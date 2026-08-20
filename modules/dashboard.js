@@ -11,27 +11,29 @@ function register(router) {
     const nrProduse = (await db.prepare("SELECT COUNT(*) AS n FROM produse").get()).n;
     const nrAngajati = (await db.prepare("SELECT COUNT(*) AS n FROM angajati").get()).n;
 
-    const facturi = await db.prepare("SELECT * FROM facturi WHERE directie = 'vanzare'").all();
-    let totalFacturat = 0;
-    let totalIncasat = 0;
-    let totalRestant = 0;
-    for (const f of facturi) {
-      const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(f.id);
-      const { total } = calcTotals(linii);
-      const platit = (await db.prepare("SELECT COALESCE(SUM(suma),0) AS s FROM plati WHERE factura_id = ?").get(f.id)).s;
-      if (f.status !== "anulata") {
-        totalFacturat += total;
-        totalIncasat += platit;
-        totalRestant += Math.max(0, total - platit);
-      }
-    }
-
-    const facturiAchizitie = await db.prepare("SELECT * FROM facturi WHERE directie = 'achizitie' AND status != 'anulata'").all();
-    let totalAchizitionat = 0;
-    for (const f of facturiAchizitie) {
-      const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(f.id);
-      totalAchizitionat += calcTotals(linii).total;
-    }
+    // Totalurile se calculează din DOUĂ interogări agregate, nu prin
+    // parcurgerea facturilor una câte una. Cu un istoric real importat din
+    // SmartBill (mii de facturi) varianta rând-cu-rând însemna mii de
+    // interogări per încărcare de dashboard — câteva secunde de așteptare.
+    const totaluri = await db
+      .prepare(
+        `SELECT f.directie,
+                COALESCE(SUM(l.total), 0) AS facturat,
+                COALESCE(SUM(pl.platit), 0) AS incasat,
+                COALESCE(SUM(GREATEST(COALESCE(l.total,0) - COALESCE(pl.platit,0), 0)), 0) AS restant
+         FROM facturi f
+         LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+         WHERE f.status <> 'anulata'
+         GROUP BY f.directie`
+      )
+      .all();
+    const vanzari = totaluri.find((t) => t.directie === "vanzare") || {};
+    const achizitii = totaluri.find((t) => t.directie === "achizitie") || {};
+    const totalFacturat = Number(vanzari.facturat || 0);
+    const totalIncasat = Number(vanzari.incasat || 0);
+    const totalRestant = Number(vanzari.restant || 0);
+    const totalAchizitionat = Number(achizitii.facturat || 0);
 
     const produseSubStoc = await db
       .prepare(

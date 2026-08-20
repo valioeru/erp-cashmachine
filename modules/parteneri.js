@@ -3,6 +3,7 @@ const db = require("../lib/db");
 const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const tsk = require("./taskuri");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
 const STARE_LABEL = {
@@ -63,6 +64,8 @@ function register(router) {
     const comenzi = await db.prepare("SELECT id, numar, status, data FROM comenzi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const facturi = await db.prepare("SELECT id, serie, numar, directie, status, data_emiterii FROM facturi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const oportunitati = await db.prepare("SELECT * FROM oportunitati WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
+    const taskuriPartener = await db.prepare(`${tsk.SELECT_TASK} WHERE t.partener_id = ? ORDER BY t.id DESC LIMIT 50`).all(partener.id);
+    const emailuriPartener = await db.prepare("SELECT id, subiect, catre, status, trimis_la FROM emailuri WHERE partener_id = ? ORDER BY id DESC LIMIT 50").all(partener.id);
     const interactiuni = await db.prepare("SELECT * FROM interactiuni WHERE partener_id = ? ORDER BY data DESC, id DESC").all(partener.id);
 
     const body = `
@@ -77,7 +80,11 @@ function register(router) {
           <div><div class="k">Sursă</div>${esc(partener.sursa) || "—"}</div>
           <div><div class="k">Adresă</div>${esc(partener.adresa) || "—"}</div>
         </div>
-        <div class="toolbar" style="margin-top:10px"><a href="/parteneri/${partener.id}/editare" class="btn secondary small">Editează datele</a></div>
+        <div class="toolbar" style="margin-top:10px">
+          <a href="/parteneri/${partener.id}/editare" class="btn secondary small">Editează datele</a>
+          <a href="/crm/email/nou?partener_id=${partener.id}" class="btn secondary small">✉ Trimite email</a>
+          <a href="/taskuri/nou?partener_id=${partener.id}" class="btn secondary small">+ Task</a>
+        </div>
       </div>
 
       <h2>Comenzi (${comenzi.length})</h2>
@@ -103,6 +110,28 @@ function register(router) {
         oportunitati.map((o) => [`<a href="/crm/oportunitati/${o.id}">${esc(o.titlu)}</a>`, esc(o.stadiu), money(o.valoare_estimata)])
       )}
       <div class="toolbar"><a href="/crm/oportunitati/noua?partener_id=${partener.id}" class="btn secondary small">+ Oportunitate nouă</a></div>
+
+      <h2>Task-uri (${taskuriPartener.length})</h2>
+      ${
+        taskuriPartener.length
+          ? table(tsk.CAPETE, taskuriPartener.map((t) => tsk.randTask(t, new Date().toISOString().slice(0, 10))))
+          : '<p style="color:var(--text-muted)">Niciun task pentru acest partener.</p>'
+      }
+
+      <h2>Emailuri trimise (${emailuriPartener.length})</h2>
+      ${
+        emailuriPartener.length
+          ? table(
+              ["Data", "Subiect", "Către", "Status"],
+              emailuriPartener.map((e) => [
+                esc((e.trimis_la || "").slice(0, 16)),
+                `<a href="/crm/email/${e.id}">${esc(e.subiect)}</a>`,
+                esc(e.catre),
+                e.status === "trimis" ? '<span class="badge verde">trimis</span>' : `<span class="badge rosu">${esc(e.status)}</span>`,
+              ])
+            )
+          : '<p style="color:var(--text-muted)">Niciun email trimis din aplicație.</p>'
+      }
 
       <h2>Interacțiuni / istoric contact</h2>
       <form method="post" action="/parteneri/${partener.id}/interactiuni" class="form" style="max-width:520px">

@@ -213,3 +213,71 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 .userbox-nume { color: var(--text); text-decoration: none; }
 .userbox-nume:hover { text-decoration: underline; }
 .userbox-rol { color: var(--text-muted); }
+
+/* Filtre + paginare pe listele mari (facturi, parteneri) */
+.filtre { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.filtre input[type="search"] {
+  flex: 1 1 260px;
+  min-width: 200px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-family: inherit;
+}
+.filtre select { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 14px; font-family: inherit; }
+.paginare { display: flex; gap: 12px; align-items: center; justify-content: center; margin-top: 16px; font-size: 13px; color: var(--text-muted); }
+
+/* Sub-navigație (Rapoarte, CRM) */
+.subnav {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.subnav-link {
+  padding: 6px 11px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.subnav-link:hover { background: var(--surface); color: var(--text); }
+.subnav-link.activ { background: var(--primary); color: #fff; }
+
+/* Hub-ul de rapoarte */
+.rapoarte-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 22px; }
+.raport-card {
+  display: block;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  text-decoration: none;
+  color: var(--text);
+}
+.raport-card:hover { border-color: var(--primary); }
+.raport-nume { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.raport-desc { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+
+/* Scadențar încasări — blocuri pe zi */
+.zi-bloc {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--success);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.zi-bloc.depasita { border-left-color: var(--danger); }
+.zi-antet { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.zi-data { font-weight: 600; font-size: 14px; }
+.zi-suma { font-weight: 700; font-size: 16px; }
+.status-form select { font-size: 12px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; max-width: 190px; }
+
+/* Formulare mai late pentru compunerea de emailuri și task-uri */
+.form { max-width: 680px; }
+.form textarea { resize: vertical; }

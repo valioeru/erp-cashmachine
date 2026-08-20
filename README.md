@@ -1,153 +1,205 @@
-# ERP — aplicație online pentru companie
+# ERP — aplicație online pentru Cash Machine
 
-Aplicație web cu autentificare pe roluri și șase module: **Facturare &
+Aplicație web multi-utilizator, cu autentificare pe roluri: **Facturare &
 contabilitate** (cu integrare SmartBill), **Achiziții**, **Stocuri &
-producție** (inclusiv rețete/BOM), **CRM & Comenzi**, **HR & salarizare** și
-**Rapoarte**. Rulează online, cu bază de date PostgreSQL (backup automat pe
-Render).
+producție** (inclusiv rețete/BOM), **CRM** (lead-uri, pipeline, task-uri,
+emailuri), **Task-uri**, **Rapoarte** (financiare / operaționale /
+comerciale) și **HR & salarizare**. Rulează online, pe PostgreSQL (Render).
 
 ## Autentificare și roluri
 
-Aplicația are acum conturi de utilizator (nu mai e liber accesibilă oricui
-are link-ul). La prima pornire, dacă nu există niciun utilizator, se
-creează automat un cont de **administrator** — email și parolă apar în
-logurile serviciului (Render → Logs) la primul start, sau pot fi fixate
-dinainte cu variabilele de mediu `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+La prima pornire, dacă nu există niciun utilizator, se creează automat un cont
+de **administrator** — emailul și parola apar în logurile serviciului (Render →
+Logs) la primul start, sau pot fi fixate dinainte cu variabilele de mediu
+`ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
-Rolurile disponibile:
+| Rol | Ce vede |
+|---|---|
+| **Administrator** | Tot, inclusiv pagina „Utilizatori” (adaugă/dezactivează conturi, schimbă roluri). |
+| **Agent vânzări** | Dashboard, Parteneri, CRM, Task-uri, Comenzi, Produse, Stocuri, rapoartele comerciale, Profilul meu. |
+| **Financiar / contabilitate** | Dashboard, Parteneri, Facturare, Achiziții, toate Rapoartele, Task-uri, Angajați, Salarizare. |
+| **Gestionar depozit** | Dashboard, Produse, Stocuri, Comenzi, Import, Task-uri, rapoartele operaționale. |
 
-- **Administrator** — acces la tot, inclusiv la pagina „Utilizatori” unde
-  poate adăuga/dezactiva conturi și schimba roluri.
-- **Agent vânzări** — Dashboard, Parteneri, CRM, Comenzi, Produse, Stocuri.
-- **Financiar / contabilitate** — Dashboard, Parteneri, Facturare,
-  Achiziții, Rapoarte, Angajați, Salarizare.
-- **Gestionar depozit** — Dashboard, Produse, Stocuri, Import.
+Împărțirea se ajustează dintr-un singur loc: `ACCES_ROL` în `lib/auth.js`.
 
-Împărțirea de mai sus e o primă versiune rezonabilă — se poate ajusta ușor
-din `lib/auth.js` (`ACCES_ROL`), fără alte modificări.
+Fiecare utilizator își schimbă parola din „Profilul meu” și își configurează
+contul de email din „Profilul meu → Email”.
 
-Fiecare utilizator își poate schimba parola din pagina „Profilul meu”
-(link în dreapta sus, lângă nume).
-
-**Notă tehnică**: sesiunile sunt ținute în memorie (nu într-o bază
-separată) — la un restart/redeploy al serviciului, toată lumea trebuie să
-se autentifice din nou. Comportament acceptabil pentru un tool intern; dacă
-devine deranjant, se poate muta sesiunea în baza de date.
-
-## Arhitectură
-
-- **Server**: Node.js simplu (`http` nativ), fără framework — cod ușor de
-  citit și modificat.
-- **Bază de date**: PostgreSQL, prin pachetul `pg`. Schema (inclusiv
-  coloanele/tabelele adăugate ulterior) se creează/actualizează automat la
-  fiecare pornire (`lib/db.js`).
-- **Găzduire**: Render (web service + PostgreSQL, cu backup pe planurile
-  plătite).
-- **Integrare SmartBill**: `lib/smartbill.js` — trimite facturi emise către
-  SmartBill și poate interoga stocul curent prin API. Vezi secțiunea
-  dedicată mai jos pentru limitări.
+**Notă**: sesiunile sunt ținute în memorie — la un restart/redeploy toată lumea
+se autentifică din nou. Acceptabil pentru un tool intern; se poate muta în baza
+de date dacă devine deranjant.
 
 ## Module
 
-- **Parteneri** (`/parteneri`) — clienți și furnizori, cu pagină de detaliu:
-  istoricul comenzilor, facturilor, interacțiunilor și oportunităților
-  fiecărui partener.
-- **CRM** (`/crm`) — pipeline de vânzări (oportunități pe stadii: lead →
-  calificat → ofertă → negociere → câștigat/pierdut) și lista de
-  follow-up-uri scadente. Interacțiunile (apeluri, emailuri, notițe) se
-  adaugă din pagina fiecărui partener.
-- **Produse** (`/produse`) — catalog, preț, TVA, stoc minim. Pagina de
-  detaliu a unui produs arată stocul pe fiecare depozit/gestiune și
-  **rețeta de fabricație (BOM)** — din ce alte produse (materii
-  prime/semifabricate) e compus, editabilă direct din interfață.
-- **Stocuri** (`/stocuri`) — depozite, intrări/ieșiri, stoc curent calculat
-  automat, alertă sub stoc minim.
+- **Parteneri** (`/parteneri`) — clienți și furnizori. Pagina fiecărui partener
+  arată comenzile, facturile (ambele sensuri), oportunitățile, **task-urile**,
+  **emailurile trimise** și istoricul de interacțiuni, cu butoane rapide de
+  „Trimite email” și „+ Task”.
+- **CRM** (`/crm`) — trei componente legate:
+  - **Pipeline** — oportunități pe stadii (lead → calificat → ofertă →
+    negociere → câștigat/pierdut), fiecare cu agent responsabil.
+  - **Lead-uri** (`/crm/leaduri`) — contacte care încă *nu* sunt clienți, ținute
+    separat ca lista de parteneri să nu se umple de contacte necalificate. Au
+    sursă, scor, stadiu, agent, istoric de interacțiuni și **conversie într-un
+    pas** în client (+ opțional oportunitate). Task-urile lead-ului se mută
+    automat pe partenerul nou creat.
+  - **Activitate & emailuri** (`/crm/activitate`) — tot ce s-a trimis și
+    discutat, într-un singur loc.
+- **Task-uri** (`/taskuri`) — sarcini atribuibile **oricărui utilizator**, cu
+  tip, prioritate, scadență, comentarii și legătură cu orice entitate din ERP
+  (partener, lead, oportunitate, comandă, factură). Lista arată separat
+  task-urile depășite și încărcarea fiecărui coleg.
+- **Produse** (`/produse`) — catalog, preț, TVA, stoc minim; pagina de detaliu
+  arată stocul pe fiecare gestiune și **rețeta de fabricație (BOM)**.
+- **Stocuri** (`/stocuri`) — depozite, intrări/ieșiri, stoc curent, alertă sub
+  stocul minim.
 - **Comenzi** (`/comenzi`) — comenzi de vânzare cu linii de produse, status,
   generare automată a facturii.
-- **Facturare** (`/facturi`) — facturi de vânzare, cu TVA, plăți, status
-  automat, buton de trimitere în SmartBill.
-- **Achiziții** (`/facturi/achizitii`) — facturi primite de la furnizori
-  (introduse manual sau importate), cu evidența plăților către furnizori.
-- **Rapoarte** (`/rapoarte`) — vânzări vs. achiziții pe ultimele 12 luni
-  (grafic simplu), top clienți, top furnizori, facturi restante.
-- **HR & salarizare** (`/angajati`, `/salarii`) — angajați și state de
-  plată lunare (calcul simplificat, vezi mai jos).
-- **Import** (`/import`) — aduce în ERP datele deja existente în SmartBill
-  (vezi secțiunea următoare).
+- **Facturare** (`/facturi`) și **Achiziții** (`/facturi/achizitii`) — cu
+  căutare, filtrare pe status și paginare (necesare la un istoric de mii de
+  documente), plăți și buton de trimitere în SmartBill.
+- **Rapoarte** (`/rapoarte`) — vezi mai jos.
+- **HR & salarizare** — angajați și state de plată lunare (calcul simplificat).
+- **Import** (`/import`) — aduce în ERP datele existente în SmartBill.
 
-Dashboard-ul (`/`) centralizează indicatorii principali.
+## Rapoarte
+
+Grupate pe categorii, fiecare la propriul URL:
+
+**Financiare**
+
+- **Scadențar încasări** (`/rapoarte/incasari`) — cât ai de încasat **în fiecare
+  zi**, după scadența facturii, cu bară proporțională pe zi. Statusul se schimbă
+  direct din listă (marchează achitat, amână scadența cu 30 de zile, anulează
+  documentul) și se poate seta scadența acolo unde lipsește din exportul
+  SmartBill. Funcționează și invers, pentru plățile către furnizori.
+  „Depășit” **nu** e un status stocat, ci se calculează din scadență față de
+  ziua curentă — așa nu poate rămâne niciodată nesincronizat.
+- **Restanțe & vechime** (`/rapoarte/restante`) — aging pe intervale
+  (nescadent, 1–30, 31–60, 61–90, peste 90 de zile), parteneri cu cele mai mari
+  solduri, documente cu cea mai veche întârziere.
+- **Vânzări vs. achiziții** (`/rapoarte/vanzari`) — evoluție pe 6/12/24/36 de luni.
+- **Top clienți & furnizori** (`/rapoarte/parteneri`) — cu procent din total.
+
+**Operaționale**
+
+- **Situația stocurilor** (`/rapoarte/stocuri`) — stoc pe produs și pe gestiune,
+  valoare la preț de achiziție, produse sub minim.
+- **Comenzi pe status** (`/rapoarte/comenzi`) — inclusiv cele mai vechi comenzi
+  nefinalizate.
+
+**Comerciale**
+
+- **Pipeline oportunități** (`/rapoarte/pipeline`).
+- **Clienți activi & inactivi** (`/rapoarte/clienti`) — cine n-a mai cumpărat de
+  peste 90/180/365/730 de zile, ordonat după valoarea istorică.
+
+## Emailuri din CRM
+
+Fiecare agent își conectează **propriul cont de email** din „Profilul meu →
+Email” (server SMTP, port, criptare STARTTLS sau TLS direct, utilizator,
+parolă, semnătură). Emailurile trimise din CRM pleacă de la adresa lui, ca
+răspunsul clientului să ajungă direct la el, nu într-o căsuță comună.
+
+Detalii tehnice:
+
+- Clientul SMTP e scris pe modulele native Node (`net`, `tls`) — fără nicio
+  dependință externă. Suportă STARTTLS și TLS direct, AUTH LOGIN și AUTH PLAIN,
+  subiecte cu diacritice (RFC 2047) și corp UTF-8 (base64).
+- **Parola e cifrată** (AES-256-GCM) înainte de a fi salvată. Cheia se derivă
+  din variabila de mediu `APP_SECRET` — **setează-o pe Render**; fără ea se
+  folosește `DATABASE_URL` ca sursă de secret, ceea ce e mai slab.
+- Dacă serverul nu acceptă criptare, trimiterea e **refuzată intenționat**, ca
+  parola să nu circule în clar.
+- Emailurile se salvează în istoric și când eșuează, cu motivul exact —
+  altfel n-ai cum să afli de ce n-a ajuns mesajul la client.
+- Pentru Gmail / Microsoft 365 cu 2FA e nevoie de o **parolă de aplicație**, nu
+  de parola contului (aplicația afișează nota potrivită automat).
 
 ## Import de date din SmartBill
 
-SmartBill **nu are un API public pentru export în masă** al istoricului
-(facturi vechi, listă de parteneri, stocuri pe gestiuni, rețete, bonuri de
-consum) — API-ul lor e construit pentru emiterea de documente noi, nu
-pentru extragere. Verificat explicit înainte de a construi acest modul.
-Soluția practică: exporți rapoartele din contul tău SmartBill (Excel,
-sau salvate ca CSV) și le încarci din pagina `/import` — sigur de rulat de
-mai multe ori, rândurile deja existente sunt sărite automat.
+SmartBill **nu are API public pentru export în masă** al istoricului (facturi
+vechi, listă de parteneri, stocuri pe gestiuni, rețete, bonuri de consum) —
+API-ul lor e construit pentru emiterea de documente noi. Verificat explicit
+înainte de a construi acest modul. Soluția: exporți rapoartele din contul tău
+SmartBill și le încarci din pagina `/import`. Importul e **idempotent** — poate
+fi rulat de mai multe ori, rândurile deja existente sunt sărite.
 
-Tipuri de import disponibile:
+Tipuri disponibile: facturi emise, facturi de achiziție, parteneri, stoc pe
+gestiuni, bonuri de consum intern, rețete de produs (BOM), plus sincronizare
+live a stocului curent prin singurul endpoint API care chiar există
+(`GET /stocks`).
 
-1. **Facturi emise / facturi de achiziție** — SmartBill Facturare →
-   Rapoarte → Facturi emise → export Excel. Pentru achiziții, echivalentul
-   din Gestiune.
-2. **Parteneri** — opțional, dacă ai un export separat cu lista de clienți/
-   furnizori (parteneri se creează oricum automat din facturi).
-3. **Stoc pe gestiuni** — cantități curente per depozit → devin mișcări de
-   stoc "intrare" (stoc inițial).
-4. **Bonuri de consum intern** — devin mișcări de stoc "ieșire".
-5. **Rețete de produs (BOM)** — produs finit + componentă + cantitate.
-6. **Sincronizare stoc curent, live** — singurul care chiar apelează
-   API-ul SmartBill (`GET /stocks`) în timp real, nu fișier. Structura
-   exactă a răspunsului **nu a fost testată** contra unui cont real — la
-   primul test, dacă formatul nu se potrivește, pagina arată răspunsul brut
-   ca să putem ajusta rapid maparea din `modules/import.js`.
+Ce știe importul de facturi să facă singur, pe exportul real SmartBill:
 
-Fiecare tip de import încearcă să recunoască automat coloanele (după
-denumire, indiferent de diacritice) — dacă nu recunoaște fișierul, arată
-exact ce coloane a găsit, ca să putem ajusta.
+- **Sare rândurile de titlu.** Exportul începe cu „Facturi incepand din data
+  de … pana in data de …”, o notă și un rând gol; header-ul real e abia pe
+  rândul 4. Detectarea se face după conținut, nu după poziție.
+- **Desparte seria de număr** dintr-o singură coloană (`CSHMUPA0037` → seria
+  `CSHMUPA`, numărul 37), păstrând documentul original ca referință.
+- **Ignoră rândurile de total** de la finalul raportului (fără client și fără
+  număr de document), fără să le raporteze ca erori.
+- **Convertește valuta.** Facturile în EUR/USD se stochează în RON, folosind
+  cursul implicit din raport (raportul dintre coloana în RON și cea în valută),
+  păstrând separat moneda și valoarea originală.
+- **Reconstituie cota de TVA** din raportul TVA/net cu 4 zecimale, nu rotunjită
+  la întreg — o factură cu linii pe cote diferite (19% + 5%) dă un raport
+  intermediar, iar rotunjirea ar strica totalul.
+- **Populează automat lista de parteneri** din facturi (nume, CUI, adresă), fără
+  dubluri: potrivirea se face întâi pe CUI, apoi pe denumire.
+- **Preia indexul SPV** (e-Factura) acolo unde există.
 
-**Limitare cunoscută**: exportul standard de facturi din SmartBill are
-detaliu doar la nivel de document (client, sumă, TVA, status), nu și
-liniile de produse — facturile importate apar cu o singură linie sumar
-("conform document X"), nu cu produsele reale. Pentru facturile plătite
-parțial, din exportul standard nu reiese suma exactă încasată — apare
-statusul corect, dar valoarea "Încasat" de pe dashboard nu include acele
-sume până nu se înregistrează plata manual.
+Verificat pe exportul real: 3.033 de facturi din 2016 până azi, 399 de parteneri
+noi, 0 erori, iar totalul reconstituit în ERP diferă de totalul raportat de
+SmartBill cu 0,24 lei din 115,9 milioane (rotunjiri de bani).
+
+Importul se face **în loturi** (batch insert), nu rând cu rând: la mii de
+facturi, varianta rând-cu-rând ar însemna peste 12.000 de interogări și minute
+de așteptare, cu risc de timeout. Așa durează sub o secundă.
+
+**Limitare cunoscută**: exportul standard de facturi are detaliu doar la nivel
+de document (client, sumă, TVA, status), nu și liniile de produse — facturile
+importate apar cu o singură linie sumar, nu cu produsele reale. Pentru
+facturile plătite parțial, exportul nu spune suma exactă încasată.
 
 ## Integrare SmartBill (emitere facturi)
 
-`lib/smartbill.js` conține clientul de integrare pentru trimiterea
-facturilor de vânzare emise din ERP către SmartBill. **Important**:
-structura exactă a request-ului e construită pe baza tiparului public al
-API-ului, dar nu a fost testată împotriva unui cont real — la primul test
-din aplicație (butonul "Trimite factura în SmartBill"), dacă apare o eroare
-de la SmartBill, ajustăm maparea din `construiesteFactura`.
+`lib/smartbill.js` trimite facturile de vânzare emise din ERP către SmartBill.
+Structura request-ului e construită pe tiparul public al API-ului, dar **nu a
+fost testată împotriva unui cont real** — la primul test (butonul „Trimite
+factura în SmartBill”), dacă apare o eroare, ajustăm maparea.
 
-Variabile de mediu necesare: `SMARTBILL_EMAIL`, `SMARTBILL_TOKEN`,
-`SMARTBILL_CIF`, opțional `SMARTBILL_SERIE`. Fără ele, integrarea e
-dezactivată automat (aplicația funcționează normal, doar fără trimitere).
+Variabile de mediu: `SMARTBILL_EMAIL`, `SMARTBILL_TOKEN`, `SMARTBILL_CIF`,
+opțional `SMARTBILL_SERIE`. Fără ele integrarea e dezactivată automat.
+
+## Variabile de mediu
+
+| Variabilă | Rol |
+|---|---|
+| `DATABASE_URL` | **Obligatorie.** Conexiunea PostgreSQL (Render o setează automat). |
+| `APP_SECRET` | **Recomandată.** Cheia de cifrare a parolelor de email. |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Opțional — fixează contul de admin creat la prima pornire. |
+| `SMARTBILL_*` | Opțional — integrarea SmartBill. |
 
 ## Important — calculul de salarii este orientativ
 
-Modulul de salarizare aplică o formulă simplificată (CAS 25%, CASS 10%,
-impozit pe venit 10%) și **nu ține cont** de deduceri personale, facilități
-fiscale sectoriale etc. **Verifică sumele cu un contabil înainte de plată.**
+Modulul de salarizare aplică o formulă simplificată (CAS 25%, CASS 10%, impozit
+10%) și **nu ține cont** de deduceri personale sau facilități sectoriale.
+**Verifică sumele cu un contabil înainte de plată.**
 
 ## Limitări cunoscute
 
-- **Numerotarea facturilor** e simplă, incrementală — nu garantează
+- **Numerotarea facturilor** e incrementală simplă — nu garantează
   conformitatea cu cerințele legale de numerotare din România (unul din
   motivele pentru care integrarea SmartBill contează).
-- **Rapoarte financiare** — acoperă vânzări/achiziții/restanțe; nu
-  înlocuiesc un bilanț contabil complet.
+- **Rapoarte financiare** — acoperă vânzări/achiziții/încasări/restanțe; nu
+  înlocuiesc un bilanț contabil.
 - **Pontaj/concedii** — HR are doar salariul de bază, fără ore lucrate.
-- **Sesiuni în memorie** — vezi nota din secțiunea Autentificare.
+- **Sesiuni în memorie** — vezi nota de la Autentificare.
+- **Facturi fără scadență** — 158 din exportul real n-au scadență completată în
+  SmartBill; apar grupate la finalul scadențarului, unde li se poate seta data.
 
-## Rulare locală (opțional, pentru testare)
-
-Necesită un PostgreSQL local (sau un container Docker):
+## Rulare locală (opțional)
 
 ```bash
 docker run --name erp-postgres -e POSTGRES_PASSWORD=parola -e POSTGRES_DB=erp -p 5432:5432 -d postgres:16
@@ -156,23 +208,17 @@ npm install
 npm start
 ```
 
-Apoi deschizi `http://localhost:3000` — te loghezi cu contul de admin creat
-automat (vezi consola la pornire).
-
 ## Structura codului
 
-- `server.js` — pornire server, rutare, healthcheck, verificarea de
-  autentificare/rol pe fiecare cerere.
-- `lib/db.js` — conexiune PostgreSQL + schema (creată/actualizată automat).
-- `lib/auth.js` — parole (hash+salt), sesiuni, roluri și acces pe secțiuni.
-- `lib/router.js` — router minimal (fără framework), inclusiv parsare
-  multipart/form-data pentru upload de fișiere (fără dependințe externe).
-- `lib/crud.js` — generator generic de CRUD pentru entități simple.
-- `lib/render.js` — layout HTML, tabele, formatare, navigație filtrată pe
-  rol.
-- `lib/smartbill.js` — client API SmartBill (emitere facturi + interogare
-  stoc).
-- `lib/import-utils.js` — parsare CSV/Excel, comună tuturor tipurilor de
-  import.
+- `server.js` — pornire, rutare, healthcheck, verificarea de autentificare/rol.
+- `lib/db.js` — conexiune PostgreSQL + schema (creată/actualizată automat la
+  fiecare pornire, inclusiv coloanele adăugate ulterior).
+- `lib/auth.js` — parole (scrypt + salt), sesiuni, roluri și acces pe secțiuni.
+- `lib/mail.js` — client SMTP propriu + cifrarea parolelor de email.
+- `lib/router.js` — router minimal, inclusiv parsare `multipart/form-data`.
+- `lib/crud.js` — generator generic de CRUD.
+- `lib/render.js` — layout HTML, tabele, formatare, navigație filtrată pe rol.
+- `lib/smartbill.js` — client API SmartBill.
+- `lib/import-utils.js` — parsare CSV/Excel + detectarea rândului de header.
 - `modules/*.js` — câte un fișier per modul de business.
-- `render.yaml` — configurare deploy Render (web service + PostgreSQL).
+- `render.yaml` — configurare deploy Render.

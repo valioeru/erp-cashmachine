@@ -68,62 +68,119 @@ function lineRowsScript() {
 }
 
 function register(router) {
-  router.get("/facturi", async (ctx) => {
+  // Lista de facturi — o SINGURĂ interogare agregată, cu paginare și căutare.
+  //
+  // Varianta inițială cerea liniile și plățile fiecărei facturi separat
+  // (2 interogări per rând). Cu un istoric real importat din SmartBill
+  // (~3.000 de facturi) asta însemna peste 6.000 de dus-întorsuri la baza de
+  // date la fiecare încărcare a paginii și o pagină HTML de ~850 KB — practic
+  // inutilizabilă. Acum: o interogare pentru pagina curentă, una pentru
+  // numărul total.
+  const PE_PAGINA = 50;
+
+  async function listaFacturi(ctx, directie) {
+    const cauta = String(ctx.query.q || "").trim();
+    const status = String(ctx.query.status || "").trim();
+    const pagina = Math.max(1, parseInt(ctx.query.p || "1", 10) || 1);
+
+    const where = ["f.directie = ?"];
+    const args = [directie];
+    if (cauta) {
+      where.push("(p.nume ILIKE ? OR f.serie ILIKE ? OR f.document_extern ILIKE ? OR CAST(f.numar AS TEXT) LIKE ?)");
+      args.push(`%${cauta}%`, `%${cauta}%`, `%${cauta}%`, `%${cauta}%`);
+    }
+    if (status) {
+      where.push("f.status = ?");
+      args.push(status);
+    }
+    const clauza = where.join(" AND ");
+
+    const totalRanduri = (
+      await db.prepare(`SELECT COUNT(*) AS n FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE ${clauza}`).get(...args)
+    ).n;
+    const nrPagini = Math.max(1, Math.ceil(totalRanduri / PE_PAGINA));
+    const paginaCurenta = Math.min(pagina, nrPagini);
+    const offset = (paginaCurenta - 1) * PE_PAGINA;
+
     const facturi = await db
       .prepare(
-        `SELECT f.*, p.nume AS partener_nume FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.directie = 'vanzare' ORDER BY f.id DESC`
+        `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, f.data_scadenta, f.status, f.moneda, f.total_valuta,
+                p.nume AS partener_nume,
+                COALESCE(l.total, 0) AS total,
+                COALESCE(pl.platit, 0) AS platit
+         FROM facturi f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+         WHERE ${clauza}
+         ORDER BY f.data_emiterii DESC, f.id DESC
+         LIMIT ${PE_PAGINA} OFFSET ${offset}`
       )
-      .all();
-    const rows = [];
-    for (const f of facturi) {
-      const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(f.id);
-      const { total } = calcTotals(linii);
-      const platit = (await db.prepare("SELECT COALESCE(SUM(suma),0) AS s FROM plati WHERE factura_id = ?").get(f.id)).s;
-      rows.push([
-        `<a href="/facturi/${f.id}">${esc(f.serie)}-${f.numar ?? f.id}</a>`,
-        esc(f.partener_nume),
-        esc(f.data_emiterii),
-        STATUS_LABEL[f.status] || esc(f.status),
-        money(total),
-        money(platit),
-        actionLinks([{ href: `/facturi/${f.id}`, label: "Deschide" }]),
-      ]);
-    }
+      .all(...args);
+
+    const rows = facturi.map((f) => [
+      `<a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar ?? f.id}`)}</a>`,
+      esc(f.partener_nume),
+      esc((f.data_emiterii || "").slice(0, 10)),
+      STATUS_LABEL[f.status] || esc(f.status),
+      money(f.total) + (f.moneda && f.moneda !== "RON" ? ` <span class="badge gri">${esc(f.moneda)} ${Number(f.total_valuta || 0).toLocaleString("ro-RO")}</span>` : ""),
+      money(f.platit),
+      actionLinks([{ href: `/facturi/${f.id}`, label: "Deschide" }]),
+    ]);
+
+    const qs = (p) => {
+      const u = new URLSearchParams();
+      if (cauta) u.set("q", cauta);
+      if (status) u.set("status", status);
+      u.set("p", String(p));
+      return "?" + u.toString();
+    };
+    const bazaUrl = directie === "achizitie" ? "/facturi/achizitii" : "/facturi";
+    const paginare =
+      nrPagini <= 1
+        ? ""
+        : `<div class="paginare">
+             ${paginaCurenta > 1 ? `<a class="btn secondary small" href="${bazaUrl}${qs(paginaCurenta - 1)}">← Anterioare</a>` : ""}
+             <span>Pagina ${paginaCurenta} din ${nrPagini} · ${totalRanduri} documente</span>
+             ${paginaCurenta < nrPagini ? `<a class="btn secondary small" href="${bazaUrl}${qs(paginaCurenta + 1)}">Următoare →</a>` : ""}
+           </div>`;
+
+    const optiuniStatus = [["", "Toate statusurile"], ["emisa", "emise / neîncasate"], ["platita_partial", "încasate parțial"], ["platita", "încasate"], ["anulata", "anulate"]]
+      .map(([v, t]) => `<option value="${v}"${status === v ? " selected" : ""}>${t}</option>`)
+      .join("");
+
+    return {
+      totalRanduri,
+      body: `
+      <form class="filtre" method="get" action="${bazaUrl}">
+        <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după client sau număr document…">
+        <select name="status">${optiuniStatus}</select>
+        <button class="btn small" type="submit">Filtrează</button>
+        ${cauta || status ? `<a class="btn secondary small" href="${bazaUrl}">Resetează</a>` : ""}
+      </form>
+      ${table(["Document", directie === "achizitie" ? "Furnizor" : "Client", "Data", "Status", "Total", directie === "achizitie" ? "Plătit" : "Încasat", "Acțiuni"], rows)}
+      ${paginare}
+    `,
+    };
+  }
+
+  router.get("/facturi", async (ctx) => {
+    const { body: lista, totalRanduri } = await listaFacturi(ctx, "vanzare");
     const body = `
       <div class="toolbar"><a href="/facturi/nou" class="btn">+ Factură nouă</a> <a href="/facturi/achizitii" class="btn secondary">Vezi achiziții (facturi de la furnizori)</a></div>
-      ${table(["Nr.", "Client", "Data", "Status", "Total", "Încasat", "Acțiuni"], rows)}
+      ${lista}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Facturare & contabilitate (vânzări)", active: "/facturi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Facturare & contabilitate (vânzări) · ${totalRanduri} documente`, active: "/facturi", body }));
   });
 
   router.get("/facturi/achizitii", async (ctx) => {
-    const facturi = await db
-      .prepare(
-        `SELECT f.*, p.nume AS partener_nume FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.directie = 'achizitie' ORDER BY f.id DESC`
-      )
-      .all();
-    const rows = [];
-    for (const f of facturi) {
-      const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(f.id);
-      const { total } = calcTotals(linii);
-      const platit = (await db.prepare("SELECT COALESCE(SUM(suma),0) AS s FROM plati WHERE factura_id = ?").get(f.id)).s;
-      rows.push([
-        `<a href="/facturi/${f.id}">${esc(f.serie)}-${f.numar ?? f.id}</a>`,
-        esc(f.partener_nume),
-        esc(f.data_emiterii),
-        STATUS_LABEL[f.status] || esc(f.status),
-        money(total),
-        money(platit),
-        actionLinks([{ href: `/facturi/${f.id}`, label: "Deschide" }]),
-      ]);
-    }
+    const { body: lista, totalRanduri } = await listaFacturi(ctx, "achizitie");
     const body = `
       <div class="toolbar"><a href="/facturi/achizitii/noua" class="btn">+ Achiziție nouă</a> <a href="/facturi" class="btn secondary">Vezi vânzări</a></div>
-      ${table(["Nr.", "Furnizor", "Data", "Status", "Total", "Plătit", "Acțiuni"], rows)}
+      ${lista}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Achiziții (facturi de la furnizori)", active: "/facturi/achizitii", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Achiziții (facturi de la furnizori) · ${totalRanduri} documente`, active: "/facturi/achizitii", body }));
   });
-
   router.get("/facturi/achizitii/noua", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'client' ORDER BY nume").all();
     const produse = await db.prepare("SELECT id, denumire, pret_achizitie, cota_tva FROM produse ORDER BY denumire").all();
