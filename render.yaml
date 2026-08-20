@@ -1,0 +1,29 @@
+# Blueprint Render — creează automat serviciul web și baza de date
+# PostgreSQL (cu backup automat inclus pe planurile plătite), legate între
+# ele prin variabila DATABASE_URL. Se folosește din Render Dashboard:
+# "New" → "Blueprint", sau este citit automat dacă repo-ul e conectat.
+services:
+  - type: web
+    name: erp-companie
+    runtime: node
+    plan: starter
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: erp-companie-db
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+      # Completează manual din Render Dashboard (Environment) după deploy,
+      # NU le pune în acest fișier dacă îl urci pe GitHub:
+      # SMARTBILL_EMAIL, SMARTBILL_TOKEN, SMARTBILL_CIF, SMARTBILL_SERIE
+
+databases:
+  - name: erp-companie-db
+    plan: basic-256mb
+    region: frankfurt
+    postgresMajorVersion: 16
