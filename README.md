@@ -185,6 +185,30 @@ integra ulterior.
   furnizori", cu totaluri pe zi și pe furnizor, pe săptămâna în curs sau
   orice altă perioadă.
 
+## Facturi de furnizori — „Raport document furnizori"
+
+Importul de achiziții e construit pe exportul real „Raport document
+furnizori" din SmartBill: recunoaște coloanele lui (Document furnizor,
+Denumire furnizor, Data doc…), scoate tipul documentului din serie („Fact",
+„Bon fiscal", „Proforma"), convertește facturile în valută cu un curs
+estimativ marcat explicit pe factură (raportul ăsta nu are echivalent RON),
+plafonează numerele de document uriașe (>9 cifre) și dă număr derivat din
+dată documentelor fără număr. Dedup-ul la achiziții include DATA: numerele
+de bon fiscal și numerotarea furnizorilor mici se reciclează (același „Bon
+fiscal 27" în luni diferite = documente diferite). CUI-urile de umplutură
+(„-", „0") nu se folosesc la potrivirea partenerilor — altfel toți
+furnizorii externi s-ar lipi de același partener (bug real, prins la teste).
+
+## Producție — registrul oficial de comenzi
+
+Modulul Producție urmează „Registru Comenzi CASH MACHINE": număr pe zi
+(20260803-001, generat automat), client, reprezentant, produs +
+caracteristici, cantitate + UM, tip ambalare, data plasării/livrării, stare,
+DoC emisă, fișă tehnică, facturat, rețetă. Import dedicat pentru registru
+(dedup pe numărul de comandă) + importul vechiului Excel nestructurat, păstrat
+separat. Comenzile se pot șterge selectiv (bife) sau toate odată — gândit
+pentru „șterg tot și reimport curat".
+
 ## Balanțe din SmartBill Conta: ancoră + istoric
 
 Două utilizări, ambele pe formatul real de export (antet pe două rânduri,

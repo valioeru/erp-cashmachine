@@ -80,6 +80,25 @@ async function partenerDupaNume(nume, cache) {
   return p ? p.id : null;
 }
 
+// Numerotarea din registrul oficial: yyyymmdd-nnn (contor pe zi).
+async function numarComandaNou() {
+  const aziCompact = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const r = await db.prepare("SELECT COUNT(*) AS n FROM comenzi_productie WHERE numar LIKE ?").get(`${aziCompact}-%`);
+  return `${aziCompact}-${String(Number(r.n) + 1).padStart(3, "0")}`;
+}
+
+function initiale(nume) {
+  return String(nume || "")
+    .split(/\s+/)
+    .map((w) => w.charAt(0).toUpperCase())
+    .join("")
+    .slice(0, 3);
+}
+
+function daNu(v) {
+  return /^da$/i.test(String(v || "").trim()) ? 1 : 0;
+}
+
 function register(router) {
   // ---- Listă -------------------------------------------------------------
   router.get("/productie", async (ctx) => {
@@ -134,45 +153,82 @@ function register(router) {
         </select>
         <button class="btn small" type="submit">Filtrează</button>
       </form>
+      <form method="post" action="/productie/sterge" onsubmit="return confirm('Ștergi comenzile selectate? Nu se pot recupera.')">
       ${table(
-        ["#", "Client", "Produs", "Cantitate", "Inițiator", "Solicitat (client)", "Propus (producție)", "Status"],
+        ["<input type=\"checkbox\" onclick=\"document.querySelectorAll('.sel-cmd').forEach(c=>c.checked=this.checked)\">", "#", "Client", "Produs", "Caracteristici", "Cant.", "Rep.", "Livrare", "DoC/FT", "Status"],
         comenzi.map((c) => [
+          `<input type="checkbox" class="sel-cmd" name="ids" value="${c.id}">`,
           `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
           c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—"),
           esc(c.tip_produs || "—"),
-          esc(c.cantitate || "—"),
-          esc(c.initiator || "—"),
-          c.data_solicitata
-            ? ["noua", "in_productie"].includes(c.status) && c.data_solicitata < aziStr
-              ? `<span class="badge rosu">${esc(c.data_solicitata)}</span>`
-              : esc(c.data_solicitata)
+          `<span style="font-size:12px;color:var(--text-muted)">${esc(String(c.caracteristici || "").slice(0, 40))}</span>`,
+          esc([c.cantitate, c.um].filter(Boolean).join(" ")),
+          esc(c.reprezentant || "—"),
+          c.data_livrare
+            ? ["noua", "in_productie"].includes(c.status) && c.data_livrare < aziStr
+              ? `<span class="badge rosu">${esc(c.data_livrare)}</span>`
+              : esc(c.data_livrare)
             : "—",
-          esc(c.data_propusa || "—"),
+          `${c.doc_emisa ? '<span class="badge verde">DoC</span>' : ""} ${c.fisa_tehnica ? '<span class="badge verde">FT</span>' : ""}`,
           badge(c.status),
         ])
       )}
+      <div class="toolbar" style="margin-top:10px">
+        <button class="btn secondary" type="submit">Șterge selectatele</button>
+      </div>
+      </form>
+      <form method="post" action="/productie/sterge-tot" class="inline-form" onsubmit="return confirm('Ștergi TOATE comenzile de producție? Folosește asta doar înainte de un reimport curat.')">
+        <button class="link-btn danger" type="submit">Șterge toate comenzile (pentru reimport)</button>
+      </form>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Comenzi producție (${comenzi.length})`, active: "/productie", body }));
+  });
+
+  // ---- Ștergere (selectiv sau tot — pentru reimport curat) ----------------
+  router.post("/productie/sterge", async (ctx) => {
+    let ids = ctx.body.ids;
+    if (!ids) return redirect(ctx.res, "/productie");
+    if (!Array.isArray(ids)) ids = [ids];
+    ids = ids.map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x));
+    if (ids.length) await db.prepare(`DELETE FROM comenzi_productie WHERE id IN (${ids.map(() => "?").join(",")})`).run(...ids);
+    redirect(ctx.res, "/productie");
+  });
+
+  router.post("/productie/sterge-tot", async (ctx) => {
+    await db.prepare("DELETE FROM comenzi_productie").run();
+    redirect(ctx.res, "/productie");
   });
 
   // ---- Creare -------------------------------------------------------------
   router.get("/productie/noua", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 3000").all();
+    const nrNou = await numarComandaNou();
     const body = `
-      <form class="form" method="post" action="/productie">
-        <label class="field">Client
-          <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
-        </label>
+      <form class="form" method="post" action="/productie" style="max-width:680px">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-          <label class="field">Tip produs<input name="tip_produs" required placeholder="Ex: Pungi 300x400, Scotch 38 mic"></label>
-          <label class="field">Cantitate<input name="cantitate" required placeholder="Ex: 30000 buc / 240 cutii"></label>
+          <label class="field">Nr. comandă<input name="numar" value="${esc(nrNou)}" required></label>
+          <label class="field">Client
+            <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
+          </label>
         </div>
-        <label class="field">Data solicitată de client<input type="date" name="data_solicitata"></label>
-        <label class="field">Observații / specificații<textarea name="observatii" rows="3" placeholder="Dimensiuni, personalizare, termen special"></textarea></label>
-        <label class="field">Rețetă / consum estimat<textarea name="reteta" rows="2" placeholder="Ex: Folie 364 kg, Bandă 12 role, cutii 30"></textarea></label>
-        <div class="form-actions"><button class="btn" type="submit">Trimite în producție</button> <a class="btn secondary" href="/productie">Renunță</a></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <label class="field">Produs comandat<input name="tip_produs" required placeholder="Ex: Folie Stretch, Pungi Curier, Bandă adezivă"></label>
+          <label class="field">Caracteristici (dimensiuni, microni…)<input name="caracteristici" placeholder="Ex: 23 microni reciclat, 1.5 kg net"></label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 100px 1fr;gap:14px">
+          <label class="field">Cantitate<input name="cantitate" required placeholder="Ex: 15000"></label>
+          <label class="field">UM<input name="um" value="buc"></label>
+          <label class="field">Tip ambalare<input name="tip_ambalare" placeholder="Ex: 6 role/pack, 500/cutie"></label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <label class="field">Data livrare promisă<input type="date" name="data_livrare"></label>
+          <label class="field">Reprezentant vânzări<input name="reprezentant" value="${esc(ctx.user ? initiale(ctx.user.nume) : "")}" placeholder="Ex: GT, IR, MM"></label>
+        </div>
+        <label class="field">Rețetă / consum estimat<textarea name="reteta" rows="2" placeholder="Ex: 190 kg, LDPE-23, LLDPE-80, MB 4, Tape 15 role"></textarea></label>
+        <label class="field">Observații<textarea name="observatii" rows="2"></textarea></label>
+        <div class="form-actions"><button class="btn" type="submit">Înregistrează comanda</button> <a class="btn secondary" href="/productie">Renunță</a></div>
       </form>
-      <p style="font-size:12px;color:var(--text-muted)">Inițiatorul e contul tău (${esc(ctx.user ? ctx.user.nume : "")}); producția completează data propusă și pornește lucrul.</p>
+      <p style="font-size:12px;color:var(--text-muted)">Numărul urmează formatul registrului (ziua + contor). DoC, fișa tehnică și facturarea se bifează din pagina comenzii, pe măsură ce se emit.</p>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă în producție", active: "/productie", body }));
   });
@@ -181,22 +237,27 @@ function register(router) {
     const b = ctx.body;
     const partenerId = parseInt(b.partener_id, 10) || null;
     const p = partenerId ? await db.prepare("SELECT nume FROM parteneri WHERE id = ?").get(partenerId) : null;
-    const nr = (await db.prepare("SELECT COUNT(*) AS n FROM comenzi_productie").get()).n;
+    const numar = String(b.numar || "").trim() || (await numarComandaNou());
     const ins = await db
       .prepare(
-        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, partener_id, client_text, tip_produs, cantitate, data_initiere, data_solicitata, status, observatii, reteta, sursa)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', ?, ?, 'manual') RETURNING id`
+        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, status, observatii, reteta, sursa)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', ?, ?, 'manual') RETURNING id`
       )
       .run(
-        String(Number(nr) + 1),
+        numar,
         ctx.user ? ctx.user.nume : null,
         ctx.user ? ctx.user.id : null,
+        String(b.reprezentant || "").trim() || null,
         partenerId,
         p ? p.nume : null,
         String(b.tip_produs || "").trim(),
+        String(b.caracteristici || "").trim() || null,
         String(b.cantitate || "").trim(),
+        String(b.um || "buc").trim(),
+        String(b.tip_ambalare || "").trim() || null,
         azi(),
-        String(b.data_solicitata || "") || null,
+        String(b.data_livrare || "") || null,
+        String(b.data_livrare || "") || null,
         String(b.observatii || "").trim() || null,
         String(b.reteta || "").trim() || null
       );
@@ -212,40 +273,47 @@ function register(router) {
 
     const body = `
       <div class="detail-box">
-        <h1 style="margin-top:0">Comanda #${esc(c.numar || c.id)} ${badge(c.status)}</h1>
+        <h1 style="margin-top:0">Comanda ${esc(c.numar || c.id)} ${badge(c.status)}
+          ${c.doc_emisa ? '<span class="badge verde">DoC emisă</span>' : '<span class="badge gri">fără DoC</span>'}
+          ${c.fisa_tehnica ? '<span class="badge verde">Fișă tehnică</span>' : '<span class="badge gri">fără FT</span>'}
+        </h1>
         <div class="detail-grid">
           <div><div class="k">Client</div>${c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—")}</div>
           <div><div class="k">Produs</div>${esc(c.tip_produs || "—")}</div>
-          <div><div class="k">Cantitate</div>${esc(c.cantitate || "—")}</div>
-          <div><div class="k">Inițiator</div>${esc(c.initiator || "—")}</div>
-          <div><div class="k">Inițiată la</div>${esc(c.data_initiere || "—")}</div>
-          <div><div class="k">Solicitat de client</div>${esc(c.data_solicitata || "—")}</div>
-          <div><div class="k">Propus de producție</div>${esc(c.data_propusa || "—")}</div>
-          <div><div class="k">Start producție</div>${esc(c.start_productie || "—")}</div>
+          <div><div class="k">Caracteristici</div>${esc(c.caracteristici || "—")}</div>
+          <div><div class="k">Cantitate</div>${esc([c.cantitate, c.um].filter(Boolean).join(" "))}</div>
+          <div><div class="k">Ambalare</div>${esc(c.tip_ambalare || "—")}</div>
+          <div><div class="k">Reprezentant</div>${esc(c.reprezentant || c.initiator || "—")}</div>
+          <div><div class="k">Plasată la</div>${esc(c.data_initiere || "—")}</div>
+          <div><div class="k">Livrare promisă</div>${esc(c.data_livrare || c.data_solicitata || "—")}</div>
           <div><div class="k">Finalizată la</div>${esc(c.data_finalizare || "—")}</div>
         </div>
         ${c.observatii ? `<p style="margin-top:12px;white-space:pre-wrap"><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
         ${c.reteta ? `<p style="white-space:pre-wrap"><strong>Rețetă / consum:</strong> ${esc(c.reteta)}</p>` : ""}
       </div>
 
-      <form class="form" method="post" action="/productie/${c.id}/actualizeaza">
-        <h2 style="margin-top:0">Actualizare (producție / vânzări)</h2>
+      <form class="form" method="post" action="/productie/${c.id}/actualizeaza" style="max-width:680px">
+        <h2 style="margin-top:0">Actualizare</h2>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
           <label class="field">Status
             <select name="status">${STATUSURI.map(([v, t]) => `<option value="${v}"${c.status === v ? " selected" : ""}>${esc(t)}</option>`).join("")}</select>
           </label>
-          <label class="field">Data propusă de producție<input type="date" name="data_propusa" value="${esc(c.data_propusa || "")}"></label>
+          <label class="field">Data livrare promisă<input type="date" name="data_livrare" value="${esc(c.data_livrare || "")}"></label>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-          <label class="field">Start producție<input type="date" name="start_productie" value="${esc(c.start_productie || "")}"></label>
-          <label class="field">Data solicitată de client<input type="date" name="data_solicitata" value="${esc(c.data_solicitata || "")}"></label>
+          <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="doc_emisa" value="1"${c.doc_emisa ? " checked" : ""}> DoC emisă</label>
+          <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="fisa_tehnica" value="1"${c.fisa_tehnica ? " checked" : ""}> Fișă tehnică emisă</label>
         </div>
-        <label class="field">Observații<textarea name="observatii" rows="3">${esc(c.observatii || "")}</textarea></label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <label class="field">Caracteristici<input name="caracteristici" value="${esc(c.caracteristici || "")}"></label>
+          <label class="field">Tip ambalare<input name="tip_ambalare" value="${esc(c.tip_ambalare || "")}"></label>
+        </div>
         <label class="field">Rețetă / consum<textarea name="reteta" rows="2">${esc(c.reteta || "")}</textarea></label>
+        <label class="field">Observații<textarea name="observatii" rows="2">${esc(c.observatii || "")}</textarea></label>
         <div class="form-actions"><button class="btn" type="submit">Salvează</button> <a class="btn secondary" href="/productie">Înapoi</a></div>
       </form>
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: `Comanda producție #${c.numar || c.id}`, active: "/productie", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Comanda ${c.numar || c.id}`, active: "/productie", body }));
   });
 
   router.post("/productie/:id/actualizeaza", async (ctx) => {
@@ -254,20 +322,161 @@ function register(router) {
     const finalizare = ["finalizata", "facturata"].includes(status) ? azi() : null;
     await db
       .prepare(
-        `UPDATE comenzi_productie SET status = ?, data_propusa = ?, start_productie = ?, data_solicitata = ?, observatii = ?, reteta = ?,
+        `UPDATE comenzi_productie SET status = ?, data_livrare = ?, doc_emisa = ?, fisa_tehnica = ?, caracteristici = ?, tip_ambalare = ?, observatii = ?, reteta = ?,
          data_finalizare = COALESCE(data_finalizare, ?) WHERE id = ?`
       )
       .run(
         status,
-        String(b.data_propusa || "") || null,
-        String(b.start_productie || "") || null,
-        String(b.data_solicitata || "") || null,
+        String(b.data_livrare || "") || null,
+        b.doc_emisa ? 1 : 0,
+        b.fisa_tehnica ? 1 : 0,
+        String(b.caracteristici || "").trim() || null,
+        String(b.tip_ambalare || "").trim() || null,
         String(b.observatii || "").trim() || null,
         String(b.reteta || "").trim() || null,
         finalizare,
         ctx.params.id
       );
     redirect(ctx.res, `/productie/${ctx.params.id}`);
+  });
+
+// ---- Import din REGISTRUL oficial de comenzi (modelul bun) ---------------
+  // Coloane: Nr. comandă (20260803-001) | Client | Reprezentant vânzări |
+  // Produs comandat | Caracteristici | Cantitate | UM | Tip ambalare | Data
+  // plasare | Data livrare | Stare comandă | DoC emisa | Fisa tehnica |
+  // Facturat | Reteta | Observații. Dedup pe numărul de comandă (aici chiar
+  // e unic). Datele vin iar amestecat (08/03/2026 american, 06.08.2026
+  // românesc) — aceeași regulă: punct = românesc, slash = american.
+  router.post("/import/registru-comenzi", async (ctx) => {
+    const files = (ctx.body.__files && ctx.body.__files.fisier) || [];
+    const file = files[0];
+    if (!file) return redirect(ctx.res, "/import");
+
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, layout({ user: ctx.user, title: "Eroare import", active: "/import", body: `<p>${esc(e.message)}</p><a class="btn" href="/import">Înapoi</a>` }));
+    }
+
+    const CHEI = {
+      numar: ["nrcomanda", "numarcomanda"],
+      client: ["client"],
+      reprezentant: ["reprezentantvanzari", "reprezentant"],
+      produs: ["produscomandat", "produs"],
+      caracteristici: ["caracteristiciprodus", "caracteristici"],
+      cantitate: ["cantitatecomandata", "cantitate"],
+      um: ["unitatedemasuraum", "unitatedemasura", "um"],
+      ambalare: ["tipambalare", "ambalare"],
+      plasare: ["dataplasarecomanda", "dataplasare"],
+      livrare: ["datalivrarecomanda", "datalivrare"],
+      stare: ["starecomanda", "stare", "status"],
+      doc: ["docemisadanu", "docemisa", "doc"],
+      fisa: ["fisatehnicaemisadanu", "fisatehnicaemisa", "fisatehnica"],
+      facturat: ["facturat"],
+      reteta: ["reteta"],
+      observatii: ["observatii"],
+    };
+    let randHeader = -1;
+    const idx = {};
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+      const norm = (rows[i] || []).map(normalizeHeader);
+      const iNr = norm.findIndex((h) => CHEI.numar.some((k) => h.includes(k)));
+      const iCl = norm.findIndex((h) => CHEI.client.some((k) => h === k));
+      if (iNr !== -1 && iCl !== -1) {
+        randHeader = i;
+        for (const [cheie, aliasuri] of Object.entries(CHEI)) {
+          idx[cheie] = norm.findIndex((h) => h && aliasuri.some((k) => h.includes(k)));
+        }
+        break;
+      }
+    }
+    if (randHeader === -1) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: "Coloane nerecunoscute",
+          active: "/import",
+          body: `<h1>N-am recunoscut registrul de comenzi</h1><pre style="background:var(--surface);padding:12px;border-radius:8px;overflow-x:auto">${esc(rows.slice(0, 5).map((r, i) => `${i + 1}: ${r.join(" | ")}`).join("\n"))}</pre><a class="btn" href="/import">Înapoi</a>`,
+        })
+      );
+    }
+
+    const val = (row, cheie) => (idx[cheie] !== undefined && idx[cheie] !== -1 ? String(row[idx[cheie]] ?? "").trim() : "");
+    const existente = new Set((await db.prepare("SELECT numar FROM comenzi_productie WHERE numar IS NOT NULL").all()).map((r) => String(r.numar)));
+    const cacheP = new Map();
+
+    let create = 0;
+    let sarite = 0;
+    const erori = [];
+    for (let r = randHeader + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
+      const numar = val(row, "numar");
+      const client = val(row, "client");
+      // rânduri reziduale (ex: un "l" singur pe rând) sau fără date reale
+      if (!client || !/\d/.test(numar)) {
+        sarite++;
+        continue;
+      }
+      if (existente.has(numar)) {
+        sarite++;
+        continue;
+      }
+      existente.add(numar);
+      try {
+        const stare = val(row, "stare").toLowerCase();
+        const facturat = daNu(val(row, "facturat"));
+        let status;
+        if (/anulat/.test(stare)) status = "anulata";
+        else if (facturat) status = "facturata";
+        else if (/finalizat/.test(stare)) status = "finalizata";
+        else if (/curs|lucru/.test(stare)) status = "in_productie";
+        else status = "in_productie"; // stare goală în registru = încă în lucru
+        await db
+          .prepare(
+            `INSERT INTO comenzi_productie (numar, reprezentant, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, observatii, reteta, sursa)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_registru')`
+          )
+          .run(
+            numar,
+            val(row, "reprezentant") || null,
+            await partenerDupaNume(client, cacheP),
+            client,
+            val(row, "produs") || null,
+            val(row, "caracteristici") || null,
+            val(row, "cantitate") || null,
+            val(row, "um") || "buc",
+            val(row, "ambalare") || null,
+            parseDataComenzi(val(row, "plasare")),
+            parseDataComenzi(val(row, "livrare")),
+            parseDataComenzi(val(row, "livrare")),
+            /finalizat/.test(stare) || facturat ? parseDataComenzi(val(row, "livrare")) : null,
+            status,
+            daNu(val(row, "doc")),
+            daNu(val(row, "fisa")),
+            val(row, "observatii") || null,
+            val(row, "reteta") || null
+          );
+        create++;
+      } catch (e) {
+        erori.push(`Rând ${r + 1}: ${e.message}`);
+      }
+    }
+
+    const body = `
+      <h1>Import registru comenzi — rezultat</h1>
+      <div class="cards">
+        <div class="card"><div class="label">Comenzi importate</div><div class="value">${create}</div></div>
+        <div class="card"><div class="label">Sărite (dubluri / rânduri goale)</div><div class="value">${sarite}</div></div>
+        <div class="card"><div class="label">Erori</div><div class="value">${erori.length}</div></div>
+      </div>
+      ${erori.length ? `<ul>${erori.slice(0, 20).map((e) => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}
+      <a class="btn" href="/productie">Vezi comenzile de producție</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Import registru comenzi", active: "/import", body }));
   });
 
   // ---- Import din Excelul "Comenzi_in_lucru" ------------------------------

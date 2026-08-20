@@ -20,13 +20,13 @@ const { xlsxDisponibil, normalizeHeader, gasesteColoana, gasesteRandHeader, pars
 const ALIASE = {
   serie: ["serie", "seria"],
   numar: ["numar", "nr", "numardocument", "nrdocument", "numarfactura"],
-  serieNumar: ["factura", "serieinumarul", "seriasinumarul", "seriasinumaruldocumentuluiemis", "document", "numardocumentemis", "numefactura", "nrfactura", "documentemis"],
-  client: ["client", "partener", "furnizor", "denumireclient", "denumirepartener", "denumire", "nume", "numeclient", "numefurnizor", "numepartener"],
+  serieNumar: ["factura", "documentfurnizor", "serieinumarul", "seriasinumarul", "seriasinumaruldocumentuluiemis", "document", "numardocumentemis", "numefactura", "nrfactura", "documentemis"],
+  client: ["client", "partener", "furnizor", "denumireclient", "denumirepartener", "denumire", "denumirefurnizor", "nume", "numeclient", "numefurnizor", "numepartener"],
   cui: ["cui", "cif", "codfiscal", "cuicnp", "cifcui"],
   email: ["email", "emailclient", "adresaemail"],
   telefon: ["telefon", "tel", "nrtelefon"],
   adresa: ["adresa", "adresaclient", "adresasediu"],
-  dataEmiterii: ["dataemiterii", "data", "dataemitere", "dataemis", "datadocument"],
+  dataEmiterii: ["dataemiterii", "data", "datadoc", "dataemitere", "dataemis", "datadocument"],
   dataScadenta: ["datascadentei", "datascadenta", "scadenta", "termendeplata"],
   faraTva: ["valoarefaratva", "subtotal", "valoarenet", "fatva", "netfaratva", "valoarenetalei", "valoarenetlei"],
   tva: ["valoaretva", "tva", "sumatva", "tvalei"],
@@ -34,6 +34,7 @@ const ALIASE = {
   totalRon: ["valoaretotalaron", "valoaretotalalei", "totalron", "totallei", "valoareron"],
   moneda: ["moneda", "valuta"],
   observatii: ["observatii", "mentiuni", "note"],
+  categoria: ["categoria", "categorie"],
   indexSpv: ["indexspv", "spv", "indexincarcarespv"],
   status: ["status", "stare"],
   gestiune: ["gestiune", "depozit", "gestiunea"],
@@ -110,6 +111,26 @@ async function gasesteSauCreeazaAgent(numeBrut, cacheAgenti) {
   return u.id;
 }
 
+// Raportul de documente furnizor din SmartBill NU are coloana de echivalent
+// în RON pentru facturile în valută (spre deosebire de raportul de facturi
+// emise). Ca totalurile ERP să rămână comparabile, convertim cu un curs
+// ESTIMATIV, marcat explicit pe factură în Observații — suma exactă în
+// valută rămâne salvată separat (total_valuta + moneda), deci nimic nu se
+// pierde. Contabilitatea de drept rămâne în SmartBill Conta, cu cursul BNR
+// al fiecărei zile.
+const CURS_ESTIMATIV = { EUR: 5.03, USD: 4.33, GBP: 5.9, SEK: 0.45, HUF: 0.0128, CHF: 5.4, PLN: 1.18, TRY: 0.11 };
+
+// CUI-urile "de umplutură" din exporturi ("-", ".", "0", "n/a") NU sunt
+// identitate: dacă le-am folosi la potrivire, toți furnizorii externi cu
+// CIF "-" s-ar lipi de același partener (bug real, prins la testare —
+// facturile Uyumplast ajunseseră pe alt furnizor). Un CUI e valid doar dacă
+// are cel puțin 4 caractere alfanumerice și măcar o cifră.
+function cuiValid(cui) {
+  const c = String(cui || "").trim();
+  const alfanumeric = c.replace(/[^0-9A-Za-z]/g, "");
+  return /[0-9]/.test(alfanumeric) && alfanumeric.length >= 4 ? c : "";
+}
+
 function statusDinText(text) {
   const t = (text || "").toLowerCase();
   if (/anulat|stornat/.test(t)) return "anulata";
@@ -129,6 +150,7 @@ async function gasesteSauCreeazaPartener(nume, cui, tipDorit, cache) {
   if (!cheie) return { id: null, nou: false };
   if (cache.has(cheie)) return { id: cache.get(cheie), nou: false };
   let existent = null;
+  cui = (typeof cuiValid === "function" ? cuiValid(cui) : cui);
   if (cui) existent = await db.prepare("SELECT id, tip FROM parteneri WHERE LOWER(cui) = LOWER(?) AND cui != ''").get(cui);
   if (!existent && nume) existent = await db.prepare("SELECT id, tip FROM parteneri WHERE LOWER(nume) = LOWER(?)").get(nume);
   let id;
@@ -269,7 +291,14 @@ function register(router) {
         <button type="submit" class="btn">Importă rețete</button>
       </form>
 
-      <h2>6. Comenzi în lucru (producție) — din Excelul intern</h2>
+      <h2>6. Registrul de comenzi (modelul oficial) — recomandat</h2>
+      <p style="font-size:13px;color:var(--text-muted)">„Registru Comenzi CASH MACHINE": Nr. comandă (20260803-001), client, reprezentant, produs, caracteristici, cantitate+UM, ambalare, date plasare/livrare, stare, DoC, fișă tehnică, facturat, rețetă. Dedup pe numărul de comandă — reimportul e sigur.</p>
+      <form method="post" action="/import/registru-comenzi" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
+        <button type="submit" class="btn">Importă registrul de comenzi</button>
+      </form>
+
+      <h2>6b. Comenzi în lucru (Excelul vechi, nestructurat)</h2>
       <p style="font-size:13px;color:var(--text-muted)">Fișierul „Comenzi_in_lucru" cu coloanele: număr, inițiator, tip produs, dată inițiere, client, cantitate, data solicitată de client, data propusă de producție, start producție, status, dată finalizare, info, rețetă. Statusurile (done/facturat/canceled) sunt recunoscute oriunde ar fi pe rând, iar datele în ambele formate (19.09.2025 și 09/23/2025). Dublurile sunt sărite automat.</p>
       <form method="post" action="/import/comenzi-productie" enctype="multipart/form-data" class="form" style="max-width:520px">
         <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
@@ -390,11 +419,14 @@ function register(router) {
       }
 
       let serie, numar;
+      // "Fact GT2620629", "Bon fiscal 27", "Proforma 12" — tipul documentului
+      // nu e serie; îl scoatem din față (rămâne în document_extern complet).
+      const documentCurat = documentText.replace(/^(factura|fact|bon\s*fiscal|bon|proforma|aviz)\s+/i, "");
       if (idx.serie !== -1 && idx.numar !== -1) {
         serie = val(row, "serie") || "IMP";
         numar = parseInt(numarText.replace(/[^0-9]/g, ""), 10);
       } else {
-        const m = documentText.match(/^([A-Za-z][A-Za-z\-_ ]*?)[\s\-\/]*([0-9]+)\s*$/);
+        const m = documentCurat.match(/^([A-Za-z][A-Za-z\-_ ]*?)[\s\-\/]*([0-9]+)\s*$/);
         if (m) {
           serie = m[1].trim();
           numar = parseInt(m[2], 10);
@@ -403,16 +435,30 @@ function register(router) {
           // "ABC-12/345"): seria = prefixul fără cifre (sau IMP), numărul =
           // ULTIMUL grup de cifre. Identitatea reală a documentului rămâne
           // oricum textul complet (document_extern), pe care se face dedupul.
-          const prefix = (documentText.match(/^[^0-9]+/) || [""])[0].replace(/[\s\-\/]+$/, "").trim();
-          const grupuri = documentText.match(/[0-9]+/g) || [];
+          const prefix = (documentCurat.match(/^[^0-9]+/) || [""])[0].replace(/[\s\-\/]+$/, "").trim();
+          const grupuri = documentCurat.match(/[0-9]+/g) || [];
           serie = prefix || "IMP";
           numar = parseInt(grupuri[grupuri.length - 1] || "", 10);
         }
       }
       if (!numar || isNaN(numar)) {
-        erori.push(`Rând ${r + 1}: nu am găsit un număr de document valid (${documentText || numarText || "gol"}).`);
-        continue;
+        // Documente fără niciun număr (unii furnizori externi emit așa).
+        // Le dăm un număr derivat din data documentului ca să nu piardă
+        // factura — identitatea rămâne documentul + furnizorul + data.
+        const dataFallback = idx.dataEmiterii !== -1 ? parseData(row[idx.dataEmiterii]) : null;
+        if (directie === "achizitie" && dataFallback) {
+          serie = "FARA-NR";
+          numar = Number(dataFallback.replace(/-/g, ""));
+        } else {
+          erori.push(`Rând ${r + 1}: nu am găsit un număr de document valid (${documentText || numarText || "gol"}).`);
+          continue;
+        }
       }
+      // Unele documente de furnizor au numere uriașe (coduri de 15-20 de
+      // cifre) care depășesc INTEGER-ul bazei de date. Păstrăm ultimele 9
+      // cifre — identitatea reală a documentului e oricum textul complet
+      // (document_extern), pe care se face și dedupul.
+      if (numar > 2000000000) numar = Number(String(numar).slice(-9));
 
       const moneda = (val(row, "moneda") || "RON").toUpperCase();
       let faraTva = idx.faraTva !== -1 ? parseNumar(row[idx.faraTva]) : 0;
@@ -422,19 +468,28 @@ function register(router) {
       // Factură în valută: aducem totul în RON, folosind cursul implicit din
       // raport (raportul dintre coloana în RON și coloana în valută).
       const totalRon = idx.totalRon !== -1 ? parseNumar(row[idx.totalRon]) : 0;
+      let notaCurs = "";
       if (moneda !== "RON" && totalRon && total) {
         const curs = totalRon / total;
         faraTva *= curs;
         tva *= curs;
         total = totalRon;
+      } else if (moneda !== "RON" && total && CURS_ESTIMATIV[moneda]) {
+        // raportul nu dă echivalentul RON — folosim curs estimativ, marcat
+        const curs = CURS_ESTIMATIV[moneda];
+        faraTva *= curs;
+        tva *= curs;
+        total *= curs;
+        notaCurs = ` · convertit cu curs estimativ ${curs} RON/${moneda}`;
       }
+      const categoria = val(row, "categoria");
 
       inregistrari.push({
         rand: r + 1,
         serie,
         numar,
         numeClient,
-        cui: val(row, "cui"),
+        cui: cuiValid(val(row, "cui")),
         adresa: val(row, "adresa"),
         email: val(row, "email"),
         telefon: val(row, "telefon"),
@@ -447,7 +502,7 @@ function register(router) {
         totalValuta: moneda !== "RON" ? totalValuta : null,
         documentExtern: documentText || `${serie}${numar}`,
         indexSpv: val(row, "indexSpv"),
-        observatiiFisier: val(row, "observatii"),
+        observatiiFisier: [val(row, "observatii"), categoria ? `Categoria: ${categoria}` : "", notaCurs.trim()].filter(Boolean).join(" · "),
         agentDinObservatii: aratANumeDePersoana(val(row, "observatii")) ? val(row, "observatii") : null,
         status: statusDinText(val(row, "status")),
       });
@@ -536,11 +591,23 @@ function register(router) {
     // normalizarea (majuscule, fără spații/punctuație) le face egale, deci
     // reimportul aceluiași fișier sau al unui export refăcut nu creează dubluri.
     const normDoc = (d) => String(d || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-    const existenteRanduri = await db.prepare("SELECT serie, numar, partener_id, document_extern FROM facturi WHERE directie = ?").all(directie);
+    // La achiziții, cheile de dedup includ și DATA: numerele de bon fiscal și
+    // numerotarea furnizorilor mici se RECICLEAZĂ (același "Bon fiscal 27" de
+    // la METROREX apare în luni diferite = documente diferite, nu dubluri).
+    // La vânzări (numerotarea noastră, unică) data nu intră în cheie.
+    const cuData = directie === "achizitie";
+    const existenteRanduri = await db
+      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM facturi WHERE directie = ?")
+      .all(directie);
     const existente = new Set();
+    const cheiPentru = (serie, numar, partenerId, docExtern, data) => {
+      const sufix = cuData ? `|${String(data || "").slice(0, 10)}` : "";
+      return [`${serie}|${numar}|${partenerId}${sufix}`, `DOC|${normDoc(docExtern)}|${partenerId}${sufix}`];
+    };
     for (const f of existenteRanduri) {
-      existente.add(`${f.serie}|${f.numar}|${f.partener_id}`);
-      if (f.document_extern) existente.add(`DOC|${normDoc(f.document_extern)}|${f.partener_id}`);
+      const [c1, c2] = cheiPentru(f.serie, f.numar, f.partener_id, f.document_extern, f.data_emiterii);
+      existente.add(c1);
+      if (f.document_extern) existente.add(c2);
     }
     const deInserat = [];
     for (const inr of inregistrari) {
@@ -548,8 +615,7 @@ function register(router) {
         erori.push(`Rând ${inr.rand}: nu am putut crea/găsi partenerul „${inr.numeClient}”.`);
         continue;
       }
-      const cheie = `${inr.serie}|${inr.numar}|${inr.partenerId}`;
-      const cheieDoc = `DOC|${normDoc(inr.documentExtern)}|${inr.partenerId}`;
+      const [cheie, cheieDoc] = cheiPentru(inr.serie, inr.numar, inr.partenerId, inr.documentExtern, inr.dataEmiterii);
       if (existente.has(cheie) || existente.has(cheieDoc)) {
         sarite++;
         continue;
