@@ -146,6 +146,80 @@ Notele introduse manual și soldurile inițiale nu se ating la regenerare.
 Amortizările, provizioanele și închiderile de lună rămân operațiuni de
 contabil.
 
+## Producție — comenzi în lucru
+
+`/productie` — fluxul care era ținut în Excelul „Comenzi_in_lucru": agentul
+inițiază comanda cu data SOLICITATĂ de client, producția răspunde cu data
+PROPUSĂ și pornește lucrul; statusul curge nouă → în producție → finalizată →
+facturată. Importul din Excelul istoric recunoaște statusurile oriunde ar fi
+pe rând (done/facturat/canceled „plutesc" între coloane în fișierul real),
+datele în ambele formate (19.09.2025 și 09/23/2025 — punct = românesc,
+slash = american) și sare dublurile. Comenzile fără status se deduc: vechi →
+finalizate, recente → în producție. De la import încolo, comenzile se
+introduc direct din aplicație.
+
+## Bancă — extras de cont & reconciliere
+
+`/banca` — imporți extrasul de cont (CSV din internet banking; coloanele se
+recunosc automat, inclusiv formatul debit/credit al băncilor românești), iar
+aplicația potrivește automat tranzacțiile cu facturile: sumă exactă + numele
+partenerului sau numărul documentului în descriere. Potrivirile sigure se
+propun; nimic nu devine plată fără confirmare (individuală sau „confirmă
+toate"). Tranzacțiile rămase se leagă manual dintr-o listă de candidați.
+Reimportul extraselor suprapuse e sigur (amprentă pe dată+sumă+descriere).
+Conectarea directă la bancă (fără export) e posibilă doar printr-un agregator
+licențiat PSD2 (GoCardless Bank Account Data, Smart Fintech etc.) — se poate
+integra ulterior.
+
+## Rapoarte pentru bancă și comparații
+
+- **Indicatori financiari — ochii băncii** (`/rapoarte/indicatori`): DSO,
+  DPO, restanțe, concentrarea clienților, trend an/an — fiecare cu ținta
+  băncii și starea lui — plus estimarea sumei finanțabile (linie de credit
+  8–12% din cifră; factoring 80% din creanțele nedepășite) și sugestii
+  concrete de îmbunătățire a punctajului, generate din datele reale.
+- **Comparație la zi** (`/rapoarte/comparatie`): 1 ianuarie → azi, anul
+  curent vs. ultimii doi ani — vânzări, încasări, costuri, facturi, clienți
+  activi, valoarea medie a facturii, plus graficul lunar suprapus pe 3 ani.
+- **Plăți furnizori pe zile** — scadențarul pe direcția „plăți către
+  furnizori", cu totaluri pe zi și pe furnizor, pe săptămâna în curs sau
+  orice altă perioadă.
+
+## Balanțe din SmartBill Conta: ancoră + istoric
+
+Două utilizări, ambele pe formatul real de export (antet pe două rânduri,
+„Perioada: dd/mm/yyyy - dd/mm/yyyy"):
+
+- **Solduri inițiale** — balanța ultimei luni închise devine ancora: toate
+  soldurile pornesc din cifrele contabilului (bancă, capital, credite,
+  furnizori…), iar din ziua următoare ERP-ul le mișcă singur. Facturile
+  istorice deja importate sunt EXCLUSE automat din calcule până la ancoră —
+  altfel s-ar număra dublu (o dată în sold, o dată ca rulaj). NU e nevoie de
+  balanțe pe fiecare lună: soldurile finale cumulează tot; reîncarci doar
+  când contabilul mai închide o lună, ca să reancorezi.
+- **Balanțe istorice** (anuale) — alimentează indicatorii de bilanț reali din
+  raportul „Indicatori financiari": capitaluri proprii, lichiditate, grad de
+  îndatorare, profit (sold 121), cifră de afaceri (rulaj creditor 70x — cel
+  debitor conține închiderile lunare prin 121 și ar da zero), cu evoluția pe
+  ani. Verificat pe balanțele reale 2023–2026.
+
+## Cash flow la zi + forecast manual
+
+`/rapoarte/cashflow` — cash disponibil azi (din soldurile ancorate + mișcările
+ERP), proiecție zi cu zi pe 14–120 de zile din scadențele facturilor deschise
+(restanțele se pun pe „azi" — sunt exigibile acum), cu alertă pe prima zi în
+care soldul proiectat scade sub zero. Peste facturi se adaugă manual orice nu
+e în sistem: chirii, rate, salarii, taxe, încasări promise — inclusiv
+recurente lunar. Istoricul lunar încasări vs. plăți, dedesubt.
+
+## Filtre de perioadă și excluderi din top
+
+Rapoartele cu perioadă au preseturi comune: ultimele 3/6/12/24 de luni, anul
+curent, anul trecut, tot istoricul sau o perioadă custom aleasă manual. În
+Top clienți & furnizori, orice partener se poate elimina din vizualizare cu
+un click (procentele se recalculează fără el) — excluderea trăiește doar în
+URL, la o nouă deschidere a raportului reapar toți.
+
 ## TVA de plată, la zi
 
 `/rapoarte/tva` — TVA colectată minus TVA deductibilă, pe orice perioadă, cu

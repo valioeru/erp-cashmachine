@@ -417,6 +417,20 @@ function register(router) {
             .all(admin.id)
         : [];
 
+    // Top produse vândute în portofoliul agentului (doar liniile cu produs
+    // identificat — facturile importate din SmartBill n-au detaliu pe produse).
+    const topProduse = await db
+      .prepare(
+        `SELECT pr.id, pr.denumire, SUM(fl.cantitate) AS cantitate, SUM(fl.cantitate * fl.pret_unitar) AS venit
+         FROM facturi_linii fl
+         JOIN facturi f ON f.id = fl.factura_id
+         JOIN parteneri p ON p.id = f.partener_id
+         JOIN produse pr ON pr.id = fl.produs_id
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND p.agent_id = ?
+         GROUP BY pr.id, pr.denumire ORDER BY venit DESC LIMIT 8`
+      )
+      .all(acum12Luni, agentId);
+
     const vanzari12Total = clienti.reduce((s, c) => s + Number(c.vanzari12), 0);
     const soldTotal = clienti.reduce((s, c) => s + Math.max(0, Number(c.sold)), 0);
 
@@ -478,6 +492,15 @@ function register(router) {
           : '<p style="color:var(--text-muted)">Nimic programat în următoarele 14 zile. <a href="/taskuri/nou">Adaugă un task</a>.</p>'
       }
       ${faraScadenta.length ? `<h2>Task-uri fără termen (${faraScadenta.length})</h2>${table(taskuri.CAPETE, faraScadenta.slice(0, 20).map((t) => taskuri.randTask(t, aziStr)))}` : ""}
+
+      ${
+        topProduse.length
+          ? `<h2>Top produse în portofoliul lui (12 luni)</h2>${table(
+              ["Produs", "Cantitate", "Venit net"],
+              topProduse.map((tp) => [`<a href="/produse/${tp.id}">${esc(tp.denumire)}</a>`, Number(tp.cantitate).toLocaleString("ro-RO"), money(tp.venit)])
+            )}`
+          : ""
+      }
 
       <h2>Sugestii — clienți de reactivat (n-au mai cumpărat de peste 90 de zile)</h2>
       ${

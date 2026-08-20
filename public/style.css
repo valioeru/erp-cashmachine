@@ -206,6 +206,7 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 .bar-fill { height: 100%; border-radius: 3px; }
 .bar-fill.verde { background: var(--success); }
 .bar-fill.rosu { background: var(--danger); }
+.bar-fill.galbena { background: var(--warn); }
 .chart-values { color: var(--text-muted); white-space: nowrap; }
 
 /* Login + userbox (multi-utilizator) */

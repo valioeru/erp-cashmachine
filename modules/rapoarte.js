@@ -25,6 +25,11 @@ const CATEGORII = [
         desc: "Balanță contabilă pe planul de conturi RO, generată automat din documente: solduri inițiale, rulaje, total sume, solduri finale — pe orice perioadă sau zi.",
       },
       {
+        href: "/rapoarte/cashflow",
+        nume: "Cash flow la zi + proiecție",
+        desc: "Cash disponibil azi, intrări/ieșiri așteptate pe scadențe zi cu zi, cu adăugare manuală de plăți/încasări viitoare pentru forecast.",
+      },
+      {
         href: "/rapoarte/tva",
         nume: "TVA de plată (la zi)",
         desc: "TVA colectată minus TVA deductibilă, în orice moment: pe luna curentă, pe orice perioadă și cumulat la zi.",
@@ -39,6 +44,9 @@ const CATEGORII = [
         nume: "Restanțe & vechime (aging)",
         desc: "Facturi neîncasate grupate pe întârziere: nescadente, 1–30, 31–60, 61–90 și peste 90 de zile.",
       },
+      { href: "/rapoarte/indicatori", nume: "Indicatori financiari — ochii băncii", desc: "DSO, concentrare clienți, restanțe, trend — cu estimare de sumă finanțabilă și sugestii de îmbunătățire." },
+      { href: "/rapoarte/comparatie", nume: "Comparație la zi cu anii trecuți", desc: "1 ianuarie → azi: vânzări, costuri, încasări, clienți — anul curent față de ultimii doi ani." },
+      { href: "/rapoarte/incasari?directie=achizitie&zile=15", nume: "Plăți furnizori (pe zile)", desc: "Cât ai de plătit în fiecare zi din săptămâna/perioada următoare, cu totaluri pe furnizor." },
       { href: "/rapoarte/vanzari", nume: "Vânzări vs. achiziții", desc: "Evoluția lunară a facturării și diferența dintre vânzări și achiziții." },
       { href: "/rapoarte/parteneri", nume: "Top clienți & furnizori", desc: "Cine aduce cei mai mulți bani și către cine pleacă cei mai mulți." },
     ],
@@ -55,6 +63,7 @@ const CATEGORII = [
     titlu: "Comerciale",
     descriere: "Clienți și vânzare: pipeline, activitate, clienți în risc de pierdere.",
     rapoarte: [
+      { href: "/rapoarte/produse-top", nume: "Top produse & marjă pe produs", desc: "Ce se vinde cel mai bine și cu ce marjă — pe toată firma sau pe portofoliul unui agent." },
       { href: "/rapoarte/forecast", nume: "Forecast vânzări", desc: "Proiecție pe următoarele luni din sezonalitatea și trendul istoricului real, cu scenarii pesimist/probabil/optimist și pipeline-ul CRM ponderat." },
       { href: "/rapoarte/agenti", nume: "Profitabilitate pe agent & client", desc: "Venit, marjă (unde există costuri), pipeline și solduri pe fiecare agent — cu detaliu pe clienții lui." },
       { href: "/rapoarte/pipeline", nume: "Pipeline oportunități", desc: "Valoarea oportunităților deschise pe fiecare stadiu din CRM." },
@@ -74,6 +83,56 @@ function lunileUltimele(n) {
     rez.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
   }
   return rez;
+}
+
+// Interval de raportare cu preseturi: ultimele N luni, anul curent, anul
+// trecut sau o perioadă custom aleasă de om. Folosit de rapoartele cu filtru
+// de perioadă, ca toate să se comporte la fel.
+function intervalDinQuery(ctx, implicitLuni = 12) {
+  const aziStr = azi();
+  const an = Number(aziStr.slice(0, 4));
+  const preset = String(ctx.query.perioada || `${implicitLuni}luni`);
+  let deLa;
+  let panaLa = aziStr;
+  if (preset === "an_curent") deLa = `${an}-01-01`;
+  else if (preset === "an_trecut") {
+    deLa = `${an - 1}-01-01`;
+    panaLa = `${an - 1}-12-31`;
+  } else if (preset === "tot") deLa = "2000-01-01";
+  else if (preset === "custom") {
+    deLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.de_la || "")) ? String(ctx.query.de_la) : `${an}-01-01`;
+    panaLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.pana_la || "")) ? String(ctx.query.pana_la) : aziStr;
+  } else {
+    const n = Math.min(120, Math.max(1, parseInt(preset, 10) || implicitLuni));
+    deLa = lunileUltimele(n)[0] + "-01";
+  }
+  return { preset, deLa, panaLa };
+}
+
+function selectorPerioada(actiune, interval, extraCampuri = "") {
+  const { preset, deLa, panaLa } = interval;
+  const opt = (v, t) => `<option value="${v}"${preset === v ? " selected" : ""}>${t}</option>`;
+  return `
+    <form class="filtre" method="get" action="${actiune}">
+      <select name="perioada" onchange="if(this.value!=='custom')this.form.submit(); else {this.form.querySelector('.datele-custom').style.display='flex';}">
+        ${opt("3", "ultimele 3 luni")}
+        ${opt("6", "ultimele 6 luni")}
+        ${opt("12", "ultimele 12 luni")}
+        ${opt("24", "ultimele 24 de luni")}
+        ${opt("an_curent", "anul curent")}
+        ${opt("an_trecut", "anul trecut")}
+        ${opt("tot", "tot istoricul")}
+        ${opt("custom", "perioadă custom…")}
+      </select>
+      <span class="datele-custom" style="display:${preset === "custom" ? "flex" : "none"};gap:8px;align-items:center">
+        <input type="date" name="de_la" value="${deLa}">
+        <span style="font-size:13px">→</span>
+        <input type="date" name="pana_la" value="${panaLa}">
+        <button class="btn small" type="submit">Aplică</button>
+      </span>
+      ${extraCampuri}
+      <span style="font-size:12px;color:var(--text-muted)">${deLa} → ${panaLa}</span>
+    </form>`;
 }
 
 function bar(pct, cls) {
@@ -192,6 +251,25 @@ function register(router) {
         </label>
         <button class="btn small" type="submit">Aplică</button>
       </form>
+
+      ${
+        directie === "achizitie" && facturi.length
+          ? (() => {
+              const peFurnizor = new Map();
+              for (const f of facturi) {
+                if (!peFurnizor.has(f.partener_id)) peFurnizor.set(f.partener_id, { nume: f.partener_nume, id: f.partener_id, suma: 0, nr: 0 });
+                const g = peFurnizor.get(f.partener_id);
+                g.suma += Number(f.restant);
+                g.nr++;
+              }
+              const listaF = [...peFurnizor.values()].sort((a, b) => b.suma - a.suma);
+              return `<h2>Total pe furnizor în perioada selectată</h2>` + table(
+                ["Furnizor", "Documente", "Total de plătit"],
+                listaF.map((x) => [`<a href="/parteneri/${x.id}">${esc(x.nume)}</a>`, x.nr, money(x.suma)])
+              );
+            })()
+          : ""
+      }
 
       ${
         grupuri.length === 0
@@ -395,19 +473,32 @@ function register(router) {
 
   // ---- Financiar: vânzări vs. achiziții --------------------------------
   router.get("/rapoarte/vanzari", async (ctx) => {
-    const nrLuni = Math.min(36, Math.max(6, parseInt(ctx.query.luni || "12", 10) || 12));
-    const luni = lunileUltimele(nrLuni);
-    const deLa = luni[0] + "-01";
+    const interval = intervalDinQuery(ctx, 12);
+    const { deLa, panaLa } = interval;
+    // lista lunilor din interval (max 48, ca graficul să rămână lizibil)
+    const luni = [];
+    {
+      let [a, l] = [Number(deLa.slice(0, 4)), Number(deLa.slice(5, 7))];
+      const [aF, lF] = [Number(panaLa.slice(0, 4)), Number(panaLa.slice(5, 7))];
+      while ((a < aF || (a === aF && l <= lF)) && luni.length < 48) {
+        luni.push(`${a}-${String(l).padStart(2, "0")}`);
+        l++;
+        if (l > 12) {
+          l = 1;
+          a++;
+        }
+      }
+    }
 
     const randuri = await db
       .prepare(
         `SELECT f.directie, SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
          FROM facturi f
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-         WHERE f.status <> 'anulata' AND f.data_emiterii >= ?
+         WHERE f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?
          GROUP BY f.directie, SUBSTR(f.data_emiterii, 1, 7)`
       )
-      .all(deLa);
+      .all(deLa, panaLa);
 
     const perLuna = Object.fromEntries(luni.map((l) => [l, { vanzari: 0, achizitii: 0, nrV: 0 }]));
     let totalV = 0;
@@ -425,12 +516,9 @@ function register(router) {
       }
     }
     const maxLuna = Math.max(1, ...luni.map((l) => Math.max(perLuna[l].vanzari, perLuna[l].achizitii)));
-    const optiuni = [6, 12, 24, 36].map((n) => `<option value="${n}"${nrLuni === n ? " selected" : ""}>ultimele ${n} de luni</option>`).join("");
 
     const continut = `
-      <form class="filtre" method="get" action="/rapoarte/vanzari">
-        <select name="luni" onchange="this.form.submit()">${optiuni}</select>
-      </form>
+      ${selectorPerioada("/rapoarte/vanzari", interval)}
       <div class="cards">
         <div class="card"><div class="label">Vânzări</div><div class="value">${money(totalV)}</div></div>
         <div class="card"><div class="label">Achiziții</div><div class="value">${money(totalA)}</div></div>
@@ -468,63 +556,87 @@ function register(router) {
   });
 
   // ---- Financiar: top parteneri ----------------------------------------
+  // Excluderea unor parteneri din top e DOAR pe vizualizarea curentă (stă în
+  // URL, nu în baza de date) — la o nouă deschidere a raportului reapar toți.
+  // Procentele se recalculează pe ce rămâne după excludere.
   router.get("/rapoarte/parteneri", async (ctx) => {
-    const nrLuni = Math.min(240, Math.max(1, parseInt(ctx.query.luni || "12", 10) || 12));
-    const luni = lunileUltimele(nrLuni);
-    const deLa = luni[0] + "-01";
+    const interval = intervalDinQuery(ctx, 12);
+    const { deLa, panaLa } = interval;
+    const excluse = String(ctx.query.exclude || "")
+      .split(",")
+      .map((x) => parseInt(x, 10))
+      .filter((x) => Number.isFinite(x) && x > 0);
 
     async function top(directie) {
+      const filtruExcl = excluse.length ? `AND p.id NOT IN (${excluse.map(() => "?").join(",")})` : "";
       return await db
         .prepare(
           `SELECT p.id, p.nume, p.cui, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr, MAX(f.data_emiterii) AS ultima
            FROM facturi f
            JOIN parteneri p ON p.id = f.partener_id
            JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-           WHERE f.status <> 'anulata' AND f.directie = ? AND f.data_emiterii >= ?
+           WHERE f.status <> 'anulata' AND f.directie = ? AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruExcl}
            GROUP BY p.id, p.nume, p.cui
            ORDER BY valoare DESC
            LIMIT 25`
         )
-        .all(directie, deLa);
+        .all(directie, deLa, panaLa, ...excluse);
     }
     const clienti = await top("vanzare");
     const furnizori = await top("achizitie");
     const totalC = clienti.reduce((s, c) => s + Number(c.valoare), 0);
-    const optiuni = [3, 6, 12, 24, 240]
-      .map((n) => `<option value="${n}"${nrLuni === n ? " selected" : ""}>${n >= 240 ? "tot istoricul" : `ultimele ${n} de luni`}</option>`)
-      .join("");
+    const totalF = furnizori.reduce((s, c) => s + Number(c.valoare), 0);
 
-    const continut = `
-      <form class="filtre" method="get" action="/rapoarte/parteneri">
-        <select name="luni" onchange="this.form.submit()">${optiuni}</select>
-      </form>
+    const numeExcluse = excluse.length
+      ? await db.prepare(`SELECT id, nume FROM parteneri WHERE id IN (${excluse.map(() => "?").join(",")})`).all(...excluse)
+      : [];
 
-      <h2>Top clienți</h2>
-      ${table(
-        ["Client", "CUI", "Valoare facturată", "% din top", "Facturi", "Ultima factură"],
-        clienti.map((c) => [
+    const urlCu = (lista) => {
+      const u = new URLSearchParams();
+      u.set("perioada", interval.preset);
+      if (interval.preset === "custom") {
+        u.set("de_la", deLa);
+        u.set("pana_la", panaLa);
+      }
+      if (lista.length) u.set("exclude", lista.join(","));
+      return "/rapoarte/parteneri?" + u.toString();
+    };
+    const linkExclude = (id) => urlCu([...excluse, id]);
+
+    const randuriTop = (lista, total, etichetaValoare) =>
+      table(
+        ["Partener", "CUI", etichetaValoare, "% din top (recalculat)", "Facturi", "Ultima factură", ""],
+        lista.map((c) => [
           `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
           esc(c.cui || "—"),
           money(c.valoare),
-          totalC > 0 ? `${((Number(c.valoare) / totalC) * 100).toFixed(1)}%` : "—",
+          total > 0 ? `${((Number(c.valoare) / total) * 100).toFixed(1)}%` : "—",
           c.nr,
           esc((c.ultima || "").slice(0, 10)),
+          `<a class="link-btn danger" href="${linkExclude(c.id)}" title="Scoate din această vizualizare (revine la regenerare)">elimină</a>`,
         ])
-      )}
+      );
+
+    const continut = `
+      ${selectorPerioada("/rapoarte/parteneri", interval, excluse.length ? `<input type="hidden" name="exclude" value="${excluse.join(",")}">` : "")}
+
+      ${
+        numeExcluse.length
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
+              Excluși din această vizualizare (procentele sunt recalculate fără ei):
+              ${numeExcluse.map((e) => `<strong>${esc(e.nume)}</strong> <a href="${urlCu(excluse.filter((x) => x !== e.id))}" style="color:inherit">✕</a>`).join(" · ")}
+              — <a href="${urlCu([])}">readu-i pe toți</a>. Excluderea NU se salvează: la o nouă deschidere a raportului reapar toți.
+            </div>`
+          : ""
+      }
+
+      <h2>Top clienți</h2>
+      ${randuriTop(clienti, totalC, "Valoare facturată")}
 
       <h2>Top furnizori</h2>
       ${
         furnizori.length
-          ? table(
-              ["Furnizor", "CUI", "Valoare achiziționată", "Facturi", "Ultima factură"],
-              furnizori.map((c) => [
-                `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
-                esc(c.cui || "—"),
-                money(c.valoare),
-                c.nr,
-                esc((c.ultima || "").slice(0, 10)),
-              ])
-            )
+          ? randuriTop(furnizori, totalF, "Valoare achiziționată")
           : '<p>Nu există încă facturi de achiziție în ERP. Le poți importa din pagina <a href="/import">Import</a> sau adăuga manual din <a href="/facturi/achizitii">Achiziții</a>.</p>'
       }
     `;
@@ -687,6 +799,367 @@ function register(router) {
     send(ctx.res, 200, pagina(ctx, "Pipeline oportunități", "/rapoarte/pipeline", continut));
   });
 
+
+
+  // ---- Financiar: indicatorii la care se uită o bancă --------------------
+  // Calculați DOAR din ce există în ERP, cu afișarea explicită a lipsurilor:
+  // o bancă va cere bilanț + balanță complete, iar aici arătăm exact aceiași
+  // indicatori pe datele disponibile, plus cât valorează firma ca dosar de
+  // finanțare și ce ar îmbunătăți punctajul.
+  router.get("/rapoarte/indicatori", async (ctx) => {
+    const aziStr = azi();
+    const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+    const acum24 = new Date(Date.now() - 730 * 86400000).toISOString().slice(0, 10);
+
+    const agg = async (directie, deLa, panaLa) =>
+      await db
+        .prepare(
+          `SELECT COALESCE(SUM(n.net),0) AS net, COUNT(*) AS nr
+           FROM facturi f JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
+           WHERE f.directie = ? AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+        )
+        .get(directie, deLa, panaLa);
+
+    const v12 = await agg("vanzare", acum12, aziStr);
+    const v24 = await agg("vanzare", acum24, acum12);
+    const a12 = await agg("achizitie", acum12, aziStr);
+
+    const solduri = await db
+      .prepare(
+        `SELECT f.directie,
+                COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS sold,
+                COALESCE(SUM(CASE WHEN f.data_scadenta <> '' AND f.data_scadenta < ? THEN COALESCE(l.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS depasit
+         FROM facturi f
+         LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+         WHERE f.status <> 'anulata' AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         GROUP BY f.directie`
+      )
+      .all(aziStr);
+    const sV = solduri.find((s) => s.directie === "vanzare") || { sold: 0, depasit: 0 };
+    const sA = solduri.find((s) => s.directie === "achizitie") || { sold: 0, depasit: 0 };
+
+    const vanzariNet12 = Number(v12.net);
+    const vanzariNetPrec = Number(v24.net);
+    const achizitiiNet12 = Number(a12.net);
+    const creanteClienti = Number(sV.sold);
+    const datoriiFurnizori = Number(sA.sold);
+
+    // Concentrarea clienților — primul lucru la care se uită analistul de credit.
+    const topClienti = await db
+      .prepare(
+        `SELECT p.nume, COALESCE(SUM(n.net),0) AS net FROM facturi f
+         JOIN parteneri p ON p.id = f.partener_id
+         JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+         GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
+      )
+      .all(acum12);
+    const top1 = topClienti.length && vanzariNet12 > 0 ? (Number(topClienti[0].net) / vanzariNet12) * 100 : 0;
+    const top5 = vanzariNet12 > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariNet12) * 100 : 0;
+
+    const dso = vanzariNet12 > 0 ? (creanteClienti / (vanzariNet12 * 1.19)) * 365 : null; // creanțele sunt cu TVA
+    const dpo = achizitiiNet12 > 0 ? (datoriiFurnizori / (achizitiiNet12 * 1.19)) * 365 : null;
+    const crestere = vanzariNetPrec > 0 ? (vanzariNet12 / vanzariNetPrec - 1) * 100 : null;
+    const pctDepasit = creanteClienti > 0 ? (Number(sV.depasit) / creanteClienti) * 100 : 0;
+
+    const areSolduriInitiale = Number((await db.prepare("SELECT COUNT(*) AS n FROM inregistrari_contabile WHERE sursa = 'sold_initial'").get()).n) > 0;
+    const areAchizitii = achizitiiNet12 > 0;
+
+    // Estimarea de finanțabilitate — pe logica standard a produselor bancare:
+    //  - linie de credit pentru capital de lucru: uzual ~8–12% din cifra anuală;
+    //  - factoring: ~80% din creanțele nedepășite (sub 90 de zile întârziere).
+    const creanteEligibile = Math.max(0, creanteClienti - Number(sV.depasit));
+    const linieCreditMin = vanzariNet12 * 0.08;
+    const linieCreditMax = vanzariNet12 * 0.12;
+    const factoring = creanteEligibile * 0.8;
+
+    const nota = (ok, avert) => (ok ? '<span class="badge verde">bun</span>' : avert ? '<span class="badge galben">atenție</span>' : '<span class="badge rosu">slab</span>');
+
+    const indicatori = [
+      {
+        nume: "Cifra de afaceri (12 luni, fără TVA)",
+        valoare: money(vanzariNet12),
+        tinta: "—",
+        stare: "",
+        explicatie: "Baza oricărei analize de credit.",
+      },
+      {
+        nume: "Creștere an/an",
+        valoare: crestere !== null ? crestere.toFixed(1) + "%" : "—",
+        tinta: "> 0%",
+        stare: crestere !== null ? nota(crestere > 5, crestere > -5) : "",
+        explicatie: "Trend pozitiv = capacitate de rambursare în creștere.",
+      },
+      {
+        nume: "DSO — zile medii de încasare",
+        valoare: dso !== null ? Math.round(dso) + " zile" : "—",
+        tinta: "< 60 de zile",
+        stare: dso !== null ? nota(dso < 60, dso < 90) : "",
+        explicatie: "Cât stau banii la clienți. Peste 90 de zile = presiune pe cash și punctaj slab.",
+      },
+      {
+        nume: "DPO — zile medii de plată furnizori",
+        valoare: dpo !== null ? Math.round(dpo) + " zile" : "n/a (fără facturi de achiziție)",
+        tinta: "≈ DSO sau mai mare",
+        stare: dpo !== null ? nota(dso === null || dpo >= dso * 0.7, true) : "",
+        explicatie: "Dacă plătești mult mai repede decât încasezi, finanțezi tu piața.",
+      },
+      {
+        nume: "Creanțe cu scadența depășită",
+        valoare: money(sV.depasit) + ` (${pctDepasit.toFixed(0)}% din sold)`,
+        tinta: "< 20% din sold",
+        stare: nota(pctDepasit < 20, pctDepasit < 40),
+        explicatie: "Banca scade creanțele vechi din garanții — și din încredere.",
+      },
+      {
+        nume: "Concentrarea pe primul client",
+        valoare: topClienti.length ? `${top1.toFixed(0)}% (${esc(topClienti[0].nume)})` : "—",
+        tinta: "< 30%",
+        stare: nota(top1 < 30, top1 < 50),
+        explicatie: "Dependența de un singur client e primul risc semnalat de analist.",
+      },
+      {
+        nume: "Concentrarea pe top 5 clienți",
+        valoare: `${top5.toFixed(0)}%`,
+        tinta: "< 60%",
+        stare: nota(top5 < 60, top5 < 80),
+        explicatie: "",
+      },
+      {
+        nume: "Fond de rulment operațional (creanțe − furnizori)",
+        valoare: money(creanteClienti - datoriiFurnizori),
+        tinta: "pozitiv",
+        stare: nota(creanteClienti - datoriiFurnizori > 0, true),
+        explicatie: areAchizitii ? "" : "Parțial: facturile de furnizori nu sunt încă în ERP.",
+      },
+    ];
+
+    const sugestii = [];
+    if (dso !== null && dso > 60)
+      sugestii.push(
+        `<strong>Scade DSO-ul (${Math.round(dso)} zile).</strong> Folosește zilnic <a href="/rapoarte/incasari">scadențarul</a> și task-urile de încasare; renegociază termenele cu clienții mari. Fiecare 10 zile de DSO în minus eliberează ≈ ${money((vanzariNet12 * 1.19 * 10) / 365)} cash permanent.`
+      );
+    if (pctDepasit > 20)
+      sugestii.push(
+        `<strong>Curăță restanțele (${pctDepasit.toFixed(0)}% din sold e depășit).</strong> Creanțele sub 90 de zile sunt eligibile la factoring; cele peste — nu. Recuperarea lor crește direct plafonul finanțabil.`
+      );
+    if (top1 > 30)
+      sugestii.push(
+        `<strong>Diversifică portofoliul.</strong> ${esc(topClienti.length ? topClienti[0].nume : "")} = ${top1.toFixed(0)}% din vânzări. Băncile taie punctajul peste 30%. Pipeline-ul CRM și lead-urile sunt unealta — fiecare client nou mare scade riscul.`
+      );
+    if (!areAchizitii)
+      sugestii.push(
+        `<strong>Importă facturile de furnizori.</strong> Fără ele, DPO, marja și fondul de rulment sunt incomplete — iar dosarul de credit se face pe cifre complete. Ai pagina <a href="/import">Import</a> pregătită.`
+      );
+    if (!areSolduriInitiale)
+      sugestii.push(
+        `<strong>Preia soldurile din balanța Conta.</strong> Lichiditatea curentă, gradul de îndatorare și capitalurile proprii — exact ce cere banca — se pot calcula abia după <a href="/rapoarte/balanta/solduri-initiale">preluarea soldurilor inițiale</a>.`
+      );
+    sugestii.push(
+      `<strong>Ține istoricul de încasări curat în ERP.</strong> Un raport de aging + scadențar exportabile, cu cifre care se leagă cu extrasul de cont (modulul <a href="/banca">Bancă</a>), scurtează analiza de credit de la săptămâni la zile.`
+    );
+
+    // --- indicatori REALI din balanțele Conta încărcate (snapshoturi) ------
+    const etichete = await db
+      .prepare("SELECT eticheta, MIN(data_pana) AS pana FROM balante_snapshot GROUP BY eticheta ORDER BY MIN(data_pana) ASC")
+      .all();
+    const analizeBilant = [];
+    for (const e of etichete) {
+      const conturi = await db.prepare("SELECT cont, r_d, r_c, sf_d, sf_c FROM balante_snapshot WHERE eticheta = ?").all(e.eticheta);
+      // Notă de calcul: SmartBill Conta închide LUNAR clasele 6/7 prin 121,
+      // deci rulajele debit=credit pe 6xx/7xx și "venituri - cheltuieli" ar
+      // ieși mereu zero. De-aia: cifra de afaceri = rulajul CREDITOR al
+      // grupei 70x (fără închideri), iar profitul = soldul contului 121
+      // (credit = profit, debit = pierdere) — exact cum îl citește și banca.
+      let capitaluri = 0, datoriiTL = 0, datoriiCurente = 0, activeImob = 0, activeCirc = 0, ca = 0, profit = 0, cash = 0;
+      for (const c of conturi) {
+        const g2 = c.cont.slice(0, 2);
+        const cls = c.cont.charAt(0);
+        const netD = Number(c.sf_d) - Number(c.sf_c);
+        if (["10", "11", "12"].includes(g2)) capitaluri += -netD;
+        else if (["16"].includes(g2)) datoriiTL += Math.max(0, -netD);
+        else if (cls === "2") activeImob += Math.max(0, netD);
+        else if (cls === "3") activeCirc += Math.max(0, netD);
+        else if (cls === "4") {
+          if (netD > 0) activeCirc += netD;
+          else datoriiCurente += -netD;
+        } else if (cls === "5") {
+          if (c.cont.startsWith("519")) datoriiCurente += Math.max(0, -netD);
+          else {
+            activeCirc += Math.max(0, netD);
+            if (["51", "53", "54"].includes(g2) && !c.cont.startsWith("519")) cash += Math.max(0, netD);
+          }
+        }
+        if (g2 === "70" && !c.cont.startsWith("709")) ca += Number(c.r_c);
+        if (c.cont.startsWith("709")) ca -= Number(c.r_d);
+        if (c.cont === "121") profit = Number(c.sf_c) - Number(c.sf_d);
+      }
+      analizeBilant.push({
+        eticheta: e.eticheta,
+        capitaluri, datoriiTL, datoriiCurente, activeImob, activeCirc, cash, ca,
+        profit,
+        totalActiv: activeImob + activeCirc,
+        lichiditate: datoriiCurente > 0 ? activeCirc / datoriiCurente : null,
+        indatorare: activeImob + activeCirc > 0 ? ((datoriiTL + datoriiCurente) / (activeImob + activeCirc)) * 100 : null,
+      });
+    }
+    const ultimBilant = analizeBilant.length ? analizeBilant[analizeBilant.length - 1] : null;
+
+    const sectiuneBilant = analizeBilant.length
+      ? `
+      <h2>Cifrele reale din balanțele Conta (ce vede banca în bilanț)</h2>
+      ${table(
+        ["Perioada", "Cifra de afaceri (rulaj 70x)", "Profit / (pierdere) — sold 121", "Capitaluri proprii", "Datorii bănci/leasing (16x, 519)", "Datorii curente", "Cash (51x+53x)", "Lichiditate curentă", "Grad îndatorare"],
+        analizeBilant.map((a) => [
+          esc(a.eticheta),
+          money(a.ca),
+          `<span style="color:${a.profit >= 0 ? "var(--success)" : "var(--danger)"}">${money(a.profit)}</span>`,
+          money(a.capitaluri),
+          money(a.datoriiTL),
+          money(a.datoriiCurente),
+          money(a.cash),
+          a.lichiditate !== null ? `${a.lichiditate.toFixed(2)} ${a.lichiditate >= 1.2 ? '<span class="badge verde">bun</span>' : a.lichiditate >= 1 ? '<span class="badge galben">la limită</span>' : '<span class="badge rosu">sub 1</span>'}` : "—",
+          a.indatorare !== null ? `${a.indatorare.toFixed(0)}% ${a.indatorare <= 60 ? '<span class="badge verde">ok</span>' : a.indatorare <= 80 ? '<span class="badge galben">ridicat</span>' : '<span class="badge rosu">critic</span>'}` : "—",
+        ])
+      )}
+      <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · grad de îndatorare ≤ 60–70% · capitaluri proprii pozitive și în creștere. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</p>`
+      : `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Pentru indicatorii de bilanț REALI (capitaluri proprii, lichiditate, grad de îndatorare — exact ce cere banca), încarcă balanțele anuale din SmartBill Conta la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</div>`;
+
+    const continut = `
+      ${sectiuneBilant}
+      <div class="cards">
+        <div class="card"><div class="label">Linie de credit estimată (capital de lucru)</div><div class="value">${money(linieCreditMin)} – ${money(linieCreditMax)}</div></div>
+        <div class="card"><div class="label">Plafon factoring estimat (80% din creanțe eligibile)</div><div class="value">${money(factoring)}</div></div>
+        <div class="card"><div class="label">Creanțe eligibile (nedepășite)</div><div class="value">${money(creanteEligibile)}</div></div>
+      </div>
+      <p style="font-size:12px;color:var(--text-muted)">Estimări orientative pe practica uzuală a băncilor din România (linie de capital de lucru ≈ 8–12% din cifra anuală; factoring ≈ 80% din creanțele nedepășite). Suma reală depinde de bilanț, garanții, istoric bancar și politica fiecărei bănci — nu e o ofertă.</p>
+
+      <h2>Indicatorii dosarului de credit</h2>
+      ${table(
+        ["Indicator", "Valoare", "Ținta băncii", "Stare", "De ce contează"],
+        indicatori.map((i) => [i.nume, i.valoare, i.tinta, i.stare, `<span style="font-size:12px;color:var(--text-muted)">${i.explicatie}</span>`])
+      )}
+
+      <h2>Top 5 clienți (concentrarea riscului)</h2>
+      ${table(
+        ["Client", "Vânzări 12 luni (net)", "% din total"],
+        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariNet12 > 0 ? ((Number(c.net) / vanzariNet12) * 100).toFixed(1) + "%" : "—"])
+      )}
+
+      <h2>Ce ar îmbunătăți punctajul</h2>
+      <ol style="line-height:1.7">${sugestii.map((s) => `<li>${s}</li>`).join("")}</ol>
+      <p style="font-size:12px;color:var(--text-muted)">Nu sunt consultant de credit — raportul arată indicatorii standard pe datele din ERP; dosarul final se face cu banca și contabilul.</p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Indicatori financiari — ochii băncii", "/rapoarte/indicatori", continut));
+  });
+
+  // ---- Financiar: comparație la zi cu anii precedenți ---------------------
+  router.get("/rapoarte/comparatie", async (ctx) => {
+    const aziStr = azi();
+    const anCurent = Number(aziStr.slice(0, 4));
+    const mmzz = aziStr.slice(5, 10);
+    const ani = [anCurent, anCurent - 1, anCurent - 2];
+
+    async function perioada(an) {
+      const deLa = `${an}-01-01`;
+      const panaLa = `${an}-${mmzz}`;
+      const vanzari = await db
+        .prepare(
+          `SELECT COALESCE(SUM(n.net),0) AS net, COALESCE(SUM(t.total),0) AS total, COUNT(*) AS nr, COUNT(DISTINCT f.partener_id) AS clienti
+           FROM facturi f
+           JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
+           JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+           WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+        )
+        .get(deLa, panaLa);
+      const achizitii = await db
+        .prepare(
+          `SELECT COALESCE(SUM(t.total),0) AS total FROM facturi f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+           WHERE f.directie = 'achizitie' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+        )
+        .get(deLa, panaLa);
+      const incasari = await db
+        .prepare(
+          `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id = pl.factura_id
+           WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND pl.data >= ? AND pl.data <= ?`
+        )
+        .get(deLa, panaLa);
+      return {
+        an,
+        net: Number(vanzari.net),
+        total: Number(vanzari.total),
+        nr: Number(vanzari.nr),
+        clienti: Number(vanzari.clienti),
+        mediaFactura: Number(vanzari.nr) > 0 ? Number(vanzari.total) / Number(vanzari.nr) : 0,
+        achizitii: Number(achizitii.total),
+        incasari: Number(incasari.s),
+      };
+    }
+    const date = [];
+    for (const an of ani) date.push(await perioada(an));
+    const [c, p1, p2] = date;
+
+    const delta = (a, b) => (b > 0 ? (((a - b) / b) * 100).toFixed(1) + "%" : "—");
+    const culoare = (a, b) => (b > 0 ? (a >= b ? "var(--success)" : "var(--danger)") : "inherit");
+    const rand = (nume, camp, fmt = money) => [
+      nume,
+      fmt(c[camp]),
+      `${fmt(p1[camp])} <span style="color:${culoare(c[camp], p1[camp])};font-size:12px">(${delta(c[camp], p1[camp])})</span>`,
+      `${fmt(p2[camp])} <span style="color:${culoare(c[camp], p2[camp])};font-size:12px">(${delta(c[camp], p2[camp])})</span>`,
+    ];
+    const nrFmt = (x) => String(Math.round(x));
+
+    // Vânzări lunare pe cei 3 ani, pentru grafic comparativ.
+    const lunar = await db
+      .prepare(
+        `SELECT SUBSTR(f.data_emiterii,1,4) AS an, SUBSTR(f.data_emiterii,6,2) AS luna, COALESCE(SUM(t.total),0) AS v
+         FROM facturi f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+         GROUP BY SUBSTR(f.data_emiterii,1,4), SUBSTR(f.data_emiterii,6,2)`
+      )
+      .all(`${anCurent - 2}-01-01`);
+    const gr = {};
+    for (const r of lunar) (gr[r.luna] ||= {})[r.an] = Number(r.v);
+    const maxLunar = Math.max(1, ...lunar.map((r) => Number(r.v)));
+
+    const continut = `
+      <p style="color:var(--text-muted);font-size:13px">Aceeași perioadă în fiecare an: <strong>1 ianuarie → ${esc(mmzz.replace("-", "."))}</strong> — mere cu mere, la zi.</p>
+      ${table(
+        ["Indicator", `${anCurent} (curent)`, `${anCurent - 1} (vs. curent)`, `${anCurent - 2} (vs. curent)`],
+        [
+          rand("Vânzări (cu TVA)", "total"),
+          rand("Vânzări (net, fără TVA)", "net"),
+          rand("Încasări efective", "incasari"),
+          rand("Costuri (facturi furnizori, cu TVA)", "achizitii"),
+          rand("Facturi emise", "nr", nrFmt),
+          rand("Clienți activi (au cumpărat)", "clienti", nrFmt),
+          rand("Valoarea medie a facturii", "mediaFactura"),
+        ]
+      )}
+      ${c.achizitii === 0 ? '<p style="font-size:12px;color:var(--warn)">Costurile arată 0 pentru că facturile de furnizori nu sunt încă importate în ERP.</p>' : ""}
+
+      <h2>Vânzări pe luni — ${anCurent} vs. ${anCurent - 1} vs. ${anCurent - 2}</h2>
+      <div class="chart">
+        ${["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
+          .map((luna) => {
+            const v = (an) => (gr[luna] || {})[String(an)] || 0;
+            return `<div class="chart-row">
+              <div class="chart-label">luna ${luna}</div>
+              <div class="chart-bars">
+                ${bar((v(anCurent) / maxLunar) * 100, "verde")}
+                ${bar((v(anCurent - 1) / maxLunar) * 100, "rosu")}
+                ${bar((v(anCurent - 2) / maxLunar) * 100, "galbena")}
+              </div>
+              <div class="chart-values">${money(v(anCurent))} / ${money(v(anCurent - 1))} / ${money(v(anCurent - 2))}</div>
+            </div>`;
+          })
+          .join("")}
+      </div>
+      <p style="font-size:12px;color:var(--text-muted)">Verde = ${anCurent}, roșu = ${anCurent - 1}, galben = ${anCurent - 2}. Luna curentă e parțială.</p>
+    `;
+    send(ctx.res, 200, pagina(ctx, `Comparație la zi: ${anCurent} vs. ${anCurent - 1} vs. ${anCurent - 2}`, "/rapoarte/comparatie", continut));
+  });
 
   // ---- Comercial: profitabilitate pe agent și pe client -----------------
   // Marja reală se poate calcula doar acolo unde liniile de factură au produs
@@ -987,6 +1460,103 @@ function register(router) {
       </p>
     `;
     send(ctx.res, 200, pagina(ctx, "Forecast vânzări", "/rapoarte/forecast", continut));
+  });
+
+
+  // ---- Comercial: top produse & profitabilitate pe produs ----------------
+  // Onest despre acoperire: facturile importate din SmartBill au o singură
+  // linie sumar, FĂRĂ produse — deci topul acoperă doar facturile emise din
+  // ERP cu linii reale de produs. Raportul afișează explicit procentul de
+  // venit care are detaliu pe produse, ca să nu tragă nimeni concluzii de pe
+  // date parțiale fără să știe.
+  router.get("/rapoarte/produse-top", async (ctx) => {
+    const interval = intervalDinQuery(ctx, 12);
+    const { deLa, panaLa } = interval;
+    const agentAles = parseInt(ctx.query.agent, 10) || null;
+    const agenti = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
+
+    const filtruAgent = agentAles ? "AND p.agent_id = ?" : "";
+    const argsAgent = agentAles ? [agentAles] : [];
+
+    const produse = await db
+      .prepare(
+        `SELECT pr.id, pr.denumire, pr.cod, pr.pret_achizitie,
+                SUM(fl.cantitate) AS cantitate,
+                SUM(fl.cantitate * fl.pret_unitar) AS venit,
+                SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0)) AS cost,
+                COUNT(DISTINCT f.id) AS facturi,
+                COUNT(DISTINCT f.partener_id) AS clienti
+         FROM facturi_linii fl
+         JOIN facturi f ON f.id = fl.factura_id
+         JOIN parteneri p ON p.id = f.partener_id
+         JOIN produse pr ON pr.id = fl.produs_id
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}
+         GROUP BY pr.id, pr.denumire, pr.cod, pr.pret_achizitie
+         ORDER BY venit DESC
+         LIMIT 50`
+      )
+      .all(deLa, panaLa, ...argsAgent);
+
+    const acoperire = await db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN fl.produs_id IS NOT NULL THEN fl.cantitate * fl.pret_unitar ELSE 0 END), 0) AS cuProdus,
+                COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS total
+         FROM facturi_linii fl JOIN facturi f ON f.id = fl.factura_id JOIN parteneri p ON p.id = f.partener_id
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}`
+      )
+      .get(deLa, panaLa, ...argsAgent);
+    const pctAcoperire = Number(acoperire.total) > 0 ? (Number(acoperire.cuProdus) / Number(acoperire.total)) * 100 : 0;
+
+    const totalVenit = produse.reduce((s, p) => s + Number(p.venit), 0);
+    const totalMarja = produse.reduce((s, p) => s + (Number(p.venit) - Number(p.cost)), 0);
+
+    const continut = `
+      ${selectorPerioada(
+        "/rapoarte/produse-top",
+        interval,
+        `<select name="agent" onchange="this.form.submit()">
+           <option value="">toți agenții</option>
+           ${agenti.map((a) => `<option value="${a.id}"${agentAles === a.id ? " selected" : ""}>doar clienții lui ${esc(a.nume)}</option>`).join("")}
+         </select>`
+      )}
+
+      <div class="cards">
+        <div class="card"><div class="label">Venit pe produse identificate</div><div class="value">${money(totalVenit)}</div></div>
+        <div class="card"><div class="label">Marjă totală (unde există cost)</div><div class="value">${money(totalMarja)}</div></div>
+        <div class="card"><div class="label">Acoperire: venit cu detaliu pe produs</div><div class="value" style="color:${pctAcoperire > 50 ? "inherit" : "var(--warn)"}">${pctAcoperire.toFixed(0)}%</div></div>
+      </div>
+      ${
+        pctAcoperire < 50
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Doar ${pctAcoperire.toFixed(0)}% din venitul perioadei are detaliu pe produse — facturile importate din SmartBill vin fără linii de produs. Topul de mai jos e valabil pentru facturile emise din ERP; pe măsură ce facturezi din aplicație, acoperirea crește singură.</div>`
+          : ""
+      }
+
+      <h2>Top produse vândute${agentAles ? " (portofoliul agentului ales)" : ""}</h2>
+      ${
+        produse.length
+          ? table(
+              ["Produs", "Cod", "Cantitate", "Venit (net)", "Cost", "Marjă", "Marjă %", "Facturi", "Clienți"],
+              produse.map((p) => {
+                const marja = Number(p.venit) - Number(p.cost);
+                const pct = Number(p.venit) > 0 && Number(p.cost) > 0 ? ((marja / Number(p.venit)) * 100).toFixed(1) + "%" : "—";
+                return [
+                  `<a href="/produse/${p.id}">${esc(p.denumire)}</a>`,
+                  esc(p.cod || "—"),
+                  Number(p.cantitate).toLocaleString("ro-RO"),
+                  money(p.venit),
+                  Number(p.cost) > 0 ? money(p.cost) : "—",
+                  Number(p.cost) > 0 ? money(marja) : "—",
+                  pct,
+                  p.facturi,
+                  p.clienti,
+                ];
+              })
+            )
+          : '<p style="color:var(--text-muted)">Nicio linie de factură cu produs identificat în perioada aleasă. Emite facturi din ERP (cu produse din catalog) sau importă stocul ca să existe catalogul.</p>'
+      }
+      <p style="font-size:12px;color:var(--text-muted)">Costul = cantitate × prețul de achiziție din catalogul de produse. Fără preț de achiziție completat, marja produsului nu se afișează (nu e zero — e necunoscută).</p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Top produse & profitabilitate pe produs", "/rapoarte/produse-top", continut));
   });
 
   // ---- Comercial: clienți activi / inactivi -----------------------------

@@ -44,6 +44,81 @@ function nrRo(x) {
   return v.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// Parser pentru balanța exportată din SmartBill Conta (XLS/CSV).
+// Formatul real: câteva rânduri de antet (firmă, CIF, „Perioada: dd/mm/yyyy -
+// dd/mm/yyyy"), apoi antetul tabelului pe DOUĂ rânduri („Contul | Descrierea
+// contului | Solduri initiale an | Rulaje perioada | Total sume | Solduri
+// finale" + „Debitoare | Creditoare" × 4), apoi conturile și totalurile pe
+// clase. Verificat pe balanțele reale Cash Machine (2023, 2024, 2025, iul 2026).
+function parseBalantaConta(rows) {
+  let randContul = -1;
+  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+    if (normalizeHeader(rows[i] && rows[i][0]) === "contul") {
+      randContul = i;
+      break;
+    }
+  }
+  if (randContul === -1) return { eroare: "Nu am găsit antetul 'Contul' — e o balanță exportată din SmartBill Conta?" };
+
+  let deLa = null;
+  let panaLa = null;
+  for (let i = 0; i < randContul; i++) {
+    for (const cel of rows[i] || []) {
+      const m = String(cel || "").match(/Perioada:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+      if (m) {
+        deLa = `${m[3]}-${m[2]}-${m[1]}`;
+        panaLa = `${m[6]}-${m[5]}-${m[4]}`;
+      }
+    }
+  }
+
+  const conturi = [];
+  for (let r = randContul + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const brut = String(row[0] || "").trim();
+    if (!/^\d/.test(brut)) continue; // sare „Debitoare/Creditoare", „Total clasa X", totalul general
+    const simbol = brut.replace(/[^0-9.]/g, "");
+    if (!/^\d{3,4}(\.\d+)?$/.test(simbol)) continue;
+    const n = (i) => parseNumar(row[i]);
+    conturi.push({
+      cont: simbol,
+      denumire: String(row[1] || "").trim(),
+      siD: n(2), siC: n(3),
+      rD: n(4), rC: n(5),
+      tsD: n(6), tsC: n(7),
+      sfD: n(8), sfC: n(9),
+    });
+  }
+  if (!conturi.length) return { eroare: "Am găsit antetul, dar niciun rând de cont — verifică fișierul." };
+
+  const tot = conturi.reduce((a, c) => ({ sfD: a.sfD + c.sfD, sfC: a.sfC + c.sfC }), { sfD: 0, sfC: 0 });
+  return { conturi, deLa, panaLa, totalSfD: conta.BANI(tot.sfD), totalSfC: conta.BANI(tot.sfC) };
+}
+
+// Salvează balanța și ca „snapshot" istoric — sursa indicatorilor bancari
+// reali și a comparațiilor multi-an. Aceeași etichetă = înlocuire.
+async function salveazaSnapshot(eticheta, parsat, fisier) {
+  await db.prepare("DELETE FROM balante_snapshot WHERE eticheta = ?").run(eticheta);
+  const linii = parsat.conturi;
+  for (let i = 0; i < linii.length; i += 100) {
+    const lot = linii.slice(i, i + 100);
+    const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const args = [];
+    for (const c of lot) args.push(eticheta, parsat.deLa, parsat.panaLa, c.cont, c.denumire, c.siD, c.siC, c.rD, c.rC, c.tsD, c.tsC, c.sfD, c.sfC, fisier || null);
+    await db
+      .prepare(
+        `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, si_d, si_c, r_d, r_c, ts_d, ts_c, sf_d, sf_c, fisier) VALUES ${ph}`
+      )
+      .run(...args);
+  }
+}
+
+function etichetaDinPerioada(deLa, panaLa) {
+  if (!deLa || !panaLa) return `balanta-${new Date().toISOString().slice(0, 10)}`;
+  const anIntreg = deLa.endsWith("-01-01") && panaLa.endsWith("-12-31") && deLa.slice(0, 4) === panaLa.slice(0, 4);
+  return anIntreg ? `Anul ${deLa.slice(0, 4)}` : `${deLa} → ${panaLa}`;
+}
+
 function register(router) {
   router.get("/rapoarte/balanta", async (ctx) => {
     await regenereazaDacaENevoie();
@@ -412,8 +487,7 @@ function register(router) {
   router.post("/rapoarte/balanta/solduri-initiale", async (ctx) => {
     const files = (ctx.body.__files && ctx.body.__files.fisier) || [];
     const file = files[0];
-    const data = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.body.data || "")) ? String(ctx.body.data) : null;
-    if (!file || !data) return redirect(ctx.res, "/rapoarte/balanta/solduri-initiale");
+    if (!file) return redirect(ctx.res, "/rapoarte/balanta/solduri-initiale");
 
     let rows;
     try {
@@ -422,106 +496,140 @@ function register(router) {
       return send(ctx.res, 200, layout({ user: ctx.user, title: "Eroare", active: "/rapoarte", body: `<p>${esc(e.message)}</p><a class="btn" href="/rapoarte/balanta/solduri-initiale">Înapoi</a>` }));
     }
 
-    // Recunoaștem coloanele din exportul de balanță. SmartBill folosește
-    // denumiri gen "Simbol cont", "Solduri finale Debit/Credit"; acceptăm și
-    // variante.
-    const CHEI = {
-      cont: ["simbolcont", "simbol", "cont", "contul"],
-      sfD: ["soldurifinaledebit", "soldfinaldebit", "sfdebit", "solddebit", "soldfinald", "debit"],
-      sfC: ["soldurifinalecredit", "soldfinalcredit", "sfcredit", "soldcredit", "soldfinalc", "credit"],
-    };
-    let randHeader = -1;
-    let idx = {};
-    for (let i = 0; i < Math.min(rows.length, 20); i++) {
-      const norm = (rows[i] || []).map(normalizeHeader);
-      const gaseste = (chei) => norm.findIndex((h) => chei.some((k) => h.includes(k)));
-      const iCont = gaseste(CHEI.cont);
-      // debit/credit pot apărea de mai multe ori (inițiale, rulaje, finale) —
-      // luăm ULTIMA pereche, care în balanța standard e cea de solduri finale.
-      let iD = -1;
-      let iC = -1;
-      norm.forEach((h, j) => {
-        if (CHEI.sfD.some((k) => h.includes(k))) iD = j;
-      });
-      norm.forEach((h, j) => {
-        if (CHEI.sfC.some((k) => h.includes(k))) iC = j;
-      });
-      if (iCont !== -1 && iD !== -1 && iC !== -1 && iD !== iC) {
-        randHeader = i;
-        idx = { cont: iCont, sfD: iD, sfC: iC };
-        break;
-      }
-    }
-    if (randHeader === -1) {
+    const parsat = parseBalantaConta(rows);
+    if (parsat.eroare) {
       return send(
         ctx.res,
         200,
         layout({
           user: ctx.user,
-          title: "Coloane nerecunoscute",
+          title: "Format nerecunoscut",
           active: "/rapoarte",
-          body: `<h1>N-am recunoscut coloanele balanței</h1><p>Primele rânduri găsite:</p><pre style="background:var(--surface);padding:12px;border-radius:8px;overflow-x:auto">${esc(
-            rows.slice(0, 6).map((r, i) => `${i + 1}: ${r.join(" | ")}`).join("\n")
-          )}</pre><a class="btn" href="/rapoarte/balanta/solduri-initiale">Înapoi</a>`,
+          body: `<h1>${esc(parsat.eroare)}</h1><pre style="background:var(--surface);padding:12px;border-radius:8px;overflow-x:auto">${esc(rows.slice(0, 8).map((r, i) => `${i + 1}: ${r.join(" | ")}`).join("\n"))}</pre><a class="btn" href="/rapoarte/balanta/solduri-initiale">Înapoi</a>`,
         })
       );
     }
+
+    // Data ancorei: ultima zi a perioadei din balanță (sau ce alege omul).
+    const data = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.body.data || "")) ? String(ctx.body.data) : parsat.panaLa || azi();
 
     if (ctx.body.inlocuieste) {
       await db.prepare("DELETE FROM inregistrari_contabile WHERE sursa = 'sold_initial'").run();
     }
 
     let preluate = 0;
-    let totalD = 0;
-    let totalC = 0;
-    const linii = [];
-    for (let r = randHeader + 1; r < rows.length; r++) {
-      const row = rows[r];
-      if (!row) continue;
-      const cont = String(row[idx.cont] || "").trim().replace(/[^0-9.]/g, "");
-      if (!/^\d{3,4}(\.\d+)?$/.test(cont)) continue; // sare titluri, clase, totaluri
-      const d = conta.BANI(parseNumar(row[idx.sfD]));
-      const c = conta.BANI(parseNumar(row[idx.sfC]));
-      if (d === 0 && c === 0) continue;
-      linii.push({ cont, d, c });
-      totalD += d;
-      totalC += c;
-      preluate++;
-    }
-
+    const linii = parsat.conturi.filter((c) => c.sfD !== 0 || c.sfC !== 0);
     for (let i = 0; i < linii.length; i += 200) {
       const lot = linii.slice(i, i + 200);
       const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, 'sold_initial')").join(", ");
       const args = [];
-      for (const l of lot) args.push(`SI-${l.cont}`, data, l.cont, l.d, l.c, `Sold inițial preluat din balanța SmartBill Conta (${file.filename})`);
+      for (const l of lot) args.push(`SI-${l.cont}`, data, l.cont, l.sfD, l.sfC, `Sold inițial din balanța Conta ${parsat.deLa || ""} → ${parsat.panaLa || ""} (${file.filename})`);
       await db.prepare(`INSERT INTO inregistrari_contabile (nota_id, data, cont, debit, credit, explicatie, sursa) VALUES ${ph}`).run(...args);
+      preluate += lot.length;
     }
 
-    // Conturile din balanța contabilului care nu există în planul nostru se
-    // adaugă automat (ca simbol + funcțiune bifuncțională), ca fișa să meargă.
+    // Conturile noi (analitice de la contabil: 1171, 1174, 1682…) intră în plan.
     const planExistent = new Set((await db.prepare("SELECT simbol FROM plan_conturi").all()).map((r) => r.simbol));
-    const noi = [...new Set(linii.map((l) => l.cont))].filter((c) => !planExistent.has(c));
-    for (const c of noi) {
-      await db.prepare("INSERT INTO plan_conturi (simbol, denumire, functiune, clasa, grupa) VALUES (?, ?, 'B', ?, ?)").run(c, "(din balanța SmartBill Conta)", c.charAt(0), c.slice(0, 2));
+    for (const c of linii) {
+      if (planExistent.has(c.cont)) continue;
+      planExistent.add(c.cont);
+      await db
+        .prepare("INSERT INTO plan_conturi (simbol, denumire, functiune, clasa, grupa) VALUES (?, ?, 'B', ?, ?)")
+        .run(c.cont, c.denumire || "(din balanța Conta)", c.cont.charAt(0), c.cont.slice(0, 2));
     }
 
-    const dif = conta.BANI(totalD - totalC);
+    // Salvăm și ca snapshot istoric + regenerăm contabilitatea pe noua ancoră.
+    await salveazaSnapshot(etichetaDinPerioada(parsat.deLa, parsat.panaLa), parsat, file.filename);
+    await conta.regenereaza("solduri-initiale");
+
+    const dif = conta.BANI(parsat.totalSfD - parsat.totalSfC);
     const body = `
-      <h1>Solduri preluate</h1>
+      <h1>Solduri preluate din balanța Conta</h1>
       <div class="cards">
-        <div class="card"><div class="label">Conturi preluate</div><div class="value">${preluate}</div></div>
-        <div class="card"><div class="label">Total debit</div><div class="value">${money(totalD)}</div></div>
-        <div class="card"><div class="label">Total credit</div><div class="value">${money(totalC)}</div></div>
-        <div class="card"><div class="label">Diferență D-C</div><div class="value" style="color:${Math.abs(dif) <= 0.01 ? "var(--success)" : "var(--danger)"}">${money(dif)}</div></div>
+        <div class="card"><div class="label">Perioada balanței</div><div class="value" style="font-size:16px">${esc(parsat.deLa || "?")} → ${esc(parsat.panaLa || "?")}</div></div>
+        <div class="card"><div class="label">Conturi cu sold preluate</div><div class="value">${preluate}</div></div>
+        <div class="card"><div class="label">Total debit / credit</div><div class="value" style="font-size:16px">${money(parsat.totalSfD)}<br>${money(parsat.totalSfC)}</div></div>
+        <div class="card"><div class="label">Diferență D−C</div><div class="value" style="color:${Math.abs(dif) <= 0.01 ? "var(--success)" : "var(--danger)"}">${money(dif)}</div></div>
       </div>
       ${
-        Math.abs(dif) > 0.01
-          ? '<div class="flash" style="background:#f8e5e3;border-color:#e8bdb8;color:var(--danger)">Atenție: soldurile preluate nu se echilibrează — verifică dacă fișierul e balanța completă (toate conturile, nu un filtru).</div>'
-          : '<div class="flash">Soldurile se echilibrează (debit = credit) — balanța de pornire e validă.</div>'
+        Math.abs(dif) <= 0.01
+          ? '<div class="flash">Balanța de pornire se echilibrează perfect. Din ziua următoare ancorei, ERP-ul mișcă singur soldurile; facturile istorice deja importate nu se mai numără dublu (sunt excluse automat până la ancoră).</div>'
+          : '<div class="flash" style="background:#f8e5e3;border-color:#e8bdb8;color:var(--danger)">Soldurile nu se echilibrează — verifică dacă fișierul e balanța completă.</div>'
       }
       <a class="btn" href="/rapoarte/balanta">Vezi balanța</a>
+      <a class="btn secondary" href="/rapoarte/balanta/istoric">Vezi balanțele istorice</a>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Solduri preluate", active: "/rapoarte", body }));
+  });
+
+  // ---- Balanțe istorice (snapshoturi anuale/lunare) ----------------------
+  // Balanțele pe anii trecuți NU devin solduri inițiale — sunt sursa
+  // indicatorilor bancari reali (capitaluri, îndatorare, lichiditate) și a
+  // evoluției multi-an din /rapoarte/indicatori.
+  router.get("/rapoarte/balanta/istoric", async (ctx) => {
+    const snap = await db
+      .prepare(
+        "SELECT eticheta, MIN(data_de_la) AS de_la, MIN(data_pana) AS pana, COUNT(*) AS conturi, MIN(fisier) AS fisier, MIN(incarcat_la) AS la FROM balante_snapshot GROUP BY eticheta ORDER BY MIN(data_pana) DESC"
+      )
+      .all();
+    const body = `
+      <div class="subnav">
+        <a href="/rapoarte" class="subnav-link">Toate rapoartele</a>
+        <a href="/rapoarte/balanta" class="subnav-link">Balanță de verificare</a>
+        <a href="/rapoarte/balanta/solduri-initiale" class="subnav-link">Solduri inițiale</a>
+        <a href="/rapoarte/balanta/istoric" class="subnav-link activ">Balanțe istorice</a>
+      </div>
+      <div class="detail-box">
+        <h2 style="margin-top:0">La ce folosesc</h2>
+        <p style="font-size:13px">Balanțele pe anii trecuți (2023, 2024, 2025…) alimentează raportul
+        <a href="/rapoarte/indicatori">Indicatori financiari — ochii băncii</a> cu cifre contabile reale: capitaluri proprii,
+        grad de îndatorare, lichiditate, profit — și evoluția lor de la an la an. Nu afectează balanța curentă a ERP-ului.</p>
+      </div>
+      <form method="post" action="/rapoarte/balanta/istoric" enctype="multipart/form-data" class="filtre">
+        <input type="file" name="fisier" accept=".xls,.xlsx,.csv" required>
+        <button class="btn" type="submit">Încarcă balanța istorică</button>
+      </form>
+      <h2>Balanțe încărcate</h2>
+      ${
+        snap.length
+          ? table(
+              ["Etichetă", "Perioadă", "Conturi", "Fișier", "Încărcată la", ""],
+              snap.map((r) => [
+                esc(r.eticheta),
+                `${esc(r.de_la || "?")} → ${esc(r.pana || "?")}`,
+                r.conturi,
+                esc(r.fisier || "—"),
+                esc((r.la || "").slice(0, 16)),
+                `<form method="post" action="/rapoarte/balanta/istoric/sterge" class="inline-form" onsubmit="return confirm('Ștergi balanța ${esc(r.eticheta)}?')"><input type="hidden" name="eticheta" value="${esc(r.eticheta)}"><button class="link-btn danger" type="submit">Șterge</button></form>`,
+              ])
+            )
+          : '<p style="color:var(--text-muted)">Nicio balanță istorică încă. Încarcă balanțele anuale (2023, 2024, 2025) și pe cea a ultimei luni închise.</p>'
+      }
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Balanțe istorice", active: "/rapoarte", body }));
+  });
+
+  router.post("/rapoarte/balanta/istoric", async (ctx) => {
+    const files = (ctx.body.__files && ctx.body.__files.fisier) || [];
+    const file = files[0];
+    if (!file) return redirect(ctx.res, "/rapoarte/balanta/istoric");
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, layout({ user: ctx.user, title: "Eroare", active: "/rapoarte", body: `<p>${esc(e.message)}</p><a class="btn" href="/rapoarte/balanta/istoric">Înapoi</a>` }));
+    }
+    const parsat = parseBalantaConta(rows);
+    if (parsat.eroare) {
+      return send(ctx.res, 200, layout({ user: ctx.user, title: "Format nerecunoscut", active: "/rapoarte", body: `<p>${esc(parsat.eroare)}</p><a class="btn" href="/rapoarte/balanta/istoric">Înapoi</a>` }));
+    }
+    await salveazaSnapshot(etichetaDinPerioada(parsat.deLa, parsat.panaLa), parsat, file.filename);
+    redirect(ctx.res, "/rapoarte/balanta/istoric");
+  });
+
+  router.post("/rapoarte/balanta/istoric/sterge", async (ctx) => {
+    await db.prepare("DELETE FROM balante_snapshot WHERE eticheta = ?").run(String(ctx.body.eticheta || ""));
+    redirect(ctx.res, "/rapoarte/balanta/istoric");
   });
 
   router.post("/rapoarte/balanta/solduri-initiale/sterge", async (ctx) => {

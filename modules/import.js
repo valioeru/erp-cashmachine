@@ -269,7 +269,14 @@ function register(router) {
         <button type="submit" class="btn">Importă rețete</button>
       </form>
 
-      <h2>6. Sincronizare stoc curent (live, prin API-ul SmartBill)</h2>
+      <h2>6. Comenzi în lucru (producție) — din Excelul intern</h2>
+      <p style="font-size:13px;color:var(--text-muted)">Fișierul „Comenzi_in_lucru" cu coloanele: număr, inițiator, tip produs, dată inițiere, client, cantitate, data solicitată de client, data propusă de producție, start producție, status, dată finalizare, info, rețetă. Statusurile (done/facturat/canceled) sunt recunoscute oriunde ar fi pe rând, iar datele în ambele formate (19.09.2025 și 09/23/2025). Dublurile sunt sărite automat.</p>
+      <form method="post" action="/import/comenzi-productie" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
+        <button type="submit" class="btn">Importă comenzile de producție</button>
+      </form>
+
+      <h2>7. Sincronizare stoc curent (live, prin API-ul SmartBill)</h2>
       <p style="font-size:13px;color:var(--text-muted)">
         ${
           smartbill.isConfigured()
