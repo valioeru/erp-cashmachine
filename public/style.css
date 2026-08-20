@@ -167,3 +167,49 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 
 .totals { text-align: right; font-size: 14px; margin-top: 10px; }
 .totals .grand { font-size: 18px; font-weight: 700; }
+
+/* CRM — pipeline (kanban) */
+.crm-board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+.crm-col {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  min-width: 200px;
+  flex: 1 0 200px;
+}
+.crm-col-head { font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+.crm-col-count { background: var(--bg); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--text-muted); }
+.crm-col-total { font-size: 12px; color: var(--text-muted); margin: 4px 0 10px; }
+.crm-col-empty { color: var(--text-muted); font-size: 12px; text-align: center; padding: 10px 0; }
+.crm-card {
+  display: block;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  text-decoration: none;
+  color: var(--text);
+}
+.crm-card:hover { border-color: var(--primary); }
+.crm-card-title { font-size: 13px; font-weight: 600; }
+.crm-card-partener { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.crm-card-valoare { font-size: 12px; font-weight: 600; margin-top: 4px; color: var(--primary-dark); }
+
+/* Rapoarte — grafic simplu cu bare CSS */
+.chart { display: flex; flex-direction: column; gap: 6px; }
+.chart-row { display: grid; grid-template-columns: 70px 1fr 200px; align-items: center; gap: 10px; font-size: 12px; }
+.chart-label { color: var(--text-muted); }
+.chart-bars { display: flex; flex-direction: column; gap: 2px; }
+.bar-track { background: var(--bg); border-radius: 3px; height: 8px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 3px; }
+.bar-fill.verde { background: var(--success); }
+.bar-fill.rosu { background: var(--danger); }
+.chart-values { color: var(--text-muted); white-space: nowrap; }
+
+/* Login + userbox (multi-utilizator) */
+.userbox { display: flex; align-items: center; gap: 12px; margin-left: auto; font-size: 13px; white-space: nowrap; }
+.userbox-nume { color: var(--text); text-decoration: none; }
+.userbox-nume:hover { text-decoration: underline; }
+.userbox-rol { color: var(--text-muted); }

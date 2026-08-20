@@ -11,7 +11,7 @@ function register(router) {
     const nrProduse = (await db.prepare("SELECT COUNT(*) AS n FROM produse").get()).n;
     const nrAngajati = (await db.prepare("SELECT COUNT(*) AS n FROM angajati").get()).n;
 
-    const facturi = await db.prepare("SELECT * FROM facturi").all();
+    const facturi = await db.prepare("SELECT * FROM facturi WHERE directie = 'vanzare'").all();
     let totalFacturat = 0;
     let totalIncasat = 0;
     let totalRestant = 0;
@@ -24,6 +24,13 @@ function register(router) {
         totalIncasat += platit;
         totalRestant += Math.max(0, total - platit);
       }
+    }
+
+    const facturiAchizitie = await db.prepare("SELECT * FROM facturi WHERE directie = 'achizitie' AND status != 'anulata'").all();
+    let totalAchizitionat = 0;
+    for (const f of facturiAchizitie) {
+      const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(f.id);
+      totalAchizitionat += calcTotals(linii).total;
     }
 
     const produseSubStoc = await db
@@ -54,8 +61,10 @@ function register(router) {
         <div class="card"><div class="label">Facturat (nete de anulate)</div><div class="value">${money(totalFacturat)}</div></div>
         <div class="card"><div class="label">Încasat</div><div class="value">${money(totalIncasat)}</div></div>
         <div class="card"><div class="label">Restant de încasat</div><div class="value">${money(totalRestant)}</div></div>
+        <div class="card"><div class="label">Achiziționat (facturi furnizori)</div><div class="value">${money(totalAchizitionat)}</div></div>
         <div class="card"><div class="label">Cost salarial lună curentă</div><div class="value">${money(cheltuieliSalariale)}</div></div>
       </div>
+      <div class="toolbar"><a href="/rapoarte" class="btn secondary small">Vezi rapoarte detaliate →</a></div>
 
       <h2>Produse sub stocul minim</h2>
       ${
@@ -82,7 +91,7 @@ function register(router) {
           : "<p>Nicio comandă încă.</p>"
       }
     `;
-    send(ctx.res, 200, layout({ title: "Dashboard", active: "/", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Dashboard", active: "/", body }));
   });
 }
 

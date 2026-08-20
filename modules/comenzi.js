@@ -62,7 +62,7 @@ function register(router) {
         ])
       )}
     `;
-    send(ctx.res, 200, layout({ title: "Vânzări & CRM — comenzi", active: "/comenzi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări & CRM — comenzi", active: "/comenzi", body }));
   });
 
   router.get("/comenzi/nou", async (ctx) => {
@@ -72,7 +72,7 @@ function register(router) {
       return send(
         ctx.res,
         200,
-        layout({
+        layout({ user: ctx.user,
           title: "Comandă nouă",
           active: "/comenzi",
           body: `<p>Adaugă mai întâi cel puțin un <a href="/parteneri/nou">client</a> și un <a href="/produse/nou">produs</a>.</p>`,
@@ -110,7 +110,7 @@ function register(router) {
       </div>
     </form>
     ${lineRowsScript()}`;
-    send(ctx.res, 200, layout({ title: "Comandă nouă", active: "/comenzi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   });
 
   router.post("/comenzi", async (ctx) => {
@@ -139,7 +139,7 @@ function register(router) {
     const comanda = await db
       .prepare(`SELECT c.*, p.nume AS partener_nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`)
       .get(ctx.params.id);
-    if (!comanda) return send(ctx.res, 404, layout({ title: "Negăsit", active: "/comenzi", body: "<p>Comandă inexistentă.</p>" }));
+    if (!comanda) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/comenzi", body: "<p>Comandă inexistentă.</p>" }));
 
     const linii = await db
       .prepare(
@@ -188,7 +188,7 @@ function register(router) {
         </form>
       </div>
     `;
-    send(ctx.res, 200, layout({ title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body }));
   });
 
   router.post("/comenzi/:id/status", async (ctx) => {
@@ -226,7 +226,7 @@ function register(router) {
         return send(
           ctx.res,
           409,
-          layout({
+          layout({ user: ctx.user,
             title: "Nu se poate șterge",
             active: "/comenzi",
             body: `<p>Această comandă nu poate fi ștearsă pentru că are o factură generată din ea. Șterge mai întâi factura asociată.</p><a href="/comenzi/${ctx.params.id}" class="btn secondary">Înapoi la comandă</a>`,

@@ -1,6 +1,6 @@
 {
   "name": "erp-companie",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "ERP online pentru companie mică-medie: facturare & contabilitate (cu integrare SmartBill), stocuri, vânzări & CRM, HR & salarizare.",
   "main": "server.js",
   "type": "commonjs",
@@ -13,7 +13,8 @@
     "migrate": "node -e \"require('./lib/db').migrate().then(() => process.exit(0))\""
   },
   "dependencies": {
-    "pg": "^8.13.0"
+    "pg": "^8.13.0",
+    "xlsx": "^0.18.5"
   },
   "license": "UNLICENSED",
   "private": true

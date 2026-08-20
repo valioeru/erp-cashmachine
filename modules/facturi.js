@@ -71,7 +71,7 @@ function register(router) {
   router.get("/facturi", async (ctx) => {
     const facturi = await db
       .prepare(
-        `SELECT f.*, p.nume AS partener_nume FROM facturi f JOIN parteneri p ON p.id = f.partener_id ORDER BY f.id DESC`
+        `SELECT f.*, p.nume AS partener_nume FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.directie = 'vanzare' ORDER BY f.id DESC`
       )
       .all();
     const rows = [];
@@ -90,10 +90,121 @@ function register(router) {
       ]);
     }
     const body = `
-      <div class="toolbar"><a href="/facturi/nou" class="btn">+ Factură nouă</a></div>
+      <div class="toolbar"><a href="/facturi/nou" class="btn">+ Factură nouă</a> <a href="/facturi/achizitii" class="btn secondary">Vezi achiziții (facturi de la furnizori)</a></div>
       ${table(["Nr.", "Client", "Data", "Status", "Total", "Încasat", "Acțiuni"], rows)}
     `;
-    send(ctx.res, 200, layout({ title: "Facturare & contabilitate", active: "/facturi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Facturare & contabilitate (vânzări)", active: "/facturi", body }));
+  });
+
+  router.get("/facturi/achizitii", async (ctx) => {
+    const facturi = await db
+      .prepare(
+        `SELECT f.*, p.nume AS partener_nume FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.directie = 'achizitie' ORDER BY f.id DESC`
+      )
+      .all();
+    const rows = [];
+    for (const f of facturi) {
+      const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(f.id);
+      const { total } = calcTotals(linii);
+      const platit = (await db.prepare("SELECT COALESCE(SUM(suma),0) AS s FROM plati WHERE factura_id = ?").get(f.id)).s;
+      rows.push([
+        `<a href="/facturi/${f.id}">${esc(f.serie)}-${f.numar ?? f.id}</a>`,
+        esc(f.partener_nume),
+        esc(f.data_emiterii),
+        STATUS_LABEL[f.status] || esc(f.status),
+        money(total),
+        money(platit),
+        actionLinks([{ href: `/facturi/${f.id}`, label: "Deschide" }]),
+      ]);
+    }
+    const body = `
+      <div class="toolbar"><a href="/facturi/achizitii/noua" class="btn">+ Achiziție nouă</a> <a href="/facturi" class="btn secondary">Vezi vânzări</a></div>
+      ${table(["Nr.", "Furnizor", "Data", "Status", "Total", "Plătit", "Acțiuni"], rows)}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Achiziții (facturi de la furnizori)", active: "/facturi/achizitii", body }));
+  });
+
+  router.get("/facturi/achizitii/noua", async (ctx) => {
+    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'client' ORDER BY nume").all();
+    const produse = await db.prepare("SELECT id, denumire, pret_achizitie, cota_tva FROM produse ORDER BY denumire").all();
+    if (parteneri.length === 0) {
+      return send(
+        ctx.res,
+        200,
+        layout({ user: ctx.user, title: "Achiziție nouă", active: "/facturi/achizitii", body: `<p>Adaugă mai întâi cel puțin un <a href="/parteneri/nou">furnizor</a>.</p>` })
+      );
+    }
+    const produsOptions =
+      `<option value="">— linie liberă —</option>` +
+      produse.map((p) => `<option value="${p.id}" data-pret="${p.pret_achizitie}" data-tva="${p.cota_tva}">${esc(p.denumire)}</option>`).join("");
+
+    const body = `<form method="post" action="/facturi/achizitii" class="form" style="max-width:900px">
+      <label class="field"><span>Furnizor</span>
+        <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
+      </label>
+      <label class="field"><span>Serie (de pe factura furnizorului)</span><input type="text" name="serie" required></label>
+      <label class="field"><span>Număr (de pe factura furnizorului)</span><input type="text" name="numar" required></label>
+      <label class="field"><span>Data emiterii</span><input type="date" name="data_emiterii"></label>
+      <label class="field"><span>Data scadenței</span><input type="date" name="data_scadenta"></label>
+      <label class="field"><span>Observații</span><textarea name="observatii" rows="2"></textarea></label>
+
+      <h2>Linii factură</h2>
+      <table class="table lines-table">
+        <thead><tr><th>Produs</th><th>Denumire pe factură</th><th>Cantitate</th><th>Preț unitar</th><th>TVA %</th><th></th></tr></thead>
+        <tbody id="linii-body">
+          <tr>
+            <td><select name="produs_id[]" onchange="facturiFillProdus(this)">${produsOptions}</select></td>
+            <td><input type="text" name="denumire[]"></td>
+            <td><input type="number" step="0.01" name="cantitate[]"></td>
+            <td><input type="number" step="0.01" name="pret_unitar[]"></td>
+            <td><input type="number" step="0.01" name="cota_tva[]" value="19"></td>
+            <td><button type="button" class="link-btn danger" onclick="facturiRemoveRow(this)">Șterge</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <button type="button" class="btn secondary small" onclick="facturiAddRow()">+ Adaugă linie</button>
+
+      <div class="form-actions">
+        <button type="submit" class="btn">Salvează achiziția</button>
+        <a href="/facturi/achizitii" class="btn secondary">Renunță</a>
+      </div>
+    </form>
+    ${lineRowsScript()}`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Achiziție nouă", active: "/facturi/achizitii", body }));
+  });
+
+  router.post("/facturi/achizitii", async (ctx) => {
+    const { partener_id, serie, numar, data_emiterii, data_scadenta, observatii } = ctx.body;
+    const produsIds = asArray(ctx.body["produs_id[]"]);
+    const denumiri = asArray(ctx.body["denumire[]"]);
+    const cantitati = asArray(ctx.body["cantitate[]"]);
+    const preturi = asArray(ctx.body["pret_unitar[]"]);
+    const cotele = asArray(ctx.body["cota_tva[]"]);
+
+    const info = await db
+      .prepare(
+        "INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, observatii, status) VALUES (?, ?, ?, 'achizitie', ?, ?, ?, 'emisa') RETURNING id"
+      )
+      .run(serie || "FAC", parseInt(String(numar).replace(/[^0-9]/g, ""), 10) || 0, partener_id, data_emiterii || "", data_scadenta || "", observatii || "");
+    const facturaId = info.lastInsertRowid;
+
+    const insertLinie = db.prepare(
+      "INSERT INTO facturi_linii (factura_id, produs_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    const produsCache = {};
+    for (let i = 0; i < denumiri.length; i++) {
+      const cant = Number(cantitati[i] || 0);
+      if (cant <= 0) continue;
+      const pid = produsIds[i] || null;
+      let numeLinie = denumiri[i];
+      if (!numeLinie && pid) {
+        if (!(pid in produsCache)) produsCache[pid] = await db.prepare("SELECT denumire FROM produse WHERE id = ?").get(pid);
+        numeLinie = produsCache[pid] ? produsCache[pid].denumire : "";
+      }
+      await insertLinie.run(facturaId, pid, numeLinie || "(fără denumire)", cant, Number(preturi[i] || 0), Number(cotele[i] || 0));
+    }
+
+    redirect(ctx.res, `/facturi/${facturaId}`);
   });
 
   router.get("/facturi/nou", async (ctx) => {
@@ -103,7 +214,7 @@ function register(router) {
       return send(
         ctx.res,
         200,
-        layout({ title: "Factură nouă", active: "/facturi", body: `<p>Adaugă mai întâi cel puțin un <a href="/parteneri/nou">client</a>.</p>` })
+        layout({ user: ctx.user, title: "Factură nouă", active: "/facturi", body: `<p>Adaugă mai întâi cel puțin un <a href="/parteneri/nou">client</a>.</p>` })
       );
     }
     const produsOptions =
@@ -139,7 +250,7 @@ function register(router) {
       </div>
     </form>
     ${lineRowsScript()}`;
-    send(ctx.res, 200, layout({ title: "Factură nouă", active: "/facturi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Factură nouă", active: "/facturi", body }));
   });
 
   router.post("/facturi", async (ctx) => {
@@ -150,10 +261,10 @@ function register(router) {
     const preturi = asArray(ctx.body["pret_unitar[]"]);
     const cotele = asArray(ctx.body["cota_tva[]"]);
 
-    const maxNumar = (await db.prepare("SELECT COALESCE(MAX(numar),0) AS m FROM facturi").get()).m;
+    const maxNumar = (await db.prepare("SELECT COALESCE(MAX(numar),0) AS m FROM facturi WHERE directie = 'vanzare'").get()).m;
 
     const info = await db
-      .prepare("INSERT INTO facturi (numar, partener_id, data_scadenta, observatii, status) VALUES (?, ?, ?, ?, 'emisa') RETURNING id")
+      .prepare("INSERT INTO facturi (numar, partener_id, directie, data_scadenta, observatii, status) VALUES (?, ?, 'vanzare', ?, ?, 'emisa') RETURNING id")
       .run(maxNumar + 1, partener_id, data_scadenta || "", observatii || "");
     const facturaId = info.lastInsertRowid;
 
@@ -180,27 +291,34 @@ function register(router) {
     const factura = await db
       .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
       .get(ctx.params.id);
-    if (!factura) return send(ctx.res, 404, layout({ title: "Negăsit", active: "/facturi", body: "<p>Factură inexistentă.</p>" }));
+    if (!factura) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/facturi", body: "<p>Factură inexistentă.</p>" }));
 
     const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
     const { subtotal, tva, total } = calcTotals(linii);
     const plati = await db.prepare("SELECT * FROM plati WHERE factura_id = ? ORDER BY id DESC").all(factura.id);
     const platit = plati.reduce((s, p) => s + p.suma, 0);
     const restant = Math.max(0, total - platit);
+    const eVanzare = factura.directie !== "achizitie";
+    const listaInapoi = eVanzare ? "/facturi" : "/facturi/achizitii";
 
     const body = `
+      <div class="toolbar"><a href="${listaInapoi}" class="btn secondary small">← ${eVanzare ? "Facturi vânzare" : "Facturi achiziție"}</a></div>
       <div class="detail-box">
         <div class="detail-grid">
-          <div><div class="k">Client</div>${esc(factura.partener_nume)}</div>
+          <div><div class="k">${eVanzare ? "Client" : "Furnizor"}</div>${esc(factura.partener_nume)}</div>
           <div><div class="k">CUI</div>${esc(factura.cui) || "—"}</div>
           <div><div class="k">Data emiterii</div>${esc(factura.data_emiterii)}</div>
           <div><div class="k">Scadență</div>${esc(factura.data_scadenta) || "—"}</div>
           <div><div class="k">Status</div>${STATUS_LABEL[factura.status] || esc(factura.status)}</div>
-          <div><div class="k">SmartBill</div>${
-            factura.smartbill_sync_la
-              ? `<span class="badge verde">trimisă (${esc(factura.smartbill_serie)}-${esc(factura.smartbill_numar)})</span>`
-              : '<span class="badge gri">netrimisă</span>'
-          }</div>
+          ${
+            eVanzare
+              ? `<div><div class="k">SmartBill</div>${
+                  factura.smartbill_sync_la
+                    ? `<span class="badge verde">trimisă (${esc(factura.smartbill_serie)}-${esc(factura.smartbill_numar)})</span>`
+                    : '<span class="badge gri">netrimisă</span>'
+                }</div>`
+              : ""
+          }
         </div>
       </div>
 
@@ -233,13 +351,17 @@ function register(router) {
           : ""
       }
 
-      <h2>Integrare SmartBill</h2>
+      ${
+        eVanzare
+          ? `<h2>Integrare SmartBill</h2>
       ${
         smartbill.isConfigured()
           ? `<form method="post" action="/facturi/${factura.id}/smartbill" class="inline-form">
               <button type="submit" class="btn secondary small">${factura.smartbill_sync_la ? "Retrimite în SmartBill" : "Trimite factura în SmartBill"}</button>
             </form>`
           : `<p style="color:var(--text-muted);font-size:13px">Integrarea SmartBill nu este configurată încă (lipsesc variabilele de mediu SMARTBILL_*). Vezi README.</p>`
+      }`
+          : ""
       }
 
       <div class="toolbar" style="margin-top:14px">
@@ -253,7 +375,7 @@ function register(router) {
         </form>
       </div>
     `;
-    send(ctx.res, 200, layout({ title: `Factură ${factura.serie}-${factura.numar ?? factura.id}`, active: "/facturi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${factura.serie}-${factura.numar ?? factura.id}`, active: eVanzare ? "/facturi" : "/facturi/achizitii", body }));
   });
 
   router.post("/facturi/:id/plata", async (ctx) => {
@@ -283,7 +405,7 @@ function register(router) {
         return send(
           ctx.res,
           409,
-          layout({
+          layout({ user: ctx.user,
             title: "Nu se poate șterge",
             active: "/facturi",
             body: `<p>Această factură nu poate fi ștearsă din cauza altor înregistrări asociate.</p><a href="/facturi/${ctx.params.id}" class="btn secondary">Înapoi la factură</a>`,
@@ -298,6 +420,7 @@ function register(router) {
     const factura = await db
       .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
       .get(ctx.params.id);
+    if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
     const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
     try {
       const rezultat = await smartbill.trimiteFactura(factura, linii);
@@ -309,7 +432,7 @@ function register(router) {
       return send(
         ctx.res,
         200,
-        layout({
+        layout({ user: ctx.user,
           title: "Eroare integrare SmartBill",
           active: "/facturi",
           body: `<p>Trimiterea către SmartBill a eșuat: ${esc(err.message)}</p>

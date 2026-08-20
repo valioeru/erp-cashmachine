@@ -1,19 +1,25 @@
 "use strict";
+const crypto = require("crypto");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { Router } = require("./lib/router");
 const db = require("./lib/db");
-const { seedIfEmpty } = require("./lib/seed");
+const auth = require("./lib/auth");
 
 const router = new Router();
 
+require("./modules/auth").register(router);
+require("./modules/utilizatori").register(router);
 require("./modules/dashboard").register(router);
 require("./modules/parteneri").register(router);
 require("./modules/produse").register(router);
 require("./modules/stocuri").register(router);
 require("./modules/comenzi").register(router);
 require("./modules/facturi").register(router);
+require("./modules/crm").register(router);
+require("./modules/rapoarte").register(router);
+require("./modules/import").register(router);
 require("./modules/angajati").register(router);
 require("./modules/salarii").register(router);
 
@@ -21,6 +27,26 @@ router.get("/healthz", (ctx) => {
   ctx.res.writeHead(200, { "Content-Type": "text/plain" });
   ctx.res.end("ok");
 });
+
+// Rute accesibile fără autentificare (plus fișierele statice din /public,
+// tratate separat mai jos).
+const RUTE_PUBLICE = new Set(["/healthz", "/login"]);
+
+async function creeazaAdminInitialDacaLipseste() {
+  const nr = (await db.prepare("SELECT COUNT(*) AS n FROM utilizatori").get()).n;
+  if (nr > 0) return;
+  const email = process.env.ADMIN_EMAIL || "valentin.oeru@cashmachine.ro";
+  const parola = process.env.ADMIN_PASSWORD || crypto.randomBytes(6).toString("base64url");
+  const { hash, salt } = auth.hashParola(parola);
+  await db.prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol) VALUES (?, ?, ?, ?, 'admin')").run("Administrator", email.toLowerCase(), hash, salt);
+  console.log("=".repeat(70));
+  console.log("Cont de administrator creat automat (nu mai există niciun utilizator):");
+  console.log(`  Email:  ${email}`);
+  console.log(`  Parolă: ${parola}`);
+  console.log("Schimbă parola după prima logare, din pagina „Profilul meu”.");
+  console.log("(Poți fixa dinainte email/parolă cu variabilele de mediu ADMIN_EMAIL / ADMIN_PASSWORD.)");
+  console.log("=".repeat(70));
+}
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MIME = { ".css": "text/css", ".js": "text/javascript", ".png": "image/png", ".svg": "image/svg+xml" };
@@ -35,8 +61,39 @@ function serveStatic(req, res) {
   return true;
 }
 
+function paginaFaraAcces(user) {
+  return `<!doctype html><html lang="ro"><head><meta charset="utf-8"><title>Acces interzis · ERP</title>
+  <link rel="stylesheet" href="/style.css"></head><body><main class="content" style="max-width:520px;margin:60px auto;text-align:center">
+  <h1>Nu ai acces la această secțiune</h1>
+  <p>Contul tău (rol: ${user.rol}) nu are voie să vadă această pagină. Dacă ar trebui să ai acces, cere unui administrator să-ți schimbe rolul din „Utilizatori”.</p>
+  <a href="/" class="btn">Înapoi la Dashboard</a></main></body></html>`;
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && serveStatic(req, res)) return;
+
+  const { pathname } = new URL(req.url, "http://localhost");
+  const curat = decodeURIComponent(pathname).replace(/\/+$/, "") || "/";
+
+  if (!RUTE_PUBLICE.has(curat) && curat !== "/logout") {
+    const cookies = auth.parseCookies(req);
+    const user = await auth.utilizatorDinToken(cookies[auth.COOKIE_NAME]);
+    if (!user) {
+      res.writeHead(302, { Location: `/login?redirect=${encodeURIComponent(curat)}` });
+      return res.end();
+    }
+    if (!auth.poateAccesa(user.rol, curat)) {
+      res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(paginaFaraAcces(user));
+    }
+    req.utilizator = user;
+  } else if (curat === "/logout") {
+    // /logout are nevoie de cookie ca să știe ce sesiune să șteargă, dar nu
+    // blocăm cererea dacă din orice motiv cookie-ul lipsește deja.
+    const cookies = auth.parseCookies(req);
+    req.utilizator = await auth.utilizatorDinToken(cookies[auth.COOKIE_NAME]);
+  }
+
   const handled = await router.handle(req, res);
   if (!handled) {
     res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
@@ -46,7 +103,7 @@ const server = http.createServer(async (req, res) => {
 
 async function start() {
   await db.migrate();
-  await seedIfEmpty();
+  await creeazaAdminInitialDacaLipseste();
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, () => {
     console.log(`ERP pornit: http://localhost:${PORT}`);

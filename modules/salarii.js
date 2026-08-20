@@ -49,7 +49,7 @@ function register(router) {
         Calculul este simplificat (CAS 25%, CASS 10%, impozit 10%) și are scop orientativ — verifică sumele cu un contabil înainte de plată.
       </p>
     `;
-    send(ctx.res, 200, layout({ title: "Salarizare", active: "/salarii", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Salarizare", active: "/salarii", body }));
   });
 
   router.get("/salarii/nou", async (ctx) => {
@@ -58,7 +58,7 @@ function register(router) {
       return send(
         ctx.res,
         200,
-        layout({ title: "Stat de plată nou", active: "/salarii", body: `<p>Adaugă mai întâi cel puțin un <a href="/angajati/nou">angajat</a>.</p>` })
+        layout({ user: ctx.user, title: "Stat de plată nou", active: "/salarii", body: `<p>Adaugă mai întâi cel puțin un <a href="/angajati/nou">angajat</a>.</p>` })
       );
     }
     const body = `<form method="post" action="/salarii" class="form">
@@ -84,7 +84,7 @@ function register(router) {
       }
       salariiFillBrut();
     </script>`;
-    send(ctx.res, 200, layout({ title: "Stat de plată nou", active: "/salarii", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Stat de plată nou", active: "/salarii", body }));
   });
 
   router.post("/salarii", async (ctx) => {
@@ -105,7 +105,7 @@ function register(router) {
       send(
         ctx.res,
         400,
-        layout({
+        layout({ user: ctx.user,
           title: "Eroare",
           active: "/salarii",
           body: `<p>Există deja un stat de plată pentru acest angajat în luna selectată.</p><a href="/salarii/nou" class="btn secondary">Înapoi</a>`,
@@ -118,7 +118,7 @@ function register(router) {
     const s = await db
       .prepare(`SELECT s.*, a.nume AS angajat_nume, a.functie FROM salarii s JOIN angajati a ON a.id = s.angajat_id WHERE s.id = ?`)
       .get(ctx.params.id);
-    if (!s) return send(ctx.res, 404, layout({ title: "Negăsit", active: "/salarii", body: "<p>Stat de plată inexistent.</p>" }));
+    if (!s) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/salarii", body: "<p>Stat de plată inexistent.</p>" }));
 
     const body = `
       <div class="detail-box">
@@ -147,7 +147,7 @@ function register(router) {
         </form>
       </div>
     `;
-    send(ctx.res, 200, layout({ title: `Stat de plată — ${s.angajat_nume} (${s.luna})`, active: "/salarii", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Stat de plată — ${s.angajat_nume} (${s.luna})`, active: "/salarii", body }));
   });
 
   router.post("/salarii/:id/platit", async (ctx) => {

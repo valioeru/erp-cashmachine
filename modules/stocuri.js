@@ -75,7 +75,7 @@ function register(router) {
         ])
       )}
     `;
-    send(ctx.res, 200, layout({ title: "Stocuri & inventar", active: "/stocuri", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Stocuri & inventar", active: "/stocuri", body }));
   });
 
   router.get("/stocuri/miscare/nou", async (ctx) => {
@@ -85,7 +85,7 @@ function register(router) {
       return send(
         ctx.res,
         200,
-        layout({
+        layout({ user: ctx.user,
           title: "Mișcare de stoc nouă",
           active: "/stocuri",
           body: `<p>Adaugă mai întâi cel puțin un <a href="/produse/nou">produs</a> și un <a href="/depozite/nou">depozit</a>.</p>`,
@@ -111,7 +111,7 @@ function register(router) {
         <a href="/stocuri" class="btn secondary">Renunță</a>
       </div>
     </form>`;
-    send(ctx.res, 200, layout({ title: "Mișcare de stoc nouă", active: "/stocuri", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Mișcare de stoc nouă", active: "/stocuri", body }));
   });
 
   router.post("/stocuri/miscare", async (ctx) => {
