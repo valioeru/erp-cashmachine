@@ -281,3 +281,17 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 /* Formulare mai late pentru compunerea de emailuri și task-uri */
 .form { max-width: 680px; }
 .form textarea { resize: vertical; }
+
+/* Balanța de verificare */
+.table.balanta { font-size: 12.5px; }
+.table.balanta th { text-align: center; font-size: 11.5px; }
+.table.balanta td.nr { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.table.balanta td.den { max-width: 260px; }
+.table.balanta .zero { color: #c3c9d1; }
+.table.balanta tfoot td { background: #fafbfc; border-top: 2px solid var(--border); }
+
+/* Sortare pe antetele de tabel */
+th.sortabil { cursor: pointer; user-select: none; }
+th.sortabil:hover { color: var(--primary); }
+th.sortabil.sort-asc::after { content: " ▲"; font-size: 9px; }
+th.sortabil.sort-desc::after { content: " ▼"; font-size: 9px; }

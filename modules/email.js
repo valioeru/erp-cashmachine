@@ -155,6 +155,19 @@ function register(router) {
     }
 
     const semnatura = u.email_semnatura ? `\n\n${u.email_semnatura}` : "";
+
+    // Șabloane de email precompletate (deocamdată: urarea de zi de naștere,
+    // folosită din Biroul agentului).
+    let subiectPrecompletat = "";
+    let corpPrecompletat = semnatura;
+    if (ctx.query.sablon === "zi_nastere" && partenerId) {
+      const p = await db.prepare("SELECT nume, persoana_contact FROM parteneri WHERE id = ?").get(partenerId);
+      const catreCine = p && p.persoana_contact ? p.persoana_contact : "dumneavoastră";
+      subiectPrecompletat = "La mulți ani! 🎂";
+      corpPrecompletat = `Bună ziua,\n\nCu ocazia zilei de naștere, echipa Cash Machine vă urează ${
+        catreCine === "dumneavoastră" ? "" : `dumneavoastră, ${catreCine}, `
+      }un sincer „La mulți ani!" — multă sănătate, bucurii și reușite.\n\nVă mulțumim pentru colaborare și ne bucurăm să vă avem alături.${semnatura}`;
+    }
     const body = `
       ${context ? `<div class="detail-box" style="padding:12px">${context}</div>` : ""}
       <form class="form" method="post" action="/crm/email">
@@ -164,8 +177,8 @@ function register(router) {
         <p style="font-size:13px;color:var(--text-muted);margin:0">De la: <strong>${esc(config.expeditor)}</strong> · <a href="/profil/email">schimbă</a></p>
         <label class="field">Către<input name="catre" required value="${esc(destinatar)}" placeholder="client@exemplu.ro"></label>
         <label class="field">Cc (opțional)<input name="cc" placeholder="coleg@cashmachine.ro"></label>
-        <label class="field">Subiect<input name="subiect" required></label>
-        <label class="field">Mesaj<textarea name="corp" rows="12" required>${esc(semnatura)}</textarea></label>
+        <label class="field">Subiect<input name="subiect" required value="${esc(subiectPrecompletat)}"></label>
+        <label class="field">Mesaj<textarea name="corp" rows="12" required>${esc(corpPrecompletat)}</textarea></label>
         <label class="field" style="flex-direction:row;align-items:center;gap:8px">
           <input type="checkbox" name="inregistreaza" value="1" checked> Înregistrează și ca interacțiune în istoricul partenerului
         </label>

@@ -20,6 +20,16 @@ const CATEGORII = [
     descriere: "Bani: ce ai facturat, ce ai încasat, ce mai ai de încasat și când.",
     rapoarte: [
       {
+        href: "/rapoarte/balanta",
+        nume: "Balanță de verificare (la zi)",
+        desc: "Balanță contabilă pe planul de conturi RO, generată automat din documente: solduri inițiale, rulaje, total sume, solduri finale — pe orice perioadă sau zi.",
+      },
+      {
+        href: "/rapoarte/tva",
+        nume: "TVA de plată (la zi)",
+        desc: "TVA colectată minus TVA deductibilă, în orice moment: pe luna curentă, pe orice perioadă și cumulat la zi.",
+      },
+      {
         href: "/rapoarte/incasari",
         nume: "Scadențar încasări (pe zile)",
         desc: "Cât ai de încasat în fiecare zi, după scadența facturii. Statusul se poate schimba direct din listă.",
@@ -45,6 +55,8 @@ const CATEGORII = [
     titlu: "Comerciale",
     descriere: "Clienți și vânzare: pipeline, activitate, clienți în risc de pierdere.",
     rapoarte: [
+      { href: "/rapoarte/forecast", nume: "Forecast vânzări", desc: "Proiecție pe următoarele luni din sezonalitatea și trendul istoricului real, cu scenarii pesimist/probabil/optimist și pipeline-ul CRM ponderat." },
+      { href: "/rapoarte/agenti", nume: "Profitabilitate pe agent & client", desc: "Venit, marjă (unde există costuri), pipeline și solduri pe fiecare agent — cu detaliu pe clienții lui." },
       { href: "/rapoarte/pipeline", nume: "Pipeline oportunități", desc: "Valoarea oportunităților deschise pe fiecare stadiu din CRM." },
       { href: "/rapoarte/clienti", nume: "Clienți activi & inactivi", desc: "Cine a cumpărat recent și cine n-a mai cumpărat de mult." },
     ],
@@ -673,6 +685,308 @@ function register(router) {
       }
     `;
     send(ctx.res, 200, pagina(ctx, "Pipeline oportunități", "/rapoarte/pipeline", continut));
+  });
+
+
+  // ---- Comercial: profitabilitate pe agent și pe client -----------------
+  // Marja reală se poate calcula doar acolo unde liniile de factură au produs
+  // cu preț de achiziție cunoscut. Facturile importate din SmartBill au o
+  // singură linie sumar, fără produse — pentru ele arătăm venitul, iar
+  // coloana de marjă spune explicit cât din venit ARE cost cunoscut, ca să nu
+  // pretindem o profitabilitate pe care n-avem de unde s-o știm.
+  router.get("/rapoarte/agenti", async (ctx) => {
+    const nrLuni = Math.min(240, Math.max(1, parseInt(ctx.query.luni || "12", 10) || 12));
+    const luni = lunileUltimele(nrLuni);
+    const deLa = luni[0] + "-01";
+    const agentAles = parseInt(ctx.query.agent, 10) || null;
+
+    const SUB_COST =
+      "(SELECT fl.factura_id, SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0)) AS cost, SUM(CASE WHEN fl.produs_id IS NOT NULL AND COALESCE(pr.pret_achizitie,0) > 0 THEN fl.cantitate * fl.pret_unitar ELSE 0 END) AS venit_cu_cost FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id GROUP BY fl.factura_id)";
+    const SUB_NET = "(SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id)";
+
+    const peAgent = await db
+      .prepare(
+        `SELECT u.id, u.nume,
+                COUNT(DISTINCT p.id) AS clienti,
+                COUNT(DISTINCT f.id) AS facturi,
+                COALESCE(SUM(n.net), 0) AS venit,
+                COALESCE(SUM(c.cost), 0) AS cost,
+                COALESCE(SUM(c.venit_cu_cost), 0) AS venit_cu_cost,
+                COALESCE(SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)), 0) AS sold
+         FROM utilizatori u
+         LEFT JOIN parteneri p ON p.agent_id = u.id AND p.tip IN ('client','ambele')
+         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+         LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
+         LEFT JOIN ${SUB_COST} c ON c.factura_id = f.id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+         LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+         WHERE u.activ = 1
+         GROUP BY u.id, u.nume
+         ORDER BY venit DESC`
+      )
+      .all(deLa);
+
+    const pipelineAgent = await db
+      .prepare(
+        `SELECT COALESCE(o.atribuit_lui, p.agent_id) AS agent_id, COALESCE(SUM(o.valoare_estimata),0) AS valoare
+         FROM oportunitati o LEFT JOIN parteneri p ON p.id = o.partener_id
+         WHERE o.stadiu NOT IN ('castigat','pierdut')
+         GROUP BY COALESCE(o.atribuit_lui, p.agent_id)`
+      )
+      .all();
+    const pipelineMap = Object.fromEntries(pipelineAgent.map((r) => [r.agent_id, Number(r.valoare)]));
+
+    let detaliuClienti = "";
+    if (agentAles) {
+      const agent = await db.prepare("SELECT nume FROM utilizatori WHERE id = ?").get(agentAles);
+      const clienti = await db
+        .prepare(
+          `SELECT p.id, p.nume,
+                  COUNT(DISTINCT f.id) AS facturi,
+                  COALESCE(SUM(n.net), 0) AS venit,
+                  COALESCE(SUM(c.cost), 0) AS cost,
+                  COALESCE(SUM(c.venit_cu_cost), 0) AS venit_cu_cost,
+                  COALESCE(SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)), 0) AS sold
+           FROM parteneri p
+           LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+           LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
+           LEFT JOIN ${SUB_COST} c ON c.factura_id = f.id
+           LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+           LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+           WHERE p.agent_id = ? AND p.tip IN ('client','ambele')
+           GROUP BY p.id, p.nume
+           ORDER BY venit DESC`
+        )
+        .all(deLa, agentAles);
+      detaliuClienti = `
+        <h2>Clienții lui ${esc(agent ? agent.nume : "?")} — profitabilitate pe client</h2>
+        ${table(
+          ["Client", "Facturi", "Venit net", "Marjă (unde există cost)", "% venit cu cost cunoscut", "Sold de încasat"],
+          clienti.map((c) => {
+            const marja = Number(c.venit_cu_cost) - Number(c.cost);
+            const acoperire = Number(c.venit) > 0 ? (Number(c.venit_cu_cost) / Number(c.venit)) * 100 : 0;
+            return [
+              `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+              c.facturi,
+              money(c.venit),
+              Number(c.venit_cu_cost) > 0 ? `${money(marja)} (${((marja / Number(c.venit_cu_cost)) * 100).toFixed(1)}%)` : "—",
+              `${acoperire.toFixed(0)}%`,
+              money(Math.max(0, c.sold)),
+            ];
+          })
+        )}`;
+    }
+
+    const optiuni = [3, 6, 12, 24, 240]
+      .map((n) => `<option value="${n}"${nrLuni === n ? " selected" : ""}>${n >= 240 ? "tot istoricul" : `ultimele ${n} de luni`}</option>`)
+      .join("");
+
+    const continut = `
+      <form class="filtre" method="get" action="/rapoarte/agenti">
+        <select name="luni" onchange="this.form.submit()">${optiuni}</select>
+        <select name="agent" onchange="this.form.submit()">
+          <option value="">— alege un agent pentru detaliu pe clienți —</option>
+          ${peAgent.map((a) => `<option value="${a.id}"${agentAles === a.id ? " selected" : ""}>${esc(a.nume)}</option>`).join("")}
+        </select>
+      </form>
+
+      <h2>Profitabilitate pe agent</h2>
+      ${table(
+        ["Agent", "Clienți", "Facturi", "Venit net", "Marjă (unde există cost)", "% venit cu cost cunoscut", "Pipeline deschis", "Sold de încasat", ""],
+        peAgent.map((a) => {
+          const marja = Number(a.venit_cu_cost) - Number(a.cost);
+          const acoperire = Number(a.venit) > 0 ? (Number(a.venit_cu_cost) / Number(a.venit)) * 100 : 0;
+          return [
+            esc(a.nume),
+            a.clienti,
+            a.facturi,
+            money(a.venit),
+            Number(a.venit_cu_cost) > 0 ? `${money(marja)} (${((marja / Number(a.venit_cu_cost)) * 100).toFixed(1)}%)` : "—",
+            `${acoperire.toFixed(0)}%`,
+            money(pipelineMap[a.id] || 0),
+            money(Math.max(0, a.sold)),
+            `<a class="link-btn" href="/rapoarte/agenti?luni=${nrLuni}&agent=${a.id}">clienții lui →</a> <a class="link-btn" href="/crm/birou?agent=${a.id}">biroul lui →</a>`,
+          ];
+        })
+      )}
+      <p style="font-size:12px;color:var(--text-muted)">
+        Marja se calculează DOAR pe liniile de factură care au produs cu preț de achiziție completat — facturile importate din
+        SmartBill n-au detaliu pe produse, deci pentru ele se arată venitul, nu marja. Coloana „% venit cu cost cunoscut" spune
+        cât de acoperit e calculul: la 0% marja lipsește complet, nu e zero.
+      </p>
+      ${detaliuClienti}
+    `;
+    send(ctx.res, 200, pagina(ctx, "Profitabilitate pe agent & client", "/rapoarte/agenti", continut));
+  });
+
+
+  // ---- Comercial: forecast de vânzări ------------------------------------
+  // Două surse, combinate transparent:
+  //  1. Istoricul de facturare (10 ani de facturi importate) → sezonalitate
+  //     (media aceleiași luni calendaristice din ultimii ani) × trendul
+  //     ultimelor 12 luni față de precedentele 12.
+  //  2. Pipeline-ul CRM → oportunitățile deschise, ponderate pe stadiu.
+  // Scenariile optimist/pesimist vin din volatilitatea reală a ultimelor 12
+  // luni (deviația față de medie), nu dintr-un procent inventat.
+  router.get("/rapoarte/forecast", async (ctx) => {
+    const aziStr = azi();
+    const lunaCurenta = aziStr.slice(0, 7);
+    const nrLuniForecast = Math.min(12, Math.max(3, parseInt(ctx.query.luni || "6", 10) || 6));
+
+    const istoric = await db
+      .prepare(
+        `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
+         FROM facturi f
+         JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata'
+         GROUP BY SUBSTR(f.data_emiterii, 1, 7)
+         ORDER BY luna`
+      )
+      .all();
+    const valoarePeLuna = new Map(istoric.map((r) => [r.luna, Number(r.valoare)]));
+
+    // Trend: ultimele 12 luni ÎNTREGI vs. precedentele 12.
+    const luniIntregi = istoric.filter((r) => r.luna < lunaCurenta).map((r) => r.luna);
+    const ultimele12 = luniIntregi.slice(-12);
+    const precedente12 = luniIntregi.slice(-24, -12);
+    const suma = (list) => list.reduce((s, l) => s + (valoarePeLuna.get(l) || 0), 0);
+    const s12 = suma(ultimele12);
+    const s24 = suma(precedente12);
+    const crestere = precedente12.length >= 6 && s24 > 0 ? s12 / s24 : 1;
+
+    // Volatilitate: cât de mult sar lunile față de media lor (ultimele 12).
+    const media12 = ultimele12.length ? s12 / ultimele12.length : 0;
+    const abateri = ultimele12.map((l) => Math.abs((valoarePeLuna.get(l) || 0) - media12));
+    const abatereMedie = abateri.length ? abateri.reduce((a, b) => a + b, 0) / abateri.length : 0;
+    const banda = media12 > 0 ? Math.min(0.5, abatereMedie / media12) : 0.2;
+
+    // Forecast pe lunile următoare (inclusiv restul lunii curente).
+    const randuri = [];
+    const anCurent = Number(aziStr.slice(0, 4));
+    const lunaCurentaNr = Number(aziStr.slice(5, 7));
+    for (let i = 0; i < nrLuniForecast; i++) {
+      const d = new Date(Date.UTC(anCurent, lunaCurentaNr - 1 + i, 1));
+      const luna = d.toISOString().slice(0, 7);
+      const mm = luna.slice(5, 7);
+      // Sezonalitate: media aceleiași luni calendaristice din ultimii 3 ani.
+      const istoriceAceeasiLuna = [];
+      for (let an = anCurent - 1; an >= anCurent - 3; an--) {
+        const v = valoarePeLuna.get(`${an}-${mm}`);
+        if (v && v > 0) istoriceAceeasiLuna.push(v);
+      }
+      const baza = istoriceAceeasiLuna.length
+        ? istoriceAceeasiLuna.reduce((a, b) => a + b, 0) / istoriceAceeasiLuna.length
+        : media12;
+      let probabil = baza * crestere;
+      let nota = istoriceAceeasiLuna.length
+        ? `media lunii ${mm} din ultimii ${istoriceAceeasiLuna.length} ani × trend ${(crestere * 100 - 100).toFixed(1)}%`
+        : "media ultimelor 12 luni (fără istoric pe luna asta)";
+
+      let realizat = null;
+      if (luna === lunaCurenta) {
+        realizat = valoarePeLuna.get(lunaCurenta) || 0;
+        const zileTrecute = Number(aziStr.slice(8, 10));
+        const zileTotal = new Date(Date.UTC(anCurent, lunaCurentaNr, 0)).getUTCDate();
+        const proiectieRunRate = zileTrecute >= 3 ? (realizat / zileTrecute) * zileTotal : probabil;
+        // Luna în curs: media dintre proiecția sezonieră și ritmul real de
+        // până acum — ritmul real contează mai mult pe măsură ce avansează luna.
+        const pondere = zileTrecute / zileTotal;
+        probabil = proiectieRunRate * pondere + probabil * (1 - pondere);
+        nota = `mix: ritmul de până azi (${money(proiectieRunRate)}) și sezonalitatea, ponderat cu ${(pondere * 100).toFixed(0)}% / ${(100 - pondere * 100).toFixed(0)}%`;
+      }
+
+      randuri.push({
+        luna,
+        realizat,
+        probabil: Math.max(0, probabil),
+        pesimist: Math.max(0, probabil * (1 - banda)),
+        optimist: probabil * (1 + banda),
+        nota,
+      });
+    }
+    const totalProbabil = randuri.reduce((s, r) => s + r.probabil, 0);
+    const totalPesimist = randuri.reduce((s, r) => s + r.pesimist, 0);
+    const totalOptimist = randuri.reduce((s, r) => s + r.optimist, 0);
+
+    // Pipeline-ul CRM, ponderat pe stadiu.
+    const PROBABILITATI = { lead: 0.1, calificat: 0.25, oferta: 0.5, negociere: 0.75 };
+    const pipeline = await db
+      .prepare(
+        `SELECT o.stadiu, COUNT(*) AS nr, COALESCE(SUM(o.valoare_estimata),0) AS valoare
+         FROM oportunitati o WHERE o.stadiu NOT IN ('castigat','pierdut') GROUP BY o.stadiu`
+      )
+      .all();
+    const pipelinePonderat = pipeline.reduce((s, r) => s + Number(r.valoare) * (PROBABILITATI[r.stadiu] || 0.1), 0);
+    const pipelineBrut = pipeline.reduce((s, r) => s + Number(r.valoare), 0);
+
+    const maxV = Math.max(1, ...randuri.map((r) => r.optimist));
+    const optiuni = [3, 6, 9, 12].map((n) => `<option value="${n}"${nrLuniForecast === n ? " selected" : ""}>următoarele ${n} luni</option>`).join("");
+
+    const continut = `
+      <form class="filtre" method="get" action="/rapoarte/forecast">
+        <select name="luni" onchange="this.form.submit()">${optiuni}</select>
+      </form>
+
+      <div class="cards">
+        <div class="card"><div class="label">Forecast probabil (${nrLuniForecast} luni)</div><div class="value">${money(totalProbabil)}</div></div>
+        <div class="card"><div class="label">Scenariu pesimist</div><div class="value" style="color:var(--warn)">${money(totalPesimist)}</div></div>
+        <div class="card"><div class="label">Scenariu optimist</div><div class="value" style="color:var(--success)">${money(totalOptimist)}</div></div>
+        <div class="card"><div class="label">Trend an/an (ultimele 12 luni)</div><div class="value" style="color:${crestere >= 1 ? "var(--success)" : "var(--danger)"}">${((crestere - 1) * 100).toFixed(1)}%</div></div>
+        <div class="card"><div class="label">Pipeline CRM ponderat</div><div class="value">${money(pipelinePonderat)}</div></div>
+      </div>
+
+      <h2>Forecast pe luni</h2>
+      <div class="chart">
+        ${randuri
+          .map(
+            (r) => `<div class="chart-row">
+              <div class="chart-label">${esc(r.luna)}</div>
+              <div class="chart-bars">
+                ${bar((r.probabil / maxV) * 100, "verde")}
+                ${r.realizat !== null ? bar((r.realizat / maxV) * 100, "rosu") : ""}
+              </div>
+              <div class="chart-values">${money(r.probabil)}${r.realizat !== null ? ` / realizat: ${money(r.realizat)}` : ""}</div>
+            </div>`
+          )
+          .join("")}
+      </div>
+      <p style="font-size:12px;color:var(--text-muted)">Bară verde = forecast probabil; bară roșie = cât s-a facturat deja în luna curentă.</p>
+
+      ${table(
+        ["Luna", "Pesimist", "Probabil", "Optimist", "Cum e calculat"],
+        randuri.map((r) => [
+          esc(r.luna) + (r.luna === lunaCurenta ? ' <span class="badge galben">în curs</span>' : ""),
+          money(r.pesimist),
+          `<strong>${money(r.probabil)}</strong>`,
+          money(r.optimist),
+          `<span style="font-size:12px;color:var(--text-muted)">${esc(r.nota)}</span>`,
+        ])
+      )}
+
+      <h2>Pipeline CRM — ce se poate adăuga peste forecast</h2>
+      ${
+        pipeline.length
+          ? table(
+              ["Stadiu", "Oportunități", "Valoare brută", "Probabilitate", "Valoare ponderată"],
+              pipeline.map((r) => [
+                esc(r.stadiu),
+                r.nr,
+                money(r.valoare),
+                `${((PROBABILITATI[r.stadiu] || 0.1) * 100).toFixed(0)}%`,
+                money(Number(r.valoare) * (PROBABILITATI[r.stadiu] || 0.1)),
+              ])
+            ) +
+            `<p style="font-size:12px;color:var(--text-muted)">Total brut ${money(pipelineBrut)} → ponderat ${money(pipelinePonderat)}. Pipeline-ul e PESTE forecastul istoric doar în măsura în care oportunitățile sunt clienți/afaceri noi — vânzările recurente către clienții existenți sunt deja prinse în istoric.</p>`
+          : '<p style="color:var(--text-muted)">Nu există oportunități deschise în CRM. Forecastul de mai sus se bazează exclusiv pe istoricul de facturare.</p>'
+      }
+
+      <p style="font-size:12px;color:var(--text-muted)">
+        Metodă: sezonalitate (media aceleiași luni calendaristice din ultimii ≤3 ani) × trendul an/an al ultimelor 12 luni întregi
+        (${money(s12)} vs. ${money(s24)}). Banda pesimist–optimist = abaterea medie reală a ultimelor 12 luni față de media lor
+        (±${(banda * 100).toFixed(0)}%). Luna în curs amestecă ritmul zilnic real cu sezonalitatea. E o proiecție statistică, nu o promisiune.
+      </p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Forecast vânzări", "/rapoarte/forecast", continut));
   });
 
   // ---- Comercial: clienți activi / inactivi -----------------------------

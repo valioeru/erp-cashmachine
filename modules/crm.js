@@ -52,6 +52,7 @@ function nr(v) {
 function subnavCrm(activ) {
   const linkuri = [
     ["/crm", "Pipeline"],
+    ["/crm/birou", "Biroul meu"],
     ["/crm/leaduri", "Lead-uri"],
     ["/crm/activitate", "Activitate & emailuri"],
     ["/taskuri", "Task-uri"],
@@ -64,14 +65,27 @@ function subnavCrm(activ) {
 function register(router) {
   // ================= PIPELINE (oportunități) ==========================
   router.get("/crm", async (ctx) => {
+    // Adminul vede pipeline-ul total sau filtrat pe un singur agent; un agent
+    // de vânzări își vede DOAR pipeline-ul lui (cerință de business).
+    const esteAdmin = ctx.user && ctx.user.rol === "admin";
+    let filtruAgent = null;
+    if (esteAdmin) {
+      const a = parseInt(ctx.query.agent, 10);
+      filtruAgent = Number.isFinite(a) && a > 0 ? a : null;
+    } else if (ctx.user && ctx.user.rol === "vanzari") {
+      filtruAgent = ctx.user.id;
+    }
+    const agenti = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
+
     const oportunitati = await db
       .prepare(
         `SELECT o.*, p.nume AS partener_nume, u.nume AS agent_nume
          FROM oportunitati o JOIN parteneri p ON p.id = o.partener_id
          LEFT JOIN utilizatori u ON u.id = o.atribuit_lui
+         ${filtruAgent ? "WHERE o.atribuit_lui = ? OR p.agent_id = ?" : ""}
          ORDER BY o.id DESC`
       )
-      .all();
+      .all(...(filtruAgent ? [filtruAgent, filtruAgent] : []));
 
     const aziStr = azi();
     const deContactat = await db
@@ -121,6 +135,18 @@ function register(router) {
         <a href="/crm/leaduri/nou" class="btn secondary">+ Lead</a>
         <a href="/taskuri/nou" class="btn secondary">+ Task</a>
         ${nrLeaduriNoi ? `<a href="/crm/leaduri" class="btn secondary">${nrLeaduriNoi} lead-uri de lucrat →</a>` : ""}
+        ${
+          esteAdmin
+            ? `<form method="get" action="/crm" class="inline-form" style="margin-left:auto">
+                <select name="agent" onchange="this.form.submit()" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px">
+                  <option value="">Pipeline: toți agenții</option>
+                  ${agenti.map((a) => `<option value="${a.id}"${filtruAgent === a.id ? " selected" : ""}>doar ${esc(a.nume)}</option>`).join("")}
+                </select>
+              </form>`
+            : filtruAgent
+            ? `<span style="margin-left:auto;font-size:13px;color:var(--text-muted)">Pipeline-ul tău</span>`
+            : ""
+        }
       </div>
       <div class="crm-board">${coloane}</div>
 
@@ -282,6 +308,217 @@ function register(router) {
     await db.prepare("DELETE FROM taskuri WHERE oportunitate_id = ?").run(ctx.params.id);
     await db.prepare("DELETE FROM oportunitati WHERE id = ?").run(ctx.params.id);
     redirect(ctx.res, "/crm");
+  });
+
+
+  // ================= BIROUL AGENTULUI =================================
+  // Dashboardul personal al fiecărui agent: portofoliul lui de clienți,
+  // pipeline-ul lui, calendarul de task-uri pe zile, remindere (întârziate),
+  // zilele de naștere ale clienților și sugestii de clienți potențiali.
+  // Adminul poate deschide biroul oricărui agent cu ?agent=ID.
+  router.get("/crm/birou", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const esteAdmin = ctx.user.rol === "admin";
+    let agentId = ctx.user.id;
+    if (esteAdmin) {
+      const a = parseInt(ctx.query.agent, 10);
+      if (Number.isFinite(a) && a > 0) agentId = a;
+    }
+    const agent = await db.prepare("SELECT id, nume FROM utilizatori WHERE id = ?").get(agentId);
+    if (!agent) return redirect(ctx.res, "/crm");
+    const agenti = esteAdmin ? await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all() : [];
+
+    const aziStr = azi();
+    const acum12Luni = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+    const SUB_TOTAL =
+      "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
+    const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+
+    // Portofoliul: clienții alocați agentului, cu vânzări pe 12 luni și sold.
+    const clienti = await db
+      .prepare(
+        `SELECT p.id, p.nume, p.email, p.telefon, p.data_nastere,
+                COALESCE(SUM(CASE WHEN f.data_emiterii >= ? THEN l.total ELSE 0 END), 0) AS vanzari12,
+                COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS sold,
+                MAX(f.data_emiterii) AS ultima
+         FROM parteneri p
+         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata'
+         LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+         WHERE p.agent_id = ? AND p.tip IN ('client','ambele')
+         GROUP BY p.id, p.nume, p.email, p.telefon, p.data_nastere
+         ORDER BY vanzari12 DESC`
+      )
+      .all(acum12Luni, agentId);
+
+    // Pipeline-ul agentului, pe stadii.
+    const pipeline = await db
+      .prepare(
+        `SELECT o.stadiu, COUNT(*) AS nr, COALESCE(SUM(o.valoare_estimata),0) AS valoare
+         FROM oportunitati o LEFT JOIN parteneri p ON p.id = o.partener_id
+         WHERE o.atribuit_lui = ? OR p.agent_id = ?
+         GROUP BY o.stadiu`
+      )
+      .all(agentId, agentId);
+    const pipelineDeschis = pipeline
+      .filter((r) => !["castigat", "pierdut"].includes(r.stadiu))
+      .reduce((s, r) => s + Number(r.valoare), 0);
+
+    // Calendarul: task-urile pe următoarele 14 zile + cele întârziate.
+    const in14 = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+    const taskuriAgent = await db
+      .prepare(
+        `${taskuri.SELECT_TASK} WHERE t.atribuit_lui = ? AND t.status IN ('${taskuri.DESCHISE.join("','")}')
+         ORDER BY (t.scadenta IS NULL), t.scadenta ASC LIMIT 200`
+      )
+      .all(agentId);
+    const intarziate = taskuriAgent.filter((t) => t.scadenta && t.scadenta < aziStr);
+    const peZile = new Map();
+    for (const t of taskuriAgent) {
+      if (!t.scadenta || t.scadenta < aziStr || t.scadenta > in14) continue;
+      if (!peZile.has(t.scadenta)) peZile.set(t.scadenta, []);
+      peZile.get(t.scadenta).push(t);
+    }
+    const faraScadenta = taskuriAgent.filter((t) => !t.scadenta);
+
+    // Zile de naștere: clienții agentului cu ziua în următoarele 30 de zile
+    // (comparăm doar luna-ziua, anul nu contează).
+    const zileNastere = [];
+    for (const c of clienti) {
+      if (!c.data_nastere) continue;
+      const mz = String(c.data_nastere).slice(5, 10);
+      if (!/^\d{2}-\d{2}$/.test(mz)) continue;
+      const anCurent = Number(aziStr.slice(0, 4));
+      let urmatoarea = `${anCurent}-${mz}`;
+      if (urmatoarea < aziStr) urmatoarea = `${anCurent + 1}-${mz}`;
+      const inZile = Math.round((Date.parse(urmatoarea) - Date.parse(aziStr)) / 86400000);
+      if (inZile <= 30) zileNastere.push({ ...c, urmatoarea, inZile });
+    }
+    zileNastere.sort((a, b) => a.inZile - b.inZile);
+
+    // Sugestii de clienți potențiali, pe baza portofoliului:
+    //  1. clienții LUI care n-au mai cumpărat de peste 90 de zile (reactivare);
+    //  2. clienți fără agent dedicat (alocați adminului implicit), ordonați
+    //     după valoarea istorică — potriviti de preluat în portofoliu.
+    const acum90 = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+    const deReactivat = clienti.filter((c) => c.ultima && c.ultima.slice(0, 10) < acum90 && Number(c.vanzari12) > 0).slice(0, 10);
+    const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
+    const dePreluat =
+      admin && admin.id !== agentId
+        ? await db
+            .prepare(
+              `SELECT p.id, p.nume, COALESCE(SUM(l.total),0) AS valoare, MAX(f.data_emiterii) AS ultima
+               FROM parteneri p
+               JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata'
+               JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+               WHERE (p.agent_id = ? OR p.agent_id IS NULL) AND p.tip IN ('client','ambele')
+               GROUP BY p.id, p.nume ORDER BY valoare DESC LIMIT 10`
+            )
+            .all(admin.id)
+        : [];
+
+    const vanzari12Total = clienti.reduce((s, c) => s + Number(c.vanzari12), 0);
+    const soldTotal = clienti.reduce((s, c) => s + Math.max(0, Number(c.sold)), 0);
+
+    const body = `
+      ${subnavCrm("/crm/birou")}
+      ${
+        esteAdmin && agenti.length
+          ? `<form method="get" action="/crm/birou" class="filtre">
+              <span style="font-size:13px">Biroul lui:</span>
+              <select name="agent" onchange="this.form.submit()">
+                ${agenti.map((a) => `<option value="${a.id}"${a.id === agentId ? " selected" : ""}>${esc(a.nume)}</option>`).join("")}
+              </select>
+            </form>`
+          : ""
+      }
+      <div class="cards">
+        <div class="card"><div class="label">Clienți în portofoliu</div><div class="value">${clienti.length}</div></div>
+        <div class="card"><div class="label">Vânzări portofoliu (12 luni)</div><div class="value">${money(vanzari12Total)}</div></div>
+        <div class="card"><div class="label">De încasat din portofoliu</div><div class="value">${money(soldTotal)}</div></div>
+        <div class="card"><div class="label">Pipeline deschis</div><div class="value">${money(pipelineDeschis)}</div></div>
+        <div class="card"><div class="label">Task-uri întârziate</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
+      </div>
+
+      ${
+        intarziate.length
+          ? `<h2 style="color:var(--danger)">Remindere — task-uri întârziate</h2>${table(taskuri.CAPETE, intarziate.map((t) => taskuri.randTask(t, aziStr)))}`
+          : ""
+      }
+
+      ${
+        zileNastere.length
+          ? `<h2>🎂 Zile de naștere (următoarele 30 de zile)</h2>
+             ${table(
+               ["Client", "Ziua", "Când", "Acțiune"],
+               zileNastere.map((c) => [
+                 `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                 esc(c.urmatoarea),
+                 c.inZile === 0 ? '<span class="badge verde">AZI</span>' : `în ${c.inZile} zile`,
+                 c.email
+                   ? `<a class="link-btn" href="/crm/email/nou?partener_id=${c.id}&sablon=zi_nastere">Trimite urarea</a>`
+                   : '<span style="color:var(--text-muted)">fără email salvat</span>',
+               ])
+             )}`
+          : ""
+      }
+
+      <h2>Calendarul următoarelor 14 zile</h2>
+      ${
+        peZile.size
+          ? [...peZile.entries()]
+              .map(
+                ([zi, lista]) => `
+            <div class="zi-bloc">
+              <div class="zi-antet"><div class="zi-data">${esc(zi)}${zi === aziStr ? ' <span class="badge galben">azi</span>' : ""}</div><div class="zi-suma">${lista.length} task-uri</div></div>
+              ${table(taskuri.CAPETE, lista.map((t) => taskuri.randTask(t, aziStr)))}
+            </div>`
+              )
+              .join("")
+          : '<p style="color:var(--text-muted)">Nimic programat în următoarele 14 zile. <a href="/taskuri/nou">Adaugă un task</a>.</p>'
+      }
+      ${faraScadenta.length ? `<h2>Task-uri fără termen (${faraScadenta.length})</h2>${table(taskuri.CAPETE, faraScadenta.slice(0, 20).map((t) => taskuri.randTask(t, aziStr)))}` : ""}
+
+      <h2>Sugestii — clienți de reactivat (n-au mai cumpărat de peste 90 de zile)</h2>
+      ${
+        deReactivat.length
+          ? table(
+              ["Client", "Ultima factură", "Vânzări 12 luni", "Acțiune"],
+              deReactivat.map((c) => [
+                `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                `<span class="badge galben">${esc((c.ultima || "").slice(0, 10))}</span>`,
+                money(c.vanzari12),
+                `<a class="link-btn" href="/taskuri/nou?partener_id=${c.id}&tip=apel&titlu=${encodeURIComponent("Reactivare " + c.nume)}&scadenta=${aziStr}">+ Task de contact</a>`,
+              ])
+            )
+          : '<p style="color:var(--text-muted)">Tot portofoliul e activ — nimeni de reactivat.</p>'
+      }
+
+      <h2>Sugestii — clienți potențiali de preluat (fără agent dedicat)</h2>
+      ${
+        dePreluat.length
+          ? table(
+              ["Client", "Valoare istorică", "Ultima factură"],
+              dePreluat.map((c) => [`<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`, money(c.valoare), esc((c.ultima || "").slice(0, 10))])
+            ) + '<p style="font-size:12px;color:var(--text-muted)">Alocarea o face administratorul, din pagina fiecărui client.</p>'
+          : '<p style="color:var(--text-muted)">Toți clienții au deja un agent dedicat.</p>'
+      }
+
+      <h2>Portofoliul complet (${clienti.length} clienți)</h2>
+      ${table(
+        ["Client", "Vânzări 12 luni", "Sold de încasat", "Ultima factură", "Contact"],
+        clienti
+          .slice(0, 100)
+          .map((c) => [
+            `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+            money(c.vanzari12),
+            money(Math.max(0, c.sold)),
+            esc((c.ultima || "").slice(0, 10)) || "—",
+            [c.email && `<a class="link-btn" href="/crm/email/nou?partener_id=${c.id}">email</a>`, c.telefon && esc(c.telefon)].filter(Boolean).join(" · ") || "—",
+          ])
+      )}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Biroul lui ${agent.nume}`, active: "/crm", body }));
   });
 
   // ================= LEAD-URI =========================================

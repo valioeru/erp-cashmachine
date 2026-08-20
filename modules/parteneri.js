@@ -41,6 +41,7 @@ function register(router) {
       { name: "persoana_contact", label: "Persoană de contact" },
       { name: "stare", label: "Stare", type: "select", default: "client_activ", options: STARE_OPTIONS },
       { name: "sursa", label: "Sursă (de unde a venit)" },
+      { name: "data_nastere", label: "Zi de naștere persoană de contact (pentru urări)", type: "date" },
       { name: "adresa", label: "Adresă", type: "textarea" },
     ],
     listColumns: [
@@ -53,12 +54,22 @@ function register(router) {
     ],
   });
 
+  // Schimbarea agentului responsabil — permisă doar administratorului.
+  router.post("/parteneri/:id/agent", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, `/parteneri/${ctx.params.id}`);
+    const agentId = parseInt(ctx.body.agent_id, 10);
+    await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(Number.isFinite(agentId) && agentId > 0 ? agentId : null, ctx.params.id);
+    redirect(ctx.res, `/parteneri/${ctx.params.id}`);
+  });
+
   // Pagină de detaliu — istoricul complet al unui partener: comenzi, facturi
   // (vânzare & achiziție), oportunități CRM și interacțiuni/follow-up-uri.
   // Înregistrată după registerCrud, ca să nu intre în conflict cu rutele
   // literale /parteneri/nou, /parteneri/:id/editare etc.
   router.get("/parteneri/:id", async (ctx) => {
-    const partener = await db.prepare("SELECT * FROM parteneri WHERE id = ?").get(ctx.params.id);
+    const partener = await db
+      .prepare("SELECT p.*, u.nume AS agent_nume FROM parteneri p LEFT JOIN utilizatori u ON u.id = p.agent_id WHERE p.id = ?")
+      .get(ctx.params.id);
     if (!partener) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/parteneri", body: "<p>Partener inexistent.</p>" }));
 
     const comenzi = await db.prepare("SELECT id, numar, status, data FROM comenzi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
@@ -66,6 +77,7 @@ function register(router) {
     const oportunitati = await db.prepare("SELECT * FROM oportunitati WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const taskuriPartener = await db.prepare(`${tsk.SELECT_TASK} WHERE t.partener_id = ? ORDER BY t.id DESC LIMIT 50`).all(partener.id);
     const emailuriPartener = await db.prepare("SELECT id, subiect, catre, status, trimis_la FROM emailuri WHERE partener_id = ? ORDER BY id DESC LIMIT 50").all(partener.id);
+    const utilizatoriActivi = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const interactiuni = await db.prepare("SELECT * FROM interactiuni WHERE partener_id = ? ORDER BY data DESC, id DESC").all(partener.id);
 
     const body = `
@@ -84,6 +96,20 @@ function register(router) {
           <a href="/parteneri/${partener.id}/editare" class="btn secondary small">Editează datele</a>
           <a href="/crm/email/nou?partener_id=${partener.id}" class="btn secondary small">✉ Trimite email</a>
           <a href="/taskuri/nou?partener_id=${partener.id}" class="btn secondary small">+ Task</a>
+        </div>
+        <div style="margin-top:10px;font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span>Agent responsabil: <strong>${esc(partener.agent_nume || "nealocat")}</strong></span>
+          ${
+            ctx.user && ctx.user.rol === "admin"
+              ? `<form method="post" action="/parteneri/${partener.id}/agent" class="inline-form" style="display:flex;gap:6px;align-items:center">
+                  <select name="agent_id" style="font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:6px">
+                    <option value="">— nealocat —</option>
+                    ${utilizatoriActivi.map((u) => `<option value="${u.id}"${partener.agent_id === u.id ? " selected" : ""}>${esc(u.nume)}</option>`).join("")}
+                  </select>
+                  <button class="btn small secondary" type="submit">Schimbă agentul</button>
+                </form>`
+              : `<span style="color:var(--text-muted)">(doar administratorul poate schimba agentul)</span>`
+          }
         </div>
       </div>
 

@@ -54,6 +54,62 @@ function mapColoane(header, chei) {
   return idx;
 }
 
+// --- alocarea clienților pe agenți, din coloana Observații -----------------
+// În SmartBill, la Cash Machine, numele agentului de vânzări se scrie în
+// câmpul de observații al facturii (ex. "isabela radu" pe CSHMUPA0037).
+// La import: dacă observațiile arată a nume de persoană, clientul e alocat
+// acelui agent (utilizatorul se creează automat dacă nu există); clienții
+// fără agent rămân alocați administratorului. Doar adminul poate schimba
+// ulterior alocarea, din pagina partenerului.
+function aratANumeDePersoana(text) {
+  const t = String(text || "").trim();
+  if (!t || t.length > 40) return false;
+  if (/[0-9@\/\\.,:;#%]/.test(t)) return false; // cifre/punctuație = nu e nume
+  const cuvinte = t.split(/\s+/);
+  if (cuvinte.length < 2 || cuvinte.length > 4) return false;
+  return cuvinte.every((c) => /^[a-zA-ZăâîșțĂÂÎȘȚéÉ-]{2,}$/.test(c));
+}
+
+function numeFrumos(text) {
+  return String(text)
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((c) => c.charAt(0).toUpperCase() + c.slice(1))
+    .join(" ");
+}
+
+async function gasesteSauCreeazaAgent(numeBrut, cacheAgenti) {
+  const nume = numeFrumos(numeBrut);
+  const cheie = nume.toLowerCase();
+  if (cacheAgenti.has(cheie)) return cacheAgenti.get(cheie);
+  let u = await db.prepare("SELECT id FROM utilizatori WHERE LOWER(nume) = ?").get(cheie);
+  if (!u) {
+    const slug = cheie
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z ]/g, "")
+      .trim()
+      .replace(/\s+/g, ".");
+    const email = `${slug}@cashmachine.ro`;
+    const auth = require("../lib/auth");
+    const { hash, salt } = auth.hashParola(require("crypto").randomBytes(9).toString("base64url"));
+    try {
+      const ins = await db
+        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol) VALUES (?, ?, ?, ?, 'vanzari') RETURNING id")
+        .run(nume, email, hash, salt);
+      u = { id: ins.lastInsertRowid };
+    } catch (e) {
+      // emailul generat există deja (alt nume, același slug) — refolosim contul
+      const existent = await db.prepare("SELECT id FROM utilizatori WHERE email = ?").get(email);
+      if (!existent) throw e;
+      u = existent;
+    }
+  }
+  cacheAgenti.set(cheie, u.id);
+  return u.id;
+}
+
 function statusDinText(text) {
   const t = (text || "").toLowerCase();
   if (/anulat|stornat/.test(t)) return "anulata";
@@ -336,8 +392,14 @@ function register(router) {
           serie = m[1].trim();
           numar = parseInt(m[2], 10);
         } else {
-          serie = "IMP";
-          numar = parseInt(documentText.replace(/[^0-9]/g, ""), 10);
+          // Documente de furnizor cu formate arbitrare ("FF 2026/00123",
+          // "ABC-12/345"): seria = prefixul fără cifre (sau IMP), numărul =
+          // ULTIMUL grup de cifre. Identitatea reală a documentului rămâne
+          // oricum textul complet (document_extern), pe care se face dedupul.
+          const prefix = (documentText.match(/^[^0-9]+/) || [""])[0].replace(/[\s\-\/]+$/, "").trim();
+          const grupuri = documentText.match(/[0-9]+/g) || [];
+          serie = prefix || "IMP";
+          numar = parseInt(grupuri[grupuri.length - 1] || "", 10);
         }
       }
       if (!numar || isNaN(numar)) {
@@ -379,6 +441,7 @@ function register(router) {
         documentExtern: documentText || `${serie}${numar}`,
         indexSpv: val(row, "indexSpv"),
         observatiiFisier: val(row, "observatii"),
+        agentDinObservatii: aratANumeDePersoana(val(row, "observatii")) ? val(row, "observatii") : null,
         status: statusDinText(val(row, "status")),
       });
     }
@@ -431,17 +494,47 @@ function register(router) {
       if (gasit) inr.partenerId = gasit.id;
     }
 
+    // --- agenți: numele din Observații → agentul clientului --------------
+    // Rândurile vin cu factura cea mai nouă prima, deci prima mențiune
+    // câștigă (= cea mai recentă factură decide agentul curent al clientului).
+    const cacheAgenti = new Map();
+    const agentPerPartener = new Map();
+    let agentiAlocati = 0;
+    if (directie === "vanzare") {
+      for (const inr of inregistrari) {
+        if (!inr.partenerId || !inr.agentDinObservatii) continue;
+        if (agentPerPartener.has(inr.partenerId)) continue;
+        agentPerPartener.set(inr.partenerId, await gasesteSauCreeazaAgent(inr.agentDinObservatii, cacheAgenti));
+      }
+      for (const [partenerId, agentId] of agentPerPartener) {
+        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agentId, partenerId);
+        agentiAlocati++;
+      }
+      // Clienții rămași fără agent merg la administrator.
+      const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
+      if (admin) {
+        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE agent_id IS NULL AND tip IN ('client','ambele')").run(admin.id);
+      }
+    }
+
     const deMarcat = [...new Set(inregistrari.map((i) => i.deMarcatAmbele).filter(Boolean))];
     if (deMarcat.length) {
       await db.prepare(`UPDATE parteneri SET tip = 'ambele' WHERE id IN (${deMarcat.map(() => "?").join(",")})`).run(...deMarcat);
     }
 
     // ---- Pasul 3: sărim facturile deja existente ------------------------
-    const existente = new Set(
-      (await db.prepare("SELECT serie, numar, partener_id FROM facturi WHERE directie = ?").all(directie)).map(
-        (f) => `${f.serie}|${f.numar}|${f.partener_id}`
-      )
-    );
+    // Dedup pe DOUĂ chei: (serie, număr, partener) și (documentul original
+    // normalizat, partener). A doua contează la facturile de furnizor, unde
+    // "FF 2026/00123" și "FF2026-00123" sunt același document scris diferit —
+    // normalizarea (majuscule, fără spații/punctuație) le face egale, deci
+    // reimportul aceluiași fișier sau al unui export refăcut nu creează dubluri.
+    const normDoc = (d) => String(d || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const existenteRanduri = await db.prepare("SELECT serie, numar, partener_id, document_extern FROM facturi WHERE directie = ?").all(directie);
+    const existente = new Set();
+    for (const f of existenteRanduri) {
+      existente.add(`${f.serie}|${f.numar}|${f.partener_id}`);
+      if (f.document_extern) existente.add(`DOC|${normDoc(f.document_extern)}|${f.partener_id}`);
+    }
     const deInserat = [];
     for (const inr of inregistrari) {
       if (!inr.partenerId) {
@@ -449,11 +542,13 @@ function register(router) {
         continue;
       }
       const cheie = `${inr.serie}|${inr.numar}|${inr.partenerId}`;
-      if (existente.has(cheie)) {
+      const cheieDoc = `DOC|${normDoc(inr.documentExtern)}|${inr.partenerId}`;
+      if (existente.has(cheie) || existente.has(cheieDoc)) {
         sarite++;
         continue;
       }
       existente.add(cheie); // și în interiorul aceluiași fișier
+      existente.add(cheieDoc);
       deInserat.push(inr);
     }
 
@@ -526,6 +621,7 @@ function register(router) {
           "Facturi importate": create,
           "Sărite (deja existau sau rânduri de total)": sarite,
           "Parteneri noi creați": parteneriNoi.length,
+          "Clienți alocați pe agenți (din Observații)": directie === "vanzare" ? agentiAlocati : "—",
           "Rânduri cu erori": erori.length,
         },
         erori

@@ -21,6 +21,7 @@ require("./modules/crm").register(router);
 require("./modules/taskuri").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
+require("./modules/balanta").register(router);
 require("./modules/import").register(router);
 require("./modules/angajati").register(router);
 require("./modules/salarii").register(router);
@@ -85,6 +86,13 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
     if (!auth.poateAccesa(user.rol, curat)) {
+      res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(paginaFaraAcces(user));
+    }
+    // Ștergerile de date sunt rezervate administratorului. Agenții (și
+    // celelalte roluri) pot adăuga și modifica, dar nu pot șterge clienți,
+    // facturi, oportunități etc. — cerință explicită de business.
+    if (user.rol !== "admin" && req.method === "POST" && /\/(sterge|curata-tot)(\/|$)/.test(curat)) {
       res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(paginaFaraAcces(user));
     }

@@ -91,8 +91,69 @@ Grupate pe categorii, fiecare la propriul URL:
 **Comerciale**
 
 - **Pipeline oportunități** (`/rapoarte/pipeline`).
+- **Forecast vânzări** (`/rapoarte/forecast`) — proiecție pe 3–12 luni:
+  sezonalitatea reală (media aceleiași luni din ultimii ani) × trendul an/an,
+  cu bandă pesimist/optimist din volatilitatea reală a lunilor, luna în curs
+  proiectată din ritmul zilnic, plus pipeline-ul CRM ponderat pe stadii.
 - **Clienți activi & inactivi** (`/rapoarte/clienti`) — cine n-a mai cumpărat de
   peste 90/180/365/730 de zile, ordonat după valoarea istorică.
+
+## Agenți de vânzări și portofolii de clienți
+
+Fiecare client are un **agent responsabil**. Alocarea vine automat la import:
+numele agentului scris în câmpul Observații al facturii din SmartBill (ex.
+„isabela radu" pe CSHMUPA0037) devine agentul clientului — dacă utilizatorul
+nu există, se creează automat cont de agent de vânzări (adminul îi setează
+parola din „Utilizatori"). Clienții fără agent în observații rămân alocați
+administratorului. **Doar administratorul** poate schimba agentul unui client
+(din pagina clientului), iar agenții **nu pot șterge** clienți sau alte date
+(orice ștergere e blocată pe server pentru non-admini).
+
+**Biroul meu** (`/crm/birou`) — dashboardul personal al fiecărui agent:
+portofoliul lui cu vânzări pe 12 luni și solduri, pipeline-ul lui, calendarul
+task-urilor pe următoarele 14 zile, remindere pentru task-urile întârziate,
+zilele de naștere ale clienților (cu urare precompletată, trimisă pe emailul
+lui) și sugestii: clienți de reactivat (fără cumpărături de 90+ zile) și
+clienți fără agent dedicat, de preluat în portofoliu. Adminul poate deschide
+biroul oricărui agent.
+
+**Profitabilitate pe agent & client** (`/rapoarte/agenti`) — venit net, marjă
+(doar unde există costuri de produs — facturile importate din SmartBill n-au
+detaliu pe produse, iar raportul spune explicit cât din venit are cost
+cunoscut), pipeline deschis și solduri pe fiecare agent, cu detaliu pe
+clienții lui. Pipeline-ul din `/crm` se poate filtra pe un singur agent
+(admin); agenții își văd doar propriul pipeline.
+
+Toate tabelele din aplicație se **sortează la click pe antet** (numere în
+format românesc, date și text, cu săgeată de direcție).
+
+## Balanța de verificare
+
+`/rapoarte/balanta` — balanță contabilă reală, pe planul de conturi românesc
+(OMFP 1802/2014), cu cele patru serii de coloane: solduri inițiale, rulaje,
+total sume, solduri finale, pe orice perioadă sau zi. Documentele ERP
+(facturi, încasări, plăți, salarii) se traduc automat în note contabile
+(4111 = 707 + 4427, 5121 = 4111, 371/4426 = 401 etc.), regenerate integral la
+fiecare schimbare — deci balanța e mereu la zi. Cele patru egalități se
+verifică la fiecare afișare, iar din fiecare cont se deschide **fișa contului**
+cu sold rulant.
+
+SmartBill **nu are API pentru Conta** (verificat — API-ul acoperă doar
+Facturare), deci soldurile de deschidere se preiau din balanța exportată din
+SmartBill Conta (XLS/CSV) în pagina „Solduri inițiale" — o singură dată, de
+regulă la început de an; de acolo încolo ERP-ul mișcă singur soldurile.
+Notele introduse manual și soldurile inițiale nu se ating la regenerare.
+Amortizările, provizioanele și închiderile de lună rămân operațiuni de
+contabil.
+
+## TVA de plată, la zi
+
+`/rapoarte/tva` — TVA colectată minus TVA deductibilă, pe orice perioadă, cu
+defalcare pe luni și cu suma lunii precedente (cea scadentă pe 25). Cumulatul
+„la zi" apare după preluarea soldurilor inițiale din balanța Conta — fără
+ele, aplicația refuză intenționat să afișeze un cumulat care ar aduna tot
+istoricul ca și cum TVA-ul n-ar fi fost plătit niciodată. Calcul informativ —
+decontul oficial (D300) rămâne la contabil; la TVA la încasare cifra diferă.
 
 ## Emailuri din CRM
 
