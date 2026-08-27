@@ -12,6 +12,7 @@ const router = new Router();
 require("./modules/auth").register(router);
 require("./modules/utilizatori").register(router);
 require("./modules/dashboard").register(router);
+require("./modules/alocari").register(router);
 require("./modules/parteneri").register(router);
 require("./modules/produse").register(router);
 require("./modules/stocuri").register(router);
