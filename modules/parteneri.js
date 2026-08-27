@@ -22,6 +22,89 @@ const INTERACTIUNE_MANUAL = ["nota", "telefon", "vizita", "email", "whatsapp"];
 const INTERACTIUNE_AUTO = { oferta: "Ofertă", contract: "Contract", comanda: "Comandă", notificare: "Notificare", factura: "Factură" };
 
 function register(router) {
+  // Lista de parteneri, ordonată după cât cântăresc de fapt: rulajul pe
+  // ultimele 12 luni, nu alfabetic. Un client de 13 milioane și unul de 200
+  // de lei n-au ce căuta unul lângă altul, nediferențiați, în aceeași listă.
+  //
+  // Se înregistrează ÎNAINTEA CRUD-ului generic, ca să câștige ruta /parteneri.
+  router.get("/parteneri", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const tip = ["client", "furnizor", "ambii"].includes(String(ctx.query.tip)) ? String(ctx.query.tip) : "ambii";
+    const cauta = String(ctx.query.q || "").trim();
+
+    const args = [];
+    let unde = "1 = 1";
+    if (tip === "client") unde = "p.tip IN ('client','ambele')";
+    else if (tip === "furnizor") unde = "p.tip IN ('furnizor','ambele')";
+    if (cauta) {
+      unde += " AND (LOWER(p.nume) LIKE ? OR LOWER(COALESCE(p.cui,'')) LIKE ?)";
+      args.push("%" + cauta.toLowerCase() + "%", "%" + cauta.toLowerCase() + "%");
+    }
+
+    const T = "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
+    const P = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+    const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+
+    const randuri = await db
+      .prepare(
+        `SELECT p.id, p.nume, p.tip, p.stare, p.cui, p.email, p.telefon,
+                u.nume AS agent,
+                COALESCE((SELECT SUM(COALESCE(t.total,0)) FROM facturi f
+                            LEFT JOIN ${T} t ON t.factura_id = f.id
+                           WHERE f.partener_id = p.id AND f.status <> 'anulata'
+                             AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?), 0) AS rulaj,
+                COALESCE((SELECT SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)) FROM facturi f
+                            LEFT JOIN ${T} t ON t.factura_id = f.id
+                            LEFT JOIN ${P} pl ON pl.factura_id = f.id
+                           WHERE f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata'
+                             AND COALESCE(f.intercompany,0) = 0
+                             AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5), 0) AS sold,
+                (SELECT MAX(f.data_emiterii) FROM facturi f WHERE f.partener_id = p.id AND f.status <> 'anulata') AS ultima
+           FROM parteneri p
+           LEFT JOIN utilizatori u ON u.id = p.agent_id
+          WHERE ${unde}
+          ORDER BY rulaj DESC, sold DESC, p.nume`
+      )
+      .all(acum12, ...args);
+
+    const qs = cauta ? "&q=" + encodeURIComponent(cauta) : "";
+    const buton = (v, eticheta) =>
+      `<a class="btn ${tip === v ? "" : "secondary"}" href="/parteneri?tip=${v}${qs}">${esc(eticheta)}</a>`;
+
+    const body = `
+      <div class="toolbar">
+        <a class="btn" href="/parteneri/nou">+ Partener nou</a>
+        ${buton("ambii", "Toți")}
+        ${buton("client", "Clienți")}
+        ${buton("furnizor", "Furnizori")}
+      </div>
+      <form method="get" action="/parteneri" class="filtre">
+        <input type="hidden" name="tip" value="${esc(tip)}">
+        <input name="q" placeholder="caută după nume sau CUI" value="${esc(cauta)}" style="min-width:240px">
+        <button class="btn secondary small" type="submit">Caută</button>
+        ${cauta ? `<a class="btn secondary small" href="/parteneri?tip=${tip}">renunță</a>` : ""}
+      </form>
+      <p style="font-size:13px;color:var(--text-muted)">
+        ${randuri.length} parteneri, ordonați după rulajul din ultimele 12 luni.
+      </p>
+      ${table(
+        ["#", "Nume", "Tip", "Agent", "Rulaj 12 luni", "De încasat", "Ultima factură", "Stare"],
+        randuri.slice(0, 300).map((r, i) => [
+          String(i + 1),
+          `<a href="/parteneri/${r.id}">${esc(r.nume)}</a>`,
+          esc(TIP_LABEL[r.tip] || r.tip),
+          esc(r.agent || "—"),
+          money(r.rulaj),
+          Number(r.sold) > 0.5 ? `<strong style="color:var(--danger)">${money(r.sold)}</strong>` : "—",
+          r.ultima ? esc(String(r.ultima).slice(0, 10)) : "—",
+          esc(STARE_LABEL[r.stare] || r.stare || "—"),
+        ])
+      )}
+      ${randuri.length > 300 ? `<p style="color:var(--text-muted);font-size:13px">Se afișează primii 300. Folosește căutarea pentru restul.</p>` : ""}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Parteneri", active: "/parteneri", body }));
+  });
+
   registerCrud(router, {
     path: "/parteneri",
     table: "parteneri",
@@ -95,6 +178,34 @@ function register(router) {
       .prepare("SELECT id, nume, rol FROM utilizatori WHERE activ = 1 AND rol IN ('admin','vanzari') ORDER BY rol DESC, nume")
       .all();
 
+    // Semaforul de încasări al clientului, cu comanda adminului de a tăia
+    // notificările pe el (client în insolvență, înțelegere separată etc).
+    let blocSemafor = "";
+    try {
+      const st = await require("./scadente").stareClient(partener.id);
+      const eticheta = { verde: "la zi", galben: "întârziere mică", rosu: "restanță" }[st.stare];
+      blocSemafor = `
+        <div style="margin-top:12px;font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span>Încasări:</span>
+          <span class="badge ${st.stare}">${esc(eticheta)}</span>
+          ${st.sold > 0.5 ? `<span>sold restant <strong>${money(st.sold)}</strong>${st.zileMax > 0 ? `, cea mai veche factură de ${st.zileMax} zile` : ""}</span>` : "<span>fără sold restant</span>"}
+          ${st.stare === "rosu" ? `<span style="color:var(--danger)">agenții nu pot plasa comenzi pentru el</span>` : ""}
+          ${
+            ctx.user && ctx.user.rol === "admin"
+              ? `<form method="post" action="/parteneri/${partener.id}/notificari" class="inline-form">
+                   <input type="hidden" name="oprite" value="${Number(partener.notificari_oprite) === 1 ? 0 : 1}">
+                   <button class="btn small secondary" type="submit">${Number(partener.notificari_oprite) === 1 ? "reia notificările" : "oprește notificările"}</button>
+                 </form>`
+              : Number(partener.notificari_oprite) === 1
+                ? `<span class="badge gri">notificări oprite de admin</span>`
+                : ""
+          }
+          <a class="btn small secondary" href="/scadente">vezi scadențarul</a>
+        </div>`;
+    } catch (e) {
+      blocSemafor = "";
+    }
+
     const body = `
       <div class="detail-box">
         <div class="detail-grid">
@@ -112,6 +223,7 @@ function register(router) {
           <a href="/crm/email/nou?partener_id=${partener.id}" class="btn secondary small">✉ Trimite email</a>
           <a href="/taskuri/nou?partener_id=${partener.id}" class="btn secondary small">+ Task</a>
         </div>
+        ${blocSemafor}
         <div style="margin-top:12px;font-size:13px">
           <div style="margin-bottom:6px">Alocare pe agenți (din asta se calculează comisionul):
             <strong>${alocareLinii.length ? alocareLinii.map((a) => `${esc(a.nume)} ${Number(a.procent).toFixed(0)}%`).join(" · ") : "nealocat"}</strong>

@@ -19,7 +19,7 @@
 //    altcuiva) și primește imediat un task de contact.
 const db = require("../lib/db");
 const { ALOC } = require("./alocari");
-const { esc, layout, table, money } = require("../lib/render");
+const { esc, layout, table, money, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // Câte zile de tăcere înseamnă „ar cam trebui sunat".
@@ -420,7 +420,7 @@ function register(router) {
     const deFacut = await blocTaskuriContact(ctx.user, agentId);
 
     const body = `
-      ${subnavCrm("/crm/contacte")}
+      ${subnavCrm("/crm/contacte", ctx.user)}
       ${
         eAdmin
           ? `<form method="get" action="/crm/contacte" class="filtre">
@@ -454,26 +454,6 @@ function register(router) {
 
     send(ctx.res, 200, layout({ user: ctx.user, title: "Contactări", active: "/crm", body }));
   });
-}
-
-// Duplicat local, ca să nu creăm o dependență circulară cu crm.js
-// (crm.js folosește blocurile de aici, deci nu poate fi cerut de aici).
-function subnavCrm(activ) {
-  const linkuri = [
-    ["/crm", "Pipeline"],
-    ["/crm/birou", "Biroul meu"],
-    ["/crm/alocare", "Clienții mei"],
-    ["/crm/contacte", "Contactări"],
-    ["/scadente", "Scadențe"],
-    ["/oferte", "Oferte"],
-    ["/contracte", "Contracte"],
-    ["/crm/leaduri", "Lead-uri"],
-    ["/crm/activitate", "Activitate & emailuri"],
-    ["/taskuri", "Task-uri"],
-  ];
-  return `<div class="subnav">${linkuri
-    .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
-    .join("")}</div>`;
 }
 
 module.exports = {

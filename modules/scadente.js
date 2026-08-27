@@ -15,7 +15,7 @@
 // Culoarea NU se stochează: se calculează din solduri. Un client care plătește
 // azi trebuie să fie verde azi, fără să apese cineva un buton.
 const db = require("../lib/db");
-const { esc, layout, table, money } = require("../lib/render");
+const { esc, layout, table, money, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const mail = require("../lib/mail");
 const { ALOC } = require("./alocari");
@@ -499,25 +499,6 @@ async function blocScadente(user, agentId) {
     </p>`;
 }
 
-// ------------------------------------------------------------------
-function subnavCrm(activ) {
-  const linkuri = [
-    ["/crm", "Pipeline"],
-    ["/crm/birou", "Biroul meu"],
-    ["/crm/alocare", "Clienții mei"],
-    ["/crm/contacte", "Contactări"],
-    ["/scadente", "Scadențe"],
-    ["/oferte", "Oferte"],
-    ["/contracte", "Contracte"],
-    ["/crm/leaduri", "Lead-uri"],
-    ["/crm/activitate", "Activitate & emailuri"],
-    ["/taskuri", "Task-uri"],
-  ];
-  return `<div class="subnav">${linkuri
-    .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
-    .join("")}</div>`;
-}
-
 function register(router) {
   router.get("/scadente", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
@@ -529,7 +510,7 @@ function register(router) {
 
     const bloc = await blocScadente(ctx.user, agentId);
     const body = `
-      ${subnavCrm("/scadente")}
+      ${subnavCrm("/scadente", ctx.user)}
       ${
         eAdmin
           ? `<form method="get" action="/scadente" class="filtre">

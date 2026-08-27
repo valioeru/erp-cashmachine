@@ -7,7 +7,7 @@
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
 const { ALOC, ALOC_FACTURA } = require("./alocari");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
 
@@ -48,24 +48,6 @@ function badgeLead(stadiu) {
 function nr(v) {
   const n = parseInt(v, 10);
   return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-function subnavCrm(activ) {
-  const linkuri = [
-    ["/crm", "Pipeline"],
-    ["/crm/birou", "Biroul meu"],
-    ["/crm/alocare", "Clienții mei"],
-    ["/crm/contacte", "Contactări"],
-    ["/scadente", "Scadențe"],
-    ["/oferte", "Oferte"],
-    ["/contracte", "Contracte"],
-    ["/crm/leaduri", "Lead-uri"],
-    ["/crm/activitate", "Activitate & emailuri"],
-    ["/taskuri", "Task-uri"],
-  ];
-  return `<div class="subnav">${linkuri
-    .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
-    .join("")}</div>`;
 }
 
 function register(router) {
@@ -135,7 +117,7 @@ function register(router) {
     }).join("");
 
     const body = `
-      ${subnavCrm("/crm")}
+      ${subnavCrm("/crm", ctx.user)}
       <div class="toolbar">
         <a href="/crm/oportunitati/noua" class="btn">+ Oportunitate</a>
         <a href="/crm/leaduri/nou" class="btn secondary">+ Lead</a>
@@ -246,7 +228,7 @@ function register(router) {
       .all(o.id);
 
     const body = `
-      ${subnavCrm("/crm")}
+      ${subnavCrm("/crm", ctx.user)}
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">Partener</div><a href="/parteneri/${o.partener_id}">${esc(o.partener_nume)}</a></div>
@@ -1003,7 +985,7 @@ function register(router) {
     }
 
     const body = `
-      ${subnavCrm("/crm/birou")}
+      ${subnavCrm("/crm/birou", ctx.user)}
       ${widgetComision}
       ${blocSold}
       ${blocContact}
@@ -1137,7 +1119,7 @@ function register(router) {
     const contor = Object.fromEntries(peStadiu.map((r) => [r.stadiu, r.n]));
 
     const body = `
-      ${subnavCrm("/crm/leaduri")}
+      ${subnavCrm("/crm/leaduri", ctx.user)}
       <div class="toolbar"><a href="/crm/leaduri/nou" class="btn">+ Lead nou</a></div>
       <div class="cards">
         ${STADII_LEAD.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${contor[v] || 0}</div></div>`).join("")}
@@ -1172,7 +1154,7 @@ function register(router) {
   router.get("/crm/leaduri/nou", async (ctx) => {
     const useri = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const body = `
-      ${subnavCrm("/crm/leaduri")}
+      ${subnavCrm("/crm/leaduri", ctx.user)}
       <form class="form" method="post" action="/crm/leaduri">
         <label class="field">Nume persoană <input name="nume" required placeholder="Ex: Ion Popescu"></label>
         <label class="field">Companie <input name="companie" placeholder="Ex: Alpha Logistics SRL"></label>
@@ -1236,7 +1218,7 @@ function register(router) {
       .all(l.id);
 
     const body = `
-      ${subnavCrm("/crm/leaduri")}
+      ${subnavCrm("/crm/leaduri", ctx.user)}
       <div class="detail-box">
         <h1 style="margin-top:0">${esc(l.nume)} ${badgeLead(l.stadiu)}</h1>
         <div class="detail-grid">
@@ -1350,7 +1332,7 @@ function register(router) {
     const l = await db.prepare("SELECT * FROM leaduri WHERE id = ?").get(ctx.params.id);
     if (!l) return redirect(ctx.res, "/crm/leaduri");
     const body = `
-      ${subnavCrm("/crm/leaduri")}
+      ${subnavCrm("/crm/leaduri", ctx.user)}
       <form class="form" method="post" action="/crm/leaduri/${l.id}/converteste">
         <p>Lead-ul <strong>${esc(l.nume)}</strong>${l.companie ? ` (${esc(l.companie)})` : ""} devine partener în ERP.</p>
         <label class="field">Denumirea clientului<input name="nume_partener" required value="${esc(l.companie || l.nume)}"></label>
@@ -1430,7 +1412,7 @@ function register(router) {
       .all();
 
     const body = `
-      ${subnavCrm("/crm/activitate")}
+      ${subnavCrm("/crm/activitate", ctx.user)}
       <div class="toolbar">
         <a class="btn" href="/crm/email/nou">✉ Email nou</a>
         <a class="btn secondary" href="/profil/email">Configurează contul meu de email</a>

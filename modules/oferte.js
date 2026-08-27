@@ -9,7 +9,7 @@
 // obligatoriu: din orice pas se poate sări direct la contract sau la comandă.
 // Un client care sună și comandă pe loc n-are nevoie de ofertă.
 const db = require("../lib/db");
-const { esc, layout, table, money } = require("../lib/render");
+const { esc, layout, table, money, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const STATUS = {
@@ -53,22 +53,6 @@ function poateEdita(user, oferta) {
   return oferta.agent_id === user.id;
 }
 
-function subnav(activ) {
-  const linkuri = [
-    ["/crm", "Pipeline"],
-    ["/crm/birou", "Biroul meu"],
-    ["/crm/alocare", "Clienții mei"],
-    ["/crm/contacte", "Contactări"],
-    ["/scadente", "Scadențe"],
-    ["/oferte", "Oferte"],
-    ["/contracte", "Contracte"],
-    ["/crm/leaduri", "Lead-uri"],
-    ["/crm/activitate", "Activitate & emailuri"],
-    ["/taskuri", "Task-uri"],
-  ];
-  return `<div class="subnav">${linkuri.map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`).join("")}</div>`;
-}
-
 function register(router) {
   // ---------------- lista de oferte ----------------
   router.get("/oferte", async (ctx) => {
@@ -94,7 +78,7 @@ function register(router) {
       .all(...args);
 
     const body = `
-      ${subnav("/oferte")}
+      ${subnavCrm("/oferte", ctx.user)}
       <div class="toolbar">
         <a class="btn" href="/oferte/nou">+ Ofertă nouă</a>
         <a class="btn secondary" href="/oferte">Active</a>
@@ -124,7 +108,7 @@ function register(router) {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 1000").all();
     const presel = parseInt(ctx.query.partener_id, 10);
     const body = `
-      ${subnav("/oferte")}
+      ${subnavCrm("/oferte", ctx.user)}
       <form method="post" action="/oferte" class="form" style="max-width:560px">
         <label class="field"><span>Client</span>
           <select name="partener_id" required>
@@ -168,7 +152,7 @@ function register(router) {
     const editabil = poateEdita(ctx.user, o) && ["ciorna", "trimisa"].includes(o.status);
 
     const body = `
-      ${subnav("/oferte")}
+      ${subnavCrm("/oferte", ctx.user)}
       ${ctx.query.eroare ? `<p style="color:var(--danger);max-width:640px">${esc(ctx.query.eroare)}</p>` : ""}
       <div class="detail-box">
         <div class="detail-grid">
@@ -444,7 +428,7 @@ function register(router) {
       )
       .all(...args);
     const body = `
-      ${subnav("/contracte")}
+      ${subnavCrm("/contracte", ctx.user)}
       <div class="toolbar"><a class="btn" href="/contracte/nou">+ Contract nou</a></div>
       ${table(
         ["Contract", "Client", "Titlu", "Valoare", "Început", "Sfârșit", "Agent", "Stare"],
@@ -468,7 +452,7 @@ function register(router) {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 1000").all();
     const presel = parseInt(ctx.query.partener_id, 10);
     const body = `
-      ${subnav("/contracte")}
+      ${subnavCrm("/contracte", ctx.user)}
       <form method="post" action="/contracte" class="form" style="max-width:560px">
         <label class="field"><span>Client</span><select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}"${presel === p.id ? " selected" : ""}>${esc(p.nume)}</option>`).join("")}</select></label>
         <label class="field"><span>Titlu</span><input name="titlu"></label>
@@ -510,7 +494,7 @@ function register(router) {
     if (!c) return redirect(ctx.res, "/contracte");
     const comenzi = await db.prepare("SELECT id, numar, data, status FROM comenzi WHERE contract_id = ? ORDER BY id DESC").all(c.id);
     const body = `
-      ${subnav("/contracte")}
+      ${subnavCrm("/contracte", ctx.user)}
       <div class="detail-box"><div class="detail-grid">
         <div><div class="k">Contract</div><strong>${esc(c.numar || nrDoc("CTR", c.id))}</strong></div>
         <div><div class="k">Client</div><a href="/parteneri/${c.partener_id}">${esc(c.client)}</a></div>
@@ -564,4 +548,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, subnav, nrDoc };
+module.exports = { register, nrDoc };

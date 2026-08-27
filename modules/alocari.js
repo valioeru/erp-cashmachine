@@ -12,7 +12,7 @@
 // exista nu se strică, iar alocările fine se adaugă doar unde chiar
 // contează.
 const db = require("../lib/db");
-const { esc, layout, table, money } = require("../lib/render");
+const { esc, layout, table, money, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // Subinterogare folosită peste tot unde se calculează comisioane: alocarea
@@ -155,27 +155,6 @@ async function gasestePartener(nume, parteneri, aliasuri) {
     parteneri.find((x) => n.startsWith(normNume(x.nume)) && normNume(x.nume).length >= 4) ||
     null
   );
-}
-
-// Sub-meniul CRM. Duplicat aici, mic și intenționat: dacă l-aș importa din
-// modules/crm.js s-ar închide un cerc de dependențe (crm.js cere alocari.js
-// pentru formula de comision), iar la încărcare unul dintre ele ar fi gol.
-function subnavCrm(activ) {
-  const linkuri = [
-    ["/crm", "Pipeline"],
-    ["/crm/birou", "Biroul meu"],
-    ["/crm/alocare", "Clienții mei"],
-    ["/crm/contacte", "Contactări"],
-    ["/scadente", "Scadențe"],
-    ["/oferte", "Oferte"],
-    ["/contracte", "Contracte"],
-    ["/crm/leaduri", "Lead-uri"],
-    ["/crm/activitate", "Activitate & emailuri"],
-    ["/taskuri", "Task-uri"],
-  ];
-  return `<div class="subnav">${linkuri
-    .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
-    .join("")}</div>`;
 }
 
 async function hartaAliasuri() {
@@ -519,7 +498,7 @@ function register(router) {
     ];
 
     const body = `
-      ${subnavCrm("/crm/alocare")}
+      ${subnavCrm("/crm/alocare", ctx.user)}
       <div class="detail-box">
         <p style="margin-top:0">
           Aici îți iei clienții în portofoliu. Din încasările lor ți se calculează comisionul.
