@@ -35,6 +35,9 @@ require("./modules/productie").register(router);
 require("./modules/banca").register(router);
 require("./modules/angajati").register(router);
 require("./modules/salarii").register(router);
+require("./modules/warehouse").register(router);
+require("./modules/financiar").register(router);
+require("./modules/calculator").register(router);
 
 router.get("/healthz", (ctx) => {
   ctx.res.writeHead(200, { "Content-Type": "text/plain" });
@@ -154,6 +157,8 @@ async function start() {
   await creeazaAdminInitialDacaLipseste();
   await require("./lib/grup").asiguraFirme();
   await require("./modules/sincronizare").incarcaTot();
+  await require("./modules/calculator").seed();
+  require("./modules/warehouse").porneste();
   await auth.curataSesiuni();
   setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
   const PORT = process.env.PORT || 3000;
