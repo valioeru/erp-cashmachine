@@ -103,7 +103,10 @@ function register(router) {
       <label class="field"><span>Client</span>
         <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
       </label>
-      <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar"></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar"></label>
+        <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta"></label>
+      </div>
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2"></textarea></label>
 
       <h2>Produse comandate</h2>
@@ -157,8 +160,16 @@ function register(router) {
     }
 
     const info = await db
-      .prepare("INSERT INTO comenzi (partener_id, numar, observatii) VALUES (?, ?, ?) RETURNING id")
-      .run(partener_id, numar || "", observatii || "");
+      .prepare(
+        "INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta) VALUES (?, ?, ?, ?, ?) RETURNING id"
+      )
+      .run(
+        partener_id,
+        numar || "",
+        observatii || "",
+        ctx.user ? ctx.user.id : null,
+        String(ctx.body.data_livrare_ceruta || "") || null
+      );
     const comandaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
@@ -169,37 +180,10 @@ function register(router) {
       if (cant > 0) await insertLinie.run(comandaId, produsIds[i], cant, Number(preturi[i] || 0));
     }
 
-    // Comanda plasată de agent intră imediat în lista Producției — acolo i se
-    // dă status. Agentul n-are ce urmări prin telefoane: o vede pe pagina ei.
-    try {
-      const client = await db.prepare("SELECT nume FROM parteneri WHERE id = ?").get(partener_id);
-      const rezumat = await db
-        .prepare("SELECT p.denumire, cl.cantitate FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ?")
-        .all(comandaId);
-      await db
-        .prepare(
-          `INSERT INTO comenzi_productie (numar, initiator, initiator_id, partener_id, client_text, tip_produs, cantitate,
-                                          data_initiere, data_solicitata, status, sursa, comanda_id, observatii)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', 'comanda_erp', ?, ?)`
-        )
-        .run(
-          numar || "CMD" + String(comandaId).padStart(5, "0"),
-          ctx.user ? ctx.user.nume : null,
-          ctx.user ? ctx.user.id : null,
-          partener_id,
-          client ? client.nume : null,
-          rezumat.map((r) => r.denumire).join(", ").slice(0, 300) || null,
-          rezumat.map((r) => r.cantitate).join(" + ") || null,
-          new Date().toISOString().slice(0, 10),
-          ctx.body.data_livrare_ceruta || null,
-          comandaId,
-          observatii || null
-        );
-    } catch (e) {
-      // Dacă producția nu poate prelua comanda, comanda tot există — nu o pierdem.
-      console.error("[comenzi] nu am putut crea comanda de producție:", e.message);
-    }
-
+    // Comanda NU mai pleacă direct în producție. Drumul ei e cel cerut de
+    // Vali: intră în lista depozitului („comenzi deschise"), acolo se face
+    // potrivirea cu stocul, și abia dacă marfa lipsește depozitul o comandă
+    // mai departe — la un terț sau la producție. Vezi modules/warehouse.js.
     redirect(ctx.res, `/comenzi/${comandaId}`);
   });
 
@@ -215,7 +199,28 @@ function register(router) {
       )
       .all(comanda.id);
     const total = linii.reduce((s, l) => s + l.cantitate * l.pret_unitar, 0);
-    const factura = await db.prepare("SELECT id FROM facturi WHERE comanda_id = ?").get(comanda.id);
+    const facturi = await db
+      .prepare("SELECT id, serie, numar, status FROM facturi WHERE comanda_id = ? ORDER BY id")
+      .all(comanda.id);
+    const factura = facturi[0] || null;
+
+    // Cum stă comanda față de stoc — aceeași socoteală pe care o vede și
+    // depozitul, ca agentul să nu întrebe pe telefon „a venit marfa?".
+    const warehouse = require("./warehouse");
+    let stoc = { linii: [], acoperiteTot: false, acoperitePartial: false };
+    try {
+      stoc = await warehouse.potrivire(comanda.id);
+    } catch (e) {
+      console.error("[comenzi] potrivire cu stocul:", e.message);
+    }
+    const stocPeLinie = new Map(stoc.linii.map((l) => [Number(l.id), l]));
+    const rezervareActiva = stoc.linii.find((l) => l.rezervare);
+    const aprovizionari = await db
+      .prepare(
+        `SELECT a.*, p.denumire AS produs FROM aprovizionari a JOIN produse p ON p.id = a.produs_id
+         WHERE a.comanda_id = ? ORDER BY a.id DESC`
+      )
+      .all(comanda.id);
 
     // Statusul îl mișcă producția/depozitul/adminul; agentul doar facturează
     // când marfa e gata. Așa nu-și trece nimeni singur comanda pe „livrată".
@@ -232,10 +237,90 @@ function register(router) {
       </div>
 
       ${table(
-        ["Produs", "Cantitate", "UM", "Preț unitar", "Subtotal"],
-        linii.map((l) => [esc(l.denumire), l.cantitate, esc(l.unitate_masura), money(l.pret_unitar), money(l.cantitate * l.pret_unitar)])
+        ["Produs", "Cantitate", "UM", "Preț unitar", "Subtotal", "În stoc acum"],
+        linii.map((l) => {
+          const st = stocPeLinie.get(Number(l.id));
+          const stocTxt = !st
+            ? "—"
+            : st.ramas <= 0.0001
+              ? '<span class="badge verde">livrată</span>'
+              : st.lipsa <= 0.0001
+                ? '<span class="badge verde">tot pe stoc</span>'
+                : st.acoperit > 0.0001
+                  ? `<span class="badge galben">parțial ${st.acoperit.toLocaleString("ro-RO", { maximumFractionDigits: 3 })}</span>`
+                  : '<span class="badge rosu">lipsă</span>';
+          return [
+            esc(l.denumire),
+            l.cantitate,
+            esc(l.unitate_masura),
+            money(l.pret_unitar),
+            money(l.cantitate * l.pret_unitar),
+            stocTxt,
+          ];
+        })
       )}
       <div class="totals"><span class="grand">Total: ${money(total)}</span></div>
+
+      ${
+        comanda.verificata_depozit_la
+          ? `<div class="detail-box" style="margin-top:12px">
+               <strong>Depozitul a verificat comanda</strong> la ${esc(String(comanda.verificata_depozit_la).slice(0, 16))}
+               ${comanda.verificata_depozit_de ? " — " + esc(comanda.verificata_depozit_de) : ""}.
+               ${stoc.acoperiteTot ? "Toată marfa e disponibilă." : stoc.acoperitePartial ? "O parte din marfă e disponibilă." : "Marfa nu e pe stoc."}
+             </div>`
+          : `<p style="color:var(--text-muted);font-size:13px;margin-top:12px">Comanda așteaptă verificarea depozitului.</p>`
+      }
+      ${
+        rezervareActiva
+          ? `<p class="badge galben">Stoc rezervat până la ${esc(String(rezervareActiva.rezervare.expira_la || "").slice(0, 16))} — după aceea se eliberează singur.</p>`
+          : ""
+      }
+      ${
+        aprovizionari.length
+          ? `<h2>Aprovizionare cerută</h2>
+             ${table(
+               ["Produs", "Cantitate", "Sursă", "Termen cerut", "Termen confirmat", "Status"],
+               aprovizionari.map((a) => [
+                 esc(a.produs),
+                 a.cantitate,
+                 a.sursa === "productie" ? "producție" : "terț",
+                 esc(a.termen_cerut || "—"),
+                 esc(a.termen_confirmat || "—"),
+                 esc(a.status),
+               ])
+             )}`
+          : ""
+      }
+
+      ${
+        stoc.acoperitePartial && !comanda.factura_id && comanda.status !== "anulata"
+          ? `<h2>Ce faci cu comanda</h2>
+             <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+               ${
+                 stoc.acoperiteTot
+                   ? `<form method="post" action="/comenzi/${comanda.id}/factureaza" class="inline-form"><button class="btn" type="submit">Facturează tot</button></form>`
+                   : `<form method="post" action="/comenzi/${comanda.id}/factureaza-partial" class="inline-form"><button class="btn" type="submit">Facturează parțial ce e în stoc</button></form>`
+               }
+               <form method="post" action="/comenzi/${comanda.id}/decizie" class="inline-form">
+                 <input type="hidden" name="decizie" value="astept">
+                 <button class="btn secondary" type="submit">Aștept comanda completă</button>
+               </form>
+               <form method="post" action="/warehouse/comanda/${comanda.id}/rezerva" class="inline-form">
+                 <input type="hidden" name="inapoi" value="crm">
+                 <button class="btn secondary" type="submit">Rezervă stocul 24 h</button>
+               </form>
+               ${
+                 rezervareActiva
+                   ? `<form method="post" action="/warehouse/comanda/${comanda.id}/elibereaza" class="inline-form">
+                        <input type="hidden" name="inapoi" value="crm">
+                        <button class="link-btn" type="submit">Renunț la rezervare</button>
+                      </form>`
+                   : ""
+               }
+             </div>
+             ${comanda.decizie_agent === "astept" ? '<p style="color:var(--text-muted);font-size:13px">Ai ales să aștepți comanda completă.</p>' : ""}`
+          : ""
+      }
 
       <h2>Acțiuni</h2>
       ${
@@ -257,8 +342,13 @@ function register(router) {
 
       <div class="toolbar" style="margin-top:14px">
         ${
-          factura
-            ? `<a href="/facturi/${factura.id}" class="btn secondary">Vezi factura${String(factura.status) === "ciorna" ? " (ciornă, așteaptă validare)" : ""}</a>`
+          facturi.length
+            ? facturi
+                .map(
+                  (f) =>
+                    `<a href="/facturi/${f.id}" class="btn secondary">Factura ${esc(f.serie || "")}${esc(String(f.numar || f.id))}${String(f.status) === "ciorna" ? " (ciornă)" : ""}</a>`
+                )
+                .join(" ")
             : poateFactura(comanda)
               ? `<form method="post" action="/comenzi/${comanda.id}/factureaza" class="inline-form"><button type="submit" class="btn">Facturează</button></form>`
               : `<span style="color:var(--text-muted);font-size:13px">Facturarea se deblochează la statusul „în stoc depozit".</span>`
@@ -351,6 +441,92 @@ function register(router) {
       .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
       .run(comanda.partener_id, `Factură ciornă din comanda ${comanda.numar || "#" + comanda.id}`, "Așteaptă validare pe modulul de facturare.", ctx.user.id);
 
+    redirect(ctx.res, `/facturi/${facturaId}`);
+  });
+
+  // Decizia agentului după ce depozitul i-a spus ce are: „aștept comanda
+  // completă" nu face nimic în stoc, doar o scrie, ca să nu întrebe nimeni
+  // peste trei zile de ce stă comanda.
+  router.post("/comenzi/:id/decizie", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const decizie = String((ctx.body || {}).decizie || "").slice(0, 30);
+    await db.prepare("UPDATE comenzi SET decizie_agent = ? WHERE id = ?").run(decizie || null, ctx.params.id);
+    const c = await db.prepare("SELECT partener_id, numar, id FROM comenzi WHERE id = ?").get(ctx.params.id);
+    if (c) {
+      await db
+        .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+        .run(c.partener_id, `Comanda ${c.numar || "#" + c.id}: ${decizie === "astept" ? "așteaptă comanda completă" : decizie}`, null, ctx.user.id);
+    }
+    redirect(ctx.res, `/comenzi/${ctx.params.id}`);
+  });
+
+  // Facturare parțială: intră pe factură doar cât e acoperit din stoc acum.
+  // Restul rămâne pe comandă, cu „cantitate_livrata" mărită, ca a doua oară
+  // să se factureze exact ce a mai rămas.
+  router.post("/comenzi/:id/factureaza-partial", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const comanda = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
+    if (!comanda) return redirect(ctx.res, "/comenzi");
+    if (comanda.status === "anulata") return redirect(ctx.res, `/comenzi/${comanda.id}`);
+
+    const { linii: potrivite } = await require("./warehouse").potrivire(comanda.id);
+    const deFacturat = potrivite.filter((l) => l.acoperit > 0.0001);
+    if (!deFacturat.length) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: "Nimic de facturat",
+          active: "/comenzi",
+          body: `<p style="max-width:620px">Nu e nimic disponibil pe stoc din comanda asta chiar acum.</p>
+                 <a class="btn secondary" href="/comenzi/${comanda.id}">Înapoi la comandă</a>`,
+        })
+      );
+    }
+
+    const info = await db
+      .prepare(
+        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, observatii) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?) RETURNING id"
+      )
+      .run(
+        comanda.partener_id,
+        comanda.id,
+        ctx.user.id,
+        comanda.agent_id || ctx.user.id,
+        new Date().toISOString().slice(0, 10),
+        "facturare parțială — restul comenzii rămâne deschis"
+      );
+    const facturaId = info.lastInsertRowid;
+    const insertLinie = db.prepare(
+      "INSERT INTO facturi_linii (factura_id, produs_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    for (const l of deFacturat) {
+      const cota = await db.prepare("SELECT cota_tva FROM produse WHERE id = ?").get(l.produs_id);
+      await insertLinie.run(facturaId, l.produs_id, l.denumire, l.acoperit, l.pret_unitar, cota ? cota.cota_tva : 21);
+      await db
+        .prepare("UPDATE comenzi_linii SET cantitate_livrata = COALESCE(cantitate_livrata, 0) + ? WHERE id = ?")
+        .run(l.acoperit, l.id);
+    }
+    // Rezervările comenzii se sting: marfa tocmai a plecat pe factură.
+    await db.prepare("UPDATE rezervari_stoc SET stare = 'consumata' WHERE comanda_id = ? AND stare = 'activa'").run(comanda.id);
+
+    const rest = await db
+      .prepare("SELECT COALESCE(SUM(cantitate - COALESCE(cantitate_livrata, 0)), 0) AS r FROM comenzi_linii WHERE comanda_id = ?")
+      .get(comanda.id);
+    if (Number(rest.r || 0) <= 0.0001) {
+      await db.prepare("UPDATE comenzi SET status = 'facturata', factura_id = ? WHERE id = ?").run(facturaId, comanda.id);
+    } else {
+      await db.prepare("UPDATE comenzi SET decizie_agent = 'facturat_partial' WHERE id = ?").run(comanda.id);
+    }
+    await db
+      .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+      .run(
+        comanda.partener_id,
+        `Facturare parțială din comanda ${comanda.numar || "#" + comanda.id}`,
+        "Factură ciornă, așteaptă validare. Restul comenzii rămâne deschis.",
+        ctx.user.id
+      );
     redirect(ctx.res, `/facturi/${facturaId}`);
   });
 

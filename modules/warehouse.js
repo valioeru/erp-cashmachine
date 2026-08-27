@@ -36,6 +36,7 @@ function azi() {
 const STATUS_APROV = {
   ceruta: '<span class="badge gri">cerută</span>',
   confirmata: '<span class="badge albastru">confirmată</span>',
+  gata: '<span class="badge albastru">gata la producție</span>',
   refuzata: '<span class="badge rosu">refuzată</span>',
   primita: '<span class="badge verde">intrată în stoc</span>',
   anulata: '<span class="badge rosu">anulată</span>',
@@ -405,7 +406,7 @@ function register(router) {
 
     const randuriA = aprov.map((a) => {
       const actiuni =
-        poateDepozit(ctx.user) && (a.status === "ceruta" || a.status === "confirmata")
+        poateDepozit(ctx.user) && ["ceruta", "confirmata", "gata"].includes(a.status)
           ? `<form method="post" action="/warehouse/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px">
                <select name="depozit_id" style="width:120px">${optDep}</select>
                <button class="btn small" type="submit">Intră în stoc</button>

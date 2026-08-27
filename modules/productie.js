@@ -185,6 +185,213 @@ function register(router) {
   });
 
   // ---- Ștergere (selectiv sau tot — pentru reimport curat) ----------------
+  // ---- Cereri venite din depozit ----------------------------------------
+  // Depozitul cere marfă din producție când stocul nu acoperă o comandă.
+  // Producția vede termenul cerut de agent și îl confirmă sau nu. La
+  // confirmare, comanda de producție se deschide singură — n-o mai scrie
+  // nimeni a doua oară.
+  router.get("/productie/cereri", async (ctx) => {
+    const cereri = await db
+      .prepare(
+        `SELECT a.*, p.denumire AS produs, p.unitate_masura, c.numar AS comanda_numar, cl.nume AS client
+         FROM aprovizionari a
+         JOIN produse p ON p.id = a.produs_id
+         LEFT JOIN comenzi c ON c.id = a.comanda_id
+         LEFT JOIN parteneri cl ON cl.id = c.partener_id
+         WHERE a.sursa = 'productie'
+         ORDER BY CASE a.status WHEN 'ceruta' THEN 0 WHEN 'confirmata' THEN 1 ELSE 2 END, a.id DESC
+         LIMIT 200`
+      )
+      .all();
+    const randuri = cereri.map((a) => {
+      const actiuni =
+        a.status === "ceruta"
+          ? `<form method="post" action="/productie/cereri/${a.id}/confirma" class="inline-form" style="gap:6px">
+               <input type="date" name="termen" value="${esc(a.termen_cerut || azi())}">
+               <button class="btn small" type="submit">Confirm termenul</button>
+             </form>
+             <form method="post" action="/productie/cereri/${a.id}/refuza" class="inline-form">
+               <button class="link-btn danger" type="submit">Nu pot în termen</button>
+             </form>`
+          : a.status === "confirmata" && a.productie_id
+            ? `<a class="btn small secondary" href="/productie/${a.productie_id}">Vezi comanda de producție</a>`
+            : "";
+      const stare =
+        a.status === "ceruta"
+          ? '<span class="badge gri">așteaptă răspunsul producției</span>'
+          : a.status === "confirmata"
+            ? '<span class="badge albastru">confirmată</span>'
+            : a.status === "gata"
+              ? '<span class="badge albastru">gata, o preia depozitul</span>'
+              : a.status === "refuzata"
+                ? '<span class="badge rosu">refuzată</span>'
+                : a.status === "primita"
+                  ? '<span class="badge verde">intrată în stoc</span>'
+                  : esc(a.status);
+      return [
+        esc(a.produs),
+        `${a.cantitate} ${esc(a.unitate_masura || "")}`,
+        a.comanda_id ? `${esc(a.comanda_numar || "#" + a.comanda_id)}<br><span style="font-size:12px">${esc(a.client || "")}</span>` : "pentru stoc",
+        esc(a.termen_cerut || "—"),
+        esc(a.termen_confirmat || "—"),
+        stare,
+        actiuni,
+      ];
+    });
+    const body = `
+      <p style="max-width:760px;color:var(--text-muted)">
+        Ce cere depozitul de la producție, cu termenul pe care agentul l-a promis clientului. Dacă termenul se poate ține,
+        confirmă-l — comanda de producție se deschide automat. Dacă nu, refuz-o: comanda de vânzare rămâne în listă și
+        poate fi anulată de cel care a plasat-o.
+      </p>
+      ${table(["Produs", "Cantitate", "Pentru comanda", "Termen cerut", "Termen confirmat", "Stare", ""], randuri)}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Cereri din depozit", active: "/productie/cereri", body }));
+  });
+
+  router.post("/productie/cereri/:id/confirma", async (ctx) => {
+    if (!ctx.user || !["admin", "productie", "depozit"].includes(ctx.user.rol)) return redirect(ctx.res, "/productie/cereri");
+    const id = parseInt(ctx.params.id, 10);
+    const a = await db.prepare("SELECT * FROM aprovizionari WHERE id = ?").get(id);
+    if (!a || a.status !== "ceruta") return redirect(ctx.res, "/productie/cereri");
+    const termen = String((ctx.body || {}).termen || "").slice(0, 10) || a.termen_cerut || null;
+    const produs = await db.prepare("SELECT denumire, unitate_masura FROM produse WHERE id = ?").get(a.produs_id);
+    const comanda = a.comanda_id
+      ? await db
+          .prepare("SELECT c.numar, c.partener_id, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+          .get(a.comanda_id)
+      : null;
+    const numar = await numarComandaNou();
+    const ins = await db
+      .prepare(
+        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, partener_id, client_text, tip_produs, cantitate, um,
+                                        data_initiere, data_solicitata, data_propusa, data_livrare, status, sursa, comanda_id,
+                                        aprovizionare_id, produs_id, observatii)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', 'depozit', ?, ?, ?, ?) RETURNING id`
+      )
+      .run(
+        numar,
+        ctx.user.nume,
+        ctx.user.id,
+        comanda ? comanda.partener_id : null,
+        comanda ? comanda.client : null,
+        produs ? produs.denumire : null,
+        String(a.cantitate),
+        produs ? produs.unitate_masura || "buc" : "buc",
+        azi(),
+        a.termen_cerut || null,
+        termen,
+        termen,
+        a.comanda_id || null,
+        a.id,
+        a.produs_id,
+        comanda ? `Cerere din depozit pentru comanda ${comanda.numar || "#" + a.comanda_id}` : "Cerere din depozit, pentru stoc"
+      );
+    await db
+      .prepare("UPDATE aprovizionari SET status = 'confirmata', termen_confirmat = ?, productie_id = ?, raspuns = ? WHERE id = ?")
+      .run(termen, ins.lastInsertRowid, `confirmat de ${ctx.user.nume}`, id);
+    if (a.comanda_id) {
+      await db
+        .prepare("UPDATE comenzi SET status = 'in_productie' WHERE id = ? AND status NOT IN ('facturata','livrata','anulata')")
+        .run(a.comanda_id);
+    }
+    redirect(ctx.res, `/productie/${ins.lastInsertRowid}`);
+  });
+
+  router.post("/productie/cereri/:id/refuza", async (ctx) => {
+    if (!ctx.user || !["admin", "productie", "depozit"].includes(ctx.user.rol)) return redirect(ctx.res, "/productie/cereri");
+    await db
+      .prepare("UPDATE aprovizionari SET status = 'refuzata', raspuns = ? WHERE id = ?")
+      .run(`termen refuzat de ${ctx.user.nume}`, parseInt(ctx.params.id, 10));
+    redirect(ctx.res, "/productie/cereri");
+  });
+
+  // ---- Materie primă cerută de la depozit --------------------------------
+  router.get("/productie/materie", async (ctx) => {
+    const cereri = await db
+      .prepare(
+        `SELECT m.*, p.denumire AS produs FROM cereri_materie_prima m LEFT JOIN produse p ON p.id = m.produs_id
+         ORDER BY CASE m.status WHEN 'ceruta' THEN 0 WHEN 'confirmata' THEN 1 ELSE 2 END, m.id DESC LIMIT 200`
+      )
+      .all();
+    const produse = await db.prepare("SELECT id, denumire FROM produse ORDER BY denumire LIMIT 3000").all();
+    const comenzi = await db
+      .prepare("SELECT id, numar FROM comenzi_productie WHERE status IN ('noua','in_productie') ORDER BY id DESC LIMIT 100")
+      .all();
+    const body = `
+      <p style="max-width:760px;color:var(--text-muted)">
+        Drumul invers: producția cere materie primă de la depozit. Depozitul validează cererea și dă un termen, la fel
+        cum producția confirmă termenele care vin dinspre depozit.
+      </p>
+      <form method="post" action="/productie/materie" class="form" style="max-width:820px">
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px">
+          <label class="field"><span>Produs din nomenclator</span>
+            <select name="produs_id"><option value="">— altceva, scriu mai jos —</option>${produse
+              .map((p) => `<option value="${p.id}">${esc(p.denumire)}</option>`)
+              .join("")}</select>
+          </label>
+          <label class="field"><span>Cantitate</span><input type="number" step="0.001" name="cantitate" required></label>
+          <label class="field"><span>UM</span><input name="um" value="kg"></label>
+        </div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px">
+          <label class="field"><span>Descriere (dacă nu e în nomenclator)</span><input name="descriere"></label>
+          <label class="field"><span>Termen cerut</span><input type="date" name="termen_cerut"></label>
+        </div>
+        <label class="field"><span>Pentru comanda de producție</span>
+          <select name="productie_id"><option value="">— fără legătură —</option>${comenzi
+            .map((c) => `<option value="${c.id}">${esc(c.numar || "#" + c.id)}</option>`)
+            .join("")}</select>
+        </label>
+        <label class="field"><span>Observații</span><input name="observatii"></label>
+        <div class="form-actions"><button class="btn" type="submit">Cer materia primă</button></div>
+      </form>
+      ${table(
+        ["Produs / descriere", "Cantitate", "Termen cerut", "Termen dat de depozit", "Stare", "Observații"],
+        cereri.map((m) => [
+          esc(m.produs || m.descriere || "—"),
+          `${m.cantitate} ${esc(m.um || "")}`,
+          esc(m.termen_cerut || "—"),
+          esc(m.termen_confirmat || "—"),
+          m.status === "ceruta"
+            ? '<span class="badge gri">așteaptă depozitul</span>'
+            : m.status === "confirmata"
+              ? '<span class="badge albastru">confirmată</span>'
+              : m.status === "primita"
+                ? '<span class="badge verde">primită</span>'
+                : m.status === "refuzata"
+                  ? '<span class="badge rosu">refuzată</span>'
+                  : esc(m.status),
+          esc(m.observatii || ""),
+        ])
+      )}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Materie primă de la depozit", active: "/productie/materie", body }));
+  });
+
+  router.post("/productie/materie", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const b = ctx.body || {};
+    const cant = Number(b.cantitate) || 0;
+    if (cant <= 0) return redirect(ctx.res, "/productie/materie");
+    await db
+      .prepare(
+        `INSERT INTO cereri_materie_prima (produs_id, descriere, cantitate, um, termen_cerut, status, cerut_de, productie_id, creata_la, observatii)
+         VALUES (?, ?, ?, ?, ?, 'ceruta', ?, ?, ?, ?)`
+      )
+      .run(
+        parseInt(b.produs_id, 10) || null,
+        String(b.descriere || "").trim().slice(0, 300) || null,
+        cant,
+        String(b.um || "kg").slice(0, 20),
+        String(b.termen_cerut || "") || null,
+        ctx.user.nume,
+        parseInt(b.productie_id, 10) || null,
+        new Date().toISOString().slice(0, 19).replace("T", " "),
+        String(b.observatii || "").trim().slice(0, 500) || null
+      );
+    redirect(ctx.res, "/productie/materie");
+  });
+
   router.post("/productie/sterge", async (ctx) => {
     let ids = ctx.body.ids;
     if (!ids) return redirect(ctx.res, "/productie");
@@ -342,7 +549,7 @@ function register(router) {
     // spatele ei trece în „în stoc depozit" — momentul în care agentul poate
     // apăsa Facturează. Fără pasul ăsta cineva ar trebui să-i dea telefon.
     try {
-      const cp = await db.prepare("SELECT comanda_id FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
+      const cp = await db.prepare("SELECT comanda_id, aprovizionare_id FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
       if (cp && cp.comanda_id) {
         const nouStatusVanzare =
           status === "finalizata" ? "in_stoc_depozit" : status === "in_productie" ? "in_productie" : status === "anulata" ? "anulata" : null;
@@ -351,6 +558,11 @@ function register(router) {
             .prepare("UPDATE comenzi SET status = ? WHERE id = ? AND status NOT IN ('facturata','livrata')")
             .run(nouStatusVanzare, cp.comanda_id);
         }
+      }
+      // Dacă a venit dintr-o cerere a depozitului, îi spunem depozitului că
+      // marfa e gata — el o bagă efectiv în stoc, cu rețeta lui.
+      if (cp && cp.aprovizionare_id && status === "finalizata") {
+        await db.prepare("UPDATE aprovizionari SET status = 'gata' WHERE id = ? AND status = 'confirmata'").run(cp.aprovizionare_id);
       }
     } catch (e) {
       console.error("[productie] nu am putut sincroniza comanda de vânzare:", e.message);
