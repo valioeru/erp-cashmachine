@@ -30,7 +30,7 @@ async function facturatIntre(directie, de, la) {
     .prepare(
       `SELECT COALESCE(SUM(t.net), 0) AS net
          FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
-        WHERE f.directie = ? AND f.status <> 'anulata' AND COALESCE(f.intercompany,0) = 0
+        WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
     )
     .get(directie, de, la);
@@ -43,7 +43,7 @@ async function peLuni(directie, an) {
     .prepare(
       `SELECT SUBSTR(f.data_emiterii, 6, 2) AS luna, COALESCE(SUM(t.net), 0) AS net
          FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
-        WHERE f.directie = ? AND f.status <> 'anulata' AND COALESCE(f.intercompany,0) = 0
+        WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
         GROUP BY SUBSTR(f.data_emiterii, 6, 2)`
     )

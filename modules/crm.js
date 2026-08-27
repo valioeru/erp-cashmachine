@@ -749,7 +749,7 @@ function register(router) {
                 COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS sold,
                 MAX(f.data_emiterii) AS ultima
          FROM parteneri p
-         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
+         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
          WHERE p.id IN (SELECT f2.partener_id FROM facturi f2 JOIN ${ALOC_FACTURA} al2 ON al2.factura_id = f2.id WHERE al2.utilizator_id = ?) AND p.tip IN ('client','ambele')
@@ -818,7 +818,7 @@ function register(router) {
          JOIN facturi f ON f.id = fl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
          JOIN produse pr ON pr.id = fl.produs_id
-         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND p.agent_id = ?
+         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND p.agent_id = ?
          GROUP BY pr.id, pr.denumire ORDER BY venit DESC LIMIT 8`
       )
       .all(acum12Luni, agentId);

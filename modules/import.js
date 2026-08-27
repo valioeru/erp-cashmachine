@@ -1074,7 +1074,7 @@ function register(router) {
 
     // Indexăm facturile de vânzare după serie+număr, ca să potrivim rapid.
     const facturi = await db
-      .prepare("SELECT id, serie, numar FROM facturi WHERE directie = 'vanzare' AND status <> 'anulata'")
+      .prepare("SELECT id, serie, numar FROM facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
       .all();
     const dupaCheie = new Map();
     for (const f of facturi) {

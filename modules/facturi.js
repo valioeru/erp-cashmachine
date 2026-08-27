@@ -5,6 +5,7 @@ const { send, redirect } = require("../lib/router");
 const smartbill = require("../lib/smartbill");
 
 const STATUS_LABEL = {
+  ciorna: '<span class="badge gri">ciornă</span>',
   emisa: '<span class="badge galben">emisă</span>',
   platita_partial: '<span class="badge galben">plătită parțial</span>',
   platita: '<span class="badge verde">plătită</span>',
@@ -368,6 +369,26 @@ function register(router) {
 
     const body = `
       <div class="toolbar"><a href="${listaInapoi}" class="btn secondary small">← ${eVanzare ? "Facturi vânzare" : "Facturi achiziție"}</a></div>
+      ${ctx.query.mesaj ? `<p style="color:var(--text-muted)">${esc(ctx.query.mesaj)}</p>` : ""}
+      ${
+        factura.status === "ciorna"
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn)">
+              <strong>Factură ciornă.</strong>
+              <p style="margin:6px 0 10px;max-width:660px;font-size:13px;color:var(--text-muted)">
+                Nu are încă număr, nu a scăzut stocul și nu a plecat în SmartBill. Toate astea se întâmplă
+                la validare — pe care o face cineva cu drepturi pe facturare.
+              </p>
+              ${
+                ctx.user && ["admin", "financiar"].includes(ctx.user.rol)
+                  ? `<form method="post" action="/facturi/${factura.id}/valideaza" class="inline-form"
+                           onsubmit="return confirm('Validezi factura? Se emite, scade stocul și pleacă în SmartBill.')">
+                       <button class="btn" type="submit">Validează și emite factura</button>
+                     </form>`
+                  : `<span style="font-size:13px;color:var(--text-muted)">Nu ai drepturi de validare — anunță pe cineva de la facturare.</span>`
+              }
+            </div>`
+          : ""
+      }
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">${eVanzare ? "Client" : "Furnizor"}</div>${esc(factura.partener_nume)}</div>
@@ -515,6 +536,91 @@ function register(router) {
       }
       throw e;
     }
+  });
+
+  // Validarea unei facturi ciornă. Aici se întâmplă tot ce e ireversibil:
+  // factura devine emisă, scade stocul la noi și pleacă în SmartBill.
+  // De-aia o poate apăsa doar cine are drepturi pe facturare.
+  router.post("/facturi/:id/valideaza", async (ctx) => {
+    if (!ctx.user || !["admin", "financiar"].includes(ctx.user.rol)) {
+      return send(
+        ctx.res,
+        403,
+        layout({
+          user: ctx.user,
+          title: "Fără drepturi",
+          active: "/facturi",
+          body: `<h1>Fără drepturi de facturare</h1>
+            <p>Validarea unei facturi o face cineva cu drepturi pe modulul de facturare.</p>
+            <a class="btn secondary" href="/facturi/${ctx.params.id}">Înapoi la factură</a>`,
+        })
+      );
+    }
+    const factura = await db.prepare("SELECT * FROM facturi WHERE id = ?").get(ctx.params.id);
+    if (!factura) return redirect(ctx.res, "/facturi");
+    if (factura.status !== "ciorna") return redirect(ctx.res, `/facturi/${factura.id}`);
+
+    const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
+
+    // Numărul se dă abia acum: o ciornă nu consumă un număr de factură.
+    let numar = factura.numar;
+    if (!numar) {
+      const m = await db
+        .prepare("SELECT COALESCE(MAX(numar), 0) AS n FROM facturi WHERE directie = 'vanzare' AND COALESCE(serie,'') = ?")
+        .get(factura.serie || "FCT");
+      numar = Number((m && m.n) || 0) + 1;
+    }
+
+    await db
+      .prepare("UPDATE facturi SET status = 'emisa', numar = ?, validata_de = ?, validata_la = ? WHERE id = ?")
+      .run(numar, ctx.user.id, new Date().toISOString().slice(0, 19).replace("T", " "), factura.id);
+
+    // Scade stocul la noi, din primul depozit definit.
+    let avertismentStoc = "";
+    try {
+      const dep = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
+      if (dep) {
+        for (const l of linii) {
+          if (!l.produs_id) continue;
+          await db
+            .prepare("INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, data) VALUES (?, ?, 'iesire', ?, ?, ?, ?)")
+            .run(l.produs_id, dep.id, l.cantitate, l.pret_unitar, `Factura ${factura.serie || ""} ${numar}`.trim(), new Date().toISOString().slice(0, 10));
+        }
+      } else {
+        avertismentStoc = "Nu există niciun depozit definit, așa că stocul nu s-a mișcat la noi.";
+      }
+    } catch (e) {
+      avertismentStoc = "Stocul nu s-a putut actualiza: " + e.message;
+    }
+
+    // Marchează comanda ca facturată.
+    if (factura.comanda_id) {
+      await db.prepare("UPDATE comenzi SET status = 'facturata' WHERE id = ?").run(factura.comanda_id);
+    }
+
+    // Trimite în SmartBill, dacă e configurat. Dacă nu, factura rămâne validă
+    // la noi și se poate retrimite oricând din pagina ei.
+    let mesajSmartbill = "";
+    if (smartbill.isConfigured()) {
+      try {
+        const proaspata = await db.prepare("SELECT * FROM facturi WHERE id = ?").get(factura.id);
+        const rezultat = await smartbill.trimiteFactura(proaspata, linii);
+        await db
+          .prepare("UPDATE facturi SET smartbill_sync_la = ?, smartbill_serie = ?, smartbill_numar = ? WHERE id = ?")
+          .run(new Date().toISOString().slice(0, 19).replace("T", " "), rezultat.serie || null, rezultat.numar || null, factura.id);
+        mesajSmartbill = "Trimisă și în SmartBill.";
+      } catch (e) {
+        mesajSmartbill = "Factura e validă la noi, dar nu a plecat în SmartBill: " + e.message;
+      }
+    } else {
+      mesajSmartbill = "SmartBill nu e configurat, așa că factura a rămas doar la noi.";
+    }
+
+    await db
+      .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'factura', ?, ?, ?)")
+      .run(factura.partener_id, `Factura ${factura.serie || ""} ${numar} validată`.trim(), [mesajSmartbill, avertismentStoc].filter(Boolean).join(" "), ctx.user.id);
+
+    redirect(ctx.res, `/facturi/${factura.id}?mesaj=${encodeURIComponent([mesajSmartbill, avertismentStoc].filter(Boolean).join(" "))}`);
   });
 
   router.post("/facturi/:id/smartbill", async (ctx) => {

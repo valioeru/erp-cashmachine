@@ -337,6 +337,25 @@ function register(router) {
         finalizare,
         ctx.params.id
       );
+
+    // Când producția marchează comanda finalizată, comanda de vânzare din
+    // spatele ei trece în „în stoc depozit" — momentul în care agentul poate
+    // apăsa Facturează. Fără pasul ăsta cineva ar trebui să-i dea telefon.
+    try {
+      const cp = await db.prepare("SELECT comanda_id FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
+      if (cp && cp.comanda_id) {
+        const nouStatusVanzare =
+          status === "finalizata" ? "in_stoc_depozit" : status === "in_productie" ? "in_productie" : status === "anulata" ? "anulata" : null;
+        if (nouStatusVanzare) {
+          await db
+            .prepare("UPDATE comenzi SET status = ? WHERE id = ? AND status NOT IN ('facturata','livrata')")
+            .run(nouStatusVanzare, cp.comanda_id);
+        }
+      }
+    } catch (e) {
+      console.error("[productie] nu am putut sincroniza comanda de vânzare:", e.message);
+    }
+
     redirect(ctx.res, `/productie/${ctx.params.id}`);
   });
 

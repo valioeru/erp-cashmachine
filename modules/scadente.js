@@ -129,7 +129,7 @@ async function facturiCuSold(agentId) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-        WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND COALESCE(f.intercompany, 0) = 0
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany, 0) = 0
           AND COALESCE(t.total, 0) - COALESCE(pl.platit, 0) > 0.5${filtru}
         ORDER BY f.data_scadenta, f.id`
     )
@@ -184,7 +184,7 @@ async function stareClient(partenerId) {
          FROM facturi f
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-        WHERE f.partener_id = ? AND f.directie = 'vanzare' AND f.status <> 'anulata'
+        WHERE f.partener_id = ? AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
           AND COALESCE(f.intercompany,0) = 0
           AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5`
     )

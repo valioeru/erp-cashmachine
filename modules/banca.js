@@ -316,7 +316,7 @@ function register(router) {
       .get(t.factura_id);
     if (f) {
       const status = Number(f.platit) >= Number(f.total) - 0.01 ? "platita" : "platita_partial";
-      await db.prepare("UPDATE facturi SET status = ? WHERE id = ? AND status <> 'anulata'").run(status, t.factura_id);
+      await db.prepare("UPDATE facturi SET status = ? WHERE id = ? AND status NOT IN ('anulata','ciorna')").run(status, t.factura_id);
     }
     return true;
   }

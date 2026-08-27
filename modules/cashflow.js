@@ -63,7 +63,7 @@ function register(router) {
                 SUM(CASE WHEN f.directie = 'vanzare' THEN pl.suma ELSE 0 END) AS intrari,
                 SUM(CASE WHEN f.directie = 'achizitie' THEN pl.suma ELSE 0 END) AS iesiri
          FROM plati pl JOIN facturi f ON f.id = pl.factura_id
-         WHERE f.status <> 'anulata' AND f.intercompany = 0
+         WHERE f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
          GROUP BY SUBSTR(pl.data, 1, 7)
          ORDER BY luna DESC LIMIT 12`
       )

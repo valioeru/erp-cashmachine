@@ -51,15 +51,15 @@ function register(router) {
                 u.nume AS agent,
                 COALESCE((SELECT SUM(COALESCE(t.total,0)) FROM facturi f
                             LEFT JOIN ${T} t ON t.factura_id = f.id
-                           WHERE f.partener_id = p.id AND f.status <> 'anulata'
+                           WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')
                              AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?), 0) AS rulaj,
                 COALESCE((SELECT SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)) FROM facturi f
                             LEFT JOIN ${T} t ON t.factura_id = f.id
                             LEFT JOIN ${P} pl ON pl.factura_id = f.id
-                           WHERE f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata'
+                           WHERE f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
                              AND COALESCE(f.intercompany,0) = 0
                              AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5), 0) AS sold,
-                (SELECT MAX(f.data_emiterii) FROM facturi f WHERE f.partener_id = p.id AND f.status <> 'anulata') AS ultima
+                (SELECT MAX(f.data_emiterii) FROM facturi f WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')) AS ultima
            FROM parteneri p
            LEFT JOIN utilizatori u ON u.id = p.agent_id
           WHERE ${unde}
