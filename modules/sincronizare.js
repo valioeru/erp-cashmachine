@@ -96,12 +96,56 @@ async function incarcaStiri() {
   return n;
 }
 
+// Costul lunar al agenților, citit din statele de plată din Drive.
+// Spre deosebire de agendă și știri, aici NU ștergem nimic: un cost pus de
+// mână din interfață e mai proaspăt decât fișierul, iar dacă rândul există
+// deja pentru aceeași persoană și aceeași dată, îl lăsăm în pace.
+async function incarcaCosturi() {
+  const randuri = citesteFisier("costuri-agenti.json");
+  if (!randuri) return 0;
+  let n = 0;
+  for (const r of randuri.slice(0, 100)) {
+    const nume = String((r && r.utilizator) || "").trim();
+    const deLa = String((r && r.valabil_de_la) || "").slice(0, 10);
+    if (!nume || !/^\d{4}-\d{2}-\d{2}$/.test(deLa)) continue;
+    const u = await db.prepare("SELECT id FROM utilizatori WHERE LOWER(nume) = LOWER(?) AND activ = 1").get(nume);
+    if (!u) {
+      console.error(`[sincronizare] cost pentru „${nume}" — utilizatorul nu există în ERP, sărit`);
+      continue;
+    }
+    const exista = await db
+      .prepare("SELECT id FROM costuri_personal WHERE utilizator_id = ? AND valabil_de_la = ?")
+      .get(u.id, deLa);
+    if (exista) continue;
+    await db
+      .prepare(
+        `INSERT INTO costuri_personal (utilizator_id, valabil_de_la, salariu_brut, cam_procent, cost_masina,
+                                       masina_detalii, cost_carburant, alte_costuri, observatii)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        u.id,
+        deLa,
+        Number(r.salariu_brut) || 0,
+        Number(r.cam_procent) || 2.25,
+        Number(r.cost_masina) || 0,
+        r.masina_detalii ? String(r.masina_detalii).slice(0, 200) : null,
+        Number(r.cost_carburant) || 0,
+        Number(r.alte_costuri) || 0,
+        r.observatii ? String(r.observatii).slice(0, 500) : null
+      );
+    n++;
+  }
+  return n;
+}
+
 // Chemată o dată la pornire, din server.js.
 async function incarcaTot() {
   try {
     const a = await incarcaAgenda();
     const s = await incarcaStiri();
-    if (a || s) console.log(`[sincronizare] agendă: ${a} rânduri, știri: ${s} rânduri`);
+    const c = await incarcaCosturi();
+    if (a || s || c) console.log(`[sincronizare] agendă: ${a}, știri: ${s}, costuri noi: ${c}`);
   } catch (e) {
     console.error("[sincronizare] încărcarea a eșuat:", e.message);
   }

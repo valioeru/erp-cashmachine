@@ -83,7 +83,7 @@ async function salariiPeLuni(an) {
 function graficProfit(valori, aniLuni) {
   const W = 720;
   const H = 220;
-  const stangaAx = 62;
+  const stangaAx = 54;
   const jos = 26;
   const sus = 12;
   const latPlot = W - stangaAx - 8;
@@ -138,13 +138,22 @@ function graficProfit(valori, aniLuni) {
            aria-label="Profit lunar în anul curent, în lei, pe luni">
         <line x1="${stangaAx}" y1="${yZero}" x2="${W - 8}" y2="${yZero}" stroke="var(--viz-grid)" stroke-width="1"/>
         <text x="${stangaAx - 8}" y="${yZero + 4}" text-anchor="end" font-size="11" fill="var(--viz-text-2)">0</text>
-        <text x="${stangaAx - 8}" y="${sus + 10}" text-anchor="end" font-size="11" fill="var(--viz-text-2)">${esc(money(maxAbs))}</text>
-        <text x="${stangaAx - 8}" y="${H - jos - 2}" text-anchor="end" font-size="11" fill="var(--viz-text-2)">-${esc(money(maxAbs))}</text>
+        <text x="${stangaAx - 8}" y="${sus + 10}" text-anchor="end" font-size="11" fill="var(--viz-text-2)">${esc(scurt(maxAbs))}</text>
+        <text x="${stangaAx - 8}" y="${H - jos - 2}" text-anchor="end" font-size="11" fill="var(--viz-text-2)">-${esc(scurt(maxAbs))}</text>
         ${bare}
         ${etichete}
         ${axaLuni}
       </svg>
     </div>`;
+}
+
+// Etichetele axei sunt scurte, ca să nu se lovească de eticheta primei bare:
+// „1,55 mil." în loc de „1.552.546,40 lei".
+function scurt(v) {
+  const a = Math.abs(v);
+  if (a >= 1000000) return (v / 1000000).toFixed(2).replace(".", ",") + " mil.";
+  if (a >= 1000) return Math.round(v / 1000).toLocaleString("ro-RO") + " mii";
+  return Math.round(v).toString();
 }
 
 function sageata(delta) {
