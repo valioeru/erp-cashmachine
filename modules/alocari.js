@@ -141,11 +141,11 @@ function register(router) {
     };
 
     const comenzi = await db
-      .prepare("SELECT client_text, initiator FROM comenzi_productie WHERE initiator IS NOT NULL AND initiator <> '' AND client_text IS NOT NULL AND client_text <> ''")
+      .prepare("SELECT client_text, COALESCE(reprezentant, initiator) AS cod FROM comenzi_productie WHERE COALESCE(reprezentant, initiator) IS NOT NULL AND COALESCE(reprezentant, initiator) <> '' AND client_text IS NOT NULL AND client_text <> ''")
       .all();
     const peClient = new Map();
     for (const c of comenzi) {
-      const cod = String(c.initiator).trim().toUpperCase();
+      const cod = String(c.cod).trim().toUpperCase();
       if (!/^[A-Z]{2,3}$/.test(cod)) continue;
       const k = String(c.client_text).trim();
       if (!peClient.has(k)) peClient.set(k, {});
