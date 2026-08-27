@@ -55,6 +55,9 @@ function subnavCrm(activ) {
     ["/crm", "Pipeline"],
     ["/crm/birou", "Biroul meu"],
     ["/crm/alocare", "Clienții mei"],
+    ["/crm/contacte", "Contactări"],
+    ["/oferte", "Oferte"],
+    ["/contracte", "Contracte"],
     ["/crm/leaduri", "Lead-uri"],
     ["/crm/activitate", "Activitate & emailuri"],
     ["/taskuri", "Task-uri"],
@@ -991,9 +994,24 @@ function register(router) {
       }
     `;
 
+    // Task-urile de contact se generează la deschiderea biroului: agentul
+    // găsește pe masă pe cine n-a mai sunat, fără să ceară nimeni nimic.
+    const contacte = require("./contacte");
+    let blocContact = "", blocSug = "";
+    try {
+      await contacte.genereazaTaskuriContact(agentId);
+      await contacte.genereazaSugestii();
+      blocContact = await contacte.blocTaskuriContact(ctx.user, agentId);
+      blocSug = await contacte.blocSugestii(ctx.user);
+    } catch (e) {
+      blocContact = `<p style="color:var(--danger)">Nu s-au putut genera task-urile de contact: ${esc(e.message)}</p>`;
+    }
+
     const body = `
       ${subnavCrm("/crm/birou")}
       ${widgetComision}
+      ${blocContact}
+      ${blocSug}
       ${blocCost}
       ${blocMarja}
       ${blocClienti}

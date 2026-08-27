@@ -14,7 +14,12 @@ const STARE_LABEL = {
   furnizor_activ: "Furnizor activ",
 };
 const STARE_OPTIONS = Object.entries(STARE_LABEL).map(([value, label]) => ({ value, label }));
-const INTERACTIUNE_LABEL = { nota: "Notă", apel: "Apel telefonic", email: "Email", intalnire: "Întâlnire" };
+// Tipurile de interacțiune. Primele patru se aleg manual din formular;
+// restul apar doar generate de sistem (task de contact, ofertă, notificare),
+// de-aia stau separat — n-are sens să scrii de mână „ofertă acceptată".
+const INTERACTIUNE_LABEL = { nota: "Notă", telefon: "Telefon", vizita: "Vizită", email: "Email", whatsapp: "WhatsApp", apel: "Apel telefonic", intalnire: "Întâlnire" };
+const INTERACTIUNE_MANUAL = ["nota", "telefon", "vizita", "email", "whatsapp"];
+const INTERACTIUNE_AUTO = { oferta: "Ofertă", contract: "Contract", comanda: "Comandă", notificare: "Notificare", factura: "Factură" };
 
 function register(router) {
   registerCrud(router, {
@@ -79,7 +84,9 @@ function register(router) {
     const taskuriPartener = await db.prepare(`${tsk.SELECT_TASK} WHERE t.partener_id = ? ORDER BY t.id DESC LIMIT 50`).all(partener.id);
     const emailuriPartener = await db.prepare("SELECT id, subiect, catre, status, trimis_la FROM emailuri WHERE partener_id = ? ORDER BY id DESC LIMIT 50").all(partener.id);
     const utilizatoriActivi = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
-    const interactiuni = await db.prepare("SELECT * FROM interactiuni WHERE partener_id = ? ORDER BY data DESC, id DESC").all(partener.id);
+    const interactiuni = await db
+      .prepare("SELECT i.*, u.nume AS agent FROM interactiuni i LEFT JOIN utilizatori u ON u.id = i.utilizator_id WHERE i.partener_id = ? ORDER BY i.data DESC, i.id DESC")
+      .all(partener.id);
 
     const alocare = await alocari.alocariPentruPartener(partener.id);
     const alocareLinii = alocare.linii;
@@ -173,7 +180,7 @@ function register(router) {
       <h2>Interacțiuni / istoric contact</h2>
       <form method="post" action="/parteneri/${partener.id}/interactiuni" class="form" style="max-width:520px">
         <label class="field"><span>Tip</span>
-          <select name="tip">${Object.entries(INTERACTIUNE_LABEL).map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select>
+          <select name="tip">${INTERACTIUNE_MANUAL.map((v) => `<option value="${v}">${esc(INTERACTIUNE_LABEL[v])}</option>`).join("")}</select>
         </label>
         <label class="field"><span>Subiect</span><input type="text" name="subiect"></label>
         <label class="field"><span>Descriere</span><textarea name="descriere" rows="2"></textarea></label>
@@ -181,8 +188,15 @@ function register(router) {
         <button type="submit" class="btn small">Adaugă</button>
       </form>
       ${table(
-        ["Data", "Tip", "Subiect", "Descriere", "Următorul contact"],
-        interactiuni.map((i) => [esc(i.data), esc(INTERACTIUNE_LABEL[i.tip] || i.tip), esc(i.subiect), esc(i.descriere), esc(i.data_urmatoare_actiune) || "—"])
+        ["Data", "Tip", "Subiect", "Descriere", "Următorul contact", "Cine"],
+        interactiuni.map((i) => [
+          esc(i.data),
+          esc(INTERACTIUNE_LABEL[i.tip] || INTERACTIUNE_AUTO[i.tip] || i.tip),
+          esc(i.subiect),
+          esc(i.descriere),
+          esc(i.data_urmatoare_actiune) || "—",
+          esc(i.agent || "—"),
+        ])
       )}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Partener: ${partener.nume}`, active: "/parteneri", body }));
@@ -191,8 +205,8 @@ function register(router) {
   router.post("/parteneri/:id/interactiuni", async (ctx) => {
     const { tip, subiect, descriere, data_urmatoare_actiune } = ctx.body;
     await db
-      .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, data_urmatoare_actiune) VALUES (?, ?, ?, ?, ?)")
-      .run(ctx.params.id, tip || "nota", subiect || "", descriere || "", data_urmatoare_actiune || null);
+      .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, data_urmatoare_actiune, utilizator_id) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(ctx.params.id, tip || "nota", subiect || "", descriere || "", data_urmatoare_actiune || null, ctx.user ? ctx.user.id : null);
     redirect(ctx.res, `/parteneri/${ctx.params.id}`);
   });
 }
