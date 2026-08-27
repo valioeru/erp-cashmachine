@@ -139,13 +139,89 @@ async function incarcaCosturi() {
   return n;
 }
 
+// Angajații, citiți din statele de plată din Drive (Grup-Oeru).
+//
+// Ce intră: numele, funcția, salariul brut și net, data contractului, firma.
+// Ce NU intră: CNP-ul. E în PDF-uri, dar nu se citește și nu se scrie nicăieri
+// — ERP-ul n-are ce face cu el, iar un CNP ținut degeaba e doar risc.
+//
+// Actualizarea e pe nume + firmă: cine e în fișier se creează sau se
+// actualizează, cine nu mai e pe statul firmei ăleia trece pe „inactiv" —
+// nu se șterge, ca să rămână istoricul.
+async function incarcaAngajati() {
+  const randuri = citesteFisier("angajati.json");
+  if (!randuri) return 0;
+  const firme = await db.prepare("SELECT id, cui FROM firme").all();
+  const dupaCui = new Map(firme.map((f) => [String(f.cui || "").replace(/[^0-9]/g, ""), f.id]));
+  const t = acum();
+  const vazuti = new Map(); // firma_id -> Set de nume
+  let n = 0;
+
+  for (const r of randuri.slice(0, 500)) {
+    const nume = String((r && r.nume) || "").trim();
+    if (!nume) continue;
+    const firmaId = dupaCui.get(String(r.firma_cui || "").replace(/[^0-9]/g, "")) || null;
+    const existent = await db
+      .prepare(
+        firmaId
+          ? "SELECT id FROM angajati WHERE LOWER(nume) = LOWER(?) AND firma_id = ?"
+          : "SELECT id FROM angajati WHERE LOWER(nume) = LOWER(?)"
+      )
+      .get(...(firmaId ? [nume, firmaId] : [nume]));
+
+    const valori = [
+      String(r.functie || "").slice(0, 120) || null,
+      r.data_angajarii ? String(r.data_angajarii).slice(0, 10) : null,
+      Number(r.salariu_brut) || 0,
+      Number(r.salariu_net) || 0,
+      r.sediu ? String(r.sediu).slice(0, 120) : null,
+      firmaId,
+      "state de plată Drive",
+      t,
+    ];
+    if (existent) {
+      await db
+        .prepare(
+          `UPDATE angajati SET functie = ?, data_angajarii = COALESCE(?, data_angajarii), salariu_baza = ?,
+                               salariu_net = ?, sediu = ?, firma_id = ?, sursa = ?, actualizat_la = ?, activ = 1
+           WHERE id = ?`
+        )
+        .run(...valori, existent.id);
+    } else {
+      await db
+        .prepare(
+          `INSERT INTO angajati (nume, functie, data_angajarii, salariu_baza, salariu_net, sediu, firma_id, sursa, actualizat_la, activ)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+        )
+        .run(nume, ...valori);
+    }
+    n++;
+    if (firmaId) {
+      if (!vazuti.has(firmaId)) vazuti.set(firmaId, new Set());
+      vazuti.get(firmaId).add(nume.toLowerCase());
+    }
+  }
+
+  // Cine nu mai apare pe statul firmei lui trece pe inactiv.
+  for (const [firmaId, nume] of vazuti) {
+    const aiFirmei = await db.prepare("SELECT id, nume FROM angajati WHERE firma_id = ? AND activ = 1").all(firmaId);
+    for (const a of aiFirmei) {
+      if (!nume.has(String(a.nume).toLowerCase())) {
+        await db.prepare("UPDATE angajati SET activ = 0, actualizat_la = ? WHERE id = ?").run(t, a.id);
+      }
+    }
+  }
+  return n;
+}
+
 // Chemată o dată la pornire, din server.js.
 async function incarcaTot() {
   try {
     const a = await incarcaAgenda();
     const s = await incarcaStiri();
     const c = await incarcaCosturi();
-    if (a || s || c) console.log(`[sincronizare] agendă: ${a}, știri: ${s}, costuri noi: ${c}`);
+    const g = await incarcaAngajati();
+    if (a || s || c || g) console.log(`[sincronizare] agendă: ${a}, știri: ${s}, costuri noi: ${c}, angajați: ${g}`);
   } catch (e) {
     console.error("[sincronizare] încărcarea a eșuat:", e.message);
   }
