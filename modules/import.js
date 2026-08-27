@@ -352,6 +352,16 @@ function register(router) {
           : ""
       }
 
+      <h2>7b. Leagă liniile de factură de produse (ca să se poată calcula marja)</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Facturile importate din SmartBill au denumirea produsului ca text liber. Fără legătura cu
+        nomenclatorul, ERP-ul nu știe costul mărfii și marja iese 100% — fals. Rutina potrivește
+        denumirile cu produsele existente și îți arată ce n-a putut lega.
+      </p>
+      <form method="post" action="/import/leaga-produse">
+        <button type="submit" class="btn">Leagă liniile de produse</button>
+      </form>
+
       <h2>8. State de salarii (costul real al oamenilor)</h2>
       <p style="font-size:13px;color:var(--text-muted)">
         Statul de plată lunar — de aici vine salariul brut din „cost company". Fișierul poate avea luna
