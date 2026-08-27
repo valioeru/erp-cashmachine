@@ -7,27 +7,28 @@
 // intri în document. Singura sursă e pagina, citită din browser.
 //
 // Soluția: browserul citește paginile (are sesiunea utilizatorului) și trimite
-// rândurile direct aici, prin POST. Autentificarea nu se face pe cookie de
-// sesiune (cererea vine de pe alt domeniu), ci printr-un token temporar pe
-// care îl generează administratorul din ERP și care expiră în câteva ore.
-// Fără token valid, ruta refuză orice.
-const crypto = require("crypto");
+// rândurile aici, prin POST.
+//
+// Ruta de primire NU cere parolă sau token, și e în regulă așa: nimic din ce
+// intră nu atinge datele firmei. Totul aterizează într-o cutie poștală
+// (punte_staging), iar administratorul vede ce a sosit — tip, număr de
+// rânduri, primele rânduri — și apasă „Aplică". Cine ar trimite gunoi pe
+// rută n-ar reuși decât să-și pună gunoiul într-o listă de așteptare, pe
+// care adminul o șterge dintr-un clic.
+//
+// Alternativa (un token purtat din ERP în pagina SmartBill) ar fi însemnat
+// să plimb o cheie între domenii. Cutia poștală e și mai simplă, și mai
+// sigură: nu există cheie de pierdut.
 const db = require("../lib/db");
-const { esc, layout, table, money } = require("../lib/render");
+const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
-const DURATA_MS = 6 * 60 * 60 * 1000; // 6 ore — cât să încapă un import lung
+const MAX_OCTETI = 6 * 1024 * 1024; // ~6 MB per lot
+const MAX_RANDURI = 5000;
+const MAX_LOTURI_PASTRATE = 60;
 
 function acum() {
   return new Date().toISOString().slice(0, 19).replace("T", " ");
-}
-
-async function tokenValid(token) {
-  if (!token || typeof token !== "string" || token.length < 32) return null;
-  const t = await db.prepare("SELECT token, expira_la FROM punti_import WHERE token = ?").get(token);
-  if (!t) return null;
-  if (String(t.expira_la) < acum()) return null;
-  return t;
 }
 
 // --- normalizări comune ---------------------------------------------------
@@ -249,82 +250,20 @@ const HANDLERE = {
 };
 
 function register(router) {
-  // Pagina de unde adminul pornește o punte.
-  router.get("/import/punte", async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
-    const punti = await db.prepare("SELECT token, creat_la, expira_la, randuri_primite, folosit_de FROM punti_import ORDER BY creat_la DESC LIMIT 10").all();
-    const body = `
-      <div class="detail-box">
-        <p style="margin-top:0">
-          O parte din datele din SmartBill nu se pot exporta deloc — rețeta unui raport de producție sau
-          liniile unui bon de consum se văd doar dacă intri în document. „Puntea" rezolvă asta: browserul
-          citește paginile (are sesiunea ta) și trimite rândurile direct în ERP.
-        </p>
-        <p style="font-size:13px;color:var(--text-muted)">
-          Tokenul de mai jos e cheia: expiră în 6 ore și fără el ruta de import refuză orice.
-          Nu-l trimite nimănui.
-        </p>
-      </div>
-      <form method="post" action="/import/punte"><button class="btn" type="submit">Generează un token nou (6 ore)</button></form>
-      <h2>Punți generate</h2>
-      ${table(
-        ["Creat", "Expiră", "Rânduri primite", "Ultima folosire"],
-        punti.map((p) => [esc(p.creat_la), esc(p.expira_la), String(p.randuri_primite), esc(p.folosit_de || "—")])
-      )}
-    `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Punte de import din browser", active: "/import", body }));
-  });
-
-  router.post("/import/punte", async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
-    const token = crypto.randomBytes(24).toString("hex");
-    const expira = new Date(Date.now() + DURATA_MS).toISOString().slice(0, 19).replace("T", " ");
-    await db.prepare("INSERT INTO punti_import (token, creat_de, expira_la) VALUES (?, ?, ?)").run(token, ctx.user.id, expira);
-    const body = `
-      <div class="detail-box">
-        <h2 style="margin-top:0">Token generat</h2>
-        <p style="font-size:13px;color:var(--text-muted)">Valabil până la ${esc(expira)}. Copiază-l — nu se mai afișează.</p>
-        <pre style="background:var(--bg-subtle,#f6f7f9);padding:12px;border-radius:8px;overflow-x:auto;user-select:all">${esc(token)}</pre>
-      </div>
-      <a class="btn secondary" href="/import/punte">Înapoi</a>
-    `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Punte de import", active: "/import", body }));
-  });
-
-  // Ruta propriu-zisă. Vine de pe alt domeniu, deci răspunde și la preflight.
-  router.options("/api/ingest", async (ctx) => {
-    ctx.res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "content-type",
-      "Access-Control-Max-Age": "600",
-    });
-    ctx.res.end();
-  });
-
-  router.post("/api/ingest", async (ctx) => {
-    const raspunde = (cod, obj) => {
-      ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" });
-      ctx.res.end(JSON.stringify(obj));
-    };
-    const b = ctx.body || {};
-    const t = await tokenValid(b.token);
-    if (!t) return raspunde(401, { ok: false, eroare: "token lipsă, greșit sau expirat" });
-    const tip = String(b.tip || "");
-    const handler = HANDLERE[tip];
-    if (!handler) return raspunde(400, { ok: false, eroare: `tip necunoscut: ${tip}`, tipuri: Object.keys(HANDLERE) });
-    const randuri = Array.isArray(b.randuri) ? b.randuri : [];
-    if (!randuri.length) return raspunde(400, { ok: false, eroare: "randuri lipsă" });
-    if (randuri.length > 5000) return raspunde(400, { ok: false, eroare: "prea multe rânduri într-o cerere (max 5000)" });
-    let rezultat;
-    try {
-      rezultat = await handler(randuri);
-    } catch (e) {
-      return raspunde(500, { ok: false, eroare: String(e && e.message).slice(0, 300) });
-    }
-    await db.prepare("UPDATE punti_import SET randuri_primite = randuri_primite + ?, folosit_de = ? WHERE token = ?").run(randuri.length, `${tip} @ ${acum()}`, b.token);
-    raspunde(200, { ok: true, tip, primite: randuri.length, rezultat });
+  require("./punte-rute")(router, {
+    db,
+    esc,
+    layout,
+    table,
+    send,
+    redirect,
+    HANDLERE,
+    acum,
+    MAX_OCTETI,
+    MAX_RANDURI,
+    MAX_LOTURI_PASTRATE,
   });
 }
 
-module.exports = { register };
+module.exports = { register, HANDLERE };
+
