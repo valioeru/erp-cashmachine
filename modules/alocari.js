@@ -61,6 +61,22 @@ const ALOC_FACTURA = `(
 // ating niciodată.
 async function recalculeazaAgentiFacturi() {
   const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' AND activ = 1 ORDER BY id LIMIT 1").get();
+  // Curățăm alocările către oameni care nu mai sunt agenți (ex. cineva mutat
+  // pe gestiune) — altfel facturile lor n-ar mai genera comision nimănui.
+  await db.exec(`
+    DELETE FROM alocari_clienti
+     WHERE utilizator_id NOT IN (SELECT id FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin'))
+  `);
+  await db.exec(`
+    UPDATE parteneri SET agent_id = NULL
+     WHERE agent_id IS NOT NULL
+       AND agent_id NOT IN (SELECT id FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin'))
+  `);
+  await db.exec(`
+    UPDATE facturi SET agent_id = NULL, agent_manual = 0
+     WHERE agent_id IS NOT NULL
+       AND agent_id NOT IN (SELECT id FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin'))
+  `);
   // 1. din alocarea clientului, valabilă la data facturii
   await db.exec(`
     UPDATE facturi SET agent_id = (
