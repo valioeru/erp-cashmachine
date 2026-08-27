@@ -260,6 +260,67 @@ module.exports = function registerRute(router, deps) {
   // mai bună sursă pe care o avem și e a lor, nu a noastră.
   //
   // Nu atingem produsele care au deja un preț de achiziție pus de om.
+  // Produsele care se vând, dar n-au cost — ordonate după cât s-a vândut.
+  //
+  // Marja pe factură nu poate exista fără preț de achiziție. Nu toate
+  // produsele îl pot primi automat: cele care nu apar în evaluarea stocului
+  // și n-au rețetă rămân fără. Lista asta spune exact pe care merită să pui
+  // costul de mână — sunt câteva care fac aproape toată cifra.
+  router.get("/rapoarte/produse-fara-cost", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const de = String(ctx.query.de || new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10));
+
+    const randuri = await db
+      .prepare(
+        `SELECT p.id, p.cod, p.denumire, p.pret_vanzare,
+                SUM(fl.cantitate) AS cantitate,
+                SUM(fl.cantitate * fl.pret_unitar) AS vanzari
+           FROM facturi_linii fl
+           JOIN produse p ON p.id = fl.produs_id
+           JOIN facturi f ON f.id = fl.factura_id
+          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+            AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
+            AND COALESCE(p.pret_achizitie, 0) <= 0
+          GROUP BY p.id, p.cod, p.denumire, p.pret_vanzare
+          ORDER BY vanzari DESC
+          LIMIT 100`
+      )
+      .all(de);
+
+    const totalFaraCost = randuri.reduce((s, r) => s + Number(r.vanzari || 0), 0);
+
+    const body = `
+      <h1>Produse care se vând, dar n-au cost</h1>
+      <p style="max-width:760px;color:var(--text-muted)">
+        Pentru produsele astea marja iese 100%, ceea ce e fals. N-au primit cost automat pentru că nu apar în
+        evaluarea stocului din SmartBill și n-au rețetă. Pune prețul de achiziție pe primele câteva — de obicei
+        cinci-șase produse acoperă aproape toată cifra — și marja devine reală peste tot unde apar.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">Produse fără cost, cu vânzări</div><div class="value">${randuri.length}</div></div>
+        <div class="card"><div class="label">Vânzări pe care nu se poate calcula marja</div><div class="value">${money(totalFaraCost)}</div></div>
+      </div>
+      ${
+        randuri.length
+          ? table(
+              ["#", "Cod", "Produs", "Cantitate", "Vânzări 12 luni", "Preț vânzare", ""],
+              randuri.map((r, i) => [
+                String(i + 1),
+                esc(r.cod || "—"),
+                esc(r.denumire),
+                Number(r.cantitate).toLocaleString("ro-RO"),
+                money(r.vanzari),
+                money(r.pret_vanzare),
+                `<a class="link-btn" href="/produse/${r.id}/editare">pune costul</a>`,
+              ])
+            )
+          : `<p style="color:var(--text-muted)">Toate produsele vândute au cost. Marja e completă.</p>`
+      }
+      <div class="toolbar"><a class="btn secondary" href="/rapoarte">Înapoi la rapoarte</a></div>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Produse fără cost", active: "/rapoarte", body }));
+  });
+
   router.post("/import/cost-din-stoc", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
 

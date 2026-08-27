@@ -47,6 +47,11 @@ const CATEGORII = [
         desc: "Vânzări nete, costul bunurilor vândute, profit și marjă pe fiecare produs — cu costul real din gestiune, plus produsele vândute în pierdere.",
       },
       {
+        href: "/rapoarte/produse-fara-cost",
+        nume: "Produse care se vând, dar n-au cost",
+        desc: "Pe ele marja iese 100%, adică fals. Ordonate după cât s-au vândut, ca să știi pe care merită să pui prețul de achiziție de mână.",
+      },
+      {
         href: "/rapoarte/cashflow",
         nume: "Cash flow la zi + proiecție",
         desc: "Cash disponibil azi, intrări/ieșiri așteptate pe scadențe zi cu zi, cu adăugare manuală de plăți/încasări viitoare pentru forecast.",
