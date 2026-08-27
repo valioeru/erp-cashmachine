@@ -328,20 +328,67 @@ function register(router) {
     if (!agent) return redirect(ctx.res, "/crm");
     const agenti = esteAdmin ? await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol = 'vanzari' ORDER BY nume").all() : [];
 
-    // ---- Comisionul agentului ---------------------------------------------
-    // 2% din încasările EFECTIVE ale clienților lui, în luna aleasă, pe tot
-    // grupul (Cash Machine + Warehouse All), fără facturile dintre firme.
-    // Agentul vede doar linia lui; adminul poate comuta pe oricare agent sau
-    // pe totalul echipei.
-    const lunaCurentaStr = new Date().toISOString().slice(0, 7);
+    // ---- Perioada aleasă ---------------------------------------------------
+    // Agentul (și adminul) pot alege luna curentă — implicit —, luna trecută,
+    // anul curent, anul trecut sau orice interval propriu de date.
+    const aziISO = new Date().toISOString().slice(0, 10);
+    const lunaCurentaStr = aziISO.slice(0, 7);
+    const anCurentNr = Number(aziISO.slice(0, 4));
     const lunaPrecedentaStr = (() => {
       const d = new Date(lunaCurentaStr + "-01T00:00:00Z");
       d.setUTCMonth(d.getUTCMonth() - 1);
       return d.toISOString().slice(0, 7);
     })();
-    const lunaAleasa = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : lunaCurentaStr;
+    const ultimaZiDin = (luna) => {
+      const a = Number(luna.slice(0, 4));
+      const m = Number(luna.slice(5, 7));
+      return `${luna}-${String(new Date(Date.UTC(a, m, 0)).getUTCDate()).padStart(2, "0")}`;
+    };
+    const dataOk = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
+    let perioada = String(ctx.query.perioada || "luna");
+    let de, la, etichetaPer;
+    if (perioada === "luna_trecuta") {
+      de = `${lunaPrecedentaStr}-01`; la = ultimaZiDin(lunaPrecedentaStr);
+      etichetaPer = `luna trecută (${lunaPrecedentaStr})`;
+    } else if (perioada === "an_curent") {
+      de = `${anCurentNr}-01-01`; la = aziISO;
+      etichetaPer = `anul ${anCurentNr} (1 ian → azi)`;
+    } else if (perioada === "an_trecut") {
+      de = `${anCurentNr - 1}-01-01`; la = `${anCurentNr - 1}-12-31`;
+      etichetaPer = `anul ${anCurentNr - 1}`;
+    } else if (perioada === "custom") {
+      de = dataOk(ctx.query.de) ? String(ctx.query.de) : `${anCurentNr}-01-01`;
+      la = dataOk(ctx.query.la) ? String(ctx.query.la) : aziISO;
+      if (la < de) { const t = de; de = la; la = t; }
+      etichetaPer = `${de} → ${la}`;
+    } else if (/^\d{4}-\d{2}$/.test(perioada)) {
+      de = `${perioada}-01`; la = ultimaZiDin(perioada); etichetaPer = perioada;
+    } else {
+      perioada = "luna"; de = `${lunaCurentaStr}-01`; la = ultimaZiDin(lunaCurentaStr);
+      etichetaPer = `luna curentă (${lunaCurentaStr})`;
+    }
+    // Lunile acoperite de interval — costurile de personal sunt lunare.
+    const luniPerioada = [];
+    {
+      let a = Number(de.slice(0, 4));
+      let m = Number(de.slice(5, 7));
+      while (`${a}-${String(m).padStart(2, "0")}` <= la.slice(0, 7) && luniPerioada.length < 240) {
+        luniPerioada.push(`${a}-${String(m).padStart(2, "0")}`);
+        m++; if (m > 12) { m = 1; a++; }
+      }
+    }
+    const qsPer = `perioada=${encodeURIComponent(perioada)}${perioada === "custom" ? `&de=${de}&la=${la}` : ""}`;
+    const linkBirou = (id) => `/crm/birou?${id ? `agent=${id}&` : ""}${qsPer}`;
 
-    const incasariLuna = await db
+    const SUB_TOTAL =
+      "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
+    const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+
+    // ---- Comisionul agentului ---------------------------------------------
+    // Procent din încasările EFECTIVE ale clienților lui, în perioada aleasă,
+    // pe tot grupul (Cash Machine + Warehouse All), fără facturile dintre firme.
+    // Agentul vede doar linia lui; adminul poate comuta pe oricare agent.
+    const incasariPerioada = await db
       .prepare(
         `SELECT p.agent_id AS agent, u.nume AS agent_nume, COALESCE(u.comision_procent,2) AS pct,
                 COALESCE(SUM(pl.suma),0) AS incasat, COUNT(DISTINCT f.id) AS nr_facturi, COUNT(DISTINCT p.id) AS nr_clienti
@@ -350,52 +397,134 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          JOIN utilizatori u ON u.id = p.agent_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           AND SUBSTR(pl.data,1,7) = ?
+           AND u.rol = 'vanzari' AND u.activ = 1
+           AND pl.data BETWEEN ? AND ?
          GROUP BY p.agent_id, u.nume, u.comision_procent
          ORDER BY incasat DESC`
       )
-      .all(lunaAleasa);
+      .all(de, la);
 
-    const alMeu = incasariLuna.find((r) => r.agent === agentId);
+    const alMeu = incasariPerioada.find((r) => r.agent === agentId);
     const pctMeu = alMeu ? Number(alMeu.pct) : Number(agent.comision_procent ?? 2) || 2;
     const incasatMeu = alMeu ? Number(alMeu.incasat) : 0;
     const comisionMeu = (incasatMeu * pctMeu) / 100;
 
+    // Evoluția pe ultimele 12 luni (independentă de perioada aleasă).
     const evolutie = await db
       .prepare(
         `SELECT SUBSTR(pl.data,1,7) AS luna, COALESCE(SUM(pl.suma),0) AS incasat
          FROM plati pl JOIN facturi f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND p.agent_id = ?
-         GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 6`
+         GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 12`
       )
       .all(agentId);
     const evolutieOrd = evolutie.slice().reverse();
     const maxEvo = Math.max(1, ...evolutieOrd.map((e) => Number(e.incasat)));
-    const liniiEchipa = incasariLuna.map((r) => ({ ...r, incasat: Number(r.incasat), comision: (Number(r.incasat) * Number(r.pct)) / 100 }));
+    const liniiEchipa = incasariPerioada.map((r) => ({ ...r, incasat: Number(r.incasat), comision: (Number(r.incasat) * Number(r.pct)) / 100 }));
     const maxEchipa = Math.max(1, ...liniiEchipa.map((l) => l.incasat));
     const totalEchipa = liniiEchipa.reduce((s, l) => s + l.comision, 0);
 
-    const paramAgent = esteAdmin ? `&agent=${agentId}` : "";
+    // ---- Clienții alocați, cu ce au fost facturați și ce au plătit ---------
+    const incasatPeClient = await db
+      .prepare(
+        `SELECT p.id, p.nume, COALESCE(SUM(pl.suma),0) AS incasat,
+                COUNT(DISTINCT f.id) AS nr_facturi, MAX(pl.data) AS ultima_incasare
+         FROM plati pl
+         JOIN facturi f ON f.id = pl.factura_id
+         JOIN parteneri p ON p.id = f.partener_id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND p.agent_id = ? AND pl.data BETWEEN ? AND ?
+         GROUP BY p.id, p.nume`
+      )
+      .all(agentId, de, la);
+
+    const facturatPeClient = await db
+      .prepare(
+        `SELECT p.id, p.nume, COALESCE(SUM(l.total),0) AS facturat, COUNT(DISTINCT f.id) AS nr_emise
+         FROM facturi f
+         JOIN parteneri p ON p.id = f.partener_id
+         JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND p.agent_id = ? AND f.data_emiterii BETWEEN ? AND ?
+         GROUP BY p.id, p.nume`
+      )
+      .all(agentId, de, la);
+
+    // Soldul restant al clienților lui, la zi (nu depinde de perioadă).
+    const soldPeClient = await db
+      .prepare(
+        `SELECT p.id, COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)),0) AS sold
+         FROM facturi f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND p.agent_id = ?
+         GROUP BY p.id`
+      )
+      .all(agentId);
+    const soldMap = new Map(soldPeClient.map((r) => [r.id, Number(r.sold)]));
+
+    const clientiPerioada = (() => {
+      const m = new Map();
+      for (const r of facturatPeClient)
+        m.set(r.id, { id: r.id, nume: r.nume, facturat: Number(r.facturat), nr_emise: Number(r.nr_emise), incasat: 0, nr_facturi: 0, ultima_incasare: null });
+      for (const r of incasatPeClient) {
+        const g = m.get(r.id) || { id: r.id, nume: r.nume, facturat: 0, nr_emise: 0, incasat: 0, nr_facturi: 0, ultima_incasare: null };
+        g.incasat = Number(r.incasat);
+        g.nr_facturi = Number(r.nr_facturi);
+        g.ultima_incasare = r.ultima_incasare;
+        m.set(r.id, g);
+      }
+      return [...m.values()]
+        .map((g) => ({ ...g, comision: (g.incasat * pctMeu) / 100, sold: soldMap.get(g.id) || 0 }))
+        .sort((a, b) => b.incasat - a.incasat || b.facturat - a.facturat);
+    })();
+
+    // Facturile efectiv încasate în perioadă — baza de calcul, linie cu linie.
+    const facturiIncasate = await db
+      .prepare(
+        `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client,
+                COALESCE(SUM(pl.suma),0) AS incasat, MAX(pl.data) AS data_incasare
+         FROM plati pl
+         JOIN facturi f ON f.id = pl.factura_id
+         JOIN parteneri p ON p.id = f.partener_id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND p.agent_id = ? AND pl.data BETWEEN ? AND ?
+         GROUP BY f.id, f.serie, f.numar, f.data_emiterii, p.nume
+         ORDER BY data_incasare DESC, incasat DESC
+         LIMIT 400`
+      )
+      .all(agentId, de, la);
+
     const widgetComision = `
       <section class="comision-box">
         <div class="comision-head">
           <h2 style="margin:0">Comision — ${esc(agent.nume)}</h2>
           <form method="get" action="/crm/birou" class="comision-filtru">
             ${esteAdmin ? `<input type="hidden" name="agent" value="${agentId}">` : ""}
-            <select name="luna" onchange="this.form.submit()">
-              <option value="${lunaCurentaStr}"${lunaAleasa === lunaCurentaStr ? " selected" : ""}>luna curentă (${lunaCurentaStr})</option>
-              <option value="${lunaPrecedentaStr}"${lunaAleasa === lunaPrecedentaStr ? " selected" : ""}>luna anterioară (${lunaPrecedentaStr})</option>
+            <select name="perioada" onchange="this.form.submit()">
+              <option value="luna"${perioada === "luna" ? " selected" : ""}>luna curentă (${lunaCurentaStr})</option>
+              <option value="luna_trecuta"${perioada === "luna_trecuta" ? " selected" : ""}>luna trecută (${lunaPrecedentaStr})</option>
+              <option value="an_curent"${perioada === "an_curent" ? " selected" : ""}>anul curent (${anCurentNr})</option>
+              <option value="an_trecut"${perioada === "an_trecut" ? " selected" : ""}>anul trecut (${anCurentNr - 1})</option>
+              <option value="custom"${perioada === "custom" ? " selected" : ""}>perioadă la alegere</option>
             </select>
+            ${
+              perioada === "custom"
+                ? `<input type="date" name="de" value="${esc(de)}"><input type="date" name="la" value="${esc(la)}"><button type="submit" class="btn secondary" style="padding:6px 12px">Aplică</button>`
+                : ""
+            }
           </form>
         </div>
         <div class="comision-grid">
           <div class="comision-mare">
             <div class="label">De încasat ca și comision</div>
             <div class="suma">${money(comisionMeu)}</div>
-            <div class="sub">${pctMeu.toFixed(1)}% din ${money(incasatMeu)} încasați în ${esc(lunaAleasa)}${alMeu ? ` · ${alMeu.nr_facturi} facturi · ${alMeu.nr_clienti} clienți` : ""}</div>
+            <div class="sub">${pctMeu.toFixed(1)}% din ${money(incasatMeu)} încasați în ${esc(etichetaPer)}${alMeu ? ` · ${alMeu.nr_facturi} facturi · ${alMeu.nr_clienti} clienți` : ""}</div>
           </div>
           <div class="comision-evolutie">
-            <div class="label">Încasările mele, ultimele 6 luni</div>
+            <div class="label">Încasările mele, ultimele 12 luni</div>
             <div class="mini-chart">
               ${
                 evolutieOrd.length
@@ -414,12 +543,12 @@ function register(router) {
         </div>
         ${
           esteAdmin && liniiEchipa.length
-            ? `<h3 style="font-size:14px;margin:18px 0 8px">Toți agenții în ${esc(lunaAleasa)} — total de plată ${money(totalEchipa)}</h3>
+            ? `<h3 style="font-size:14px;margin:18px 0 8px">Agenții de vânzări în ${esc(etichetaPer)} — total de plată ${money(totalEchipa)}</h3>
                <div class="comision-agenti">
                  ${liniiEchipa
                    .map(
                      (l) => `<div class="agent-rand">
-                       <div class="agent-nume"><a href="/crm/birou?agent=${l.agent}&luna=${esc(lunaAleasa)}" style="color:#fff">${esc(l.agent_nume)}</a></div>
+                       <div class="agent-nume"><a href="${linkBirou(l.agent)}" style="color:#fff">${esc(l.agent_nume)}</a></div>
                        <div class="agent-bara"><div class="agent-fill" style="width:${(l.incasat / maxEchipa) * 100}%"></div></div>
                        <div class="agent-cifre"><strong>${money(l.comision)}</strong><span>din ${money(l.incasat)} · ${Number(l.pct).toFixed(1)}%</span></div>
                      </div>`
@@ -429,17 +558,107 @@ function register(router) {
             : ""
         }
         <p style="font-size:12px;color:rgba(255,255,255,.8);margin-top:10px">
-          Se numără banii <strong>efectiv încasați</strong> în luna aleasă, de la clienții alocați, pe tot grupul.
+          Se numără banii <strong>efectiv încasați</strong> în perioada aleasă, de la clienții alocați, pe tot grupul.
           Comisionul se plătește la încasare, nu la facturare.
         </p>
       </section>
     `;
 
+    // ---- Clienții asociați + facturile încasate ---------------------------
+    const totIncasatCli = clientiPerioada.reduce((s, c) => s + c.incasat, 0);
+    const totFacturatCli = clientiPerioada.reduce((s, c) => s + c.facturat, 0);
+    const blocClienti = `
+      <h2>Clienții mei în ${esc(etichetaPer)}</h2>
+      ${
+        clientiPerioada.length
+          ? table(
+              ["Client", "Facturi emise", "Facturat", "Încasat", `Comision ${pctMeu.toFixed(1)}%`, "Ultima încasare", "Sold restant (la zi)"],
+              clientiPerioada.map((c) => [
+                `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                String(c.nr_emise || 0),
+                money(c.facturat),
+                `<strong>${money(c.incasat)}</strong>`,
+                money(c.comision),
+                c.ultima_incasare ? esc(String(c.ultima_incasare).slice(0, 10)) : "—",
+                c.sold > 0.5 ? `<span style="color:var(--danger)">${money(c.sold)}</span>` : "—",
+              ]),
+              { total: ["TOTAL", "", money(totFacturatCli), money(totIncasatCli), money((totIncasatCli * pctMeu) / 100), "", ""] }
+            )
+          : `<p style="color:var(--text-muted)">Niciun client alocat cu activitate în ${esc(etichetaPer)}.</p>`
+      }
+      <h2>Facturi încasate în ${esc(etichetaPer)} <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— baza de calcul a comisionului</span></h2>
+      ${
+        facturiIncasate.length
+          ? table(
+              ["Factura", "Client", "Emisă", "Încasată la", "Sumă încasată", `Comision ${pctMeu.toFixed(1)}%`],
+              facturiIncasate.map((f) => [
+                `<a href="/facturi/${f.id}">${esc([f.serie, f.numar].filter(Boolean).join(" "))}</a>`,
+                esc(f.client),
+                f.data_emiterii ? esc(String(f.data_emiterii).slice(0, 10)) : "—",
+                f.data_incasare ? esc(String(f.data_incasare).slice(0, 10)) : "—",
+                money(f.incasat),
+                money((Number(f.incasat) * pctMeu) / 100),
+              ])
+            )
+          : `<p style="color:var(--text-muted)">Nicio încasare în ${esc(etichetaPer)}.</p>`
+      }
+    `;
+    // ---- Costul agentului (doar adminul) ----------------------------------
+    // Costul nu are meniu propriu: stă aici, lângă comisionul lui, pentru că
+    // asta e întrebarea reală — cât aduce omul față de cât costă.
+    let blocCost = "";
+    if (esteAdmin) {
+      const costuri = require("./costuri");
+      // Costurile sunt lunare: le însumăm pe toate lunile din perioada aleasă.
+      const sume = { brut: 0, cas: 0, cass: 0, impozit: 0, net: 0, cam: 0, masina: 0, carburant: 0, alte: 0, salarial: 0, total: 0 };
+      let c = null;
+      let luniCuCost = 0;
+      for (const lu of luniPerioada) {
+        const cl = await costuri.costPentruLuna(agentId, lu);
+        if (!cl) continue;
+        c = cl;
+        luniCuCost++;
+        const s = costuri.totalCost(cl);
+        for (const k of Object.keys(sume)) sume[k] += s[k] || 0;
+      }
+      const marja = incasatMeu - sume.total - comisionMeu;
+      blocCost = `
+        <div class="detail-box">
+          <h2 style="margin-top:0">Cost company — ${esc(agent.nume)}, ${esc(etichetaPer)}</h2>
+          ${luniCuCost > 1 ? `<p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Cumulat pe ${luniCuCost} luni.</p>` : ""}
+          ${
+            sume.total > 0
+              ? `<div class="detail-grid">
+                   <div><div class="k">Salariu brut</div>${money(sume.brut)}</div>
+                   <div><div class="k">Net (în mână)</div>${money(sume.net)}</div>
+                   <div><div class="k">CAS + CASS + impozit</div>${money(sume.cas + sume.cass + sume.impozit)}</div>
+                   <div><div class="k">CAM (angajator)</div>${money(sume.cam)}</div>
+                   <div><div class="k">Mașină</div>${money(sume.masina)}${c && c.masina_detalii ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(c.masina_detalii)}</span>` : ""}</div>
+                   <div><div class="k">Carburant</div>${money(sume.carburant)}</div>
+                   <div><div class="k">Alte</div>${money(sume.alte)}</div>
+                   <div><div class="k">COST TOTAL</div><strong>${money(sume.total)}</strong></div>
+                 </div>
+                 <div class="detail-grid" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+                   <div><div class="k">Încasări aduse</div>${money(incasatMeu)}</div>
+                   <div><div class="k">Comision</div>−${money(comisionMeu)}</div>
+                   <div><div class="k">Cost</div>−${money(sume.total)}</div>
+                   <div><div class="k">Rămâne</div><strong style="color:${marja >= 0 ? "var(--success)" : "var(--danger)"}">${money(marja)}</strong></div>
+                 </div>
+                 <p style="font-size:12px;color:var(--text-muted);margin-top:10px">
+                   „Rămâne" e brut: nu scade costul mărfii vândute, deci nu e profit — e cât rămâne din încasările lui după ce plătești omul.
+                 </p>`
+              : `<p style="color:var(--text-muted)">Costul nu e definit încă pentru ${esc(agent.nume)} în ${esc(etichetaPer)}.</p>`
+          }
+          <div class="toolbar" style="margin-top:12px">
+            <a class="btn secondary" href="/costuri/nou?utilizator_id=${agentId}">${sume.total > 0 ? "Actualizează costul" : "Setează costul"}</a>
+            
+          </div>
+        </div>
+      `;
+    }
+
     const aziStr = azi();
     const acum12Luni = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
-    const SUB_TOTAL =
-      "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-    const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
 
     // Portofoliul: clienții alocați agentului, cu vânzări pe 12 luni și sold.
     const clienti = await db
@@ -544,9 +763,13 @@ function register(router) {
     const body = `
       ${subnavCrm("/crm/birou")}
       ${widgetComision}
+      ${blocCost}
+      ${blocClienti}
       ${
         esteAdmin && agenti.length
           ? `<form method="get" action="/crm/birou" class="filtre">
+              <input type="hidden" name="perioada" value="${esc(perioada)}">
+              ${perioada === "custom" ? `<input type="hidden" name="de" value="${esc(de)}"><input type="hidden" name="la" value="${esc(la)}">` : ""}
               <span style="font-size:13px">Biroul lui:</span>
               <select name="agent" onchange="this.form.submit()">
                 ${agenti.map((a) => `<option value="${a.id}"${a.id === agentId ? " selected" : ""}>${esc(a.nume)}</option>`).join("")}

@@ -51,7 +51,7 @@ function register(router) {
     const body = `<form method="post" action="/admin/utilizatori" class="form" style="max-width:480px">
       <label class="field"><span>Nume</span><input type="text" name="nume" required></label>
       <label class="field"><span>Email (folosit la login)</span><input type="email" name="email" required></label>
-      <label class="field"><span>Parolă inițială</span><input type="password" name="parola" required minlength="6"></label>
+      <label class="field"><span>Parolă inițială</span><input type="text" name="parola" value="cashmachine" required minlength="6"></label>
       <label class="field"><span>Rol</span><select name="rol">${optiuniRoluri("vanzari")}</select></label>
       <label class="field"><span>Comision din încasări (%)</span><input type="number" step="0.01" name="comision_procent" value="2"></label>
       <div class="form-actions">
@@ -65,9 +65,10 @@ function register(router) {
   router.post("/admin/utilizatori", async (ctx) => {
     const { nume, email, parola, rol } = ctx.body;
     try {
-      const { hash, salt } = auth.hashParola(parola || Math.random().toString(36).slice(2));
+      // Parola implicită pentru orice cont nou; la prima logare e obligat s-o schimbe.
+      const { hash, salt } = auth.hashParola(parola || "cashmachine");
       await db
-        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, comision_procent) VALUES (?, ?, ?, ?, ?, ?)")
+        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, comision_procent, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, 1)")
         .run(nume, (email || "").toLowerCase().trim(), hash, salt, rol || "vanzari", Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0);
       redirect(ctx.res, "/admin/utilizatori");
     } catch (e) {
@@ -107,7 +108,7 @@ function register(router) {
     const comision = Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0;
     if (parola && parola.length >= 6) {
       const { hash, salt } = auth.hashParola(parola);
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, parola_hash = ?, parola_salt = ? WHERE id = ?").run(
+      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
         nume,
         (email || "").toLowerCase().trim(),
         rol,

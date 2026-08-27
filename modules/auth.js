@@ -34,14 +34,14 @@ function register(router) {
     if (!user || !user.activ || !auth.verificaParola(parola || "", user.parola_hash, user.parola_salt)) {
       return send(ctx.res, 401, paginaLogin("Email sau parolă greșită.", redirectTo));
     }
-    const token = auth.creeazaSesiune(user.id);
+    const token = await auth.creeazaSesiune(user.id);
     ctx.res.setHeader("Set-Cookie", auth.cookieSesiune(token, { secure: !/localhost|127\.0\.0\.1/.test(ctx.req.headers.host || "") }));
     redirect(ctx.res, redirectTo && redirectTo.startsWith("/") ? redirectTo : "/");
   });
 
   router.post("/logout", async (ctx) => {
     const cookies = auth.parseCookies(ctx.req);
-    if (cookies[auth.COOKIE_NAME]) auth.stergeSesiune(cookies[auth.COOKIE_NAME]);
+    if (cookies[auth.COOKIE_NAME]) await auth.stergeSesiune(cookies[auth.COOKIE_NAME]);
     ctx.res.setHeader("Set-Cookie", auth.cookieStergere());
     redirect(ctx.res, "/login");
   });
@@ -54,6 +54,13 @@ function register(router) {
         <div><div class="k">Email</div>${esc(ctx.user.email)}</div>
         <div><div class="k">Rol</div>${esc(auth.ROLURI[ctx.user.rol] || ctx.user.rol)}</div>
       </div></div>
+      ${
+        ctx.user.parola_temporara
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
+              <strong>Ai încă parola implicită.</strong> Alege una proprie mai jos — până atunci nu poți folosi restul aplicației.
+            </div>`
+          : ""
+      }
       <h2>Schimbă parola</h2>
       <form method="post" action="/profil/parola" class="form" style="max-width:420px">
         <label class="field"><span>Parolă nouă</span><input type="password" name="parola" required minlength="6"></label>
@@ -79,8 +86,8 @@ function register(router) {
       );
     }
     const { hash, salt } = auth.hashParola(parola);
-    await db.prepare("UPDATE utilizatori SET parola_hash = ?, parola_salt = ? WHERE id = ?").run(hash, salt, ctx.user.id);
-    redirect(ctx.res, "/profil");
+    await db.prepare("UPDATE utilizatori SET parola_hash = ?, parola_salt = ?, parola_temporara = 0 WHERE id = ?").run(hash, salt, ctx.user.id);
+    redirect(ctx.res, ctx.user.rol === "vanzari" ? "/crm/birou" : "/");
   });
 }
 
