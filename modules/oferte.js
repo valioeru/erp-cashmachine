@@ -59,6 +59,7 @@ function subnav(activ) {
     ["/crm/birou", "Biroul meu"],
     ["/crm/alocare", "Clienții mei"],
     ["/crm/contacte", "Contactări"],
+    ["/scadente", "Scadențe"],
     ["/oferte", "Oferte"],
     ["/contracte", "Contracte"],
     ["/crm/leaduri", "Lead-uri"],
@@ -168,6 +169,7 @@ function register(router) {
 
     const body = `
       ${subnav("/oferte")}
+      ${ctx.query.eroare ? `<p style="color:var(--danger);max-width:640px">${esc(ctx.query.eroare)}</p>` : ""}
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">Ofertă</div><strong>${esc(o.numar || nrDoc("OF", o.id))}</strong> ${o.versiune > 1 ? `<span class="badge gri">versiunea ${o.versiune}</span>` : ""}</div>
@@ -371,10 +373,10 @@ function register(router) {
     return id;
   }
 
-  async function faComanda(o, user) {
+  async function faComanda(o, user, contractId) {
     const ins = await db
-      .prepare("INSERT INTO comenzi (partener_id, numar, data, status, observatii, oferta_id, agent_id) VALUES (?, ?, ?, 'noua', ?, ?, ?) RETURNING id")
-      .run(o.partener_id, null, azi(), `Din oferta ${o.numar || nrDoc("OF", o.id)}`, o.id, o.agent_id || user.id);
+      .prepare("INSERT INTO comenzi (partener_id, numar, data, status, observatii, oferta_id, contract_id, agent_id) VALUES (?, ?, ?, 'noua', ?, ?, ?, ?) RETURNING id")
+      .run(o.partener_id, null, azi(), `Din oferta ${o.numar || nrDoc("OF", o.id)}`, o.id, contractId || o.contract_id || null, o.agent_id || user.id);
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE comenzi SET numar = ? WHERE id = ?").run(nrDoc("CMD", id), id);
     const linii = await db.prepare("SELECT * FROM oferte_linii WHERE oferta_id = ?").all(o.id);
@@ -392,12 +394,21 @@ function register(router) {
     if (!o || !poateEdita(ctx.user, o)) return redirect(ctx.res, `/oferte/${ctx.params.id}`);
     await db.prepare("UPDATE oferte SET status = 'acceptata', acceptata_la = ? WHERE id = ?").run(azi(), o.id);
     const facute = [];
-    if (ctx.body.creeaza_contract && !o.contract_id) { await faContract(o, ctx.user); facute.push("contract"); }
-    if (ctx.body.creeaza_comanda && !o.comanda_id) { await faComanda(o, ctx.user); facute.push("comandă"); }
+    let contractId = o.contract_id || null;
+    if (ctx.body.creeaza_contract && !contractId) { contractId = await faContract(o, ctx.user); facute.push("contract"); }
+    // Dacă se nasc amândouă din aceeași ofertă, comanda rămâne legată de
+    // contract — altfel, peste trei luni, nimeni nu mai știe pe ce contract
+    // s-a livrat. Iar dacă clientul e pe roșu, contractul se face, comanda nu.
+    let blocat = null;
+    if (ctx.body.creeaza_comanda && !o.comanda_id) {
+      const verdict = await require("./scadente").poateComanda(ctx.user, o.partener_id);
+      if (verdict.ok) { await faComanda(o, ctx.user, contractId); facute.push("comandă"); }
+      else blocat = verdict.motiv;
+    }
     await db
       .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'oferta', ?, ?, ?)")
       .run(o.partener_id, `Ofertă ${o.numar || nrDoc("OF", o.id)} acceptată`, facute.length ? `S-au creat: ${facute.join(" și ")}` : null, ctx.user.id);
-    redirect(ctx.res, `/oferte/${o.id}`);
+    redirect(ctx.res, blocat ? `/oferte/${o.id}?eroare=${encodeURIComponent(blocat)}` : `/oferte/${o.id}`);
   });
 
   router.post("/oferte/:id/spre-contract", async (ctx) => {
@@ -412,6 +423,8 @@ function register(router) {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const o = await db.prepare("SELECT * FROM oferte WHERE id = ?").get(ctx.params.id);
     if (!o || !poateEdita(ctx.user, o)) return redirect(ctx.res, `/oferte/${ctx.params.id}`);
+    const verdict = await require("./scadente").poateComanda(ctx.user, o.partener_id);
+    if (!verdict.ok) return redirect(ctx.res, `/oferte/${o.id}?eroare=${encodeURIComponent(verdict.motiv)}`);
     const id = o.comanda_id || (await faComanda(o, ctx.user));
     redirect(ctx.res, `/comenzi/${id}`);
   });
@@ -538,6 +551,15 @@ function register(router) {
       .run(c.partener_id, azi(), `Pe contractul ${c.numar || nrDoc("CTR", c.id)}`, c.id, c.agent_id || ctx.user.id);
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE comenzi SET numar = ? WHERE id = ?").run(nrDoc("CMD", id), id);
+    // Dacă în spatele contractului stă o ofertă, comanda pornește cu liniile
+    // ei — nimeni n-are chef să retasteze douăzeci de poziții.
+    if (c.oferta_id) {
+      const linii = await db.prepare("SELECT * FROM oferte_linii WHERE oferta_id = ?").all(c.oferta_id);
+      for (const l of linii) {
+        if (!l.produs_id) continue;
+        await db.prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (?, ?, ?, ?)").run(id, l.produs_id, l.cantitate, l.pret_unitar);
+      }
+    }
     redirect(ctx.res, `/comenzi/${id}`);
   });
 }

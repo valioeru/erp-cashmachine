@@ -119,6 +119,27 @@ function register(router) {
     const cantitati = asArray(ctx.body["cantitate[]"]);
     const preturi = asArray(ctx.body["pret_unitar[]"]);
 
+    // Client pe roșu = fără comenzi noi de la agent. Adminul poate trece
+    // peste, dar conștient — nu din reflex.
+    const verdict = await require("./scadente").poateComanda(ctx.user, partener_id);
+    if (!verdict.ok) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: "Comandă blocată",
+          active: "/comenzi",
+          body: `<h1>Comandă blocată</h1>
+            <p style="color:var(--danger);max-width:640px">${esc(verdict.motiv)}</p>
+            <p style="max-width:640px;color:var(--text-muted)">Dacă e o situație pe care ai discutat-o deja cu clientul,
+              vorbește cu administratorul: el poate plasa comanda sau poate marca restanța ca rezolvată.</p>
+            <a class="btn secondary" href="/parteneri/${esc(String(partener_id))}">Vezi clientul</a>
+            <a class="btn secondary" href="/scadente">Scadențele mele</a>`,
+        })
+      );
+    }
+
     const info = await db
       .prepare("INSERT INTO comenzi (partener_id, numar, observatii) VALUES (?, ?, ?) RETURNING id")
       .run(partener_id, numar || "", observatii || "");

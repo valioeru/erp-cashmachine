@@ -166,6 +166,7 @@ function subnavCrm(activ) {
     ["/crm/birou", "Biroul meu"],
     ["/crm/alocare", "Clienții mei"],
     ["/crm/contacte", "Contactări"],
+    ["/scadente", "Scadențe"],
     ["/oferte", "Oferte"],
     ["/contracte", "Contracte"],
     ["/crm/leaduri", "Lead-uri"],

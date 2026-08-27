@@ -56,6 +56,7 @@ function subnavCrm(activ) {
     ["/crm/birou", "Biroul meu"],
     ["/crm/alocare", "Clienții mei"],
     ["/crm/contacte", "Contactări"],
+    ["/scadente", "Scadențe"],
     ["/oferte", "Oferte"],
     ["/contracte", "Contracte"],
     ["/crm/leaduri", "Lead-uri"],
@@ -992,9 +993,19 @@ function register(router) {
       blocContact = `<p style="color:var(--danger)">Nu s-au putut genera task-urile de contact: ${esc(e.message)}</p>`;
     }
 
+    // Scadențele stau sus, lângă comision: banii neîncasați sunt treaba
+    // agentului, nu doar a contabilității.
+    let blocSold = "";
+    try {
+      blocSold = await require("./scadente").blocScadente(ctx.user, agentId);
+    } catch (e) {
+      blocSold = `<p style="color:var(--danger)">Nu s-au putut calcula scadențele: ${esc(e.message)}</p>`;
+    }
+
     const body = `
       ${subnavCrm("/crm/birou")}
       ${widgetComision}
+      ${blocSold}
       ${blocContact}
       ${blocSug}
       ${blocCost}
