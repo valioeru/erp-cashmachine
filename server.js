@@ -48,7 +48,7 @@ router.get("/healthz", (ctx) => {
 // printr-un token temporar generat de administrator (vezi modules/import.js).
 // De-aia stă în afara gardului de sesiune — dar NU e deschisă: fără token
 // valid și nexpirat, refuză orice.
-const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest", "/api/agenda", "/api/stiri"]);
+const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest"]);
 
 async function creeazaAdminInitialDacaLipseste() {
   const nr = (await db.prepare("SELECT COUNT(*) AS n FROM utilizatori").get()).n;
@@ -153,6 +153,7 @@ async function start() {
   await db.migrate();
   await creeazaAdminInitialDacaLipseste();
   await require("./lib/grup").asiguraFirme();
+  await require("./modules/sincronizare").incarcaTot();
   await auth.curataSesiuni();
   setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
   const PORT = process.env.PORT || 3000;
