@@ -211,7 +211,7 @@ function register(router) {
   router.post("/alocari/auto", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
 
-    const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin')").all();
+    const utilizatori = await db.prepare("SELECT id, nume, rol FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin') ORDER BY CASE WHEN rol = 'vanzari' THEN 0 ELSE 1 END, id").all();
     const initiale = (nume) =>
       String(nume || "")
         .normalize("NFD")
@@ -245,6 +245,11 @@ function register(router) {
 
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele')").all();
     const aliasuri = await hartaAliasuri();
+    // Alocările făcute tot automat se refac de la zero (ca o corecție de rol
+    // sau de nume să se propage); cele puse de om rămân neatinse.
+    if (ctx.body && String(ctx.body.reface || "") === "1") {
+      await db.exec("DELETE FROM alocari_clienti WHERE observatii LIKE 'alocat automat%'");
+    }
     const dejaAlocati = new Set((await db.prepare("SELECT DISTINCT partener_id FROM alocari_clienti").all()).map((r) => r.partener_id));
 
     let alocate = 0;
@@ -353,7 +358,7 @@ function register(router) {
 
     // Dacă știm și codul agentului, alocăm pe loc — asta e tot rostul legăturii.
     if (/^[A-Z]{2,3}$/.test(cod)) {
-      const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin')").all();
+      const utilizatori = await db.prepare("SELECT id, nume, rol FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin') ORDER BY CASE WHEN rol = 'vanzari' THEN 0 ELSE 1 END, id").all();
       const initiale = (nume) =>
         String(nume || "")
           .normalize("NFD")
@@ -509,6 +514,7 @@ function register(router) {
       </p>
       <form method="post" action="/alocari/auto" style="margin:12px 0">
         <button type="submit" class="btn secondary">Alocă automat din Registrul de comenzi</button>
+        <label style="font-size:12px;margin-left:8px"><input type="checkbox" name="reface" value="1"> refă alocările automate de la zero</label>
         <a class="btn secondary" href="/alocari/registru" style="margin-left:6px">Potrivește numele din registru</a>
         <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
           Folosește codul reprezentantului (GT / IR / MM / CG) de pe comenzile de producție. Nu suprascrie alocările făcute manual.
