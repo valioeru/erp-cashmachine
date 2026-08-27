@@ -1,139 +1,151 @@
 "use strict";
-// Sincronizarea lucrurilor care NU se pot afla din baza noastră de date:
-// întâlnirile din Google Calendar, task-urile programate la Claude și știrile
-// relevante pentru business. ERP-ul n-are cum să întrebe singur Google-ul sau
-// internetul, așa că i le împinge Claude, periodic.
+// Agenda (Google Calendar + task-uri programate) și știrile de pe dashboard.
 //
-// De ce un endpoint și nu un import prin interfață: pentru că trebuie să se
-// întâmple singur, zilnic, fără ca Vali să apese nimic. De-aia are un secret
-// propriu (SYNC_TOKEN, variabilă de mediu), nu sesiunea unui utilizator.
+// ERP-ul n-are cum să întrebe singur Google-ul sau internetul: n-are nici
+// credențialele lui Vali, nici căutare web. Așa că datele astea vin ca două
+// fișiere JSON ținute în repo, la `date/agenda.json` și `date/stiri.json`,
+// pe care le împrospătează Claude și le încarcă odată cu codul.
 //
-// Ce poate face endpoint-ul ăsta e strict limitat: scrie DOAR în „agenda_externa"
-// și „stiri", și doar prin înlocuire completă. Nu atinge facturi, parteneri,
-// stocuri sau utilizatori. Dacă secretul nu e setat, ruta e închisă complet —
-// nu există variantă „fără parolă".
+// De ce fișiere și nu un endpoint: un endpoint de scriere ar fi cerut un
+// secret propriu, iar secretul ar fi trebuit plimbat până acolo. Fișierele
+// nu cer niciun secret, se văd în istoricul git (deci se poate vedea exact
+// ce s-a schimbat și când) și folosesc exact drumul pe care oricum îl
+// parcurge codul: commit → deploy.
+//
+// La fiecare pornire, conținutul fișierelor înlocuiește tabelele. Dacă un
+// fișier lipsește sau e stricat, tabelul rămâne cum era — nu golim ecranul
+// din cauza unei virgule.
+const fs = require("fs");
+const path = require("path");
 const db = require("../lib/db");
 const { esc, layout } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+
+const DIRECTOR = path.join(__dirname, "..", "date");
 
 function acum() {
   return new Date().toISOString().slice(0, 19).replace("T", " ");
 }
 
-function tokenValid(req, body) {
-  const asteptat = process.env.SYNC_TOKEN;
-  if (!asteptat || asteptat.length < 16) return false; // fără secret, ruta e închisă
-  const dat = (req.headers["x-sync-token"] || (body && body.token) || "").toString();
-  if (dat.length !== asteptat.length) return false;
-  // comparație în timp constant, ca să nu se poată ghici secretul din durată
-  let dif = 0;
-  for (let i = 0; i < asteptat.length; i++) dif |= asteptat.charCodeAt(i) ^ dat.charCodeAt(i);
-  return dif === 0;
+function citesteFisier(nume) {
+  try {
+    const brut = fs.readFileSync(path.join(DIRECTOR, nume), "utf8");
+    const obiect = JSON.parse(brut);
+    return Array.isArray(obiect) ? obiect : Array.isArray(obiect.randuri) ? obiect.randuri : null;
+  } catch (e) {
+    if (e.code !== "ENOENT") console.error(`[sincronizare] ${nume}: ${e.message}`);
+    return null;
+  }
 }
 
-function raspunde(res, cod, obiect) {
-  const text = JSON.stringify(obiect);
-  res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(text) });
-  res.end(text);
+async function incarcaAgenda() {
+  const randuri = citesteFisier("agenda.json");
+  if (!randuri) return 0;
+  await db.prepare("DELETE FROM agenda_externa").run();
+  const t = acum();
+  let n = 0;
+  for (const r of randuri.slice(0, 500)) {
+    const titlu = String((r && r.titlu) || "").trim();
+    if (!titlu) continue;
+    await db
+      .prepare(
+        `INSERT INTO agenda_externa (sursa, titlu, detalii, incepe_la, se_termina_la, link, cheie_externa, actualizat_la)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        String(r.sursa || "calendar").slice(0, 40),
+        titlu.slice(0, 300),
+        r.detalii ? String(r.detalii).slice(0, 1000) : null,
+        r.incepe_la ? String(r.incepe_la).slice(0, 25) : null,
+        r.se_termina_la ? String(r.se_termina_la).slice(0, 25) : null,
+        r.link ? String(r.link).slice(0, 500) : null,
+        r.cheie_externa ? String(r.cheie_externa).slice(0, 200) : null,
+        t
+      );
+    n++;
+  }
+  return n;
+}
+
+async function incarcaStiri() {
+  const randuri = citesteFisier("stiri.json");
+  if (!randuri) return 0;
+  await db.prepare("DELETE FROM stiri").run();
+  const t = acum();
+  let n = 0;
+  for (const r of randuri.slice(0, 100)) {
+    const titlu = String((r && r.titlu) || "").trim();
+    if (!titlu) continue;
+    await db
+      .prepare(
+        `INSERT INTO stiri (titlu, sursa, url, rezumat, zona, relevanta, publicat_la, adaugat_la)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        titlu.slice(0, 300),
+        r.sursa ? String(r.sursa).slice(0, 120) : null,
+        r.url ? String(r.url).slice(0, 500) : null,
+        r.rezumat ? String(r.rezumat).slice(0, 1000) : null,
+        String(r.zona) === "extern" ? "extern" : "local",
+        r.relevanta ? String(r.relevanta).slice(0, 500) : null,
+        r.publicat_la ? String(r.publicat_la).slice(0, 25) : null,
+        t
+      );
+    n++;
+  }
+  return n;
+}
+
+// Chemată o dată la pornire, din server.js.
+async function incarcaTot() {
+  try {
+    const a = await incarcaAgenda();
+    const s = await incarcaStiri();
+    if (a || s) console.log(`[sincronizare] agendă: ${a} rânduri, știri: ${s} rânduri`);
+  } catch (e) {
+    console.error("[sincronizare] încărcarea a eșuat:", e.message);
+  }
 }
 
 function register(router) {
-  // Înlocuiește agenda (calendar + task-uri programate).
-  router.post("/api/agenda", async (ctx) => {
-    if (!tokenValid(ctx.req, ctx.body)) return raspunde(ctx.res, 401, { eroare: "token invalid" });
-    const randuri = Array.isArray(ctx.body && ctx.body.randuri) ? ctx.body.randuri : [];
-    if (randuri.length > 500) return raspunde(ctx.res, 400, { eroare: "prea multe rânduri" });
-
-    await db.prepare("DELETE FROM agenda_externa").run();
-    const t = acum();
-    let n = 0;
-    for (const r of randuri) {
-      const titlu = String((r && r.titlu) || "").trim();
-      if (!titlu) continue;
-      await db
-        .prepare(
-          `INSERT INTO agenda_externa (sursa, titlu, detalii, incepe_la, se_termina_la, link, cheie_externa, actualizat_la)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          String(r.sursa || "calendar").slice(0, 40),
-          titlu.slice(0, 300),
-          r.detalii ? String(r.detalii).slice(0, 1000) : null,
-          r.incepe_la ? String(r.incepe_la).slice(0, 25) : null,
-          r.se_termina_la ? String(r.se_termina_la).slice(0, 25) : null,
-          r.link ? String(r.link).slice(0, 500) : null,
-          r.cheie_externa ? String(r.cheie_externa).slice(0, 200) : null,
-          t
-        );
-      n++;
-    }
-    raspunde(ctx.res, 200, { ok: true, scrise: n });
+  // Reîncărcare la cerere, pentru admin — utilă după un deploy cu date noi.
+  router.post("/admin/sincronizare", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    await incarcaTot();
+    redirect(ctx.res, "/admin/sincronizare");
   });
 
-  // Înlocuiește știrile.
-  router.post("/api/stiri", async (ctx) => {
-    if (!tokenValid(ctx.req, ctx.body)) return raspunde(ctx.res, 401, { eroare: "token invalid" });
-    const randuri = Array.isArray(ctx.body && ctx.body.randuri) ? ctx.body.randuri : [];
-    if (randuri.length > 100) return raspunde(ctx.res, 400, { eroare: "prea multe rânduri" });
-
-    await db.prepare("DELETE FROM stiri").run();
-    const t = acum();
-    let n = 0;
-    for (const r of randuri) {
-      const titlu = String((r && r.titlu) || "").trim();
-      if (!titlu) continue;
-      await db
-        .prepare(
-          `INSERT INTO stiri (titlu, sursa, url, rezumat, zona, relevanta, publicat_la, adaugat_la)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          titlu.slice(0, 300),
-          r.sursa ? String(r.sursa).slice(0, 120) : null,
-          r.url ? String(r.url).slice(0, 500) : null,
-          r.rezumat ? String(r.rezumat).slice(0, 1000) : null,
-          String(r.zona) === "extern" ? "extern" : "local",
-          r.relevanta ? String(r.relevanta).slice(0, 500) : null,
-          r.publicat_la ? String(r.publicat_la).slice(0, 25) : null,
-          t
-        );
-      n++;
-    }
-    raspunde(ctx.res, 200, { ok: true, scrise: n });
-  });
-
-  // Pagină de stare, pentru admin: ce s-a sincronizat și când.
   router.get("/admin/sincronizare", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
     const a = await db.prepare("SELECT COUNT(*) AS n, MAX(actualizat_la) AS d FROM agenda_externa").get();
     const s = await db.prepare("SELECT COUNT(*) AS n, MAX(adaugat_la) AS d FROM stiri").get();
-    const areToken = !!(process.env.SYNC_TOKEN && process.env.SYNC_TOKEN.length >= 16);
+    const areAgenda = !!citesteFisier("agenda.json");
+    const areStiri = !!citesteFisier("stiri.json");
     const body = `
-      <h1>Sincronizare externă</h1>
-      <p style="max-width:700px;color:var(--text-muted)">
-        Agenda (Google Calendar + task-urile programate) și știrile de pe dashboard nu se pot afla din baza noastră
-        de date — le împinge Claude, periodic, printr-un endpoint protejat cu un secret separat de conturile de
-        utilizator. Endpoint-ul poate scrie DOAR în tabelele astea două, prin înlocuire completă.
+      <h1>Agendă și știri</h1>
+      <p style="max-width:720px;color:var(--text-muted)">
+        Întâlnirile din calendar, task-urile programate și știrile de pe dashboard nu se pot afla din baza noastră
+        de date. Vin din două fișiere ținute în repo — <code>date/agenda.json</code> și <code>date/stiri.json</code> —
+        pe care le împrospătează Claude și care se încarcă la fiecare pornire a aplicației.
       </p>
       <div class="cards">
-        <div class="card"><div class="label">Agenda</div><div class="value">${Number(a.n || 0)}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${a.d ? "actualizat " + esc(String(a.d).slice(0, 16)) : "niciodată"}</div></div>
-        <div class="card"><div class="label">Știri</div><div class="value">${Number(s.n || 0)}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${s.d ? "actualizat " + esc(String(s.d).slice(0, 16)) : "niciodată"}</div></div>
-        <div class="card"><div class="label">Secret configurat</div>
-          <div class="value">${areToken ? '<span class="badge verde">da</span>' : '<span class="badge rosu">nu</span>'}</div>
-          <div style="font-size:12px;color:var(--text-muted)">variabila SYNC_TOKEN</div></div>
+        <div class="card"><div class="label">Agendă în baza de date</div><div class="value">${Number(a.n || 0)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${a.d ? "încărcat " + esc(String(a.d).slice(0, 16)) : "niciodată"}</div></div>
+        <div class="card"><div class="label">Știri în baza de date</div><div class="value">${Number(s.n || 0)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${s.d ? "încărcat " + esc(String(s.d).slice(0, 16)) : "niciodată"}</div></div>
+        <div class="card"><div class="label">Fișiere găsite</div>
+          <div class="value" style="font-size:16px">
+            ${areAgenda ? '<span class="badge verde">agenda.json</span>' : '<span class="badge rosu">agenda.json lipsă</span>'}
+            ${areStiri ? '<span class="badge verde">stiri.json</span>' : '<span class="badge rosu">stiri.json lipsă</span>'}
+          </div></div>
       </div>
-      ${
-        areToken
-          ? ""
-          : `<p style="color:var(--danger);max-width:700px">Cât timp SYNC_TOKEN nu e setat în variabilele de mediu,
-               ruta de sincronizare e închisă și dashboard-ul rămâne fără agendă și fără știri.</p>`
-      }
+      <form method="post" action="/admin/sincronizare" class="inline-form">
+        <button class="btn" type="submit">Reîncarcă din fișiere</button>
+      </form>
       <a class="btn secondary" href="/">Înapoi la dashboard</a>
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Sincronizare", active: "/", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Agendă și știri", active: "/", body }));
   });
 }
 
-module.exports = { register };
+module.exports = { register, incarcaTot };
