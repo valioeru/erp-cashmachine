@@ -50,6 +50,12 @@ const ALIASE = {
   componentaCant: ["cantitatenecesara", "cantitatecomponenta"],
   dataIncasarii: ["dataincasarii", "dataincasare", "dataplatii", "dataplata", "dataincasari"],
   incasare: ["incasare", "nrincasare", "numarincasare", "chitanta"],
+  angajat: ["nume", "numesiprenume", "numeprenume", "angajat", "salariat", "numeangajat", "numesalariat"],
+  salariuBrut: ["salariubrut", "brut", "venitbrut", "salariulbrut", "totalbrut", "brutrealizat", "salarbrut"],
+  luna: ["luna", "perioada", "lunaan"],
+  card: ["card", "numarcard", "nrcard", "cardnumber", "rezerva", "cardrezerva"],
+  suma: ["suma", "valoare", "total", "valoarelei", "sumalei", "amount"],
+  dataTranz: ["data", "datatranzactie", "datatranzactiei", "transactiondate"],
 };
 
 function mapColoane(header, chei) {
@@ -345,6 +351,27 @@ function register(router) {
           ? `<form method="post" action="/import/sincronizare-stoc-live" class="inline-form"><button type="submit" class="btn secondary">Sincronizează stocul curent din SmartBill</button></form>`
           : ""
       }
+
+      <h2>8. State de salarii (costul real al oamenilor)</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Statul de plată lunar — de aici vine salariul brut din „cost company". Fișierul poate avea luna
+        într-o coloană sau doar în nume; dacă nu, alege-o mai jos. Oamenii se potrivesc după nume cu conturile din Utilizatori.
+      </p>
+      <form method="post" action="/import/state-salarii" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Luna (dacă nu e în fișier)</span><input type="month" name="luna"></label>
+        <label class="field"><span>Fișier (.xls / .xlsx / .csv)</span><input type="file" name="fisier" required></label>
+        <button type="submit" class="btn">Importă statul de plată</button>
+      </form>
+
+      <h2>9. Alimentări carburant (OMV)</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Extrasul cardurilor OMV. Fiecare alimentare are numărul cardului; cardul se leagă de om în
+        Utilizatori → „Card carburant". Sumele se adună pe lună și intră automat în costul lunii.
+      </p>
+      <form method="post" action="/import/carburant" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Fișier (.xls / .xlsx / .csv)</span><input type="file" name="fisier" required></label>
+        <button type="submit" class="btn">Importă alimentările</button>
+      </form>
 
       <h2>Date demonstrative</h2>
       <p>Dacă mai există datele demonstrative puse inițial (parteneri Alfa/Beta/Gamma, produse exemplu etc.) și vrei să pornești curat înainte de import:</p>
@@ -1151,6 +1178,181 @@ function register(router) {
         },
         erori
       )
+    );
+  });
+
+  // ---- 9. State de salarii (costul real al oamenilor) --------------------
+  //
+  // Costul lunar al unui om NU se introduce de mână: vine din statul de plată
+  // lunar (salariul brut realizat), din factura mașinii și din alimentările
+  // OMV pe cardul lui. Importul de aici aduce partea de salariu.
+  //
+  // Fișierul poate avea luna într-o coloană sau doar în numele fișierului
+  // ("Stat de plata 07-2026.xls") — încercăm ambele.
+  router.post("/import/state-salarii", async (ctx) => {
+    const file = preiaFisier(ctx);
+    if (!file) return send(ctx.res, 200, paginaRezultat("Import state de salarii", { Eroare: "Nu ai selectat niciun fișier." }, []));
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, paginaRezultat("Import state de salarii", { Eroare: e.message }, []));
+    }
+    const randHeader = gasesteRandHeader(rows, ALIASE);
+    const header = randHeader === -1 ? [] : rows[randHeader].map(normalizeHeader);
+    const idx = randHeader === -1 ? {} : mapColoane(header, ALIASE);
+    const colNume = idx.angajat !== -1 ? idx.angajat : idx.client;
+    if (randHeader === -1 || colNume === -1 || idx.salariuBrut === -1) {
+      return send(
+        ctx.res,
+        200,
+        paginaRezultat(
+          "Import state de salarii — coloane nerecunoscute",
+          { "Primele rânduri": rows.slice(0, 8).map((r, i) => `${i + 1}: ${r.join(" | ")}`).join("\n") || "(gol)" },
+          ["Am nevoie de o coloană cu numele angajatului și una cu salariul brut."]
+        )
+      );
+    }
+    const val = (row, cheie) => (idx[cheie] !== undefined && idx[cheie] !== -1 ? String(row[idx[cheie]] ?? "").trim() : "");
+
+    // luna: din coloană, din formularul de import, sau din numele fișierului
+    const lunaDinNume = (() => {
+      const m = String(file.filename || "").match(/(\d{4})[-_. ]?(\d{2})|(\d{2})[-_. ](\d{4})/);
+      if (!m) return null;
+      if (m[1]) return `${m[1]}-${m[2]}`;
+      return `${m[4]}-${m[3]}`;
+    })();
+    const lunaFormular = /^\d{4}-\d{2}$/.test(String(ctx.body.luna || "")) ? String(ctx.body.luna) : null;
+
+    const utilizatori = await db.prepare("SELECT id, nume, cost_masina_lunar, masina_detalii FROM utilizatori WHERE activ = 1").all();
+    const normNume = (v) =>
+      String(v || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/[^a-z ]/g, "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .sort()
+        .join(" ");
+
+    const erori = [];
+    let actualizate = 0, sarite = 0, faraOm = 0;
+    for (let r = randHeader + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
+      const nume = String(row[colNume] ?? "").trim();
+      const brut = parseNumar(val(row, "salariuBrut"));
+      if (!nume || !(brut > 0)) { sarite++; continue; }
+      const luna = (() => {
+        const dinColoana = val(row, "luna");
+        if (/^\d{4}-\d{2}/.test(dinColoana)) return dinColoana.slice(0, 7);
+        const d = parseData(dinColoana);
+        if (d) return d.slice(0, 7);
+        return lunaFormular || lunaDinNume;
+      })();
+      if (!luna) { erori.push(`Rândul ${r + 1}: nu știu pentru ce lună e „${nume}". Alege luna în formular.`); sarite++; continue; }
+
+      const n = normNume(nume);
+      const u = utilizatori.find((x) => normNume(x.nume) === n) || utilizatori.find((x) => normNume(x.nume).split(" ").every((p) => n.includes(p)));
+      if (!u) { faraOm++; if (erori.length < 40) erori.push(`Rândul ${r + 1}: „${nume}" nu are cont în ERP — creează-l la Utilizatori, apoi reimportă.`); continue; }
+
+      const deLa = `${luna}-01`;
+      const existent = await db.prepare("SELECT id, cost_carburant, alte_costuri FROM costuri_personal WHERE utilizator_id = ? AND valabil_de_la = ?").get(u.id, deLa);
+      if (existent) {
+        await db.prepare("UPDATE costuri_personal SET salariu_brut = ?, cost_masina = ?, masina_detalii = ? WHERE id = ?").run(brut, Number(u.cost_masina_lunar) || 0, u.masina_detalii || null, existent.id);
+      } else {
+        await db
+          .prepare("INSERT INTO costuri_personal (utilizator_id, valabil_de_la, salariu_brut, cost_masina, masina_detalii, cost_carburant, alte_costuri, observatii) VALUES (?, ?, ?, ?, ?, 0, 0, ?)")
+          .run(u.id, deLa, brut, Number(u.cost_masina_lunar) || 0, u.masina_detalii || null, "din statul de plată");
+      }
+      actualizate++;
+    }
+
+    send(
+      ctx.res,
+      200,
+      paginaRezultat(
+        "Import state de salarii",
+        { "Luni/oameni actualizați": actualizate, "Rânduri sărite": sarite, "Fără cont în ERP": faraOm, "Luna din fișier": lunaFormular || lunaDinNume || "(din coloană)" },
+        erori
+      )
+    );
+  });
+
+  // ---- 10. Alimentări carburant (OMV) ------------------------------------
+  // Extrasul de card OMV: fiecare alimentare are numărul cardului („rezerva").
+  // Cardul e legat de om în Utilizatori → card carburant. Sumele se adună pe
+  // lună și intră în costul lunii respective.
+  router.post("/import/carburant", async (ctx) => {
+    const file = preiaFisier(ctx);
+    if (!file) return send(ctx.res, 200, paginaRezultat("Import carburant", { Eroare: "Nu ai selectat niciun fișier." }, []));
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, paginaRezultat("Import carburant", { Eroare: e.message }, []));
+    }
+    const randHeader = gasesteRandHeader(rows, ALIASE);
+    const header = randHeader === -1 ? [] : rows[randHeader].map(normalizeHeader);
+    const idx = randHeader === -1 ? {} : mapColoane(header, ALIASE);
+    if (randHeader === -1 || idx.card === -1 || idx.suma === -1) {
+      return send(
+        ctx.res,
+        200,
+        paginaRezultat(
+          "Import carburant — coloane nerecunoscute",
+          { "Primele rânduri": rows.slice(0, 8).map((r, i) => `${i + 1}: ${r.join(" | ")}`).join("\n") || "(gol)" },
+          ["Am nevoie de o coloană cu numărul cardului și una cu suma."]
+        )
+      );
+    }
+    const val = (row, cheie) => (idx[cheie] !== undefined && idx[cheie] !== -1 ? String(row[idx[cheie]] ?? "").trim() : "");
+
+    const utilizatori = await db.prepare("SELECT id, nume, card_carburant, cost_masina_lunar, masina_detalii FROM utilizatori WHERE activ = 1 AND card_carburant IS NOT NULL AND card_carburant <> ''").all();
+    const dupaCard = new Map();
+    for (const u of utilizatori) {
+      for (const c of String(u.card_carburant).split(/[,;\s]+/).filter(Boolean)) dupaCard.set(c.replace(/\D/g, "").slice(-6), u);
+    }
+
+    const peOmSiLuna = new Map();
+    const erori = [];
+    let randuri = 0, faraCard = 0;
+    for (let r = randHeader + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
+      const card = val(row, "card").replace(/\D/g, "").slice(-6);
+      const suma = parseNumar(val(row, "suma"));
+      const data = parseData(val(row, "dataTranz")) || parseData(val(row, "dataEmiterii"));
+      if (!card || !(suma > 0) || !data) continue;
+      randuri++;
+      const u = dupaCard.get(card);
+      if (!u) { faraCard++; continue; }
+      const cheie = `${u.id}|${data.slice(0, 7)}`;
+      peOmSiLuna.set(cheie, (peOmSiLuna.get(cheie) || 0) + suma);
+    }
+
+    let scrise = 0;
+    for (const [cheie, suma] of peOmSiLuna.entries()) {
+      const [uid, luna] = cheie.split("|");
+      const u = utilizatori.find((x) => String(x.id) === uid);
+      const deLa = `${luna}-01`;
+      const existent = await db.prepare("SELECT id FROM costuri_personal WHERE utilizator_id = ? AND valabil_de_la = ?").get(uid, deLa);
+      if (existent) {
+        await db.prepare("UPDATE costuri_personal SET cost_carburant = ? WHERE id = ?").run(Math.round(suma * 100) / 100, existent.id);
+      } else {
+        await db
+          .prepare("INSERT INTO costuri_personal (utilizator_id, valabil_de_la, salariu_brut, cost_masina, masina_detalii, cost_carburant, alte_costuri, observatii) VALUES (?, ?, 0, ?, ?, ?, 0, ?)")
+          .run(uid, deLa, Number(u && u.cost_masina_lunar) || 0, (u && u.masina_detalii) || null, Math.round(suma * 100) / 100, "alimentări OMV");
+      }
+      scrise++;
+    }
+    if (faraCard) erori.push(`${faraCard} alimentări au un card care nu e legat de niciun om. Leagă cardul în Utilizatori → editează → „Card carburant".`);
+
+    send(
+      ctx.res,
+      200,
+      paginaRezultat("Import alimentări carburant", { "Alimentări citite": randuri, "Luni actualizate": scrise, "Fără card legat": faraCard }, erori)
     );
   });
 

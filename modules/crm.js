@@ -507,6 +507,77 @@ function register(router) {
       )
       .all(agentId, de, la);
 
+    // ---- Marjă, top produse, top clienți -----------------------------------
+    // Marja se poate calcula doar acolo unde linia de factură are produs
+    // identificat ȘI produsul are preț de achiziție. Facturile importate din
+    // SmartBill n-au detaliu pe produse, deci acoperirea e parțială — o
+    // spunem explicit, ca cifra să nu fie citită greșit.
+    const SUM_VENIT = "SUM(fl.cantitate * fl.pret_unitar)";
+    const SUM_COST = "SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0))";
+
+    const marjaFacturi = await db
+      .prepare(
+        `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client,
+                ${SUM_VENIT} AS venit, ${SUM_COST} AS cost,
+                SUM(CASE WHEN pr.id IS NULL OR COALESCE(pr.pret_achizitie,0) = 0 THEN 1 ELSE 0 END) AS linii_fara_cost,
+                COUNT(fl.id) AS linii
+         FROM facturi f
+         JOIN parteneri p ON p.id = f.partener_id
+         JOIN facturi_linii fl ON fl.factura_id = f.id
+         LEFT JOIN produse pr ON pr.id = fl.produs_id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND al.utilizator_id = ? AND f.data_emiterii BETWEEN ? AND ?
+         GROUP BY f.id, f.serie, f.numar, f.data_emiterii, p.nume
+         ORDER BY venit DESC
+         LIMIT 300`
+      )
+      .all(agentId, de, la);
+
+    const topProdusePerioada = await db
+      .prepare(
+        `SELECT pr.id, pr.denumire, SUM(fl.cantitate) AS cantitate,
+                ${SUM_VENIT} AS venit, ${SUM_COST} AS cost
+         FROM facturi_linii fl
+         JOIN facturi f ON f.id = fl.factura_id
+         JOIN produse pr ON pr.id = fl.produs_id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND al.utilizator_id = ? AND f.data_emiterii BETWEEN ? AND ?
+         GROUP BY pr.id, pr.denumire
+         ORDER BY venit DESC
+         LIMIT 15`
+      )
+      .all(agentId, de, la);
+
+    // Marja pe agenți — pentru admin, comparativ; pentru agent, doar linia lui.
+    const marjaPeAgenti = await db
+      .prepare(
+        `SELECT al.utilizator_id AS agent, u.nume AS agent_nume,
+                ${SUM_VENIT} AS venit, ${SUM_COST} AS cost
+         FROM facturi f
+         JOIN facturi_linii fl ON fl.factura_id = f.id
+         LEFT JOIN produse pr ON pr.id = fl.produs_id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         JOIN utilizatori u ON u.id = al.utilizator_id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND f.data_emiterii BETWEEN ? AND ?
+         GROUP BY al.utilizator_id, u.nume
+         ORDER BY venit DESC`
+      )
+      .all(de, la);
+
+    // Vânzările totale ale firmei în perioadă — baza pentru „% din total".
+    const vanzariTotale = await db
+      .prepare(
+        `SELECT COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS venit
+         FROM facturi f JOIN facturi_linii fl ON fl.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND f.data_emiterii BETWEEN ? AND ?`
+      )
+      .get(de, la);
+    const totalFirma = Number(vanzariTotale && vanzariTotale.venit) || 0;
+
     const widgetComision = `
       <section class="comision-box">
         <div class="comision-head">
@@ -783,10 +854,135 @@ function register(router) {
     const vanzari12Total = clienti.reduce((s, c) => s + Number(c.vanzari12), 0);
     const soldTotal = clienti.reduce((s, c) => s + Math.max(0, Number(c.sold)), 0);
 
+    // ---- Blocurile de marjă și topuri --------------------------------------
+    const venitMeu = marjaFacturi.reduce((s2, f) => s2 + Number(f.venit), 0);
+    const costMeu = marjaFacturi.reduce((s2, f) => s2 + Number(f.cost), 0);
+    const marjaMea = venitMeu - costMeu;
+    const acoperire = (() => {
+      const linii = marjaFacturi.reduce((s2, f) => s2 + Number(f.linii), 0);
+      const fara = marjaFacturi.reduce((s2, f) => s2 + Number(f.linii_fara_cost), 0);
+      return linii ? Math.round(((linii - fara) / linii) * 100) : 0;
+    })();
+    const pct = (x, total) => (total > 0 ? `${((x / total) * 100).toFixed(1)}%` : "—");
+
+    const topProduseTotal = topProdusePerioada.reduce((s2, r) => s2 + Number(r.venit), 0);
+    const topClienti = clientiPerioada.slice().sort((a, b) => b.facturat - a.facturat).slice(0, 15);
+    const facturatTotalCli = clientiPerioada.reduce((s2, c) => s2 + c.facturat, 0);
+
+    const blocMarja = `
+      <h2>Marja mea în ${esc(etichetaPer)}</h2>
+      <div class="cards">
+        <div class="card"><div class="label">Vânzări (fără TVA)</div><div class="value">${money(venitMeu)}</div></div>
+        <div class="card"><div class="label">Cost marfă</div><div class="value">${money(costMeu)}</div></div>
+        <div class="card"><div class="label">Marjă netă</div><div class="value" style="color:${marjaMea >= 0 ? "var(--success)" : "var(--danger)"}">${money(marjaMea)}</div></div>
+        <div class="card"><div class="label">Marjă %</div><div class="value">${venitMeu > 0 ? ((marjaMea / venitMeu) * 100).toFixed(1) + "%" : "—"}</div></div>
+        <div class="card"><div class="label">Din vânzările firmei</div><div class="value">${pct(venitMeu, totalFirma)}</div></div>
+      </div>
+      ${
+        acoperire < 100
+          ? `<p style="font-size:12px;color:var(--warn);margin-top:-6px">
+               Marja e calculată pe ${acoperire}% din liniile de factură — restul n-au produs identificat sau preț de achiziție.
+               Cifra e o estimare în minus a costului, deci marja reală e mai mică sau egală cu cea de mai sus.
+             </p>`
+          : ""
+      }
+      ${
+        esteAdmin && marjaPeAgenti.length
+          ? `<h3 style="font-size:14px;margin:16px 0 8px">Toți agenții în ${esc(etichetaPer)}</h3>
+             ${table(
+               ["Agent", "Vânzări", "Cost marfă", "Marjă netă", "Marjă %", "% din vânzările firmei"],
+               marjaPeAgenti.map((r) => {
+                 const v = Number(r.venit), c = Number(r.cost), m = v - c;
+                 return [
+                   `<a href="${linkBirou(r.agent)}">${esc(r.agent_nume)}</a>`,
+                   money(v),
+                   money(c),
+                   `<strong style="color:${m >= 0 ? "var(--success)" : "var(--danger)"}">${money(m)}</strong>`,
+                   v > 0 ? ((m / v) * 100).toFixed(1) + "%" : "—",
+                   pct(v, totalFirma),
+                 ];
+               }),
+               {
+                 total: [
+                   "TOTAL",
+                   money(marjaPeAgenti.reduce((s2, r) => s2 + Number(r.venit), 0)),
+                   money(marjaPeAgenti.reduce((s2, r) => s2 + Number(r.cost), 0)),
+                   money(marjaPeAgenti.reduce((s2, r) => s2 + Number(r.venit) - Number(r.cost), 0)),
+                   "",
+                   "100%",
+                 ],
+               }
+             )}`
+          : ""
+      }
+
+      <h2>Top clienți în ${esc(etichetaPer)}</h2>
+      ${
+        topClienti.length
+          ? table(
+              ["#", "Client", "Facturat", "% din vânzările mele", "Încasat", "Sold restant"],
+              topClienti.map((c, i) => [
+                String(i + 1),
+                `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                money(c.facturat),
+                pct(c.facturat, facturatTotalCli),
+                money(c.incasat),
+                c.sold > 0.5 ? `<span style="color:var(--danger)">${money(c.sold)}</span>` : "—",
+              ])
+            )
+          : `<p style="color:var(--text-muted)">Fără vânzări în ${esc(etichetaPer)}.</p>`
+      }
+
+      <h2>Top produse vândute în ${esc(etichetaPer)}</h2>
+      ${
+        topProdusePerioada.length
+          ? table(
+              ["#", "Produs", "Cantitate", "Vânzări", "% din total", "Cost", "Marjă", "Marjă %"],
+              topProdusePerioada.map((r, i) => {
+                const v = Number(r.venit), c = Number(r.cost), m = v - c;
+                return [
+                  String(i + 1),
+                  `<a href="/produse/${r.id}">${esc(r.denumire)}</a>`,
+                  Number(r.cantitate).toLocaleString("ro-RO"),
+                  money(v),
+                  pct(v, topProduseTotal),
+                  money(c),
+                  `<strong style="color:${m >= 0 ? "var(--success)" : "var(--danger)"}">${money(m)}</strong>`,
+                  v > 0 ? ((m / v) * 100).toFixed(1) + "%" : "—",
+                ];
+              })
+            )
+          : `<p style="color:var(--text-muted)">Facturile din perioada asta n-au produse identificate — de-aia nu pot arăta topul. Se rezolvă pe măsură ce facturile se emit din ERP sau se importă cu detaliu pe produse.</p>`
+      }
+
+      <h2>Marja pe fiecare vânzare</h2>
+      ${
+        marjaFacturi.length
+          ? table(
+              ["Factura", "Client", "Data", "Vânzare", "Cost", "Marjă", "Marjă %"],
+              marjaFacturi.slice(0, 100).map((f) => {
+                const v = Number(f.venit), c = Number(f.cost), m = v - c;
+                return [
+                  `<a href="/facturi/${f.id}">${esc([f.serie, f.numar].filter(Boolean).join(" "))}</a>`,
+                  esc(f.client),
+                  f.data_emiterii ? esc(String(f.data_emiterii).slice(0, 10)) : "—",
+                  money(v),
+                  Number(f.linii_fara_cost) === Number(f.linii) ? `<span style="color:var(--text-muted)">necunoscut</span>` : money(c),
+                  Number(f.linii_fara_cost) === Number(f.linii) ? "—" : `<strong style="color:${m >= 0 ? "var(--success)" : "var(--danger)"}">${money(m)}</strong>`,
+                  Number(f.linii_fara_cost) === Number(f.linii) || v <= 0 ? "—" : ((m / v) * 100).toFixed(1) + "%",
+                ];
+              }),
+              { total: ["TOTAL", "", "", money(venitMeu), money(costMeu), money(marjaMea), venitMeu > 0 ? ((marjaMea / venitMeu) * 100).toFixed(1) + "%" : "—"] }
+            )
+          : `<p style="color:var(--text-muted)">Nicio vânzare în ${esc(etichetaPer)}.</p>`
+      }
+    `;
+
     const body = `
       ${subnavCrm("/crm/birou")}
       ${widgetComision}
       ${blocCost}
+      ${blocMarja}
       ${blocClienti}
       ${
         esteAdmin && agenti.length

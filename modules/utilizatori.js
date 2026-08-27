@@ -54,6 +54,10 @@ function register(router) {
       <label class="field"><span>Parolă inițială</span><input type="text" name="parola" value="cashmachine" required minlength="6"></label>
       <label class="field"><span>Rol</span><select name="rol">${optiuniRoluri("vanzari")}</select></label>
       <label class="field"><span>Comision din încasări (%)</span><input type="number" step="0.01" name="comision_procent" value="2"></label>
+      <label class="field"><span>Cost mașină pe lună (lei)</span><input type="number" step="0.01" name="cost_masina_lunar" value="0"></label>
+      <label class="field"><span>Mașina (detalii)</span><input name="masina_detalii" value="" placeholder="ex. leasing Dacia Jogger"></label>
+      <label class="field"><span>Card carburant OMV (nr. card / rezervă)</span><input name="card_carburant" value="" placeholder="ex. 003"></label>
+
       <div class="form-actions">
         <button type="submit" class="btn">Creează utilizator</button>
         <a href="/admin/utilizatori" class="btn secondary">Renunță</a>
@@ -68,8 +72,18 @@ function register(router) {
       // Parola implicită pentru orice cont nou; la prima logare e obligat s-o schimbe.
       const { hash, salt } = auth.hashParola(parola || "cashmachine");
       await db
-        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, comision_procent, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, 1)")
-        .run(nume, (email || "").toLowerCase().trim(), hash, salt, rol || "vanzari", Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0);
+        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, comision_procent, cost_masina_lunar, masina_detalii, card_carburant, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
+        .run(
+          nume,
+          (email || "").toLowerCase().trim(),
+          hash,
+          salt,
+          rol || "vanzari",
+          Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0,
+          Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
+          String(ctx.body.masina_detalii || "").trim() || null,
+          String(ctx.body.card_carburant || "").trim() || null
+        );
       redirect(ctx.res, "/admin/utilizatori");
     } catch (e) {
       const mesaj = e.code === "23505" ? "Există deja un utilizator cu acest email." : e.message;
@@ -94,6 +108,10 @@ function register(router) {
       <label class="field"><span>Email</span><input type="email" name="email" value="${esc(u.email)}" required></label>
       <label class="field"><span>Rol</span><select name="rol">${optiuniRoluri(u.rol)}</select></label>
       <label class="field"><span>Comision din încasări (%)</span><input type="number" step="0.01" name="comision_procent" value="${Number(u.comision_procent ?? 2)}"></label>
+      <label class="field"><span>Cost mașină pe lună (lei)</span><input type="number" step="0.01" name="cost_masina_lunar" value="${Number(u.cost_masina_lunar ?? 0)}"></label>
+      <label class="field"><span>Mașina (detalii)</span><input name="masina_detalii" value="${esc(u.masina_detalii || "")}" placeholder="ex. leasing Dacia Jogger"></label>
+      <label class="field"><span>Card carburant OMV (nr. card / rezervă)</span><input name="card_carburant" value="${esc(u.card_carburant || "")}" placeholder="ex. 003"></label>
+
       <label class="field"><span>Parolă nouă (opțional — lasă gol ca să nu o schimbi)</span><input type="password" name="parola" minlength="6"></label>
       <div class="form-actions">
         <button type="submit" class="btn">Salvează</button>
@@ -108,17 +126,31 @@ function register(router) {
     const comision = Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0;
     if (parola && parola.length >= 6) {
       const { hash, salt } = auth.hashParola(parola);
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
+      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
         nume,
         (email || "").toLowerCase().trim(),
         rol,
         comision,
+        Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
+        String(ctx.body.masina_detalii || "").trim() || null,
+        String(ctx.body.card_carburant || "").trim() || null,
         hash,
         salt,
         ctx.params.id
       );
     } else {
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ? WHERE id = ?").run(nume, (email || "").toLowerCase().trim(), rol, comision, ctx.params.id);
+      await db
+        .prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ? WHERE id = ?")
+        .run(
+          nume,
+          (email || "").toLowerCase().trim(),
+          rol,
+          comision,
+          Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
+          String(ctx.body.masina_detalii || "").trim() || null,
+          String(ctx.body.card_carburant || "").trim() || null,
+          ctx.params.id
+        );
     }
     redirect(ctx.res, "/admin/utilizatori");
   });
