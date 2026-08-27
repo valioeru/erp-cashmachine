@@ -1,5 +1,6 @@
 "use strict";
 const db = require("../lib/db");
+const alocari = require("./alocari");
 const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
@@ -80,6 +81,13 @@ function register(router) {
     const utilizatoriActivi = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const interactiuni = await db.prepare("SELECT * FROM interactiuni WHERE partener_id = ? ORDER BY data DESC, id DESC").all(partener.id);
 
+    const alocare = await alocari.alocariPentruPartener(partener.id);
+    const alocareLinii = alocare.linii;
+    const alocareExplicita = alocare.explicite;
+    const utilizatoriAlocabili = await db
+      .prepare("SELECT id, nume, rol FROM utilizatori WHERE activ = 1 AND rol IN ('admin','vanzari') ORDER BY rol DESC, nume")
+      .all();
+
     const body = `
       <div class="detail-box">
         <div class="detail-grid">
@@ -97,18 +105,21 @@ function register(router) {
           <a href="/crm/email/nou?partener_id=${partener.id}" class="btn secondary small">✉ Trimite email</a>
           <a href="/taskuri/nou?partener_id=${partener.id}" class="btn secondary small">+ Task</a>
         </div>
-        <div style="margin-top:10px;font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <span>Agent responsabil: <strong>${esc(partener.agent_nume || "nealocat")}</strong></span>
+        <div style="margin-top:12px;font-size:13px">
+          <div style="margin-bottom:6px">Alocare pe agenți (din asta se calculează comisionul):
+            <strong>${alocareLinii.length ? alocareLinii.map((a) => `${esc(a.nume)} ${Number(a.procent).toFixed(0)}%`).join(" · ") : "nealocat"}</strong>
+            ${alocareExplicita ? "" : `<span style="color:var(--text-muted)"> (implicit, din agentul responsabil)</span>`}
+          </div>
           ${
             ctx.user && ctx.user.rol === "admin"
-              ? `<form method="post" action="/parteneri/${partener.id}/agent" class="inline-form" style="display:flex;gap:6px;align-items:center">
-                  <select name="agent_id" style="font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:6px">
-                    <option value="">— nealocat —</option>
-                    ${utilizatoriActivi.map((u) => `<option value="${u.id}"${partener.agent_id === u.id ? " selected" : ""}>${esc(u.nume)}</option>`).join("")}
-                  </select>
-                  <button class="btn small secondary" type="submit">Schimbă agentul</button>
-                </form>`
-              : `<span style="color:var(--text-muted)">(doar administratorul poate schimba agentul)</span>`
+              ? `<div style="max-width:420px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle,#f6f7f9)">
+                   <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+                     Poți împărți clientul între mai mulți oameni — ex. 70% agentul care l-a adus, 30% administratorul.
+                     Suma procentelor nu poate trece de 100%.
+                   </div>
+                   ${alocari.formularAlocare(partener.id, alocareLinii, utilizatoriAlocabili, true)}
+                 </div>`
+              : `<span style="color:var(--text-muted)">(doar administratorul poate schimba alocarea)</span>`
           }
         </div>
       </div>

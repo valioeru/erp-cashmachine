@@ -48,6 +48,8 @@ const ALIASE = {
   produsFinit: ["produsfinit", "produsfinal", "denumireprodusfinit"],
   componenta: ["componenta", "denumirecomponenta", "materieprima", "semifabricat"],
   componentaCant: ["cantitatenecesara", "cantitatecomponenta"],
+  dataIncasarii: ["dataincasarii", "dataincasare", "dataplatii", "dataplata", "dataincasari"],
+  incasare: ["incasare", "nrincasare", "numarincasare", "chitanta"],
 };
 
 function mapColoane(header, chei) {
@@ -271,6 +273,18 @@ function register(router) {
         </label>
         <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
         <button type="submit" class="btn">Importă facturi</button>
+      </form>
+
+      <h2>1b. Încasări (plățile reale, cu data la care au intrat banii)</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        SmartBill Cloud → Documente emise → <strong>Încasări</strong> → alege intervalul → Exportă.
+        Ăsta e importul care contează pentru comisioane: până acum plățile erau reconstituite din statusul
+        facturii (cu data emiterii), nu din încasarea reală. O încasare care acoperă mai multe facturi se
+        împarte automat între ele, proporțional cu soldul. Reimportul e sigur — plățile identice sunt sărite.
+      </p>
+      <form method="post" action="/import/incasari" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Fișier (.xls / .xlsx / .csv)</span><input type="file" name="fisier" required></label>
+        <button type="submit" class="btn">Importă încasările</button>
       </form>
 
       <h2>2. Parteneri (clienți / furnizori)</h2>
@@ -984,6 +998,162 @@ function register(router) {
   });
 
   // ---- 6. Sincronizare stoc curent, live prin API-ul SmartBill -----------
+  // ---- 8. Încasări (plăți pe facturi) -----------------------------------
+  //
+  // Până acum, plățile din ERP erau RECONSTITUITE din statusul facturii din
+  // SmartBill ("Încasată" → o plată egală cu totalul, datată la emitere).
+  // E o aproximare care strică exact lucrul care contează la comisioane:
+  // data la care au intrat banii. Raportul "Încasări" din SmartBill Cloud
+  // dă plata reală — factură, dată, sumă — și asta importăm aici.
+  //
+  // O încasare poate acoperi mai multe facturi ("CSHM2750, CSHM2752") —
+  // atunci suma se împarte între ele proporțional cu soldul fiecăreia.
+  // Duplicatele se evită prin cheia (factură, dată, sumă).
+  router.post("/import/incasari", async (ctx) => {
+    const file = preiaFisier(ctx);
+    if (!file) return send(ctx.res, 200, paginaRezultat("Import încasări", { Eroare: "Nu ai selectat niciun fișier." }, []));
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, paginaRezultat("Import încasări", { Eroare: e.message }, []));
+    }
+    const randHeader = gasesteRandHeader(rows, ALIASE);
+    const header = randHeader === -1 ? [] : rows[randHeader].map(normalizeHeader);
+    const idx = randHeader === -1 ? {} : mapColoane(header, ALIASE);
+    const colFactura = idx.serieNumar !== -1 ? idx.serieNumar : idx.numar;
+    if (randHeader === -1 || colFactura === -1 || idx.dataIncasarii === -1) {
+      return send(
+        ctx.res,
+        200,
+        paginaRezultat(
+          "Import încasări — coloane nerecunoscute",
+          { "Primele rânduri": rows.slice(0, 6).map((r, i) => `${i + 1}: ${r.join(" | ")}`).join("\n") || "(gol)" },
+          ["Am nevoie măcar de coloana cu factura și cea cu data încasării."]
+        )
+      );
+    }
+    const val = (row, cheie) => (idx[cheie] !== undefined && idx[cheie] !== -1 ? String(row[idx[cheie]] ?? "").trim() : "");
+
+    // Indexăm facturile de vânzare după serie+număr, ca să potrivim rapid.
+    const facturi = await db
+      .prepare("SELECT id, serie, numar FROM facturi WHERE directie = 'vanzare' AND status <> 'anulata'")
+      .all();
+    const dupaCheie = new Map();
+    for (const f of facturi) {
+      const cheie = `${String(f.serie || "").toUpperCase()}${String(f.numar || "")}`.replace(/[^A-Z0-9]/g, "");
+      if (!dupaCheie.has(cheie)) dupaCheie.set(cheie, []);
+      dupaCheie.get(cheie).push(f.id);
+    }
+    // Plățile deja existente, ca să nu dublăm la reimport.
+    const existente = new Set(
+      (await db.prepare("SELECT factura_id, data, suma FROM plati").all()).map(
+        (p) => `${p.factura_id}|${String(p.data).slice(0, 10)}|${Number(p.suma).toFixed(2)}`
+      )
+    );
+    // Soldul curent al fiecărei facturi — pentru împărțirea unei încasări
+    // care acoperă mai multe facturi.
+    const solduri = new Map(
+      (
+        await db
+          .prepare(
+            `SELECT f.id, COALESCE(l.total,0) - COALESCE(pl.platit,0) AS sold
+               FROM facturi f
+               LEFT JOIN (SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+               LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+              WHERE f.directie='vanzare'`
+          )
+          .all()
+      ).map((r) => [r.id, Number(r.sold) || 0])
+    );
+
+    const erori = [];
+    let adaugate = 0, duplicate = 0, faraFactura = 0, randuri = 0;
+    const deInserat = [];
+
+    for (let r = randHeader + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
+      const brutFactura = String(row[colFactura] ?? "").trim();
+      const dataBruta = val(row, "dataIncasarii");
+      if (!brutFactura || !dataBruta) continue;
+      const data = parseData(dataBruta);
+      if (!data) continue;
+      const suma = parseNumar(val(row, "totalRon") || val(row, "total"));
+      if (!(suma > 0)) continue;
+      randuri++;
+
+      // O încasare poate lista mai multe facturi, separate prin virgulă.
+      const bucati = brutFactura.split(/[,;]+/).map((x) => x.trim()).filter(Boolean);
+      const tinte = [];
+      for (const b of bucati) {
+        const cheie = b.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const gasite = dupaCheie.get(cheie);
+        if (gasite && gasite.length) tinte.push(gasite[0]);
+      }
+      if (!tinte.length) { faraFactura++; if (erori.length < 60) erori.push(`Rândul ${r + 1}: nu găsesc factura „${brutFactura}" în ERP.`); continue; }
+
+      // împărțim suma proporțional cu soldul (sau egal, dacă n-avem solduri)
+      const ponderi = tinte.map((id) => Math.max(0.0001, solduri.get(id) || 0));
+      const totalPondere = ponderi.reduce((a, b) => a + b, 0);
+      tinte.forEach((id, i) => {
+        const cota = totalPondere > 0 ? (suma * ponderi[i]) / totalPondere : suma / tinte.length;
+        const rotunjit = Math.round(cota * 100) / 100;
+        const cheieDup = `${id}|${data}|${rotunjit.toFixed(2)}`;
+        if (existente.has(cheieDup)) { duplicate++; return; }
+        existente.add(cheieDup);
+        deInserat.push([id, rotunjit, data]);
+        adaugate++;
+      });
+    }
+
+    // inserare în loturi
+    const LOT = 200;
+    for (let i = 0; i < deInserat.length; i += LOT) {
+      const lot = deInserat.slice(i, i + LOT);
+      const ph = lot.map(() => "(?, ?, ?, 'import smartbill', 'Încasare importată din raportul SmartBill')").join(", ");
+      const args = [];
+      for (const l of lot) args.push(l[0], l[1], l[2]);
+      await db.prepare(`INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES ${ph}`).run(...args);
+    }
+
+    // Statusul facturilor se recalculează din plăți: achitat integral,
+    // parțial, sau neîncasat — ca listele de creanțe să fie corecte.
+    await db.exec(`
+      UPDATE facturi SET status = 'platita'
+       WHERE directie = 'vanzare' AND status NOT IN ('anulata')
+         AND id IN (
+           SELECT f.id FROM facturi f
+           JOIN (SELECT factura_id, SUM(suma) s FROM plati GROUP BY factura_id) p ON p.factura_id = f.id
+           JOIN (SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) t FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+           WHERE p.s >= l.t - 0.5)
+    `);
+    await db.exec(`
+      UPDATE facturi SET status = 'platita_partial'
+       WHERE directie = 'vanzare' AND status NOT IN ('anulata')
+         AND id IN (
+           SELECT f.id FROM facturi f
+           JOIN (SELECT factura_id, SUM(suma) s FROM plati GROUP BY factura_id) p ON p.factura_id = f.id
+           JOIN (SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) t FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+           WHERE p.s > 0.5 AND p.s < l.t - 0.5)
+    `);
+
+    send(
+      ctx.res,
+      200,
+      paginaRezultat(
+        "Import încasări",
+        {
+          "Rânduri citite": randuri,
+          "Plăți adăugate": adaugate,
+          "Duplicate sărite": duplicate,
+          "Fără factură în ERP": faraFactura,
+        },
+        erori
+      )
+    );
+  });
+
   router.post("/import/sincronizare-stoc-live", async (ctx) => {
     if (!smartbill.isConfigured()) return redirect(ctx.res, "/import");
     try {

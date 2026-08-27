@@ -6,6 +6,7 @@
 //   2. Oportunități: pipeline-ul de vânzare pe stadii.
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
+const { ALOC } = require("./alocari");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
@@ -390,16 +391,18 @@ function register(router) {
     // Agentul vede doar linia lui; adminul poate comuta pe oricare agent.
     const incasariPerioada = await db
       .prepare(
-        `SELECT p.agent_id AS agent, u.nume AS agent_nume, COALESCE(u.comision_procent,2) AS pct,
-                COALESCE(SUM(pl.suma),0) AS incasat, COUNT(DISTINCT f.id) AS nr_facturi, COUNT(DISTINCT p.id) AS nr_clienti
+        `SELECT al.utilizator_id AS agent, u.nume AS agent_nume, COALESCE(u.comision_procent,2) AS pct,
+                COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat,
+                COUNT(DISTINCT f.id) AS nr_facturi, COUNT(DISTINCT p.id) AS nr_clienti
          FROM plati pl
          JOIN facturi f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
-         JOIN utilizatori u ON u.id = p.agent_id
+         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN utilizatori u ON u.id = al.utilizator_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND u.rol = 'vanzari' AND u.activ = 1
            AND pl.data BETWEEN ? AND ?
-         GROUP BY p.agent_id, u.nume, u.comision_procent
+         GROUP BY al.utilizator_id, u.nume, u.comision_procent
          ORDER BY incasat DESC`
       )
       .all(de, la);
@@ -412,9 +415,10 @@ function register(router) {
     // Evoluția pe ultimele 12 luni (independentă de perioada aleasă).
     const evolutie = await db
       .prepare(
-        `SELECT SUBSTR(pl.data,1,7) AS luna, COALESCE(SUM(pl.suma),0) AS incasat
+        `SELECT SUBSTR(pl.data,1,7) AS luna, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat
          FROM plati pl JOIN facturi f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
-         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND p.agent_id = ?
+         JOIN ${ALOC} al ON al.partener_id = p.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND al.utilizator_id = ?
          GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 12`
       )
       .all(agentId);
@@ -427,13 +431,15 @@ function register(router) {
     // ---- Clienții alocați, cu ce au fost facturați și ce au plătit ---------
     const incasatPeClient = await db
       .prepare(
-        `SELECT p.id, p.nume, COALESCE(SUM(pl.suma),0) AS incasat,
+        `SELECT p.id, p.nume, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat,
+                MAX(al.procent) AS procent_alocat,
                 COUNT(DISTINCT f.id) AS nr_facturi, MAX(pl.data) AS ultima_incasare
          FROM plati pl
          JOIN facturi f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
+         JOIN ${ALOC} al ON al.partener_id = p.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           AND p.agent_id = ? AND pl.data BETWEEN ? AND ?
+           AND al.utilizator_id = ? AND pl.data BETWEEN ? AND ?
          GROUP BY p.id, p.nume`
       )
       .all(agentId, de, la);
@@ -444,8 +450,9 @@ function register(router) {
          FROM facturi f
          JOIN parteneri p ON p.id = f.partener_id
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         JOIN ${ALOC} al ON al.partener_id = p.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           AND p.agent_id = ? AND f.data_emiterii BETWEEN ? AND ?
+           AND al.utilizator_id = ? AND f.data_emiterii BETWEEN ? AND ?
          GROUP BY p.id, p.nume`
       )
       .all(agentId, de, la);
@@ -458,8 +465,9 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+         JOIN ${ALOC} al ON al.partener_id = p.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           AND p.agent_id = ?
+           AND al.utilizator_id = ?
          GROUP BY p.id`
       )
       .all(agentId);
@@ -472,6 +480,7 @@ function register(router) {
       for (const r of incasatPeClient) {
         const g = m.get(r.id) || { id: r.id, nume: r.nume, facturat: 0, nr_emise: 0, incasat: 0, nr_facturi: 0, ultima_incasare: null };
         g.incasat = Number(r.incasat);
+        g.procent = Number(r.procent_alocat ?? 100);
         g.nr_facturi = Number(r.nr_facturi);
         g.ultima_incasare = r.ultima_incasare;
         m.set(r.id, g);
@@ -485,12 +494,13 @@ function register(router) {
     const facturiIncasate = await db
       .prepare(
         `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client,
-                COALESCE(SUM(pl.suma),0) AS incasat, MAX(pl.data) AS data_incasare
+                COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat, MAX(pl.data) AS data_incasare
          FROM plati pl
          JOIN facturi f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
+         JOIN ${ALOC} al ON al.partener_id = p.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           AND p.agent_id = ? AND pl.data BETWEEN ? AND ?
+           AND al.utilizator_id = ? AND pl.data BETWEEN ? AND ?
          GROUP BY f.id, f.serie, f.numar, f.data_emiterii, p.nume
          ORDER BY data_incasare DESC, incasat DESC
          LIMIT 400`
@@ -572,9 +582,10 @@ function register(router) {
       ${
         clientiPerioada.length
           ? table(
-              ["Client", "Facturi emise", "Facturat", "Încasat", `Comision ${pctMeu.toFixed(1)}%`, "Ultima încasare", "Sold restant (la zi)"],
+              ["Client", "Alocat", "Facturi emise", "Facturat", "Încasat (partea mea)", `Comision ${pctMeu.toFixed(1)}%`, "Ultima încasare", "Sold restant (la zi)"],
               clientiPerioada.map((c) => [
                 `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                `${Number(c.procent ?? 100).toFixed(0)}%`,
                 String(c.nr_emise || 0),
                 money(c.facturat),
                 `<strong>${money(c.incasat)}</strong>`,
@@ -582,7 +593,7 @@ function register(router) {
                 c.ultima_incasare ? esc(String(c.ultima_incasare).slice(0, 10)) : "—",
                 c.sold > 0.5 ? `<span style="color:var(--danger)">${money(c.sold)}</span>` : "—",
               ]),
-              { total: ["TOTAL", "", money(totFacturatCli), money(totIncasatCli), money((totIncasatCli * pctMeu) / 100), "", ""] }
+              { total: ["TOTAL", "", "", money(totFacturatCli), money(totIncasatCli), money((totIncasatCli * pctMeu) / 100), "", ""] }
             )
           : `<p style="color:var(--text-muted)">Niciun client alocat cu activitate în ${esc(etichetaPer)}.</p>`
       }
@@ -671,7 +682,7 @@ function register(router) {
          LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE p.agent_id = ? AND p.tip IN ('client','ambele')
+         WHERE p.id IN (SELECT partener_id FROM ${ALOC} al2 WHERE al2.utilizator_id = ?) AND p.tip IN ('client','ambele')
          GROUP BY p.id, p.nume, p.email, p.telefon, p.data_nastere
          ORDER BY vanzari12 DESC`
       )
