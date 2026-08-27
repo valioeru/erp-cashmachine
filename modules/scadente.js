@@ -34,21 +34,57 @@ function azi() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// De la ce dată încolo știm sigur cine a plătit. Istoricul de plăți a fost
-// importat din SmartBill doar pentru perioada recentă, așa că o factură din
-// 2021 apare „neîncasată" doar pentru că plata ei n-a fost importată. Pe
-// facturile de dinainte de prima plată cunoscută NU trimitem somații și NU
-// blocăm comenzi — ar însemna să cerem bani pentru facturi achitate demult.
-let _dePlati = undefined;
-async function dataPlatiDeLa() {
-  if (_dePlati !== undefined) return _dePlati;
-  try {
-    const r = await db.prepare("SELECT MIN(data) AS d FROM plati").get();
-    _dePlati = r && r.d ? String(r.d).slice(0, 10) : null;
-  } catch (e) {
-    _dePlati = null;
+// De la ce dată încolo scadențarul e „viu".
+//
+// Motivul e serios: istoricul importat din SmartBill are 3.000 de facturi și
+// doar 1.400 de încasări. Multe facturi vechi apar neîncasate pentru că plata
+// lor n-a fost importată, nu pentru că n-ar fi fost plătită — sunt acolo
+// facturi din 2021 cu „sold". Dacă am lăsa regula de 3 luni să se aplice pe
+// tot istoricul, în ziua în care cineva configurează contul de email ar pleca
+// o sută de somații de plată către clienți care au achitat demult.
+//
+// Așa că notificările automate și blocarea comenzilor se aplică DOAR
+// facturilor emise de la data asta încolo. Implicit e ziua în care s-a
+// pornit scadențarul; adminul o poate muta înapoi când e sigur pe date.
+let _start;
+let _startInFlight = null;
+async function dataStart() {
+  if (_start) return _start;
+  // O singură citire, chiar dacă pagina o cere din trei locuri odată —
+  // altfel două inserturi paralele se bat pe aceeași cheie.
+  if (!_startInFlight) {
+    _startInFlight = (async () => {
+      const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = 'scadentar_de_la'").get();
+      if (r && r.valoare) return String(r.valoare).slice(0, 10);
+      const azi_ = azi();
+      try {
+        await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('scadentar_de_la', ?, ?)").run(azi_, azi_);
+      } catch (e) {
+        const r2 = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = 'scadentar_de_la'").get();
+        if (r2 && r2.valoare) return String(r2.valoare).slice(0, 10);
+      }
+      return azi_;
+    })()
+      .then((v) => {
+        _start = v;
+        _startInFlight = null;
+        return v;
+      })
+      .catch((e) => {
+        _startInFlight = null;
+        throw e;
+      });
   }
-  return _dePlati;
+  return _startInFlight;
+}
+async function setDataStart(d) {
+  const v = String(d || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const exista = await db.prepare("SELECT cheie FROM setari_app WHERE cheie = 'scadentar_de_la'").get();
+  if (exista) await db.prepare("UPDATE setari_app SET valoare = ?, actualizat_la = ? WHERE cheie = 'scadentar_de_la'").run(v, azi());
+  else await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('scadentar_de_la', ?, ?)").run(v, azi());
+  _start = v;
+  return v;
 }
 function zileIntre(a, b) {
   return Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
@@ -100,12 +136,12 @@ async function facturiCuSold(agentId) {
     .all(...args);
 
   const aziStr = azi();
-  const deLa = await dataPlatiDeLa();
+  const deLa = await dataStart();
   return randuri.map((f) => {
     const scad = scadentaEfectiva(f);
     const zile = scad ? zileIntre(scad, aziStr) : 0; // pozitiv = întârziere
     const emisa = f.data_emiterii ? String(f.data_emiterii).slice(0, 10) : "";
-    const neverificat = !!(deLa && emisa && emisa < deLa);
+    const neverificat = !!(deLa && emisa && emisa < deLa); // istoric, nu se automatizează
     return {
       ...f,
       scadenta: scad,
@@ -154,7 +190,7 @@ async function stareClient(partenerId) {
     )
     .all(partenerId);
   const aziStr = azi();
-  const deLa = await dataPlatiDeLa();
+  const deLa = await dataStart();
   let zileMax = 0;
   let sold = 0;
   for (const r of f) {
@@ -415,7 +451,7 @@ async function blocScadente(user, agentId) {
   const cunoscute = facturi.filter((f) => !f.neverificat);
   const restante = cunoscute.filter((f) => f.zile > 0).sort((a, b) => b.zile - a.zile);
   const urmeaza = cunoscute.filter((f) => f.zile <= 0).sort((a, b) => a.zile - b.zile);
-  const deLa = await dataPlatiDeLa();
+  const deLa = await dataStart();
   const capete = ["Factura", "Client", "Scadență", "Stare", "Sold", "Notificare", "Manual", "Ultima notificare"];
 
   const clientiRosii = [...stari.values()].filter((c) => c.stare === "rosu");
@@ -444,12 +480,14 @@ async function blocScadente(user, agentId) {
     }
     ${
       neverificate.length
-        ? `<h3 style="margin-top:22px">Sold neverificat (${neverificate.length}) — total ${money(neverificate.reduce((s, f) => s + f.sold, 0))}</h3>
-           <p style="font-size:13px;color:var(--text-muted);max-width:760px">
-             Facturi emise înainte de ${esc(deLa || "prima plată cunoscută")}, adică înainte de perioada pentru care
-             s-au importat încasările din SmartBill. Apar ca neîncasate pentru că plata lor nu e în sistem, nu pentru
-             că n-ar fi fost plătite. <strong>Nu generează notificări automate și nu blochează comenzi.</strong>
-             Se lămuresc importând încasările mai vechi sau marcând factura ca încasată din pagina ei.
+        ? `<h3 style="margin-top:22px">Sold vechi, neconfirmat (${neverificate.length}) — total ${money(neverificate.reduce((s, f) => s + f.sold, 0))}</h3>
+           <p style="font-size:13px;color:var(--text-muted);max-width:780px">
+             Facturi emise înainte de <strong>${esc(deLa || "—")}</strong>, data de la care e activ scadențarul.
+             Din SmartBill au venit 3.000 de facturi și doar 1.400 de încasări, deci multe dintre astea apar
+             neîncasate pentru că plata lor n-a fost importată, nu pentru că n-ar fi fost plătită.
+             <strong>Nu generează notificări automate și nu blochează comenzi.</strong>
+             Se pot notifica manual, una câte una, după ce verifici soldul. Când ai încredere în date,
+             adminul poate muta data de start înapoi și intră și ele în regimul normal.
            </p>
            ${table(capete, neverificate.slice(0, 60).map((f) => randFactura(f, stari.get(f.partener_id), user)))}`
         : ""
@@ -504,6 +542,12 @@ function register(router) {
             </form>
             <form method="post" action="/scadente/ruleaza" class="inline-form" style="margin-bottom:10px">
               <button class="btn secondary" type="submit">Rulează acum notificările automate</button>
+            </form>
+            <form method="post" action="/scadente/start" class="inline-form" style="margin-bottom:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span style="font-size:13px">Scadențarul e activ pentru facturi emise de la:</span>
+              <input type="date" name="de_la" value="${esc(await dataStart())}">
+              <button class="btn secondary small" type="submit">Salvează</button>
+              <span style="font-size:12px;color:var(--text-muted)">Facturile mai vechi rămân vizibile, dar nu trimit notificări automate și nu blochează comenzi.</span>
             </form>`
           : ""
       }
@@ -540,6 +584,13 @@ function register(router) {
     redirect(ctx.res, r.status === "trimis" ? `${dest}${dest.includes("?") ? "&" : "?"}trimise=1&esuate=0` : `${dest}${dest.includes("?") ? "&" : "?"}eroare=${encodeURIComponent(r.eroare || "Nu s-a putut trimite.")}`);
   });
 
+  // Data de la care scadențarul e activ (admin).
+  router.post("/scadente/start", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/scadente");
+    const v = await setDataStart(ctx.body.de_la);
+    redirect(ctx.res, v ? "/scadente" : "/scadente?eroare=" + encodeURIComponent("Data nu e validă."));
+  });
+
   // Rulaj manual al rutinei automate (admin).
   router.post("/scadente/ruleaza", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/scadente");
@@ -561,6 +612,8 @@ module.exports = {
   register,
   blocScadente,
   porneste,
+  dataStart,
+  setDataStart,
   facturiCuSold,
   stariDinFacturi,
   stareClient,
