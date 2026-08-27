@@ -63,6 +63,37 @@ function formularAlocare(partenerId, linii, utilizatori, compact) {
   </form>`;
 }
 
+
+// Numele din Registrul de comenzi sunt denumiri "de gură" (Sameday, Leroy
+// Merlin BR, Aquila CT), pe când facturile poartă denumirea legală (Delivery
+// Solutions S.A.). Legătura dintre ele se ține în alias_parteneri: o dată
+// stabilită de om, potrivirea automată o folosește la fiecare rulare.
+function normNume(v) {
+  return String(v || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(s\.?r\.?l\.?|s\.?a\.?|srl|sa|pfa|ii|impex|company|comp|com)\b/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+async function gasestePartener(nume, parteneri, aliasuri) {
+  const n = normNume(nume);
+  if (!n) return null;
+  if (aliasuri && aliasuri.has(n)) return parteneri.find((p) => p.id === aliasuri.get(n)) || null;
+  return (
+    parteneri.find((x) => normNume(x.nume) === n) ||
+    parteneri.find((x) => normNume(x.nume).startsWith(n) && n.length >= 4) ||
+    parteneri.find((x) => n.startsWith(normNume(x.nume)) && normNume(x.nume).length >= 4) ||
+    null
+  );
+}
+
+async function hartaAliasuri() {
+  const r = await db.prepare("SELECT alias, partener_id FROM alias_parteneri").all();
+  return new Map(r.map((x) => [normNume(x.alias), x.partener_id]));
+}
+
 function register(router) {
   // Salvarea alocării unui client (doar administratorul).
   router.post("/parteneri/:id/alocari", async (ctx) => {
@@ -112,14 +143,6 @@ function register(router) {
   router.post("/alocari/auto", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
 
-    const norm = (v) =>
-      String(v || "")
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[̀-ͯ]/g, "")
-        .replace(/\b(s\.?r\.?l\.?|s\.?a\.?|srl|sa|pfa|ii|impex|company|comp|com)\b/g, "")
-        .replace(/[^a-z0-9]/g, "");
-
     const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin')").all();
     const initiale = (nume) =>
       String(nume || "")
@@ -153,6 +176,7 @@ function register(router) {
     }
 
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele')").all();
+    const aliasuri = await hartaAliasuri();
     const dejaAlocati = new Set((await db.prepare("SELECT DISTINCT partener_id FROM alocari_clienti").all()).map((r) => r.partener_id));
 
     let alocate = 0;
@@ -162,12 +186,7 @@ function register(router) {
       const cod = Object.entries(coduri).sort((a, b) => b[1] - a[1])[0][0];
       const agent = potrivesteCod(cod);
       if (!agent) { faraAgent.push(`${clientText} (cod ${cod})`); continue; }
-      const n = norm(clientText);
-      if (!n) continue;
-      const p =
-        parteneri.find((x) => norm(x.nume) === n) ||
-        parteneri.find((x) => norm(x.nume).startsWith(n) && n.length >= 4) ||
-        parteneri.find((x) => n.startsWith(norm(x.nume)) && norm(x.nume).length >= 4);
+      const p = await gasestePartener(clientText, parteneri, aliasuri);
       if (!p) { nepotrivite.push(`${clientText} (cod ${cod})`); continue; }
       if (dejaAlocati.has(p.id)) continue;
       await db.prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, observatii) VALUES (?, ?, 100, ?)").run(p.id, agent.id, `alocat automat din registrul de comenzi (cod ${cod})`);
@@ -185,9 +204,110 @@ function register(router) {
       </div></div>
       ${nepotrivite.length ? `<h2>Clienți din registru pe care nu i-am găsit în ERP</h2><ul>${nepotrivite.slice(0, 40).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
       ${faraAgent.length ? `<h2>Coduri de reprezentant fără utilizator în ERP</h2><ul>${faraAgent.slice(0, 40).map((x) => `<li>${esc(x)}</li>`).join("")}</ul><p style="font-size:13px;color:var(--text-muted)">Creează utilizatorii lipsă (Utilizatori → Adaugă) cu numele complet, apoi rulează din nou alocarea automată.</p>` : ""}
-      <a class="btn secondary" href="/alocari">Înapoi la alocări</a>
+      <div class="toolbar">
+        <a class="btn secondary" href="/alocari">Înapoi la alocări</a>
+        ${nepotrivite.length ? `<a class="btn" href="/alocari/registru">Leagă numele nepotrivite de clienți</a>` : ""}
+      </div>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Alocare automată din registrul de comenzi", active: "/alocari", body }));
+  });
+
+  // Potrivirea numelor din Registrul de comenzi cu clienții reali ----------
+  // Ecranul unde omul leagă „Sameday" de „DELIVERY SOLUTIONS S.A." o singură
+  // dată. Legătura se salvează ca alias și e folosită automat la fiecare
+  // alocare ulterioară.
+  router.get("/alocari/registru", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const comenzi = await db
+      .prepare(
+        `SELECT client_text, COALESCE(reprezentant, initiator) AS cod, COUNT(*) AS nr
+           FROM comenzi_productie
+          WHERE client_text IS NOT NULL AND client_text <> ''
+          GROUP BY client_text, COALESCE(reprezentant, initiator)
+          ORDER BY nr DESC`
+      )
+      .all();
+    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume").all();
+    const aliasuri = await hartaAliasuri();
+
+    // pentru fiecare nume din registru: partenerul găsit (dacă există)
+    const randuri = [];
+    const vazut = new Set();
+    for (const c of comenzi) {
+      const cheie = String(c.client_text).trim();
+      if (vazut.has(cheie.toLowerCase())) continue;
+      vazut.add(cheie.toLowerCase());
+      const p = await gasestePartener(cheie, parteneri, aliasuri);
+      const prinAlias = aliasuri.has(normNume(cheie));
+      randuri.push({ text: cheie, cod: c.cod || "", nr: c.nr, partener: p, prinAlias });
+    }
+    randuri.sort((a, b) => (a.partener ? 1 : 0) - (b.partener ? 1 : 0) || b.nr - a.nr);
+
+    const optiuniParteneri = parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("");
+
+    const body = `
+      <p style="color:var(--text-muted);font-size:13px;max-width:820px">
+        În Registrul de comenzi clienții apar cu nume de zi cu zi („Sameday", „Leroy Merlin BR"),
+        iar pe facturi cu denumirea legală („DELIVERY SOLUTIONS S.A."). Leagă-le o singură dată aici —
+        pe viitor, alocarea automată pe agenți le potrivește singură.
+      </p>
+      ${table(
+        ["Nume în registru", "Reprezentant", "Comenzi", "Client în ERP", "Leagă de"],
+        randuri.map((r) => [
+          esc(r.text),
+          esc(r.cod || "—"),
+          String(r.nr),
+          r.partener
+            ? `<a href="/parteneri/${r.partener.id}">${esc(r.partener.nume)}</a>${r.prinAlias ? ' <span style="font-size:11px;color:var(--text-muted)">(alias)</span>' : ""}`
+            : `<span style="color:var(--danger)">nepotrivit</span>`,
+          `<form method="post" action="/alocari/registru/leaga" style="display:flex;gap:6px;align-items:center">
+             <input type="hidden" name="alias" value="${esc(r.text)}">
+             <input type="hidden" name="cod" value="${esc(r.cod || "")}">
+             <select name="partener_id" style="max-width:260px"><option value="">— alege clientul —</option>${optiuniParteneri}</select>
+             <button type="submit" class="btn secondary" style="padding:5px 10px">Leagă</button>
+           </form>`,
+        ])
+      )}
+      <a class="btn secondary" href="/alocari">Înapoi la alocări</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Nume din Registrul de comenzi", active: "/alocari", body }));
+  });
+
+  router.post("/alocari/registru/leaga", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const alias = String(ctx.body.alias || "").trim();
+    const partenerId = parseInt(ctx.body.partener_id, 10);
+    const cod = String(ctx.body.cod || "").trim().toUpperCase();
+    if (!alias || !Number.isFinite(partenerId) || partenerId <= 0) return redirect(ctx.res, "/alocari/registru");
+
+    await db.prepare("DELETE FROM alias_parteneri WHERE LOWER(alias) = LOWER(?)").run(alias);
+    await db.prepare("INSERT INTO alias_parteneri (alias, partener_id, sursa) VALUES (?, ?, 'registru comenzi')").run(alias, partenerId);
+
+    // Dacă știm și codul agentului, alocăm pe loc — asta e tot rostul legăturii.
+    if (/^[A-Z]{2,3}$/.test(cod)) {
+      const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin')").all();
+      const initiale = (nume) =>
+        String(nume || "")
+          .normalize("NFD")
+          .replace(/[̀-ͯ]/g, "")
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((c) => c[0].toUpperCase())
+          .join("");
+      const sortat = (x) => x.split("").sort().join("");
+      const agent = utilizatori.find((u) => {
+        const i = initiale(u.nume);
+        return i === cod || sortat(i) === sortat(cod) || i.startsWith(cod);
+      });
+      if (agent) {
+        const are = await db.prepare("SELECT 1 AS x FROM alocari_clienti WHERE partener_id = ?").get(partenerId);
+        if (!are) {
+          await db.prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, observatii) VALUES (?, ?, 100, ?)").run(partenerId, agent.id, `legat din registrul de comenzi (${alias}, cod ${cod})`);
+          await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agent.id, partenerId);
+        }
+      }
+    }
+    redirect(ctx.res, "/alocari/registru");
   });
 
   // Lista completă de clienți cu alocarea lor — locul unde adminul mută
@@ -262,6 +382,7 @@ function register(router) {
       </p>
       <form method="post" action="/alocari/auto" style="margin:12px 0">
         <button type="submit" class="btn secondary">Alocă automat din Registrul de comenzi</button>
+        <a class="btn secondary" href="/alocari/registru" style="margin-left:6px">Potrivește numele din registru</a>
         <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
           Folosește codul reprezentantului (GT / IR / MM / CG) de pe comenzile de producție. Nu suprascrie alocările făcute manual.
         </span>
