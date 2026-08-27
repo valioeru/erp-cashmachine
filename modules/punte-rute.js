@@ -303,6 +303,67 @@ module.exports = function registerRute(router, deps) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Cost din stoc", active: "/import", body }));
   });
 
+  // Costul produselor FABRICATE, calculat din rețetă.
+  //
+  // Un produs pe care îl producem noi n-are preț de achiziție — nu l-am
+  // cumpărat de nicăieri. Costul lui e suma componentelor din rețeta adusă
+  // din rapoartele de producție: cantitate × costul componentei.
+  //
+  // Rulează DUPĂ „preia costul din stoc", ca materiile prime să aibă preț.
+  // Componentele fără cost fac rezultatul incomplet, așa că spunem pe față
+  // câte produse au ieșit cu rețeta acoperită integral și câte doar parțial.
+  router.post("/import/cost-din-reteta", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+
+    const retete = await db
+      .prepare(
+        `SELECT r.produs_id, r.cantitate, COALESCE(c.pret_achizitie, 0) AS cost_comp, c.denumire AS comp
+           FROM retete_componente r
+           JOIN produse c ON c.id = r.componenta_id`
+      )
+      .all();
+
+    const peProdus = new Map();
+    for (const r of retete) {
+      if (!peProdus.has(r.produs_id)) peProdus.set(r.produs_id, { cost: 0, lipsa: 0, total: 0 });
+      const p = peProdus.get(r.produs_id);
+      p.total++;
+      if (Number(r.cost_comp) > 0) p.cost += Number(r.cantitate) * Number(r.cost_comp);
+      else p.lipsa++;
+    }
+
+    let complete = 0, partiale = 0, faraNimic = 0, sarite = 0;
+    for (const [produsId, p] of peProdus) {
+      const prod = await db.prepare("SELECT id, pret_achizitie FROM produse WHERE id = ?").get(produsId);
+      if (!prod) continue;
+      if (Number(prod.pret_achizitie) > 0) { sarite++; continue; }
+      if (p.cost <= 0) { faraNimic++; continue; }
+      await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(p.cost, prod.id);
+      if (p.lipsa === 0) complete++; else partiale++;
+    }
+
+    const acoperire = await db
+      .prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN pret_achizitie > 0 THEN 1 ELSE 0 END) AS cu_cost FROM produse")
+      .get();
+
+    const body = `
+      <h1>Cost din rețetă</h1>
+      <p style="max-width:700px">
+        Am calculat costul pentru <strong>${complete + partiale}</strong> produse fabricate, din componentele rețetei:
+        <strong>${complete}</strong> cu rețeta acoperită integral și <strong>${partiale}</strong> cu componente
+        care încă n-au cost — pentru alea costul iese <em>mai mic decât realitatea</em>, deci marja arată mai bine
+        decât e. ${faraNimic} produse au rețetă dar nicio componentă cu preț, așa că le-am lăsat în pace.
+        ${sarite} aveau deja un preț și nu le-am atins.
+      </p>
+      <p style="max-width:700px;color:var(--text-muted)">
+        Acum ${Number(acoperire.cu_cost || 0)} din ${Number(acoperire.total || 0)} de produse au cost.
+      </p>
+      <a class="btn secondary" href="/import">Înapoi la import</a>
+      <a class="btn secondary" href="/crm/birou">Vezi marja</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Cost din rețetă", active: "/import", body }));
+  });
+
   router.post("/import/leaga-produse", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
 

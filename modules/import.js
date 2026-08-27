@@ -373,6 +373,17 @@ function register(router) {
         <button type="submit" class="btn">Preia costul din stoc</button>
       </form>
 
+      <h2>7d. Calculează costul produselor fabricate, din rețetă</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Un produs pe care îl facem noi n-are preț de achiziție — costul lui e suma componentelor din rețeta
+        adusă din rapoartele de producție. Rulează pasul ăsta <strong>după</strong> „preia costul din stoc",
+        ca materiile prime să aibă deja preț. Îți spune câte rețete au ieșit acoperite integral și câte doar
+        parțial, ca să știi unde marja arată mai bine decât e.
+      </p>
+      <form method="post" action="/import/cost-din-reteta">
+        <button type="submit" class="btn">Calculează costul din rețetă</button>
+      </form>
+
       <h2>8. State de salarii (costul real al oamenilor)</h2>
       <p style="font-size:13px;color:var(--text-muted)">
         Statul de plată lunar — de aici vine salariul brut din „cost company". Fișierul poate avea luna
