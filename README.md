@@ -185,6 +185,45 @@ integra ulterior.
   furnizori", cu totaluri pe zi și pe furnizor, pe săptămâna în curs sau
   orice altă perioadă.
 
+## Grupul de firme — consolidare cu eliminarea facturilor interne
+
+Cash Machine și Warehouse All sunt o singură afacere: aceiași clienți, aceiași
+furnizori, aceiași agenți. ERP-ul le tratează ca grup:
+
+- **Partenerii sunt comuni** — o singură listă de clienți/furnizori, un singur
+  istoric, indiferent care firmă a facturat.
+- **Angajații și agenții sunt comuni** — un singur nomenclator.
+- **Facturile dintre firmele grupului se elimină** din toate rapoartele.
+  Când o firmă îi facturează celeilalte, la nivel de grup nu s-a creat
+  valoare — banul s-a mutat dintr-un buzunar în altul. Marcarea e automată:
+  orice factură al cărei partener are CUI-ul unei firme din grup primește
+  `intercompany = 1`. (Volumul real: ~14 mil. lei achiziții și ~2,8 mil. lei
+  vânzări între cele două firme, din 2021 încoace — exact genul de sumă care
+  ar denatura complet cifra de afaceri a grupului.)
+- **Importul se face per firmă** — alegi firma emitentă în pagina de Import.
+
+Rapoarte noi de grup: **Situație consolidată** (pe firme + total, cu volumul
+intern afișat separat), **Scadențar grup** (de încasat și de plătit într-o
+singură fereastră, cu poziția netă pe zi) și **Comisioane agenți**.
+
+## Comisioane agenți
+
+Comisionul implicit e **2% din încasările efective** ale clienților alocați
+agentului, pe tot grupul, fără facturile interne — se plătește la banii
+intrați, nu la cei facturați. Procentul se schimbă per agent din Utilizatori.
+Pe dashboard, fiecare agent își vede comisionul lunii curente (sau al lunii
+anterioare, la alegere) cu evoluția încasărilor pe 6 luni; adminul vede toți
+agenții, cu bare comparative.
+
+## Status „necunoscut" la documentele de furnizor
+
+Raportul SmartBill de documente furnizor marchează multe documente vechi cu
+„Salvat/Salvata" — asta NU înseamnă neplătit, înseamnă că SmartBill doar a
+înregistrat documentul fără să urmărească plata. Tratate ca datorii, ar fi
+apărut 36 de milioane „de plătit" din 2022. De-aia primesc status
+`necunoscut` și sunt excluse din toate calculele de sold deschis (de plătit,
+restanțe, cash flow) — documentele rămân în ERP, dar nu inventează datorii.
+
 ## Facturi de furnizori — „Raport document furnizori"
 
 Importul de achiziții e construit pe exportul real „Raport document

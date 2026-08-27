@@ -117,6 +117,7 @@ const server = http.createServer(async (req, res) => {
 async function start() {
   await db.migrate();
   await creeazaAdminInitialDacaLipseste();
+  await require("./lib/grup").asiguraFirme();
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, () => {
     console.log(`ERP pornit: http://localhost:${PORT}`);
