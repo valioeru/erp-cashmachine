@@ -149,6 +149,7 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 .badge.verde { background: #e7f4ec; color: var(--success); }
 .badge.galben { background: #fbf0da; color: var(--warn); }
 .badge.rosu { background: #f8e5e3; color: var(--danger); }
+.badge.albastru { background: #e6edf7; color: var(--primary); }
 
 .lines-table input { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; }
 .lines-table select { padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; }
