@@ -324,9 +324,116 @@ function register(router) {
       const a = parseInt(ctx.query.agent, 10);
       if (Number.isFinite(a) && a > 0) agentId = a;
     }
-    const agent = await db.prepare("SELECT id, nume FROM utilizatori WHERE id = ?").get(agentId);
+    const agent = await db.prepare("SELECT id, nume, comision_procent FROM utilizatori WHERE id = ?").get(agentId);
     if (!agent) return redirect(ctx.res, "/crm");
-    const agenti = esteAdmin ? await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all() : [];
+    const agenti = esteAdmin ? await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol = 'vanzari' ORDER BY nume").all() : [];
+
+    // ---- Comisionul agentului ---------------------------------------------
+    // 2% din încasările EFECTIVE ale clienților lui, în luna aleasă, pe tot
+    // grupul (Cash Machine + Warehouse All), fără facturile dintre firme.
+    // Agentul vede doar linia lui; adminul poate comuta pe oricare agent sau
+    // pe totalul echipei.
+    const lunaCurentaStr = new Date().toISOString().slice(0, 7);
+    const lunaPrecedentaStr = (() => {
+      const d = new Date(lunaCurentaStr + "-01T00:00:00Z");
+      d.setUTCMonth(d.getUTCMonth() - 1);
+      return d.toISOString().slice(0, 7);
+    })();
+    const lunaAleasa = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : lunaCurentaStr;
+
+    const incasariLuna = await db
+      .prepare(
+        `SELECT p.agent_id AS agent, u.nume AS agent_nume, COALESCE(u.comision_procent,2) AS pct,
+                COALESCE(SUM(pl.suma),0) AS incasat, COUNT(DISTINCT f.id) AS nr_facturi, COUNT(DISTINCT p.id) AS nr_clienti
+         FROM plati pl
+         JOIN facturi f ON f.id = pl.factura_id
+         JOIN parteneri p ON p.id = f.partener_id
+         JOIN utilizatori u ON u.id = p.agent_id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           AND SUBSTR(pl.data,1,7) = ?
+         GROUP BY p.agent_id, u.nume, u.comision_procent
+         ORDER BY incasat DESC`
+      )
+      .all(lunaAleasa);
+
+    const alMeu = incasariLuna.find((r) => r.agent === agentId);
+    const pctMeu = alMeu ? Number(alMeu.pct) : Number(agent.comision_procent ?? 2) || 2;
+    const incasatMeu = alMeu ? Number(alMeu.incasat) : 0;
+    const comisionMeu = (incasatMeu * pctMeu) / 100;
+
+    const evolutie = await db
+      .prepare(
+        `SELECT SUBSTR(pl.data,1,7) AS luna, COALESCE(SUM(pl.suma),0) AS incasat
+         FROM plati pl JOIN facturi f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND p.agent_id = ?
+         GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 6`
+      )
+      .all(agentId);
+    const evolutieOrd = evolutie.slice().reverse();
+    const maxEvo = Math.max(1, ...evolutieOrd.map((e) => Number(e.incasat)));
+    const liniiEchipa = incasariLuna.map((r) => ({ ...r, incasat: Number(r.incasat), comision: (Number(r.incasat) * Number(r.pct)) / 100 }));
+    const maxEchipa = Math.max(1, ...liniiEchipa.map((l) => l.incasat));
+    const totalEchipa = liniiEchipa.reduce((s, l) => s + l.comision, 0);
+
+    const paramAgent = esteAdmin ? `&agent=${agentId}` : "";
+    const widgetComision = `
+      <section class="comision-box">
+        <div class="comision-head">
+          <h2 style="margin:0">Comision — ${esc(agent.nume)}</h2>
+          <form method="get" action="/crm/birou" class="comision-filtru">
+            ${esteAdmin ? `<input type="hidden" name="agent" value="${agentId}">` : ""}
+            <select name="luna" onchange="this.form.submit()">
+              <option value="${lunaCurentaStr}"${lunaAleasa === lunaCurentaStr ? " selected" : ""}>luna curentă (${lunaCurentaStr})</option>
+              <option value="${lunaPrecedentaStr}"${lunaAleasa === lunaPrecedentaStr ? " selected" : ""}>luna anterioară (${lunaPrecedentaStr})</option>
+            </select>
+          </form>
+        </div>
+        <div class="comision-grid">
+          <div class="comision-mare">
+            <div class="label">De încasat ca și comision</div>
+            <div class="suma">${money(comisionMeu)}</div>
+            <div class="sub">${pctMeu.toFixed(1)}% din ${money(incasatMeu)} încasați în ${esc(lunaAleasa)}${alMeu ? ` · ${alMeu.nr_facturi} facturi · ${alMeu.nr_clienti} clienți` : ""}</div>
+          </div>
+          <div class="comision-evolutie">
+            <div class="label">Încasările mele, ultimele 6 luni</div>
+            <div class="mini-chart">
+              ${
+                evolutieOrd.length
+                  ? evolutieOrd
+                      .map(
+                        (e) => `<div class="mini-bar" title="${esc(e.luna)}: ${money(e.incasat)}">
+                          <div class="mini-fill" style="height:${Math.max(4, (Number(e.incasat) / maxEvo) * 100)}%"></div>
+                          <div class="mini-eticheta">${esc(e.luna.slice(5))}</div>
+                        </div>`
+                      )
+                      .join("")
+                  : '<span style="color:rgba(255,255,255,.75);font-size:12px">încă fără încasări înregistrate</span>'
+              }
+            </div>
+          </div>
+        </div>
+        ${
+          esteAdmin && liniiEchipa.length
+            ? `<h3 style="font-size:14px;margin:18px 0 8px">Toți agenții în ${esc(lunaAleasa)} — total de plată ${money(totalEchipa)}</h3>
+               <div class="comision-agenti">
+                 ${liniiEchipa
+                   .map(
+                     (l) => `<div class="agent-rand">
+                       <div class="agent-nume"><a href="/crm/birou?agent=${l.agent}&luna=${esc(lunaAleasa)}" style="color:#fff">${esc(l.agent_nume)}</a></div>
+                       <div class="agent-bara"><div class="agent-fill" style="width:${(l.incasat / maxEchipa) * 100}%"></div></div>
+                       <div class="agent-cifre"><strong>${money(l.comision)}</strong><span>din ${money(l.incasat)} · ${Number(l.pct).toFixed(1)}%</span></div>
+                     </div>`
+                   )
+                   .join("")}
+               </div>`
+            : ""
+        }
+        <p style="font-size:12px;color:rgba(255,255,255,.8);margin-top:10px">
+          Se numără banii <strong>efectiv încasați</strong> în luna aleasă, de la clienții alocați, pe tot grupul.
+          Comisionul se plătește la încasare, nu la facturare.
+        </p>
+      </section>
+    `;
 
     const aziStr = azi();
     const acum12Luni = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
@@ -436,6 +543,7 @@ function register(router) {
 
     const body = `
       ${subnavCrm("/crm/birou")}
+      ${widgetComision}
       ${
         esteAdmin && agenti.length
           ? `<form method="get" action="/crm/birou" class="filtre">

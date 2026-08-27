@@ -2,11 +2,9 @@
 // Costul lunar real al fiecărui om din echipă — ca să se poată pune față în
 // față cu ce aduce: încasări generate, comision, contribuție netă.
 //
-// Costul pentru firmă = salariu BRUT + CAM (2,25%, plătit de angajator PESTE
-// brut) + mașină + carburant + alte. CAS (25%), CASS (10%) și impozitul
-// (10%) se rețin DIN brut — nu se adună peste el. E greșeala clasică la
-// calculul „cât mă costă un om": dacă le aduni, costul iese cu ~45% mai mare
-// decât realitatea.
+// „Cost company" = tot ce pleacă din firmă pentru omul ăla: salariul net al
+// lui, contribuțiile lui (CAS, CASS, impozit — toate cuprinse în brut),
+// CAM-ul plătit de firmă peste brut, mașina, carburantul și alte costuri.
 //
 // Fiecare modificare de salariu/mașină se salvează ca rând NOU, valabil de la
 // o dată încolo. Rapoartele pe lunile trecute rămân corecte.
@@ -32,14 +30,31 @@ async function costPentruLuna(utilizatorId, luna) {
     .get(utilizatorId, sfarsitLuna);
 }
 
+// Defalcarea completă a costului pentru companie, pornind de la salariul BRUT.
+// Din brut se rețin contribuțiile angajatului (CAS 25%, CASS 10%) și impozitul
+// (10% din ce rămâne) — banii ăștia sunt deja în brut, firma îi virează la stat
+// în numele angajatului. Peste brut, firma mai plătește CAM (2,25%).
+//
+// COST COMPANY = brut + CAM + mașină + carburant + alte.
+// E costul real, complet: include tot ce pleacă din firmă pentru omul ăla —
+// și salariul net, și toate contribuțiile, și taxele lui.
+// Calculul e simplificat (fără deduceri personale, fără facilități sectoriale) —
+// pentru sumele exacte rămâne statul de plată de la contabil.
+const CAS = 25, CASS = 10, IMPOZIT = 10;
+
 function totalCost(c) {
-  if (!c) return { brut: 0, cam: 0, masina: 0, carburant: 0, alte: 0, total: 0 };
+  if (!c) return { brut: 0, cas: 0, cass: 0, impozit: 0, net: 0, cam: 0, masina: 0, carburant: 0, alte: 0, salarial: 0, total: 0 };
   const brut = Number(c.salariu_brut) || 0;
+  const cas = (brut * CAS) / 100;
+  const cass = (brut * CASS) / 100;
+  const bazaImpozit = Math.max(0, brut - cas - cass);
+  const impozit = (bazaImpozit * IMPOZIT) / 100;
+  const net = Math.max(0, brut - cas - cass - impozit);
   const cam = (brut * (Number(c.cam_procent) || 0)) / 100;
   const masina = Number(c.cost_masina) || 0;
   const carburant = Number(c.cost_carburant) || 0;
   const alte = Number(c.alte_costuri) || 0;
-  return { brut, cam, masina, carburant, alte, total: brut + cam + masina + carburant + alte };
+  return { brut, cas, cass, impozit, net, cam, masina, carburant, alte, salarial: brut + cam, total: brut + cam + masina + carburant + alte };
 }
 
 // Costul tuturor, pentru o lună — folosit și de raportul de comisioane.
@@ -56,8 +71,48 @@ async function costuriPeLuna(luna) {
 function register(router) {
   // ---- Listă + total echipă ----------------------------------------------
   router.get("/costuri", async (ctx) => {
-    const luna = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : new Date().toISOString().slice(0, 7);
-    const linii = await costuriPeLuna(luna);
+    const aziLuna = new Date().toISOString().slice(0, 7);
+    const anCurent = Number(aziLuna.slice(0, 4));
+    // Perioada: o lună anume, anul curent, anul trecut sau tot istoricul.
+    // Costul lunar se însumează pe fiecare lună din interval — așa se vede
+    // corect și când cineva a fost angajat la jumătatea perioadei.
+    const perioada = String(ctx.query.perioada || "luna");
+    let luniInterval = [];
+    let etichetaPerioada = "";
+    if (perioada === "an_curent" || perioada === "an_trecut") {
+      const an = perioada === "an_curent" ? anCurent : anCurent - 1;
+      const panaLuna = perioada === "an_curent" ? Number(aziLuna.slice(5, 7)) : 12;
+      for (let m = 1; m <= panaLuna; m++) luniInterval.push(`${an}-${String(m).padStart(2, "0")}`);
+      etichetaPerioada = perioada === "an_curent" ? `anul ${an} (ian–${aziLuna.slice(5, 7)})` : `anul ${an}`;
+    } else if (perioada === "tot") {
+      const prima = await db.prepare("SELECT MIN(valabil_de_la) AS d FROM costuri_personal").get();
+      const start = prima && prima.d ? String(prima.d).slice(0, 7) : aziLuna;
+      let [a, m] = [Number(start.slice(0, 4)), Number(start.slice(5, 7))];
+      while (`${a}-${String(m).padStart(2, "0")}` <= aziLuna && luniInterval.length < 240) {
+        luniInterval.push(`${a}-${String(m).padStart(2, "0")}`);
+        m++;
+        if (m > 12) { m = 1; a++; }
+      }
+      etichetaPerioada = `tot istoricul (${luniInterval[0] || aziLuna} → ${aziLuna})`;
+    } else {
+      luniInterval = [/^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : aziLuna];
+      etichetaPerioada = luniInterval[0];
+    }
+    const luna = luniInterval[luniInterval.length - 1];
+
+    // însumăm costul pe toate lunile din interval
+    const acumulat = new Map();
+    for (const l of luniInterval) {
+      for (const rand of await costuriPeLuna(l)) {
+        const cheie = rand.utilizator.id;
+        if (!acumulat.has(cheie)) acumulat.set(cheie, { utilizator: rand.utilizator, cost: rand.cost, sume: { brut: 0, cas: 0, cass: 0, impozit: 0, net: 0, cam: 0, masina: 0, carburant: 0, alte: 0, salarial: 0, total: 0 }, luni: 0 });
+        const g = acumulat.get(cheie);
+        for (const k of Object.keys(g.sume)) g.sume[k] += rand.sume[k] || 0;
+        if (rand.sume.total > 0) g.luni++;
+        if (rand.cost) g.cost = rand.cost;
+      }
+    }
+    const linii = [...acumulat.values()];
     const totalEchipa = linii.reduce((s, l) => s + l.sume.total, 0);
     const cuCost = linii.filter((l) => l.sume.total > 0);
 
@@ -67,10 +122,10 @@ function register(router) {
         `SELECT p.agent_id AS agent, COALESCE(SUM(pl.suma),0) AS s
          FROM plati pl JOIN facturi f ON f.id = pl.factura_id JOIN parteneri p ON p.id = f.partener_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           AND SUBSTR(pl.data,1,7) = ? AND p.agent_id IS NOT NULL
+           AND SUBSTR(pl.data,1,7) IN (${luniInterval.map(() => "?").join(",")}) AND p.agent_id IS NOT NULL
          GROUP BY p.agent_id`
       )
-      .all(luna);
+      .all(...luniInterval);
     const incPeAgent = new Map(incasari.map((r) => [r.agent, Number(r.s)]));
 
     const luniOptiuni = [];
@@ -86,26 +141,39 @@ function register(router) {
         <a href="/costuri/nou" class="btn">+ Adaugă / actualizează cost pentru un om</a>
       </div>
       <form class="filtre" method="get" action="/costuri">
-        <select name="luna" onchange="this.form.submit()">
-          ${luniOptiuni.map((l) => `<option value="${l}"${l === luna ? " selected" : ""}>${l}</option>`).join("")}
+        <select name="perioada" onchange="this.form.submit()">
+          <option value="luna"${perioada === "luna" ? " selected" : ""}>o lună anume</option>
+          <option value="an_curent"${perioada === "an_curent" ? " selected" : ""}>anul curent</option>
+          <option value="an_trecut"${perioada === "an_trecut" ? " selected" : ""}>anul trecut</option>
+          <option value="tot"${perioada === "tot" ? " selected" : ""}>toată perioada</option>
         </select>
+        ${
+          perioada === "luna"
+            ? `<select name="luna" onchange="this.form.submit()">${luniOptiuni.map((l) => `<option value="${l}"${l === luna ? " selected" : ""}>${l}</option>`).join("")}</select>`
+            : ""
+        }
+        <span style="font-size:12px;color:var(--text-muted)">${esc(etichetaPerioada)} · ${luniInterval.length} ${luniInterval.length === 1 ? "lună" : "luni"}</span>
       </form>
 
       <div class="cards">
-        <div class="card"><div class="label">Cost total echipă (${esc(luna)})</div><div class="value">${money(totalEchipa)}</div></div>
+        <div class="card"><div class="label">COST COMPANY total (${esc(etichetaPerioada)})</div><div class="value">${money(totalEchipa)}</div></div>
+        <div class="card"><div class="label">din care salarial (brut + CAM)</div><div class="value">${money(linii.reduce((s, l) => s + l.sume.salarial, 0))}</div></div>
+        <div class="card"><div class="label">din care mașini + carburant</div><div class="value">${money(linii.reduce((s, l) => s + l.sume.masina + l.sume.carburant, 0))}</div></div>
         <div class="card"><div class="label">Oameni cu cost definit</div><div class="value">${cuCost.length} / ${linii.length}</div></div>
-        <div class="card"><div class="label">Cost mediu / om</div><div class="value">${money(cuCost.length ? totalEchipa / cuCost.length : 0)}</div></div>
       </div>
 
       ${table(
-        ["Persoana", "Rol", "Salariu brut", "CAM (angajator)", "Mașină", "Carburant", "Alte", "COST TOTAL", "Încasări aduse", "Diferență", ""],
+        ["Persoana", "Rol", "Brut", "Net (în mână)", "CAS+CASS+impozit", "CAM", "Mașină", "Carburant", "Alte", "COST COMPANY", "Încasări aduse", "Diferență", ""],
         linii.map((l) => {
           const adus = incPeAgent.get(l.utilizator.id) || 0;
           const dif = adus - l.sume.total;
+          const contributii = l.sume.cas + l.sume.cass + l.sume.impozit;
           return [
             esc(l.utilizator.nume),
             esc(l.utilizator.rol),
             l.sume.brut ? money(l.sume.brut) : '<span class="badge gri">nesetat</span>',
+            l.sume.net ? money(l.sume.net) : "—",
+            contributii ? `<span style="color:var(--text-muted)">${money(contributii)}</span>` : "—",
             l.sume.cam ? money(l.sume.cam) : "—",
             l.sume.masina ? `${money(l.sume.masina)}${l.cost && l.cost.masina_detalii ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(l.cost.masina_detalii)}</span>` : ""}` : "—",
             l.sume.carburant ? money(l.sume.carburant) : "—",
@@ -121,8 +189,10 @@ function register(router) {
       )}
 
       <p style="font-size:12px;color:var(--text-muted)">
-        <strong>Cost total = salariu brut + CAM (2,25%) + mașină + carburant + alte.</strong>
-        CAS, CASS și impozitul pe venit se rețin DIN salariul brut, nu se adaugă peste el — de-aia nu apar separat.
+        <strong>COST COMPANY = brut + CAM + mașină + carburant + alte</strong> — tot ce pleacă din firmă pentru omul respectiv.
+        Coloanele „Net" și „CAS+CASS+impozit" sunt defalcarea brutului (net + contribuții = brut), afișate ca să vezi unde se duc banii;
+        nu se adună peste brut, sunt deja în el. Calculul e simplificat (fără deduceri personale sau facilități sectoriale) —
+        pentru cifrele exacte rămâne statul de plată de la contabil.
         „Încasări aduse" sunt banii efectiv intrați în luna aleasă de la clienții alocați persoanei, pe tot grupul.
         Coloana „Diferență" e brută: nu scade costul mărfii vândute, deci nu e profit — e cât aduce omul față de cât costă direct.
       </p>
