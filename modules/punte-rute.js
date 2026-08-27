@@ -9,7 +9,77 @@ module.exports = function registerRute(router, deps) {
     stoc: "Stoc la zi",
     productie: "Rapoarte de producție (dau rețetele)",
     consum: "Bonuri de consum",
+    profit_produs: "Profit pe produs (marja reală)",
   };
+
+  // Marja pe produs, cu costul real al bunurilor vândute.
+  router.get("/rapoarte/profit-produs", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const randuri = await db
+      .prepare("SELECT * FROM profit_produs ORDER BY profit DESC")
+      .all();
+    if (!randuri.length) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: "Profit pe produs",
+          active: "/rapoarte",
+          body: `<p style="color:var(--text-muted)">Încă n-avem datele. Se aduc din SmartBill Gestiune → Rapoarte → „Profit pe produs", prin puntea de import.</p><a class="btn secondary" href="/rapoarte">Înapoi la rapoarte</a>`,
+        })
+      );
+    }
+    const bani = (v) => Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+    const totalNet = randuri.reduce((s, r) => s + Number(r.vanzari_nete), 0);
+    const totalCost = randuri.reduce((s, r) => s + Number(r.cost), 0);
+    const totalProfit = totalNet - totalCost;
+    const inPierdere = randuri.filter((r) => Number(r.profit) < 0);
+
+    const body = `
+      <div class="cards">
+        <div class="card"><div class="label">Vânzări nete</div><div class="value">${bani(totalNet)}</div></div>
+        <div class="card"><div class="label">Costul bunurilor vândute</div><div class="value">${bani(totalCost)}</div></div>
+        <div class="card"><div class="label">Profit</div><div class="value" style="color:${totalProfit >= 0 ? "var(--success)" : "var(--danger)"}">${bani(totalProfit)}</div></div>
+        <div class="card"><div class="label">Marjă medie</div><div class="value">${totalNet > 0 ? ((totalProfit / totalNet) * 100).toFixed(1) + "%" : "—"}</div></div>
+        <div class="card"><div class="label">Produse în pierdere</div><div class="value" style="color:${inPierdere.length ? "var(--danger)" : "inherit"}">${inPierdere.length}</div></div>
+      </div>
+      ${
+        inPierdere.length
+          ? `<h2 style="color:var(--danger)">Produse vândute în pierdere</h2>
+             ${table(
+               ["Produs", "Vânzări nete", "Cost", "Pierdere", "Marjă %"],
+               inPierdere.map((r) => [
+                 esc(r.denumire),
+                 bani(r.vanzari_nete),
+                 bani(r.cost),
+                 `<strong style="color:var(--danger)">${bani(r.profit)}</strong>`,
+                 Number(r.marja_pct).toFixed(2) + "%",
+               ])
+             )}`
+          : ""
+      }
+      <h2>Toate produsele (${randuri.length})</h2>
+      ${table(
+        ["Produs", "Gestiune", "Vânzări nete", "Cost", "Profit", "Marjă %"],
+        randuri.map((r) => [
+          r.produs_id ? `<a href="/produse/${r.produs_id}">${esc(r.denumire)}</a>` : esc(r.denumire),
+          esc(r.gestiune || "—"),
+          bani(r.vanzari_nete),
+          bani(r.cost),
+          `<strong style="color:${Number(r.profit) >= 0 ? "var(--success)" : "var(--danger)"}">${bani(r.profit)}</strong>`,
+          Number(r.marja_pct).toFixed(2) + "%",
+        ]),
+        { total: ["TOTAL", "", bani(totalNet), bani(totalCost), bani(totalProfit), totalNet > 0 ? ((totalProfit / totalNet) * 100).toFixed(1) + "%" : "—"] }
+      )}
+      <p style="font-size:12px;color:var(--text-muted);max-width:820px">
+        Cifrele vin din SmartBill Gestiune, cu costul real al bunurilor vândute — nu sunt estimate de noi.
+        Acoperă produsele ținute pe gestiune; serviciile și refacturările nu apar aici.
+      </p>
+      <a class="btn secondary" href="/rapoarte">Înapoi la rapoarte</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Profit pe produs", active: "/rapoarte", body }));
+  });
 
   // Cutia poștală: ce a sosit din browser și așteaptă aprobarea ta.
   router.get("/import/punte", async (ctx) => {

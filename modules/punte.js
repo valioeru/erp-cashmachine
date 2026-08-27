@@ -245,11 +245,50 @@ async function ingestConsum(randuri) {
   return { linii, sarite };
 }
 
+// --- profitabilitate pe produs --------------------------------------------
+// Cifrele vin gata calculate din SmartBill Gestiune, cu costul real al
+// bunurilor vândute. Le luăm ca atare — e singura sursă serioasă de marjă
+// pe produs până când facturile din ERP vor avea produsul pe linie.
+async function ingestProfitProdus(randuri) {
+  let scrise = 0, legate = 0;
+  const norm = (v) =>
+    String(v || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^a-z0-9]/g, "");
+  const produse = await db.prepare("SELECT id, cod, denumire FROM produse").all();
+  const dupaNume = new Map();
+  const dupaCod = new Map();
+  for (const p of produse) {
+    const n = norm(p.denumire);
+    if (n && !dupaNume.has(n)) dupaNume.set(n, p.id);
+    const c = norm(p.cod);
+    if (c && !dupaCod.has(c)) dupaCod.set(c, p.id);
+  }
+  await db.prepare("DELETE FROM profit_produs").run();
+  for (const r of randuri) {
+    const den = curat(r.produs);
+    if (!den) continue;
+    const pid = dupaCod.get(norm(r.cod)) || dupaNume.get(norm(den)) || null;
+    if (pid) legate++;
+    await db
+      .prepare(
+        `INSERT INTO profit_produs (produs_id, denumire, cod, gestiune, vanzari_brute, discount, vanzari_nete, cost, profit, marja_pct, perioada)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(pid, den, curat(r.cod) || null, curat(r.gestiune) || null, nr(r.vanzari_brute), nr(r.discount), nr(r.vanzari_nete), nr(r.cost), nr(r.profit), nr(r.marja_pct), curat(r.perioada) || null);
+    scrise++;
+  }
+  return { scrise, legate_de_produse: legate };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
   productie: ingestProductie,
   consum: ingestConsum,
+  profit_produs: ingestProfitProdus,
 };
 
 function register(router) {

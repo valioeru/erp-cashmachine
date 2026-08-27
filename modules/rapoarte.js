@@ -42,6 +42,11 @@ const CATEGORII = [
         desc: "Vânzările fiecărui agent din ambele firme și comisionul aferent, la încasat sau la facturat.",
       },
       {
+        href: "/rapoarte/profit-produs",
+        nume: "Profit pe produs (marja reală)",
+        desc: "Vânzări nete, costul bunurilor vândute, profit și marjă pe fiecare produs — cu costul real din gestiune, plus produsele vândute în pierdere.",
+      },
+      {
         href: "/rapoarte/cashflow",
         nume: "Cash flow la zi + proiecție",
         desc: "Cash disponibil azi, intrări/ieșiri așteptate pe scadențe zi cu zi, cu adăugare manuală de plăți/încasări viitoare pentru forecast.",
