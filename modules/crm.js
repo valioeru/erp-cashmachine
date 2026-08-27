@@ -820,26 +820,11 @@ function register(router) {
     }
     zileNastere.sort((a, b) => a.inZile - b.inZile);
 
-    // Sugestii de clienți potențiali, pe baza portofoliului:
-    //  1. clienții LUI care n-au mai cumpărat de peste 90 de zile (reactivare);
-    //  2. clienți fără agent dedicat (alocați adminului implicit), ordonați
-    //     după valoarea istorică — potriviti de preluat în portofoliu.
+    // Clienții LUI care n-au mai cumpărat de peste 90 de zile — reactivare.
+    // Sugestiile de clienți NOI stau sus, în blocul revendicabil din
+    // modules/contacte.js: acolo agentul îi poate lua, nu doar citi.
     const acum90 = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
     const deReactivat = clienti.filter((c) => c.ultima && c.ultima.slice(0, 10) < acum90 && Number(c.vanzari12) > 0).slice(0, 10);
-    const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
-    const dePreluat =
-      admin && admin.id !== agentId
-        ? await db
-            .prepare(
-              `SELECT p.id, p.nume, COALESCE(SUM(l.total),0) AS valoare, MAX(f.data_emiterii) AS ultima
-               FROM parteneri p
-               JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
-               JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-               WHERE (p.agent_id = ? OR p.agent_id IS NULL) AND p.tip IN ('client','ambele')
-               GROUP BY p.id, p.nume ORDER BY valoare DESC LIMIT 10`
-            )
-            .all(admin.id)
-        : [];
 
     // Top produse vândute în portofoliul agentului (doar liniile cu produs
     // identificat — facturile importate din SmartBill n-au detaliu pe produse).
@@ -1096,16 +1081,6 @@ function register(router) {
               ])
             )
           : '<p style="color:var(--text-muted)">Tot portofoliul e activ — nimeni de reactivat.</p>'
-      }
-
-      <h2>Sugestii — clienți potențiali de preluat (fără agent dedicat)</h2>
-      ${
-        dePreluat.length
-          ? table(
-              ["Client", "Valoare istorică", "Ultima factură"],
-              dePreluat.map((c) => [`<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`, money(c.valoare), esc((c.ultima || "").slice(0, 10))])
-            ) + '<p style="font-size:12px;color:var(--text-muted)">Alocarea o face administratorul, din pagina fiecărui client.</p>'
-          : '<p style="color:var(--text-muted)">Toți clienții au deja un agent dedicat.</p>'
       }
 
       <h2>Portofoliul complet (${clienti.length} clienți)</h2>

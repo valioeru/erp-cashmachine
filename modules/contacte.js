@@ -18,6 +18,7 @@
 //    modul preferat de contact, iar clientul i se alocă (dacă nu e deja al
 //    altcuiva) și primește imediat un task de contact.
 const db = require("../lib/db");
+const { ALOC } = require("./alocari");
 const { esc, layout, table, money } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -77,7 +78,7 @@ async function genereazaTaskuriContact(agentId) {
                 WHERE f.partener_id = p.id AND f.directie = 'vanzare'
                   AND f.data_emiterii >= ?) AS cifra
          FROM parteneri p
-         JOIN alocari_clienti a ON a.partener_id = p.id
+         JOIN ${ALOC} a ON a.partener_id = p.id
         WHERE a.utilizator_id = ? AND a.procent > 0
           AND p.tip IN ('client','ambele')
           AND NOT EXISTS (
@@ -123,6 +124,11 @@ async function genereazaTaskuriContact(agentId) {
 // pentru toată lumea. Le scoatem din clienții pe care nu-i lucrează nimeni:
 // fie n-au agent deloc, fie n-au mai cumpărat de peste 9 luni.
 async function genereazaSugestii() {
+  // Ieșire ieftină: dacă lista nerevendicată e deja plină, nu mai plimbăm
+  // portofoliul întreg la fiecare deschidere de pagină.
+  const libere = await db.prepare("SELECT COUNT(*) AS n FROM leaduri WHERE sursa = 'sugestie' AND atribuit_lui IS NULL AND stadiu <> 'pierdut'").get();
+  if (Number((libere && libere.n) || 0) >= 12) return 0;
+
   const existente = await db.prepare("SELECT partener_id FROM leaduri WHERE sursa = 'sugestie' AND partener_id IS NOT NULL").all();
   const deja = new Set(existente.map((x) => Number(x.partener_id)));
 
@@ -133,7 +139,7 @@ async function genereazaSugestii() {
               (SELECT COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0)
                  FROM facturi f JOIN facturi_linii fl ON fl.factura_id = f.id
                 WHERE f.partener_id = p.id AND f.directie = 'vanzare') AS total_istoric,
-              (SELECT COUNT(*) FROM alocari_clienti a WHERE a.partener_id = p.id AND a.procent > 0) AS alocat
+              (SELECT COUNT(*) FROM ${ALOC} a WHERE a.partener_id = p.id AND a.procent > 0) AS alocat
          FROM parteneri p
         WHERE p.tip IN ('client','ambele')
         ORDER BY total_istoric DESC
@@ -342,7 +348,7 @@ function register(router) {
     // Dacă sugestia e un client existent nelucrat de nimeni, i-l alocăm.
     // Dacă are deja agent, nu-l furăm — rămâne doar lead-ul lui.
     if (l.partener_id) {
-      const are = await db.prepare("SELECT COUNT(*) AS n FROM alocari_clienti WHERE partener_id = ? AND procent > 0").get(l.partener_id);
+      const are = await db.prepare(`SELECT COUNT(*) AS n FROM ${ALOC} a WHERE a.partener_id = ? AND a.procent > 0`).get(l.partener_id);
       if (Number((are && are.n) || 0) === 0) {
         await db
           .prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, valabil_de_la) VALUES (?, ?, 100, ?)")
