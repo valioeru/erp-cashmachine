@@ -26,6 +26,7 @@ require("./modules/balanta").register(router);
 require("./modules/cashflow").register(router);
 require("./modules/costuri").register(router);
 require("./modules/import").register(router);
+require("./modules/punte").register(router);
 require("./modules/productie").register(router);
 require("./modules/banca").register(router);
 require("./modules/angajati").register(router);
@@ -38,7 +39,12 @@ router.get("/healthz", (ctx) => {
 
 // Rute accesibile fără autentificare (plus fișierele statice din /public,
 // tratate separat mai jos).
-const RUTE_PUBLICE = new Set(["/healthz", "/login"]);
+// Rutele publice. /api/ingest e „puntea" prin care browserul trimite în ERP
+// datele citite din SmartBill: nu se autentifică prin cookie de sesiune, ci
+// printr-un token temporar generat de administrator (vezi modules/import.js).
+// De-aia stă în afara gardului de sesiune — dar NU e deschisă: fără token
+// valid și nexpirat, refuză orice.
+const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest"]);
 
 async function creeazaAdminInitialDacaLipseste() {
   const nr = (await db.prepare("SELECT COUNT(*) AS n FROM utilizatori").get()).n;
@@ -82,6 +88,13 @@ const server = http.createServer(async (req, res) => {
 
   const { pathname } = new URL(req.url, "http://localhost");
   const curat = decodeURIComponent(pathname).replace(/\/+$/, "") || "/";
+
+  // Preflight-ul CORS al punții de import nu trece prin gardul de sesiune:
+  // browserul îl trimite fără cookie, iar un 302 spre /login l-ar rupe.
+  if (req.method === "OPTIONS") {
+    const preflight = await router.handle(req, res);
+    if (preflight) return;
+  }
 
   if (!RUTE_PUBLICE.has(curat) && curat !== "/logout") {
     const cookies = auth.parseCookies(req);
