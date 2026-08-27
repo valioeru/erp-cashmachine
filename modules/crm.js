@@ -6,7 +6,7 @@
 //   2. Oportunități: pipeline-ul de vânzare pe stadii.
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
-const { ALOC } = require("./alocari");
+const { ALOC, ALOC_FACTURA } = require("./alocari");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
@@ -397,7 +397,7 @@ function register(router) {
          FROM plati pl
          JOIN facturi f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
-         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          JOIN utilizatori u ON u.id = al.utilizator_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND u.rol = 'vanzari' AND u.activ = 1
@@ -417,7 +417,7 @@ function register(router) {
       .prepare(
         `SELECT SUBSTR(pl.data,1,7) AS luna, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat
          FROM plati pl JOIN facturi f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
-         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND al.utilizator_id = ?
          GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 12`
       )
@@ -437,7 +437,7 @@ function register(router) {
          FROM plati pl
          JOIN facturi f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
-         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND al.utilizator_id = ? AND pl.data BETWEEN ? AND ?
          GROUP BY p.id, p.nume`
@@ -450,7 +450,7 @@ function register(router) {
          FROM facturi f
          JOIN parteneri p ON p.id = f.partener_id
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND al.utilizator_id = ? AND f.data_emiterii BETWEEN ? AND ?
          GROUP BY p.id, p.nume`
@@ -465,7 +465,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND al.utilizator_id = ?
          GROUP BY p.id`
@@ -498,7 +498,7 @@ function register(router) {
          FROM plati pl
          JOIN facturi f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
-         JOIN ${ALOC} al ON al.partener_id = p.id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND al.utilizator_id = ? AND pl.data BETWEEN ? AND ?
          GROUP BY f.id, f.serie, f.numar, f.data_emiterii, p.nume
@@ -614,11 +614,16 @@ function register(router) {
           : `<p style="color:var(--text-muted)">Nicio încasare în ${esc(etichetaPer)}.</p>`
       }
     `;
-    // ---- Costul agentului (doar adminul) ----------------------------------
+    // ---- Costul agentului --------------------------------------------------
     // Costul nu are meniu propriu: stă aici, lângă comisionul lui, pentru că
     // asta e întrebarea reală — cât aduce omul față de cât costă.
+    //
+    // Agentul îl VEDE (ca să înțeleagă cum s-a calculat comisionul și ce
+    // costă el firma), dar nu-l poate modifica: cifrele vin din statul de
+    // plată lunar, din factura mașinii și din alimentările OMV pe cardul lui.
+    // Doar administratorul are butoanele de editare.
     let blocCost = "";
-    if (esteAdmin) {
+    {
       const costuri = require("./costuri");
       // Costurile sunt lunare: le însumăm pe toate lunile din perioada aleasă.
       const sume = { brut: 0, cas: 0, cass: 0, impozit: 0, net: 0, cam: 0, masina: 0, carburant: 0, alte: 0, salarial: 0, total: 0 };
@@ -649,7 +654,7 @@ function register(router) {
                    <div><div class="k">Alte</div>${money(sume.alte)}</div>
                    <div><div class="k">COST TOTAL</div><strong>${money(sume.total)}</strong></div>
                  </div>
-                 <div class="detail-grid" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+                 ${esteAdmin ? `<div class="detail-grid" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
                    <div><div class="k">Încasări aduse</div>${money(incasatMeu)}</div>
                    <div><div class="k">Comision</div>−${money(comisionMeu)}</div>
                    <div><div class="k">Cost</div>−${money(sume.total)}</div>
@@ -657,13 +662,20 @@ function register(router) {
                  </div>
                  <p style="font-size:12px;color:var(--text-muted);margin-top:10px">
                    „Rămâne" e brut: nu scade costul mărfii vândute, deci nu e profit — e cât rămâne din încasările lui după ce plătești omul.
-                 </p>`
+                 </p>` : ""}`
               : `<p style="color:var(--text-muted)">Costul nu e definit încă pentru ${esc(agent.nume)} în ${esc(etichetaPer)}.</p>`
           }
-          <div class="toolbar" style="margin-top:12px">
-            <a class="btn secondary" href="/costuri/nou?utilizator_id=${agentId}">${sume.total > 0 ? "Actualizează costul" : "Setează costul"}</a>
-            
-          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin-top:10px">
+            Cifrele nu se introduc de mână: salariul brut vine din statul de plată lunar,
+            mașina din factura de leasing, iar carburantul din alimentările OMV pe cardul tău.
+          </p>
+          ${
+            esteAdmin
+              ? `<div class="toolbar" style="margin-top:12px">
+                   <a class="btn secondary" href="/costuri/nou?utilizator_id=${agentId}">${sume.total > 0 ? "Corectează manual" : "Setează manual"}</a>
+                 </div>`
+              : ""
+          }
         </div>
       `;
     }
@@ -682,7 +694,7 @@ function register(router) {
          LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE p.id IN (SELECT partener_id FROM ${ALOC} al2 WHERE al2.utilizator_id = ?) AND p.tip IN ('client','ambele')
+         WHERE p.id IN (SELECT f2.partener_id FROM facturi f2 JOIN ${ALOC_FACTURA} al2 ON al2.factura_id = f2.id WHERE al2.utilizator_id = ?) AND p.tip IN ('client','ambele')
          GROUP BY p.id, p.nume, p.email, p.telefon, p.data_nastere
          ORDER BY vanzari12 DESC`
       )

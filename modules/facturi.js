@@ -358,6 +358,14 @@ function register(router) {
     const eVanzare = factura.directie !== "achizitie";
     const listaInapoi = eVanzare ? "/facturi" : "/facturi/achizitii";
 
+    // Agentul creditat cu factura asta (contează la comision).
+    const agentFactura = factura.agent_id
+      ? await db.prepare("SELECT id, nume FROM utilizatori WHERE id = ?").get(factura.agent_id)
+      : null;
+    const agentiPosibili = eVanzare
+      ? await db.prepare("SELECT id, nume, rol FROM utilizatori WHERE activ = 1 AND rol IN ('admin','vanzari') ORDER BY rol DESC, nume").all()
+      : [];
+
     const body = `
       <div class="toolbar"><a href="${listaInapoi}" class="btn secondary small">← ${eVanzare ? "Facturi vânzare" : "Facturi achiziție"}</a></div>
       <div class="detail-box">
@@ -378,6 +386,42 @@ function register(router) {
           }
         </div>
       </div>
+
+      ${
+        eVanzare
+          ? `<div class="detail-box">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span>Agent pe factură: <strong>${agentFactura ? esc(agentFactura.nume) : "nealocat"}</strong></span>
+                ${factura.agent_manual ? '<span class="badge gri">setat manual</span>' : ""}
+              </div>
+              ${
+                ctx.user && ctx.user.rol === "admin"
+                  ? `<form method="post" action="/facturi/${factura.id}/agent" style="margin-top:10px;max-width:520px">
+                      <label class="field"><span>Schimbă agentul</span>
+                        <select name="agent_id">
+                          <option value="">— nealocat —</option>
+                          ${agentiPosibili.map((u) => `<option value="${u.id}"${factura.agent_id === u.id ? " selected" : ""}>${esc(u.nume)}${u.rol === "admin" ? " (administrator)" : ""}</option>`).join("")}
+                        </select>
+                      </label>
+                      <div style="font-size:13px;margin:8px 0 6px">Pentru ce aplic schimbarea?</div>
+                      <label style="display:block;font-size:13px;margin-bottom:4px">
+                        <input type="radio" name="domeniu" value="factura" checked> doar factura asta
+                      </label>
+                      <label style="display:block;font-size:13px;margin-bottom:4px">
+                        <input type="radio" name="domeniu" value="client"> tot istoricul clientului
+                      </label>
+                      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px">
+                        <input type="radio" name="domeniu" value="de_la"> de la data
+                        <input type="date" name="de_la" value="${esc(String(factura.data_emiterii || "").slice(0, 10))}" style="padding:3px 6px">
+                        încolo
+                      </label>
+                      <button type="submit" class="btn secondary">Aplică</button>
+                    </form>`
+                  : `<p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">Doar administratorul poate schimba agentul unei facturi.</p>`
+              }
+            </div>`
+          : ""
+      }
 
       ${table(
         ["Denumire", "Cantitate", "Preț unitar", "TVA %", "Subtotal"],

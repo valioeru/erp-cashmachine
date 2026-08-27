@@ -27,6 +27,58 @@ const ALOC = `(
      AND NOT EXISTS (SELECT 1 FROM alocari_clienti a2 WHERE a2.partener_id = p.id)
 )`;
 
+// Alocarea efectivă pe FACTURĂ. Regula, în ordinea priorității:
+//   1. agentul pus explicit pe factură (facturi.agent_id) — 100% lui;
+//   2. altfel, alocarea clientului (poate fi împărțită pe procente), luând
+//      în calcul de la ce dată e valabilă;
+// Facturile fără niciuna dintre ele nu generează comision — dar rutina de
+// recalculare le pune pe administrator, ca să nu rămână nimic „orfan".
+const ALOC_FACTURA = `(
+  SELECT f.id AS factura_id, f.agent_id AS utilizator_id, 100 AS procent
+    FROM facturi f
+   WHERE f.agent_id IS NOT NULL
+  UNION ALL
+  SELECT f.id, a.utilizator_id, a.procent
+    FROM facturi f
+    JOIN alocari_clienti a ON a.partener_id = f.partener_id
+   WHERE f.agent_id IS NULL
+     AND (a.valabil_de_la IS NULL OR a.valabil_de_la <= f.data_emiterii)
+  UNION ALL
+  SELECT f.id, p.agent_id, 100
+    FROM facturi f
+    JOIN parteneri p ON p.id = f.partener_id
+   WHERE f.agent_id IS NULL
+     AND p.agent_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM alocari_clienti a2 WHERE a2.partener_id = p.id)
+)`;
+
+// Recalculează agentul fiecărei facturi de vânzare, după regulile lui Vali:
+//  - facturile recente poartă numele agentului (îl punem la import);
+//  - facturile vechi ale unui client care ACUM are agent primesc același
+//    agent, retroactiv;
+//  - ce rămâne fără agent merge la administrator.
+// Facturile pe care adminul a pus manual un agent (agent_manual = 1) nu se
+// ating niciodată.
+async function recalculeazaAgentiFacturi() {
+  const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' AND activ = 1 ORDER BY id LIMIT 1").get();
+  // 1. din alocarea clientului, valabilă la data facturii
+  await db.exec(`
+    UPDATE facturi SET agent_id = (
+      SELECT a.utilizator_id FROM alocari_clienti a
+       WHERE a.partener_id = facturi.partener_id
+         AND (a.valabil_de_la IS NULL OR a.valabil_de_la <= facturi.data_emiterii)
+       ORDER BY a.procent DESC, a.valabil_de_la DESC NULLS LAST LIMIT 1)
+     WHERE directie = 'vanzare' AND agent_manual = 0
+       AND EXISTS (SELECT 1 FROM alocari_clienti a2 WHERE a2.partener_id = facturi.partener_id)
+  `);
+  // 2. restul, pe administrator
+  if (admin) {
+    await db.prepare("UPDATE facturi SET agent_id = ? WHERE directie = 'vanzare' AND agent_manual = 0 AND agent_id IS NULL").run(admin.id);
+  }
+  const n = await db.prepare("SELECT COUNT(*) AS n FROM facturi WHERE directie = 'vanzare' AND agent_id IS NOT NULL").get();
+  return n ? Number(n.n) : 0;
+}
+
 async function alocariPentruPartener(partenerId) {
   const explicite = await db
     .prepare(
@@ -310,6 +362,65 @@ function register(router) {
     redirect(ctx.res, "/alocari/registru");
   });
 
+  // Schimbarea agentului pe o factură ---------------------------------------
+  // Adminul alege domeniul schimbării, exact cum a cerut Vali:
+  //   • doar factura asta;
+  //   • tot istoricul clientului (toate facturile lui, trecute și viitoare);
+  //   • de la o dată încolo (facturile emise începând cu acea dată).
+  router.post("/facturi/:id/agent", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
+    const facturaId = parseInt(ctx.params.id, 10);
+    const agentId = parseInt(ctx.body.agent_id, 10);
+    const domeniu = String(ctx.body.domeniu || "factura");
+    const deLa = String(ctx.body.de_la || "").trim();
+    const f = await db.prepare("SELECT id, partener_id, data_emiterii FROM facturi WHERE id = ?").get(facturaId);
+    if (!f) return redirect(ctx.res, "/facturi");
+    const agentValid = Number.isFinite(agentId) && agentId > 0 ? agentId : null;
+
+    if (domeniu === "client") {
+      // alocarea clientului, de la început: rescriem alocarea și toate facturile
+      await db.prepare("DELETE FROM alocari_clienti WHERE partener_id = ?").run(f.partener_id);
+      if (agentValid) await db.prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent) VALUES (?, ?, 100)").run(f.partener_id, agentValid);
+      await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agentValid, f.partener_id);
+      await db.prepare("UPDATE facturi SET agent_id = ?, agent_manual = 0 WHERE partener_id = ? AND directie = 'vanzare'").run(agentValid, f.partener_id);
+    } else if (domeniu === "de_la" && /^\d{4}-\d{2}-\d{2}$/.test(deLa)) {
+      // alocare valabilă de la o dată încolo — facturile mai vechi rămân cum sunt
+      await db.prepare("DELETE FROM alocari_clienti WHERE partener_id = ? AND valabil_de_la = ?").run(f.partener_id, deLa);
+      if (agentValid) await db.prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, valabil_de_la) VALUES (?, ?, 100, ?)").run(f.partener_id, agentValid, deLa);
+      await db.prepare("UPDATE facturi SET agent_id = ?, agent_manual = 0 WHERE partener_id = ? AND directie = 'vanzare' AND data_emiterii >= ?").run(agentValid, f.partener_id, deLa);
+    } else {
+      // doar factura asta — și o marcăm, ca recalculările să n-o mai atingă
+      await db.prepare("UPDATE facturi SET agent_id = ?, agent_manual = 1 WHERE id = ?").run(agentValid, facturaId);
+    }
+    redirect(ctx.res, `/facturi/${facturaId}`);
+  });
+
+  // Recalcularea agenților pe toate facturile (buton în pagina de alocări).
+  router.post("/alocari/recalculeaza", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const n = await recalculeazaAgentiFacturi();
+    const peAgent = await db
+      .prepare(
+        `SELECT u.nume, COUNT(*) AS nr FROM facturi f JOIN utilizatori u ON u.id = f.agent_id
+          WHERE f.directie = 'vanzare' GROUP BY u.nume ORDER BY nr DESC`
+      )
+      .all();
+    const body = `
+      <div class="detail-box"><div class="detail-grid">
+        <div><div class="k">Facturi cu agent</div><strong>${n}</strong></div>
+      </div></div>
+      <h2>Repartizarea facturilor pe agenți</h2>
+      ${table(["Agent", "Facturi"], peAgent.map((r) => [esc(r.nume), String(r.nr)]))}
+      <p style="font-size:13px;color:var(--text-muted);max-width:760px">
+        Facturile vechi ale unui client au primit agentul pe care clientul îl are acum.
+        Ce a rămas fără agent a mers la administrator. Facturile pe care le-ai schimbat manual
+        n-au fost atinse. Poți schimba oricând agentul unei facturi, din pagina facturii.
+      </p>
+      <a class="btn secondary" href="/alocari">Înapoi la alocări</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Recalculare agenți pe facturi", active: "/alocari", body }));
+  });
+
   // Lista completă de clienți cu alocarea lor — locul unde adminul mută
   // clienți între agenți în masă.
   router.get("/alocari", async (ctx) => {
@@ -387,10 +498,17 @@ function register(router) {
           Folosește codul reprezentantului (GT / IR / MM / CG) de pe comenzile de producție. Nu suprascrie alocările făcute manual.
         </span>
       </form>
+      <form method="post" action="/alocari/recalculeaza" style="margin:0 0 14px">
+        <button type="submit" class="btn secondary">Recalculează agentul pe toate facturile</button>
+        <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
+          Facturile vechi primesc agentul pe care clientul îl are acum; ce rămâne fără agent merge la administrator.
+          Facturile schimbate manual nu se ating.
+        </span>
+      </form>
       ${table(["Client", "CUI", "Încasat 12 luni", "Alocare", "Modifică"], randuri)}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Alocarea clienților pe agenți (${lista.length})`, active: "/alocari", body }));
   });
 }
 
-module.exports = { register, ALOC, alocariPentruPartener, formularAlocare };
+module.exports = { register, ALOC, ALOC_FACTURA, recalculeazaAgentiFacturi, alocariPentruPartener, formularAlocare };
