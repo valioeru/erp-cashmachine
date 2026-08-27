@@ -15,6 +15,7 @@ const db = require("../lib/db");
 const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const smartbill = require("../lib/smartbill");
+const grup = require("../lib/grup");
 const { xlsxDisponibil, normalizeHeader, gasesteColoana, gasesteRandHeader, parseFisier, parseNumar, parseData } = require("../lib/import-utils");
 
 const ALIASE = {
@@ -134,6 +135,12 @@ function cuiValid(cui) {
 function statusDinText(text) {
   const t = (text || "").toLowerCase();
   if (/anulat|stornat/.test(t)) return "anulata";
+  // "Salvat/Salvata", "Info", "In prelucrare" din raportul de documente
+  // furnizor NU înseamnă neplătit — înseamnă că SmartBill doar a înregistrat
+  // documentul, fără să urmărească plata. Dacă le-am trata ca datorii, ar
+  // apărea 36 de milioane "de plătit" din 2022 — facturi achitate demult.
+  // Le dăm un status propriu, iar rapoartele de solduri le exclud.
+  if (/^\s*(salvat|salvata|salvată|info|in prelucrare|în prelucrare)\s*$/.test(t)) return "necunoscut";
   // ATENȚIE: "neachitat"/"neplătit" conțin literal substring-urile
   // "achitat"/"platit" — verificăm negația ÎNAINTE de cuvântul pozitiv,
   // altfel o factură neplătită ar fi clasificată greșit ca plătită (bug
@@ -222,6 +229,7 @@ function paginaRezultat(titlu, rezumat, erori) {
 
 function register(router) {
   router.get("/import", async (ctx) => {
+    const firmeGrup = await grup.listaFirme();
     const stats = {
       parteneri: (await db.prepare("SELECT COUNT(*) n FROM parteneri").get()).n,
       facturiVanzare: (await db.prepare("SELECT COUNT(*) n FROM facturi WHERE directie='vanzare'").get()).n,
@@ -250,6 +258,11 @@ function register(router) {
       <h2>1. Facturi emise (vânzări) și facturi de achiziție</h2>
       <p style="font-size:13px;color:var(--text-muted)">SmartBill Facturare → Rapoarte → Facturi emise → interval → Export Excel. Pentru achiziții, exportă echivalentul din Gestiune (facturi de intrare / achiziții) — dacă nu găsești un export direct, spune-mi exact ce vezi în meniu.</p>
       <form method="post" action="/import/facturi" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Firma care a emis / primit documentele</span>
+          <select name="firma_id">
+            ${firmeGrup.map((fr) => `<option value="${fr.id}"${fr.implicita ? " selected" : ""}>${esc(fr.nume)}</option>`).join("")}
+          </select>
+        </label>
         <label class="field"><span>Tip document</span>
           <select name="directie">
             <option value="vanzare">Facturi emise (vânzări către clienți)</option>
@@ -360,6 +373,9 @@ function register(router) {
   // întregi (cu risc de timeout). Așa rămân câteva zeci de interogări.
   router.post("/import/facturi", async (ctx) => {
     const directie = ctx.body.directie === "achizitie" ? "achizitie" : "vanzare";
+    // Firma emitentă: importurile din SmartBill se fac per firmă (Cash Machine
+    // sau Warehouse All), iar rapoartele de grup elimină apoi facturile dintre ele.
+    const firmaId = parseInt(ctx.body.firma_id, 10) || (await grup.firmaImplicita()).id;
     const file = preiaFisier(ctx);
     if (!file) return send(ctx.res, 200, paginaRezultat("Import facturi", { Eroare: "Nu ai selectat niciun fișier." }, []));
 
@@ -597,8 +613,8 @@ function register(router) {
     // La vânzări (numerotarea noastră, unică) data nu intră în cheie.
     const cuData = directie === "achizitie";
     const existenteRanduri = await db
-      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM facturi WHERE directie = ?")
-      .all(directie);
+      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM facturi WHERE directie = ? AND firma_id = ?")
+      .all(directie, firmaId);
     const existente = new Set();
     const cheiPentru = (serie, numar, partenerId, docExtern, data) => {
       const sufix = cuData ? `|${String(data || "").slice(0, 10)}` : "";
@@ -630,7 +646,7 @@ function register(router) {
     const azi = new Date().toISOString().slice(0, 10);
     for (let i = 0; i < deInserat.length; i += 200) {
       const lot = deInserat.slice(i, i + 200);
-      const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, 'smartbill', ?, ?, ?, ?)").join(", ");
+      const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, 'smartbill', ?, ?, ?, ?, ?)").join(", ");
       const args = [];
       for (const f of lot) {
         args.push(
@@ -645,12 +661,13 @@ function register(router) {
           f.moneda,
           f.totalValuta,
           f.documentExtern,
-          f.indexSpv || null
+          f.indexSpv || null,
+          firmaId
         );
       }
       const inserate = await db
         .prepare(
-          `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, observatii, sursa_import, moneda, total_valuta, document_extern, index_spv) VALUES ${ph} RETURNING id, serie, numar, partener_id`
+          `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, observatii, sursa_import, moneda, total_valuta, document_extern, index_spv, firma_id) VALUES ${ph} RETURNING id, serie, numar, partener_id`
         )
         .all(...args);
 
@@ -685,6 +702,8 @@ function register(router) {
       }
     }
 
+    const marcaje = await grup.marcheazaIntercompany();
+
     send(
       ctx.res,
       200,
@@ -696,6 +715,7 @@ function register(router) {
           "Parteneri noi creați": parteneriNoi.length,
           "Clienți alocați pe agenți (din Observații)": directie === "vanzare" ? agentiAlocati : "—",
           "Rânduri cu erori": erori.length,
+          "Facturi în interiorul grupului (eliminate din rapoarte)": marcaje.facturiMarcate,
         },
         erori
       )

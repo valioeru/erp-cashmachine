@@ -18,11 +18,12 @@ function register(router) {
     const body = `
       <div class="toolbar"><a href="/admin/utilizatori/nou" class="btn">+ Utilizator nou</a></div>
       ${table(
-        ["Nume", "Email", "Rol", "Stare", "Acțiuni"],
+        ["Nume", "Email", "Rol", "Comision", "Stare", "Acțiuni"],
         utilizatori.map((u) => [
           esc(u.nume),
           esc(u.email),
           esc(auth.ROLURI[u.rol] || u.rol),
+          `${Number(u.comision_procent ?? 0).toFixed(2)}%`,
           u.activ ? '<span class="badge verde">activ</span>' : '<span class="badge gri">dezactivat</span>',
           actionLinks([
             { href: `/admin/utilizatori/${u.id}/editare`, label: "Editează" },
@@ -52,6 +53,7 @@ function register(router) {
       <label class="field"><span>Email (folosit la login)</span><input type="email" name="email" required></label>
       <label class="field"><span>Parolă inițială</span><input type="password" name="parola" required minlength="6"></label>
       <label class="field"><span>Rol</span><select name="rol">${optiuniRoluri("vanzari")}</select></label>
+      <label class="field"><span>Comision din încasări (%)</span><input type="number" step="0.01" name="comision_procent" value="2"></label>
       <div class="form-actions">
         <button type="submit" class="btn">Creează utilizator</button>
         <a href="/admin/utilizatori" class="btn secondary">Renunță</a>
@@ -65,8 +67,8 @@ function register(router) {
     try {
       const { hash, salt } = auth.hashParola(parola || Math.random().toString(36).slice(2));
       await db
-        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol) VALUES (?, ?, ?, ?, ?)")
-        .run(nume, (email || "").toLowerCase().trim(), hash, salt, rol || "vanzari");
+        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, comision_procent) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(nume, (email || "").toLowerCase().trim(), hash, salt, rol || "vanzari", Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0);
       redirect(ctx.res, "/admin/utilizatori");
     } catch (e) {
       const mesaj = e.code === "23505" ? "Există deja un utilizator cu acest email." : e.message;
@@ -90,6 +92,7 @@ function register(router) {
       <label class="field"><span>Nume</span><input type="text" name="nume" value="${esc(u.nume)}" required></label>
       <label class="field"><span>Email</span><input type="email" name="email" value="${esc(u.email)}" required></label>
       <label class="field"><span>Rol</span><select name="rol">${optiuniRoluri(u.rol)}</select></label>
+      <label class="field"><span>Comision din încasări (%)</span><input type="number" step="0.01" name="comision_procent" value="${Number(u.comision_procent ?? 2)}"></label>
       <label class="field"><span>Parolă nouă (opțional — lasă gol ca să nu o schimbi)</span><input type="password" name="parola" minlength="6"></label>
       <div class="form-actions">
         <button type="submit" class="btn">Salvează</button>
@@ -101,18 +104,20 @@ function register(router) {
 
   router.post("/admin/utilizatori/:id/editare", async (ctx) => {
     const { nume, email, rol, parola } = ctx.body;
+    const comision = Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0;
     if (parola && parola.length >= 6) {
       const { hash, salt } = auth.hashParola(parola);
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, parola_hash = ?, parola_salt = ? WHERE id = ?").run(
+      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, parola_hash = ?, parola_salt = ? WHERE id = ?").run(
         nume,
         (email || "").toLowerCase().trim(),
         rol,
+        comision,
         hash,
         salt,
         ctx.params.id
       );
     } else {
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ? WHERE id = ?").run(nume, (email || "").toLowerCase().trim(), rol, ctx.params.id);
+      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ? WHERE id = ?").run(nume, (email || "").toLowerCase().trim(), rol, comision, ctx.params.id);
     }
     redirect(ctx.res, "/admin/utilizatori");
   });

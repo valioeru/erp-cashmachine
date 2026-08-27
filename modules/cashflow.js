@@ -63,7 +63,7 @@ function register(router) {
                 SUM(CASE WHEN f.directie = 'vanzare' THEN pl.suma ELSE 0 END) AS intrari,
                 SUM(CASE WHEN f.directie = 'achizitie' THEN pl.suma ELSE 0 END) AS iesiri
          FROM plati pl JOIN facturi f ON f.id = pl.factura_id
-         WHERE f.status <> 'anulata'
+         WHERE f.status <> 'anulata' AND f.intercompany = 0
          GROUP BY SUBSTR(pl.data, 1, 7)
          ORDER BY luna DESC LIMIT 12`
       )
@@ -78,7 +78,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.status <> 'anulata' AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5`
+         WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5`
       )
       .all();
 

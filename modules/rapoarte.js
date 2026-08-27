@@ -4,6 +4,7 @@
 // agregat, în SQL: baza reală are mii de facturi importate din SmartBill, iar
 // varianta "aduc tot în memorie și calculez în JS" ar face paginile inutilizabile.
 const db = require("../lib/db");
+const grup = require("../lib/grup");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -23,6 +24,21 @@ const CATEGORII = [
         href: "/rapoarte/balanta",
         nume: "Balanță de verificare (la zi)",
         desc: "Balanță contabilă pe planul de conturi RO, generată automat din documente: solduri inițiale, rulaje, total sume, solduri finale — pe orice perioadă sau zi.",
+      },
+      {
+        href: "/rapoarte/consolidat",
+        nume: "Situație consolidată — grup",
+        desc: "Cash Machine + Warehouse All adunate, cu facturile dintre ele eliminate. Vânzări, costuri, marjă, solduri — pe firme și pe total grup.",
+      },
+      {
+        href: "/rapoarte/scadentar-grup",
+        nume: "Scadențar grup — de încasat & de plătit",
+        desc: "Tot ce ai de încasat și de plătit, pe ambele firme, într-o singură fereastră, cu poziția netă pe fiecare zi.",
+      },
+      {
+        href: "/rapoarte/comisioane",
+        nume: "Comisioane agenți (pe grup)",
+        desc: "Vânzările fiecărui agent din ambele firme și comisionul aferent, la încasat sau la facturat.",
       },
       {
         href: "/rapoarte/cashflow",
@@ -195,7 +211,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.directie = ? AND f.status <> 'anulata'
+         WHERE f.directie = ? AND f.status <> 'anulata' AND f.intercompany = 0
            AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
            AND (f.data_scadenta <= ? OR f.data_scadenta = '' OR f.data_scadenta IS NULL)
          ORDER BY f.data_scadenta ASC, f.id ASC`
@@ -382,7 +398,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.directie = ? AND f.status <> 'anulata' AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         WHERE f.directie = ? AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
          ORDER BY f.data_scadenta ASC`
       )
       .all(directie);
@@ -495,7 +511,7 @@ function register(router) {
         `SELECT f.directie, SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
          FROM facturi f
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-         WHERE f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+         WHERE f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?
          GROUP BY f.directie, SUBSTR(f.data_emiterii, 1, 7)`
       )
       .all(deLa, panaLa);
@@ -555,6 +571,312 @@ function register(router) {
     send(ctx.res, 200, pagina(ctx, "Vânzări vs. achiziții", "/rapoarte/vanzari", continut));
   });
 
+
+  // ---- GRUP: situație financiară consolidată -----------------------------
+  // Cash Machine + Warehouse All lucrează ca o singură afacere: aceiași
+  // clienți, aceiași furnizori, aceiași oameni de vânzări. Raportul le
+  // adună, dar ELIMINĂ facturile dintre ele — altfel același leu ar fi
+  // numărat de două ori (venit la una, cost la cealaltă), iar cifra de
+  // afaceri a grupului ar fi umflată artificial.
+  router.get("/rapoarte/consolidat", async (ctx) => {
+    const interval = intervalDinQuery(ctx, 12);
+    const { deLa, panaLa } = interval;
+    const firme = await grup.listaFirme();
+
+    async function cifre(filtruFirma) {
+      const q = async (sql, ...args) => (await db.prepare(sql).get(...args)) || {};
+      const vanzari = await q(
+        `SELECT COALESCE(SUM(n.net),0) AS net, COALESCE(SUM(t.total),0) AS total, COUNT(*) AS nr
+         FROM facturi f
+         JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
+         JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
+         WHERE f.directie='vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruFirma.sql}`,
+        deLa, panaLa, ...filtruFirma.args
+      );
+      const achizitii = await q(
+        `SELECT COALESCE(SUM(n.net),0) AS net, COALESCE(SUM(t.total),0) AS total, COUNT(*) AS nr
+         FROM facturi f
+         JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
+         JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
+         WHERE f.directie='achizitie' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruFirma.sql}`,
+        deLa, panaLa, ...filtruFirma.args
+      );
+      const incasari = await q(
+        `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id=pl.factura_id
+         WHERE f.directie='vanzare' AND f.status <> 'anulata' AND pl.data >= ? AND pl.data <= ? ${filtruFirma.sql}`,
+        deLa, panaLa, ...filtruFirma.args
+      );
+      const plati = await q(
+        `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id=pl.factura_id
+         WHERE f.directie='achizitie' AND f.status <> 'anulata' AND pl.data >= ? AND pl.data <= ? ${filtruFirma.sql}`,
+        deLa, panaLa, ...filtruFirma.args
+      );
+      // soldurile sunt "la zi", nu pe perioadă
+      const solduri = await db
+        .prepare(
+          `SELECT f.directie, COALESCE(SUM(COALESCE(l.total,0)-COALESCE(pl.platit,0)),0) AS sold
+           FROM facturi f
+           LEFT JOIN ${SUB_TOTAL} l ON l.factura_id=f.id
+           LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id=f.id
+           WHERE f.status NOT IN ('anulata','necunoscut') AND COALESCE(l.total,0)-COALESCE(pl.platit,0) > 0.5 ${filtruFirma.sql}
+           GROUP BY f.directie`
+        )
+        .all(...filtruFirma.args);
+      const sV = solduri.find((x) => x.directie === "vanzare") || { sold: 0 };
+      const sA = solduri.find((x) => x.directie === "achizitie") || { sold: 0 };
+      return {
+        vanzariNet: Number(vanzari.net), vanzariTotal: Number(vanzari.total), nrVanzari: Number(vanzari.nr),
+        achizitiiNet: Number(achizitii.net), achizitiiTotal: Number(achizitii.total),
+        incasari: Number(incasari.s), plati: Number(plati.s),
+        deIncasat: Number(sV.sold), dePlatit: Number(sA.sold),
+      };
+    }
+
+    const peFirma = [];
+    for (const f of firme) peFirma.push({ firma: f, c: await cifre({ sql: " AND f.firma_id = ?", args: [f.id] }) });
+    const totalGrup = await cifre({ sql: " AND f.intercompany = 0", args: [] });
+    const intercompany = await cifre({ sql: " AND f.intercompany = 1", args: [] });
+
+    const rand = (eticheta, camp, semnBun = 1) => [
+      eticheta,
+      ...peFirma.map((x) => money(x.c[camp])),
+      `<strong>${money(totalGrup[camp])}</strong>`,
+      `<span style="color:var(--text-muted)">${money(intercompany[camp])}</span>`,
+    ];
+
+    const marjaGrup = totalGrup.vanzariNet - totalGrup.achizitiiNet;
+    const marjaPct = totalGrup.vanzariNet > 0 ? (marjaGrup / totalGrup.vanzariNet) * 100 : 0;
+
+    const continut = `
+      ${selectorPerioada("/rapoarte/consolidat", interval)}
+
+      <div class="cards">
+        <div class="card"><div class="label">Vânzări grup (net, fără TVA)</div><div class="value">${money(totalGrup.vanzariNet)}</div></div>
+        <div class="card"><div class="label">Costuri grup (achiziții, net)</div><div class="value">${money(totalGrup.achizitiiNet)}</div></div>
+        <div class="card"><div class="label">Marjă brută grup</div><div class="value" style="color:${marjaGrup >= 0 ? "var(--success)" : "var(--danger)"}">${money(marjaGrup)} <span style="font-size:14px">(${marjaPct.toFixed(1)}%)</span></div></div>
+        <div class="card"><div class="label">De încasat − de plătit</div><div class="value">${money(totalGrup.deIncasat - totalGrup.dePlatit)}</div></div>
+      </div>
+
+      ${
+        intercompany.vanzariNet > 0
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
+              În perioada aleasă, firmele grupului și-au facturat reciproc <strong>${money(intercompany.vanzariNet)}</strong> (net).
+              Suma NU intră în totalul grupului — la nivel de grup nu s-a creat valoare, banul doar s-a mutat dintr-un buzunar în altul.
+              O vezi separat în ultima coloană, ca să știi cât e volumul intern.
+            </div>`
+          : ""
+      }
+
+      <h2>Situația pe firme și consolidat</h2>
+      ${table(
+        ["Indicator", ...peFirma.map((x) => esc(x.firma.nume)), "TOTAL GRUP", "din care intern (eliminat)"],
+        [
+          rand("Vânzări (net, fără TVA)", "vanzariNet"),
+          rand("Vânzări (cu TVA)", "vanzariTotal"),
+          rand("Achiziții (net)", "achizitiiNet"),
+          rand("Încasări efective", "incasari"),
+          rand("Plăți efective", "plati"),
+          rand("De încasat de la clienți (la zi)", "deIncasat"),
+          rand("De plătit către furnizori (la zi)", "dePlatit"),
+        ]
+      )}
+      <p style="font-size:12px;color:var(--text-muted)">
+        Coloanele pe firme arată tot ce a facturat fiecare, inclusiv către cealaltă firmă din grup.
+        Coloana TOTAL GRUP e consolidată: adună firmele și scade facturile dintre ele.
+        Partenerii (clienți și furnizori) și angajații sunt comuni pe tot grupul — o singură listă, un singur istoric.
+      </p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Situație consolidată — grupul de firme", "/rapoarte/consolidat", continut));
+  });
+
+  // ---- GRUP: de încasat și de plătit, într-o singură fereastră ------------
+  router.get("/rapoarte/scadentar-grup", async (ctx) => {
+    const aziStr = azi();
+    const zile = Math.min(120, Math.max(7, parseInt(ctx.query.zile || "30", 10) || 30));
+    const pana = new Date(Date.now() + zile * 86400000).toISOString().slice(0, 10);
+
+    const randuri = await db
+      .prepare(
+        `SELECT f.id, f.directie, f.serie, f.numar, f.document_extern, f.data_scadenta, f.data_emiterii,
+                fi.nume AS firma_nume, p.id AS partener_id, p.nume AS partener_nume,
+                COALESCE(l.total,0) - COALESCE(pl.platit,0) AS rest
+         FROM facturi f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN firme fi ON fi.id = f.firma_id
+         LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+         WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         ORDER BY (f.data_scadenta IS NULL OR f.data_scadenta = ''), f.data_scadenta ASC`
+      )
+      .all();
+
+    const deIncasat = randuri.filter((r) => r.directie === "vanzare");
+    const dePlatit = randuri.filter((r) => r.directie === "achizitie");
+    const sum = (l) => l.reduce((s, r) => s + Number(r.rest), 0);
+    const restant = (l) => l.filter((r) => r.data_scadenta && r.data_scadenta < aziStr);
+    const inOrizont = (l) => l.filter((r) => r.data_scadenta && r.data_scadenta >= aziStr && r.data_scadenta <= pana);
+
+    // poziția netă pe zile: cât intră minus cât iese, în orizontul ales
+    const peZi = new Map();
+    for (const r of [...inOrizont(deIncasat), ...inOrizont(dePlatit)]) {
+      const zi = r.data_scadenta;
+      if (!peZi.has(zi)) peZi.set(zi, { zi, incasez: 0, platesc: 0 });
+      const g = peZi.get(zi);
+      if (r.directie === "vanzare") g.incasez += Number(r.rest);
+      else g.platesc += Number(r.rest);
+    }
+    const zileOrd = [...peZi.values()].sort((a, b) => (a.zi < b.zi ? -1 : 1));
+    let cumulat = 0;
+    for (const z of zileOrd) {
+      z.net = z.incasez - z.platesc;
+      cumulat += z.net;
+      z.cumulat = cumulat;
+    }
+
+    const tabelDocumente = (lista, etichetaPartener) =>
+      table(
+        ["Scadența", "Firma", etichetaPartener, "Document", "Sumă", "Stare"],
+        lista.slice(0, 200).map((r) => [
+          r.data_scadenta ? (r.data_scadenta < aziStr ? `<span class="badge rosu">${esc(r.data_scadenta)}</span>` : esc(r.data_scadenta)) : '<span class="badge gri">fără scadență</span>',
+          `<span style="font-size:12px">${esc(r.firma_nume || "—")}</span>`,
+          `<a href="/parteneri/${r.partener_id}">${esc(r.partener_nume)}</a>`,
+          `<a href="/facturi/${r.id}">${esc(r.document_extern || `${r.serie}-${r.numar}`)}</a>`,
+          money(r.rest),
+          r.data_scadenta && r.data_scadenta < aziStr ? '<span class="badge rosu">restant</span>' : '<span class="badge galben">de urmărit</span>',
+        ])
+      );
+
+    const optiuni = [7, 14, 30, 60, 90].map((z) => `<option value="${z}"${zile === z ? " selected" : ""}>următoarele ${z} de zile</option>`).join("");
+
+    const continut = `
+      <form class="filtre" method="get" action="/rapoarte/scadentar-grup">
+        <select name="zile" onchange="this.form.submit()">${optiuni}</select>
+      </form>
+
+      <div class="cards">
+        <div class="card"><div class="label">Total de încasat</div><div class="value" style="color:var(--success)">${money(sum(deIncasat))}</div></div>
+        <div class="card"><div class="label">din care restant</div><div class="value" style="color:var(--danger)">${money(sum(restant(deIncasat)))}</div></div>
+        <div class="card"><div class="label">Total de plătit</div><div class="value" style="color:var(--danger)">${money(sum(dePlatit))}</div></div>
+        <div class="card"><div class="label">din care restant</div><div class="value" style="color:var(--danger)">${money(sum(restant(dePlatit)))}</div></div>
+        <div class="card"><div class="label">Poziție netă</div><div class="value" style="color:${sum(deIncasat) - sum(dePlatit) >= 0 ? "var(--success)" : "var(--danger)"}">${money(sum(deIncasat) - sum(dePlatit))}</div></div>
+      </div>
+
+      <h2>Pe zile, în următoarele ${zile} de zile</h2>
+      ${
+        zileOrd.length
+          ? table(
+              ["Ziua", "Încasez", "Plătesc", "Net pe zi", "Cumulat"],
+              zileOrd.map((z) => [
+                esc(z.zi),
+                z.incasez ? `<span style="color:var(--success)">${money(z.incasez)}</span>` : "",
+                z.platesc ? `<span style="color:var(--danger)">−${money(z.platesc)}</span>` : "",
+                money(z.net),
+                `<strong style="color:${z.cumulat >= 0 ? "inherit" : "var(--danger)"}">${money(z.cumulat)}</strong>`,
+              ])
+            )
+          : "<p>Nimic scadent în orizontul ales.</p>"
+      }
+
+      <h2>De încasat de la clienți (${deIncasat.length} documente)</h2>
+      ${tabelDocumente(deIncasat, "Client")}
+
+      <h2>De plătit către furnizori (${dePlatit.length} documente)</h2>
+      ${tabelDocumente(dePlatit, "Furnizor")}
+
+      <p style="font-size:12px;color:var(--text-muted)">Cumulat pe tot grupul, cu facturile dintre firmele grupului eliminate. Documentele fără scadență apar la final și nu intră în proiecția pe zile.</p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Scadențar grup — de încasat și de plătit", "/rapoarte/scadentar-grup", continut));
+  });
+
+  // ---- GRUP: comisioane agenți de vânzări --------------------------------
+  // Agenții lucrează pentru tot grupul, deci comisionul se calculează pe
+  // vânzările din AMBELE firme, fără facturile interne. Procentul se
+  // setează per agent în pagina Utilizatori (implicit 0 = fără comision).
+  router.get("/rapoarte/comisioane", async (ctx) => {
+    const interval = intervalDinQuery(ctx, 3);
+    const { deLa, panaLa } = interval;
+    const bazaIncasat = String(ctx.query.baza || "incasat") === "facturat" ? "facturat" : "incasat";
+
+    const agenti = await db
+      .prepare(
+        `SELECT u.id, u.nume, u.rol, COALESCE(u.comision_procent,0) AS pct,
+                COUNT(DISTINCT f.id) AS nr_facturi,
+                COUNT(DISTINCT p.id) AS nr_clienti,
+                COALESCE(SUM(n.net),0) AS facturat_net,
+                COALESCE(SUM(t.total),0) AS facturat_total
+         FROM utilizatori u
+         LEFT JOIN parteneri p ON p.agent_id = u.id
+         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
+              AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+         LEFT JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
+         WHERE u.activ = 1
+         GROUP BY u.id, u.nume, u.rol, u.comision_procent
+         ORDER BY facturat_net DESC`
+      )
+      .all(deLa, panaLa);
+
+    // încasat efectiv pe agent (baza corectă pentru comision, de regulă)
+    const incasat = await db
+      .prepare(
+        `SELECT p.agent_id AS agent, COALESCE(SUM(pl.suma),0) AS s
+         FROM plati pl JOIN facturi f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
+         WHERE f.directie='vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND pl.data >= ? AND pl.data <= ? AND p.agent_id IS NOT NULL
+         GROUP BY p.agent_id`
+      )
+      .all(deLa, panaLa);
+    const incasatPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s)]));
+
+    const randuri = agenti
+      .filter((a) => Number(a.facturat_net) > 0 || Number(a.pct) > 0)
+      .map((a) => {
+        const inc = incasatPeAgent.get(a.id) || 0;
+        const baza = bazaIncasat === "incasat" ? inc : Number(a.facturat_total);
+        const comision = (baza * Number(a.pct)) / 100;
+        return { ...a, incasat: inc, baza, comision };
+      });
+    const totalComision = randuri.reduce((s, r) => s + r.comision, 0);
+
+    const continut = `
+      ${selectorPerioada(
+        "/rapoarte/comisioane",
+        interval,
+        `<select name="baza" onchange="this.form.submit()">
+           <option value="incasat"${bazaIncasat === "incasat" ? " selected" : ""}>comision la ÎNCASAT</option>
+           <option value="facturat"${bazaIncasat === "facturat" ? " selected" : ""}>comision la FACTURAT</option>
+         </select>`
+      )}
+
+      <div class="cards">
+        <div class="card"><div class="label">Total comisioane de plată</div><div class="value">${money(totalComision)}</div></div>
+        <div class="card"><div class="label">Baza de calcul</div><div class="value" style="font-size:16px">${bazaIncasat === "incasat" ? "încasările efective" : "valoarea facturată"}</div></div>
+        <div class="card"><div class="label">Agenți cu vânzări</div><div class="value">${randuri.length}</div></div>
+      </div>
+
+      ${table(
+        ["Agent", "Clienți", "Facturi", "Facturat (net)", "Facturat (cu TVA)", "Încasat", "Comision %", "Comision de plată"],
+        randuri.map((r) => [
+          `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
+          r.nr_clienti,
+          r.nr_facturi,
+          money(r.facturat_net),
+          money(r.facturat_total),
+          money(r.incasat),
+          Number(r.pct) > 0 ? `${Number(r.pct).toFixed(2)}%` : '<span class="badge gri">nesetat</span>',
+          `<strong>${money(r.comision)}</strong>`,
+        ])
+      )}
+
+      <p style="font-size:12px;color:var(--text-muted)">
+        Comisionul se calculează pe vânzările din <strong>tot grupul</strong> (Cash Machine + Warehouse All), fără facturile interne —
+        agenții lucrează pentru ambele firme, deci portofoliul lor e unul singur. Procentul fiecărui agent se setează în
+        <a href="/admin/utilizatori">Utilizatori</a>; cât timp e 0, comisionul iese 0 (nu ghicesc procente).
+        Recomandarea uzuală e comisionul la încasat, nu la facturat — altfel plătești comision pe bani care n-au intrat încă.
+      </p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Comisioane agenți — pe grup", "/rapoarte/comisioane", continut));
+  });
+
   // ---- Financiar: top parteneri ----------------------------------------
   // Excluderea unor parteneri din top e DOAR pe vizualizarea curentă (stă în
   // URL, nu în baza de date) — la o nouă deschidere a raportului reapar toți.
@@ -575,7 +897,7 @@ function register(router) {
            FROM facturi f
            JOIN parteneri p ON p.id = f.partener_id
            JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-           WHERE f.status <> 'anulata' AND f.directie = ? AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruExcl}
+           WHERE f.status <> 'anulata' AND f.intercompany = 0 AND f.directie = ? AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruExcl}
            GROUP BY p.id, p.nume, p.cui
            ORDER BY valoare DESC
            LIMIT 25`
@@ -816,7 +1138,7 @@ function register(router) {
         .prepare(
           `SELECT COALESCE(SUM(n.net),0) AS net, COUNT(*) AS nr
            FROM facturi f JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
-           WHERE f.directie = ? AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+           WHERE f.directie = ? AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
         )
         .get(directie, deLa, panaLa);
 
@@ -832,7 +1154,7 @@ function register(router) {
          FROM facturi f
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.status <> 'anulata' AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
          GROUP BY f.directie`
       )
       .all(aziStr);
@@ -851,7 +1173,7 @@ function register(router) {
         `SELECT p.nume, COALESCE(SUM(n.net),0) AS net FROM facturi f
          JOIN parteneri p ON p.id = f.partener_id
          JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
-         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ?
          GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
       )
       .all(acum12);
@@ -1070,19 +1392,19 @@ function register(router) {
            FROM facturi f
            JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
            JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
-           WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+           WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
         )
         .get(deLa, panaLa);
       const achizitii = await db
         .prepare(
           `SELECT COALESCE(SUM(t.total),0) AS total FROM facturi f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
-           WHERE f.directie = 'achizitie' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+           WHERE f.directie = 'achizitie' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
         )
         .get(deLa, panaLa);
       const incasari = await db
         .prepare(
           `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id = pl.factura_id
-           WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND pl.data >= ? AND pl.data <= ?`
+           WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND pl.data >= ? AND pl.data <= ?`
         )
         .get(deLa, panaLa);
       return {
@@ -1115,7 +1437,7 @@ function register(router) {
       .prepare(
         `SELECT SUBSTR(f.data_emiterii,1,4) AS an, SUBSTR(f.data_emiterii,6,2) AS luna, COALESCE(SUM(t.total),0) AS v
          FROM facturi f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
-         WHERE f.directie='vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+         WHERE f.directie='vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ?
          GROUP BY SUBSTR(f.data_emiterii,1,4), SUBSTR(f.data_emiterii,6,2)`
       )
       .all(`${anCurent - 2}-01-01`);
@@ -1188,7 +1510,7 @@ function register(router) {
                 COALESCE(SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)), 0) AS sold
          FROM utilizatori u
          LEFT JOIN parteneri p ON p.agent_id = u.id AND p.tip IN ('client','ambele')
-         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ?
          LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
          LEFT JOIN ${SUB_COST} c ON c.factura_id = f.id
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
@@ -1221,7 +1543,7 @@ function register(router) {
                   COALESCE(SUM(c.venit_cu_cost), 0) AS venit_cu_cost,
                   COALESCE(SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)), 0) AS sold
            FROM parteneri p
-           LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ?
+           LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ?
            LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
            LEFT JOIN ${SUB_COST} c ON c.factura_id = f.id
            LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
@@ -1311,7 +1633,7 @@ function register(router) {
         `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
          FROM facturi f
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
-         WHERE f.directie = 'vanzare' AND f.status <> 'anulata'
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
          GROUP BY SUBSTR(f.data_emiterii, 1, 7)
          ORDER BY luna`
       )
@@ -1490,7 +1812,7 @@ function register(router) {
          JOIN facturi f ON f.id = fl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
          JOIN produse pr ON pr.id = fl.produs_id
-         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}
          GROUP BY pr.id, pr.denumire, pr.cod, pr.pret_achizitie
          ORDER BY venit DESC
          LIMIT 50`
@@ -1502,7 +1824,7 @@ function register(router) {
         `SELECT COALESCE(SUM(CASE WHEN fl.produs_id IS NOT NULL THEN fl.cantitate * fl.pret_unitar ELSE 0 END), 0) AS cuProdus,
                 COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS total
          FROM facturi_linii fl JOIN facturi f ON f.id = fl.factura_id JOIN parteneri p ON p.id = f.partener_id
-         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}`
+         WHERE f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}`
       )
       .get(deLa, panaLa, ...argsAgent);
     const pctAcoperire = Number(acoperire.total) > 0 ? (Number(acoperire.cuProdus) / Number(acoperire.total)) * 100 : 0;
@@ -1568,7 +1890,7 @@ function register(router) {
       .prepare(
         `SELECT p.id, p.nume, COUNT(*) AS nr, COALESCE(SUM(l.total),0) AS valoare, MAX(f.data_emiterii) AS ultima
          FROM parteneri p
-         JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata'
+         JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status <> 'anulata' AND f.intercompany = 0
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          GROUP BY p.id, p.nume`
       )
