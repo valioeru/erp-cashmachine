@@ -5,6 +5,7 @@
 // varianta "aduc tot în memorie și calculez în JS" ar face paginile inutilizabile.
 const db = require("../lib/db");
 const grup = require("../lib/grup");
+const costuri = require("./costuri");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -827,15 +828,35 @@ function register(router) {
       .all(deLa, panaLa);
     const incasatPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s)]));
 
+    // costul lunar al fiecărui agent (salariu + CAM + mașină + carburant),
+    // ca să se vadă nu doar ce încasează, ci și cât costă
+    const luniInterval = [];
+    {
+      let d = new Date(deLa + "T00:00:00Z");
+      const pana = new Date(panaLa + "T00:00:00Z");
+      while (d <= pana && luniInterval.length < 36) {
+        luniInterval.push(d.toISOString().slice(0, 7));
+        d.setUTCMonth(d.getUTCMonth() + 1);
+      }
+    }
+    const costPeAgent = new Map();
+    for (const luna of luniInterval) {
+      for (const l of await costuri.costuriPeLuna(luna)) {
+        costPeAgent.set(l.utilizator.id, (costPeAgent.get(l.utilizator.id) || 0) + l.sume.total);
+      }
+    }
+
     const randuri = agenti
       .filter((a) => Number(a.facturat_net) > 0 || Number(a.pct) > 0)
       .map((a) => {
         const inc = incasatPeAgent.get(a.id) || 0;
         const baza = bazaIncasat === "incasat" ? inc : Number(a.facturat_total);
         const comision = (baza * Number(a.pct)) / 100;
-        return { ...a, incasat: inc, baza, comision };
+        const cost = costPeAgent.get(a.id) || 0;
+        return { ...a, incasat: inc, baza, comision, cost, costTotal: cost + comision, net: inc - cost - comision };
       });
     const totalComision = randuri.reduce((s, r) => s + r.comision, 0);
+    const totalCost = randuri.reduce((s, r) => s + r.cost, 0);
 
     const continut = `
       ${selectorPerioada(
@@ -851,19 +872,22 @@ function register(router) {
         <div class="card"><div class="label">Total comisioane de plată</div><div class="value">${money(totalComision)}</div></div>
         <div class="card"><div class="label">Baza de calcul</div><div class="value" style="font-size:16px">${bazaIncasat === "incasat" ? "încasările efective" : "valoarea facturată"}</div></div>
         <div class="card"><div class="label">Agenți cu vânzări</div><div class="value">${randuri.length}</div></div>
+        <div class="card"><div class="label">Cost echipă în perioadă (salariu+CAM+mașină)</div><div class="value">${money(totalCost)}</div></div>
+        <div class="card"><div class="label">Cost total cu comisioane</div><div class="value">${money(totalCost + totalComision)}</div></div>
       </div>
 
       ${table(
-        ["Agent", "Clienți", "Facturi", "Facturat (net)", "Facturat (cu TVA)", "Încasat", "Comision %", "Comision de plată"],
+        ["Agent", "Clienți", "Facturi", "Facturat (net)", "Încasat", "Comision %", "Comision", "Cost lunar (sal.+CAM+mașină)", "Încasat − cost − comision"],
         randuri.map((r) => [
           `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
           r.nr_clienti,
           r.nr_facturi,
           money(r.facturat_net),
-          money(r.facturat_total),
           money(r.incasat),
           Number(r.pct) > 0 ? `${Number(r.pct).toFixed(2)}%` : '<span class="badge gri">nesetat</span>',
           `<strong>${money(r.comision)}</strong>`,
+          r.cost ? money(r.cost) : `<a class="link-btn" href="/costuri/nou?utilizator_id=${r.id}">setează</a>`,
+          r.cost ? `<strong style="color:${r.net >= 0 ? "var(--success)" : "var(--danger)"}">${money(r.net)}</strong>` : "—",
         ])
       )}
 
