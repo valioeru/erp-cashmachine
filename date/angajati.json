@@ -1,0 +1,19 @@
+{
+  "sursa": "State de salarii SmartBill Conta, Drive Grup-Oeru — august 2026",
+  "perioada": "2026-08",
+  "nota": "Citite din PDF-urile de stat de plată. CNP-urile NU sunt citite și nu se rețin nicăieri: numele, funcția, salariul și data contractului sunt tot ce intră în ERP.",
+  "randuri": [
+    { "nume": "Oeru Valentin", "firma_cui": "27244210", "functie": "Director general", "salariu_brut": 8807, "salariu_net": 5058, "sediu": "Sediu principal" },
+    { "nume": "Ciupe Adina Ioana", "firma_cui": "27244210", "functie": "Operator mase plastice", "salariu_brut": 4616, "salariu_net": 2953, "data_angajarii": "2025-10-21", "sediu": "Afumați" },
+    { "nume": "Costache George Dumitru", "firma_cui": "27244210", "functie": "Operator mase plastice", "salariu_brut": 5384, "salariu_net": 2934, "data_angajarii": "2025-06-24", "sediu": "Afumați" },
+    { "nume": "Ducuța Gabriela", "firma_cui": "27244210", "functie": "Operator mase plastice", "salariu_brut": 4616, "salariu_net": 2963, "data_angajarii": "2026-02-27", "sediu": "Afumați" },
+    { "nume": "Mitică Vasile", "firma_cui": "27244210", "functie": "Operator mase plastice", "salariu_brut": 7097, "salariu_net": 4052, "data_angajarii": "2025-06-02", "sediu": "Afumați" },
+    { "nume": "Moinescu Mihai Octavian", "firma_cui": "27244210", "functie": "Agent de vânzări", "salariu_brut": 5401, "salariu_net": 4849, "data_angajarii": "2024-06-05", "sediu": "Afumați" },
+    { "nume": "Moșneanu Mihail Radu", "firma_cui": "27244210", "functie": "Director tehnic", "salariu_brut": 18803, "salariu_net": 11000, "data_angajarii": "2025-07-31", "sediu": "Afumați" },
+
+    { "nume": "Ciurel Valentin Corneliu", "firma_cui": "44140650", "functie": "Director tehnic", "salariu_brut": 8973, "salariu_net": 5250, "data_angajarii": "2026-07-31", "sediu": "Sediu principal" },
+    { "nume": "Dumitrache Veronica", "firma_cui": "44140650", "functie": "Manipulant mărfuri", "salariu_brut": 6461, "salariu_net": 3694, "data_angajarii": "2025-08-14", "sediu": "Sediu principal" },
+    { "nume": "Georgescu Cătălin", "firma_cui": "44140650", "functie": "Agent de vânzări", "salariu_brut": 7692, "salariu_net": 5166, "data_angajarii": "2026-01-28", "sediu": "Sediu principal" },
+    { "nume": "Veciunca Dorina-Andreea", "firma_cui": "44140650", "functie": "Gestionar depozit", "salariu_brut": 9401, "salariu_net": 5500, "data_angajarii": "2026-03-26", "sediu": "Sediu principal" }
+  ]
+}
