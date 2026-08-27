@@ -296,3 +296,36 @@ th.sortabil { cursor: pointer; user-select: none; }
 th.sortabil:hover { color: var(--primary); }
 th.sortabil.sort-asc::after { content: " ▲"; font-size: 9px; }
 th.sortabil.sort-desc::after { content: " ▼"; font-size: 9px; }
+
+/* Dashboard — widgetul de comision al agentului */
+.comision-box {
+  background: linear-gradient(135deg, #23407a 0%, #2f5d9c 100%);
+  color: #fff;
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  margin-bottom: 22px;
+}
+.comision-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.comision-head h2 { color: #fff; font-size: 16px; }
+.comision-filtru select {
+  background: rgba(255,255,255,.14); color: #fff; border: 1px solid rgba(255,255,255,.28);
+  border-radius: 6px; padding: 6px 10px; font-size: 13px;
+}
+.comision-filtru select option { color: #1c2230; }
+.comision-grid { display: grid; grid-template-columns: minmax(220px, 1.2fr) minmax(220px, 1fr); gap: 22px; margin-top: 14px; align-items: end; }
+@media (max-width: 720px) { .comision-grid { grid-template-columns: 1fr; } }
+.comision-box .label { font-size: 12px; opacity: .8; margin-bottom: 4px; }
+.comision-mare .suma { font-size: 40px; font-weight: 700; line-height: 1.05; letter-spacing: -.5px; }
+.comision-mare .sub { font-size: 12px; opacity: .85; margin-top: 6px; }
+.mini-chart { display: flex; align-items: flex-end; gap: 8px; height: 82px; }
+.mini-bar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; }
+.mini-fill { width: 100%; background: rgba(255,255,255,.55); border-radius: 4px 4px 0 0; min-height: 4px; }
+.mini-bar:last-child .mini-fill { background: #fff; }
+.mini-eticheta { font-size: 11px; opacity: .8; margin-top: 5px; }
+.comision-agenti { display: flex; flex-direction: column; gap: 8px; }
+.agent-rand { display: grid; grid-template-columns: 150px 1fr 190px; gap: 10px; align-items: center; font-size: 13px; }
+@media (max-width: 720px) { .agent-rand { grid-template-columns: 1fr; gap: 2px; } }
+.agent-bara { background: rgba(255,255,255,.18); border-radius: 4px; height: 10px; overflow: hidden; }
+.agent-fill { background: #fff; height: 100%; border-radius: 4px; }
+.agent-cifre { text-align: right; }
+.agent-cifre span { display: block; font-size: 11px; opacity: .8; }
