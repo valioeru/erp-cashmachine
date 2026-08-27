@@ -1,0 +1,55 @@
+{
+  "_nota": "Știri relevante pentru Cash Machine — producție de ambalaje. Fiecare are scris de ce contează pentru noi, nu doar titlul. Împrospătate de Claude.",
+  "randuri": [
+    {
+      "titlu": "PPWR — obligațiile cheie se aplică de la 12 august 2026",
+      "sursa": "NNDKP / Ziarul Financiar",
+      "url": "https://www.nndkp.ro/articles/regulamentul-ue-privind-ambalajele-si-deseurile-din-ambalaje-ppwr-obligatii-cheie-aplicabile-de-la-12-august-2026/",
+      "zona": "local",
+      "relevanta": "Ne privește direct, ca producători de ambalaje: cerințe de reciclabilitate, etichetare armonizată, limite de spațiu gol la ambalajul de e-commerce și restricții pe ambalajul de unică folosință. Termenul a trecut deja — de verificat ce documentație de conformitate ne cer clienții mari (eMAG, Sameday, Beko) și dacă fișele tehnice acoperă noile cerințe.",
+      "publicat_la": "2026-08-12"
+    },
+    {
+      "titlu": "Regulament PPWR pe înțelesul firmelor: obligații și termene",
+      "sursa": "pungescu.ro",
+      "url": "https://pungescu.ro/ppwr/",
+      "zona": "local",
+      "relevanta": "Sinteză practică a termenelor, utilă pentru a face un checklist intern pe fiecare familie de produs: folie stretch, plicuri de curierat, cutii carton, etichete."
+    },
+    {
+      "titlu": "Modificări fiscale 2026: regimul microîntreprinderilor, TVA la încasare, e-Factura",
+      "sursa": "StartupCafe",
+      "url": "https://startupcafe.ro/lista-taxe-in-vigoare-in-2026-noua-impozitare-pe-micro-actualizarea-termenului-la-e-factura-impozit-de-16-pe-crypto-si-dividende-taxa-temu-de-25-lei-noile-situatii-in-care-firm-92414",
+      "zona": "local",
+      "relevanta": "Schimbări pe plafoane, termene la e-Factura și situațiile în care o firmă poate fi declarată inactivă. Contează pentru cash flow și pentru verificarea partenerilor înainte de a le da marfă pe credit."
+    },
+    {
+      "titlu": "OUG 8/2026 — măsuri pe regimul microîntreprinderilor și TVA la încasare",
+      "sursa": "fiscalitatea.ro",
+      "url": "https://www.fiscalitatea.ro/oug-nr-82026-modificari-fiscale-microintreprinderi-tva-la-incasare-bonificatie-3-24722/",
+      "zona": "local",
+      "relevanta": "TVA la încasare schimbă momentul în care datorăm TVA-ul pe facturile neîncasate — relevant cu 90 de zile termen la eMAG și cu soldul mare de creanțe."
+    },
+    {
+      "titlu": "Topul producătorilor de carton ondulat: primii trei au peste jumătate din piață",
+      "sursa": "Ziarul Financiar",
+      "url": "https://www.zf.ro/companii/retail-agrobusiness/topul-celor-mai-mari-producatori-de-carton-ondulat-primii-trei-au-mai-mult-de-jumatate-din-piata-16270695",
+      "zona": "local",
+      "relevanta": "Piața de carton ondulat e concentrată. Pe segmentul ăsta concurăm cu jucători mult mai mari — diferențierea vine din serie mică, termen scurt și personalizare, nu din preț pe tonă."
+    },
+    {
+      "titlu": "Piața europeană de ambalaje din carton ondulat, împinsă de e-commerce și de economia circulară",
+      "sursa": "openPR / Future Market Insights",
+      "url": "https://www.openpr.com/news/4531435/europe-corrugated-packaging-market-to-reach-usd-105-8-billion",
+      "zona": "extern",
+      "relevanta": "Cererea europeană crește pe e-commerce — exact segmentul nostru principal (Sameday, eMAG, Cargus). Reglementarea circulară devine criteriu de achiziție la clienții mari, nu doar obligație legală."
+    },
+    {
+      "titlu": "Piața europeană de ambalaje pentru e-commerce — perspectivă 2026+",
+      "sursa": "Grand View Research",
+      "url": "https://www.grandviewresearch.com/horizon/outlook/e-commerce-packaging-market/europe",
+      "zona": "extern",
+      "relevanta": "Context de cerere pentru plicuri de curierat și folie. Util la fundamentarea investiției în linia de producție și la discuțiile cu băncile."
+    }
+  ]
+}

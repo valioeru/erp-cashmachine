@@ -1,0 +1,65 @@
+{
+  "_nota": "Agenda externă: întâlniri din Google Calendar și task-urile programate la Claude. Împrospătată de Claude, încărcată la pornirea aplicației. Duplicatele din calendar au fost eliminate.",
+  "randuri": [
+    {
+      "sursa": "calendar",
+      "titlu": "Întâlnire Revolut Business × Cash Machine",
+      "detalii": "Cu Radu Manu (Revolut). Google Meet. Întâlnirea se înregistrează.",
+      "incepe_la": "2026-08-31T10:00",
+      "se_termina_la": "2026-08-31T10:30",
+      "link": "https://meet.google.com/irq-jeqd-mph",
+      "cheie_externa": "12aictlocfm4dcl6t66c9pbrgu"
+    },
+    {
+      "sursa": "calendar",
+      "titlu": "Campionatul Național ORC — Limanu",
+      "detalii": "2–6 septembrie. Antrenament 1–2 sept, curse 3–6 sept.",
+      "incepe_la": "2026-09-02",
+      "se_termina_la": "2026-09-07",
+      "cheie_externa": "1irctrjf8jft12qjf6otakldbo"
+    },
+    {
+      "sursa": "calendar",
+      "titlu": "Kaufland Regatta — etapa 5 Cupa României ORC, Limanu",
+      "incepe_la": "2026-09-25",
+      "se_termina_la": "2026-09-28",
+      "cheie_externa": "1oc5ibimom8ejih1r9nel64lps"
+    },
+    {
+      "sursa": "task programat",
+      "titlu": "Radar răspunsuri — cine așteaptă de la noi",
+      "detalii": "Zilnic, luni–vineri, 08:30. Threaduri din office@cashmachine.ro unde mingea e la noi.",
+      "link": "https://claude.ai/code/artifact/a34c1112-c318-4510-a5ed-d0da62e8ed6f"
+    },
+    {
+      "sursa": "task programat",
+      "titlu": "Radar polimeri — prețuri LLDPE/LDPE/HDPE/EVA",
+      "detalii": "Zilnic, 08:00. Actualizează seria de prețuri și trimite emailul de dimineață.",
+      "link": "https://claude.ai/code/artifact/e51e73eb-9f9e-4e6c-88e3-b5bec666631e"
+    },
+    {
+      "sursa": "task programat",
+      "titlu": "Radar plăți și risc de blocare",
+      "detalii": "Luni și joi, 07:30. Ce trebuie plătit sau clarificat, în ordinea consecinței.",
+      "cheie_externa": "trig_01PKymFp2M8gghYfnbMVMaWN"
+    },
+    {
+      "sursa": "task programat",
+      "titlu": "Radar bancabilitate — factoring și DSO",
+      "detalii": "Vineri, 16:00. Expunere pe debitor, DSO, dovezi de livrare lipsă, ce mai așteaptă băncile.",
+      "cheie_externa": "trig_01ACrNohkZn7Knp7hd3XWFFA"
+    },
+    {
+      "sursa": "task programat",
+      "titlu": "Monitor finanțări — vehicule, camioane, utilaje",
+      "detalii": "Zilnic, 07:00. e-DRIVE, schema de marfă, Electric Up, apeluri regionale pentru IMM.",
+      "cheie_externa": "trig_018Ax8ebwxdiuPpSR8YaVw9y"
+    },
+    {
+      "sursa": "task programat",
+      "titlu": "Briefing tactic Mangalia — dimineața de concurs",
+      "detalii": "1–6 septembrie, 08:00.",
+      "cheie_externa": "trig_01WA5iYRs3Aj3KUwsydx6X81"
+    }
+  ]
+}
