@@ -54,6 +54,7 @@ function subnavCrm(activ) {
   const linkuri = [
     ["/crm", "Pipeline"],
     ["/crm/birou", "Biroul meu"],
+    ["/crm/alocare", "Clienții mei"],
     ["/crm/leaduri", "Lead-uri"],
     ["/crm/activitate", "Activitate & emailuri"],
     ["/taskuri", "Task-uri"],
