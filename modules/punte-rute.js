@@ -3,6 +3,8 @@
 // ca fișierul să rămână citibil.
 module.exports = function registerRute(router, deps) {
   const { db, esc, layout, table, send, redirect, HANDLERE, acum, MAX_OCTETI, MAX_RANDURI, MAX_LOTURI_PASTRATE } = deps;
+  // punte.js nu pasează money în deps, iar rapoartele de aici au nevoie de el
+  const { money } = require("../lib/render");
 
   const TIPURI_ETICHETE = {
     produse: "Produse / servicii",
