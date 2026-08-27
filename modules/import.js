@@ -362,6 +362,17 @@ function register(router) {
         <button type="submit" class="btn">Leagă liniile de produse</button>
       </form>
 
+      <h2>7c. Preia costul produselor din evaluarea stocului</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Fără preț de achiziție pe produs, marja iese tot 100%. Raportul „Stoc la zi" adus prin punte are
+        valoarea stocului, iar valoare împărțită la cantitate e chiar costul unitar cu care SmartBill își
+        evaluează marfa. Rutina îl pune ca preț de achiziție pe produsele care n-au unul — nu atinge
+        prețurile puse de om și nu inventează cost pentru produsele fără stoc.
+      </p>
+      <form method="post" action="/import/cost-din-stoc">
+        <button type="submit" class="btn">Preia costul din stoc</button>
+      </form>
+
       <h2>8. State de salarii (costul real al oamenilor)</h2>
       <p style="font-size:13px;color:var(--text-muted)">
         Statul de plată lunar — de aici vine salariul brut din „cost company". Fișierul poate avea luna

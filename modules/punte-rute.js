@@ -252,6 +252,57 @@ module.exports = function registerRute(router, deps) {
   // Rutina de mai jos potrivește denumirile cu produsele și completează
   // legătura. Nu inventează nimic: ce nu se potrivește rămâne nelegat și
   // apare în raport, ca să știi cât din marjă e încă necunoscut.
+  // Costul produselor, luat din evaluarea stocului SmartBill.
+  //
+  // Marja pe factură are nevoie de un preț de achiziție pe produs. Nu-l
+  // inventăm: raportul „Stoc la zi" din SmartBill dă valoarea stocului, iar
+  // valoare/cantitate e chiar costul unitar cu care e evaluată marfa. E cea
+  // mai bună sursă pe care o avem și e a lor, nu a noastră.
+  //
+  // Nu atingem produsele care au deja un preț de achiziție pus de om.
+  router.post("/import/cost-din-stoc", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+
+    const candidati = await db
+      .prepare(
+        `SELECT m.produs_id, AVG(m.pret_unitar) AS pret
+           FROM miscari_stoc m
+          WHERE m.tip = 'inventar' AND m.observatii = 'stoc la zi din SmartBill'
+            AND m.pret_unitar > 0
+          GROUP BY m.produs_id`
+      )
+      .all();
+
+    let scrise = 0, sarite = 0;
+    for (const c of candidati) {
+      const p = await db.prepare("SELECT id, pret_achizitie FROM produse WHERE id = ?").get(c.produs_id);
+      if (!p) continue;
+      if (Number(p.pret_achizitie) > 0) { sarite++; continue; }
+      await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(Number(c.pret) || 0, p.id);
+      scrise++;
+    }
+
+    const acoperire = await db
+      .prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN pret_achizitie > 0 THEN 1 ELSE 0 END) AS cu_cost FROM produse")
+      .get();
+
+    const body = `
+      <h1>Cost din evaluarea stocului</h1>
+      <p style="max-width:680px">
+        Am pus preț de achiziție la <strong>${scrise}</strong> produse, din valoarea cu care SmartBill își
+        evaluează stocul. Am lăsat neatinse ${sarite} produse care aveau deja un preț.
+      </p>
+      <p style="max-width:680px;color:var(--text-muted)">
+        Acum ${Number(acoperire.cu_cost || 0)} din ${Number(acoperire.total || 0)} de produse au cost, deci marja
+        se poate calcula pe ele. Produsele fără stoc n-au de unde primi cost pe drumul ăsta — pentru ele marja
+        rămâne necunoscută până când intră o recepție cu preț.
+      </p>
+      <a class="btn secondary" href="/import/punte">Înapoi la punte</a>
+      <a class="btn secondary" href="/crm/birou">Vezi marja</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Cost din stoc", active: "/import", body }));
+  });
+
   router.post("/import/leaga-produse", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
 
