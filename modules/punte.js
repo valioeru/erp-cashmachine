@@ -71,14 +71,17 @@ async function ingestProduse(randuri) {
     const tva = r.cota_tva === undefined || r.cota_tva === "" ? 21 : nr(r.cota_tva);
     const id = (cod && dupaCod.get(cod.toLowerCase())) || dupaDenumire.get(denumire.toLowerCase());
     if (id) {
-      // nu ștergem un preț existent cu zero — importul poate veni parțial
+      // Nu ștergem un preț existent cu zero — importul poate veni parțial.
+      // Parametrii numerici sunt turnați explicit: fără CAST, PostgreSQL
+      // deduce tipul din „? > 0" și presupune întreg, apoi crapă pe primul
+      // preț cu zecimale (bug real: „invalid input syntax for integer 98.34").
       await db
         .prepare(
           `UPDATE produse SET cod = COALESCE(NULLIF(?, ''), cod),
                               unitate_masura = COALESCE(NULLIF(?, ''), unitate_masura),
-                              pret_vanzare = CASE WHEN ? > 0 THEN ? ELSE pret_vanzare END,
-                              pret_achizitie = CASE WHEN ? > 0 THEN ? ELSE pret_achizitie END,
-                              cota_tva = CASE WHEN ? > 0 THEN ? ELSE cota_tva END
+                              pret_vanzare = CASE WHEN CAST(? AS DOUBLE PRECISION) > 0 THEN CAST(? AS DOUBLE PRECISION) ELSE pret_vanzare END,
+                              pret_achizitie = CASE WHEN CAST(? AS DOUBLE PRECISION) > 0 THEN CAST(? AS DOUBLE PRECISION) ELSE pret_achizitie END,
+                              cota_tva = CASE WHEN CAST(? AS DOUBLE PRECISION) > 0 THEN CAST(? AS DOUBLE PRECISION) ELSE cota_tva END
             WHERE id = ?`
         )
         .run(cod, um, pv, pv, pa, pa, tva, tva, id);
