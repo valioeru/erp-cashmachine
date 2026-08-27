@@ -99,6 +99,97 @@ function register(router) {
     redirect(ctx.res, ctx.body.inapoi === "lista" ? "/alocari" : `/parteneri/${partenerId}`);
   });
 
+  // Alocare automată din Registrul de comenzi ------------------------------
+  // Registrul de producție are, pe fiecare comandă, codul reprezentantului de
+  // vânzări (GT / IR / MM / CG) — inițialele agentului. E singura sursă reală
+  // de legătură client–agent din datele existente: în SmartBill toate
+  // facturile sunt emise de contul administratorului, deci raportul „Vânzări
+  // pe agent" arată un singur om.
+  //
+  // Ce face: pentru fiecare client din registru, găsește partenerul din ERP
+  // (după nume normalizat) și îi pune alocarea 100% pe agentul cu inițialele
+  // respective. NU suprascrie alocările făcute manual.
+  router.post("/alocari/auto", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+
+    const norm = (v) =>
+      String(v || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/\b(s\.?r\.?l\.?|s\.?a\.?|srl|sa|pfa|ii|impex|company|comp|com)\b/g, "")
+        .replace(/[^a-z0-9]/g, "");
+
+    const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol IN ('vanzari','admin')").all();
+    const initiale = (nume) =>
+      String(nume || "")
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((c) => c[0].toUpperCase())
+        .join("");
+    // Un cod se potrivește dacă inițialele agentului îl conțin în orice ordine
+    // (ex. „Isabela Radu" → IR; „Radu Isabela" → RI, tot IR ca mulțime).
+    const potrivesteCod = (cod) => {
+      const c = cod.toUpperCase();
+      const sortat = (x) => x.split("").sort().join("");
+      return utilizatori.find((u) => {
+        const i = initiale(u.nume);
+        return i === c || sortat(i) === sortat(c) || i.startsWith(c) || sortat(i).includes(sortat(c));
+      });
+    };
+
+    const comenzi = await db
+      .prepare("SELECT client_text, initiator FROM comenzi_productie WHERE initiator IS NOT NULL AND initiator <> '' AND client_text IS NOT NULL AND client_text <> ''")
+      .all();
+    const peClient = new Map();
+    for (const c of comenzi) {
+      const cod = String(c.initiator).trim().toUpperCase();
+      if (!/^[A-Z]{2,3}$/.test(cod)) continue;
+      const k = String(c.client_text).trim();
+      if (!peClient.has(k)) peClient.set(k, {});
+      peClient.get(k)[cod] = (peClient.get(k)[cod] || 0) + 1;
+    }
+
+    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele')").all();
+    const dejaAlocati = new Set((await db.prepare("SELECT DISTINCT partener_id FROM alocari_clienti").all()).map((r) => r.partener_id));
+
+    let alocate = 0;
+    const nepotrivite = [];
+    const faraAgent = [];
+    for (const [clientText, coduri] of peClient.entries()) {
+      const cod = Object.entries(coduri).sort((a, b) => b[1] - a[1])[0][0];
+      const agent = potrivesteCod(cod);
+      if (!agent) { faraAgent.push(`${clientText} (cod ${cod})`); continue; }
+      const n = norm(clientText);
+      if (!n) continue;
+      const p =
+        parteneri.find((x) => norm(x.nume) === n) ||
+        parteneri.find((x) => norm(x.nume).startsWith(n) && n.length >= 4) ||
+        parteneri.find((x) => n.startsWith(norm(x.nume)) && norm(x.nume).length >= 4);
+      if (!p) { nepotrivite.push(`${clientText} (cod ${cod})`); continue; }
+      if (dejaAlocati.has(p.id)) continue;
+      await db.prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, observatii) VALUES (?, ?, 100, ?)").run(p.id, agent.id, `alocat automat din registrul de comenzi (cod ${cod})`);
+      await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agent.id, p.id);
+      dejaAlocati.add(p.id);
+      alocate++;
+    }
+
+    const body = `
+      <div class="detail-box"><div class="detail-grid">
+        <div><div class="k">Clienți în registrul de comenzi</div>${peClient.size}</div>
+        <div><div class="k">Alocați acum</div><strong>${alocate}</strong></div>
+        <div><div class="k">Fără partener potrivit în ERP</div>${nepotrivite.length}</div>
+        <div><div class="k">Cod fără agent în ERP</div>${faraAgent.length}</div>
+      </div></div>
+      ${nepotrivite.length ? `<h2>Clienți din registru pe care nu i-am găsit în ERP</h2><ul>${nepotrivite.slice(0, 40).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${faraAgent.length ? `<h2>Coduri de reprezentant fără utilizator în ERP</h2><ul>${faraAgent.slice(0, 40).map((x) => `<li>${esc(x)}</li>`).join("")}</ul><p style="font-size:13px;color:var(--text-muted)">Creează utilizatorii lipsă (Utilizatori → Adaugă) cu numele complet, apoi rulează din nou alocarea automată.</p>` : ""}
+      <a class="btn secondary" href="/alocari">Înapoi la alocări</a>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Alocare automată din registrul de comenzi", active: "/alocari", body }));
+  });
+
   // Lista completă de clienți cu alocarea lor — locul unde adminul mută
   // clienți între agenți în masă.
   router.get("/alocari", async (ctx) => {
@@ -169,6 +260,12 @@ function register(router) {
         Un client poate fi împărțit între doi–trei oameni (ex. 70% agent / 30% administrator);
         suma procentelor nu poate depăși 100%. Clienții fără alocare nu generează comision.
       </p>
+      <form method="post" action="/alocari/auto" style="margin:12px 0">
+        <button type="submit" class="btn secondary">Alocă automat din Registrul de comenzi</button>
+        <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
+          Folosește codul reprezentantului (GT / IR / MM / CG) de pe comenzile de producție. Nu suprascrie alocările făcute manual.
+        </span>
+      </form>
       ${table(["Client", "CUI", "Încasat 12 luni", "Alocare", "Modifică"], randuri)}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Alocarea clienților pe agenți (${lista.length})`, active: "/alocari", body }));
