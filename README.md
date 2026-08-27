@@ -206,6 +206,18 @@ Rapoarte noi de grup: **Situație consolidată** (pe firme + total, cu volumul
 intern afișat separat), **Scadențar grup** (de încasat și de plătit într-o
 singură fereastră, cu poziția netă pe zi) și **Comisioane agenți**.
 
+## Costul lunar al echipei
+
+`/costuri` — cât costă efectiv fiecare om: **salariu brut + CAM (2,25%,
+plătit de angajator peste brut) + mașină + carburant + alte**. CAS, CASS și
+impozitul se rețin DIN brut, deci NU se adună peste el — greșeala clasică
+care umflă costul cu ~45%. Fiecare modificare se salvează ca versiune nouă,
+valabilă de la o dată încolo, ca rapoartele pe lunile trecute să rămână
+corecte. Alături, în același tabel, apar încasările aduse de persoana
+respectivă în luna aleasă și diferența brută.
+
+Raportul de comisioane arată acum și costul: încasat − cost − comision.
+
 ## Comisioane agenți
 
 Comisionul implicit e **2% din încasările efective** ale clienților alocați

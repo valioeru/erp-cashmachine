@@ -23,6 +23,7 @@ require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
 require("./modules/balanta").register(router);
 require("./modules/cashflow").register(router);
+require("./modules/costuri").register(router);
 require("./modules/import").register(router);
 require("./modules/productie").register(router);
 require("./modules/banca").register(router);
