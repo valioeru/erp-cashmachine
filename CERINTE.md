@@ -45,23 +45,47 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
       regim automat obligatoriu peste 3 luni de restanță (doar adminul îl
       poate opri, din fișa clientului).
 
+- [x] **Meniu**: oferte, contracte, scadențe și alocări au ieșit din bara
+      principală și stau sub CRM.
+- [x] **Parteneri** ordonați după rulajul din ultimele 12 luni, cu filtru
+      clienți / furnizori / toți și căutare după nume sau CUI. Pe fișa
+      clientului: semaforul de încasări și comanda adminului de a tăia
+      notificările.
+- [x] **Dashboard nou**: facturat de la 1 ianuarie până azi vs aceeași
+      fereastră din ultimii 3 ani (diferență în lei și în procente), profit
+      sau pierdere la zi cu grafic lunar, task-uri, ce e programat (calendar
+      + task-urile programate la Claude) și știri relevante pentru business.
+- [x] **Fluxul comandă → producție → stoc → factură**: comanda agentului intră
+      singură în Producție; la „finalizată" comanda de vânzare trece în „în
+      stoc depozit" și abia atunci agentul poate apăsa Facturează; iese o
+      factură ciornă (fără număr, fără stoc mișcat, fără SmartBill); cine are
+      drepturi pe facturare o validează, și atunci primește număr, scade
+      stocul și pleacă în SmartBill.
+- [x] **Cost company** pentru agenți, din statele de plată din Drive
+      (`date/costuri-agenti.json`) + costul mașinii.
+- [x] **Detaliu pe produse la facturi**, citit din SmartBill prin punte
+      (`tip: facturi_linii`), cu validare aritmetică pe fiecare linie.
+- [x] **Cost pe produs**: din evaluarea stocului SmartBill și, pentru
+      produsele fabricate, din rețetă.
+
 ## De făcut
 
-### 1. Fluxul comandă → producție → stoc → factură
-- Agentul plasează comanda pentru client (din CRM).
-- Comanda intră în **Producție** și populează lista de comenzi.
-- Cine are acces pe modul îi dă status.
-- La statusul **„comandă în stoc depozit"**, agentul poate apăsa
-  **Facturează**.
-- Se generează o **factură ciornă**.
-- Cineva cu drepturi pe **Facturare** o validează.
-- La validare: pleacă în **SmartBill** și scade stocul — și în SmartBill,
-  și la noi.
+### 1. Ce mai lipsește la cost company
+- **Carburantul OMV** — singurul lucru care lipsește din cost company. Cere
+  login-ul lui Vali (nu introduc parole) și permisiune pentru extensie pe
+  `fleet.omv.com`.
+- Statele de plată se citesc azi manual, din Drive, și ajung în ERP prin
+  `date/costuri-agenti.json`. Conectorul Google Drive NU vede folderul
+  Grup-Oeru (e partajat, nu deținut de contul cashmachine.ro), deci drumul
+  rămâne browserul.
 
-### 2. Costul lunar din Drive
-- State de plată din `Grup-Oeru` (Drive) → cost lunar la zi pentru fiecare om.
-- Mașini: Isabela 1.999,54 / Moinescu 1.849,41 / Cătălin 1.999,54.
-- Carburant: cardurile OMV (rezervele) de confirmat pe fiecare agent.
+### 2. Restul detaliului pe produse
+- Din cele 594 de facturi pe 2026 s-a importat detaliul pentru primele ~100,
+  de la cele mai noi spre vechi. Restul se pot lua rulând din nou puntea —
+  ritmul e ~5 facturi/minut, limitat de cât durează randarea paginii SmartBill.
+- Top-vânzătorii lunii curente încă apar cu cost 0: produsele potrivite pe
+  linia de factură n-au preț de achiziție nici din stoc, nici din rețetă.
+  Probabil sunt rânduri duplicate de produs — de verificat în nomenclator.
 
 ## Blocaje care țin de altcineva
 
