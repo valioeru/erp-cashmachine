@@ -33,6 +33,23 @@ const TERMEN_IMPLICIT = 30; // facturile importate fără scadență: emitere + 
 function azi() {
   return new Date().toISOString().slice(0, 10);
 }
+
+// De la ce dată încolo știm sigur cine a plătit. Istoricul de plăți a fost
+// importat din SmartBill doar pentru perioada recentă, așa că o factură din
+// 2021 apare „neîncasată" doar pentru că plata ei n-a fost importată. Pe
+// facturile de dinainte de prima plată cunoscută NU trimitem somații și NU
+// blocăm comenzi — ar însemna să cerem bani pentru facturi achitate demult.
+let _dePlati = undefined;
+async function dataPlatiDeLa() {
+  if (_dePlati !== undefined) return _dePlati;
+  try {
+    const r = await db.prepare("SELECT MIN(data) AS d FROM plati").get();
+    _dePlati = r && r.d ? String(r.d).slice(0, 10) : null;
+  } catch (e) {
+    _dePlati = null;
+  }
+  return _dePlati;
+}
 function zileIntre(a, b) {
   return Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
 }
@@ -50,7 +67,7 @@ function culoare(zileIntarziere) {
   if (zileIntarziere <= ZILE_GALBEN) return "galben";
   return "rosu";
 }
-const BADGE = { verde: "verde", galben: "galben", rosu: "rosu" };
+const BADGE = { verde: "verde", galben: "galben", rosu: "rosu", neverificat: "gri" };
 const ETICHETA = { verde: "la zi", galben: "întârziere mică", rosu: "restanță" };
 
 // ------------------------------------------------------------------
@@ -83,15 +100,19 @@ async function facturiCuSold(agentId) {
     .all(...args);
 
   const aziStr = azi();
+  const deLa = await dataPlatiDeLa();
   return randuri.map((f) => {
     const scad = scadentaEfectiva(f);
     const zile = scad ? zileIntre(scad, aziStr) : 0; // pozitiv = întârziere
+    const emisa = f.data_emiterii ? String(f.data_emiterii).slice(0, 10) : "";
+    const neverificat = !!(deLa && emisa && emisa < deLa);
     return {
       ...f,
       scadenta: scad,
       sold: Number(f.total) - Number(f.platit),
       zile,
-      stare: culoare(zile),
+      neverificat,
+      stare: neverificat ? "neverificat" : culoare(zile),
     };
   });
 }
@@ -100,9 +121,13 @@ async function facturiCuSold(agentId) {
 function stariDinFacturi(facturi) {
   const m = new Map();
   for (const f of facturi) {
-    const c = m.get(f.partener_id) || { partener_id: f.partener_id, nume: f.client, zileMax: 0, sold: 0, stare: "verde", notificari_oprite: f.notificari_oprite };
-    c.sold += f.sold;
-    if (f.zile > c.zileMax) c.zileMax = f.zile;
+    const c = m.get(f.partener_id) || { partener_id: f.partener_id, nume: f.client, zileMax: 0, sold: 0, soldNeverificat: 0, stare: "verde", notificari_oprite: f.notificari_oprite };
+    if (f.neverificat) {
+      c.soldNeverificat += f.sold;
+    } else {
+      c.sold += f.sold;
+      if (f.zile > c.zileMax) c.zileMax = f.zile;
+    }
     m.set(f.partener_id, c);
   }
   for (const c of m.values()) {
@@ -129,9 +154,12 @@ async function stareClient(partenerId) {
     )
     .all(partenerId);
   const aziStr = azi();
+  const deLa = await dataPlatiDeLa();
   let zileMax = 0;
   let sold = 0;
   for (const r of f) {
+    const emisa = r.data_emiterii ? String(r.data_emiterii).slice(0, 10) : "";
+    if (deLa && emisa && emisa < deLa) continue; // sold neverificat, nu blocăm pe el
     const scad = scadentaEfectiva(r);
     const z = scad ? zileIntre(scad, aziStr) : 0;
     if (z > zileMax) zileMax = z;
@@ -293,6 +321,7 @@ async function ruleazaNotificariAutomate() {
   let esuate = 0;
 
   for (const f of facturi) {
+    if (f.neverificat) continue; // nu cerem bani pe facturi al căror istoric de plăți nu-l avem
     const st = stari.get(f.partener_id);
     const obligatoriu = st && st.blocatAutomat;
     const oprit = Number(f.notificari_oprite) === 1; // adminul a tăiat notificările pe client
@@ -340,6 +369,19 @@ function porneste() {
 // ------------------------------------------------------------------
 function randFactura(f, st, user) {
   const eAdmin = user.rol === "admin";
+  if (f.neverificat) {
+    const nr = f.document_extern || [f.serie, f.numar].filter(Boolean).join(" ");
+    return [
+      `<a href="/facturi/${f.id}">${esc(nr)}</a>`,
+      `<a href="/parteneri/${f.partener_id}">${esc(f.client)}</a>`,
+      esc(f.scadenta || "—"),
+      `<span class="badge gri">sold neverificat</span>`,
+      money(f.sold),
+      `<span style="color:var(--text-muted);font-size:12px">—</span>`,
+      `<form method="post" action="/scadente/${f.id}/trimite" class="inline-form"><button class="btn small secondary" type="submit">Trimite manual</button></form>`,
+      f.ultima_notificare ? esc(String(f.ultima_notificare).slice(0, 10)) : "—",
+    ];
+  }
   const obligatoriu = st && st.blocatAutomat;
   const oprit = Number(f.notificari_oprite) === 1;
   const autoEfectiv = oprit ? false : obligatoriu || Number(f.notificare_auto) === 1;
@@ -369,8 +411,11 @@ async function blocScadente(user, agentId) {
   porneste(); // rutina zilnică, în fundal
   const facturi = await facturiCuSold(agentId);
   const stari = stariDinFacturi(facturi);
-  const restante = facturi.filter((f) => f.zile > 0).sort((a, b) => b.zile - a.zile);
-  const urmeaza = facturi.filter((f) => f.zile <= 0).sort((a, b) => a.zile - b.zile);
+  const neverificate = facturi.filter((f) => f.neverificat).sort((a, b) => b.sold - a.sold);
+  const cunoscute = facturi.filter((f) => !f.neverificat);
+  const restante = cunoscute.filter((f) => f.zile > 0).sort((a, b) => b.zile - a.zile);
+  const urmeaza = cunoscute.filter((f) => f.zile <= 0).sort((a, b) => a.zile - b.zile);
+  const deLa = await dataPlatiDeLa();
   const capete = ["Factura", "Client", "Scadență", "Stare", "Sold", "Notificare", "Manual", "Ultima notificare"];
 
   const clientiRosii = [...stari.values()].filter((c) => c.stare === "rosu");
@@ -396,6 +441,18 @@ async function blocScadente(user, agentId) {
       urmeaza.length
         ? table(capete, urmeaza.slice(0, 60).map((f) => randFactura(f, stari.get(f.partener_id), user)))
         : `<p style="color:var(--text-muted)">Nimic de încasat în perioada următoare.</p>`
+    }
+    ${
+      neverificate.length
+        ? `<h3 style="margin-top:22px">Sold neverificat (${neverificate.length}) — total ${money(neverificate.reduce((s, f) => s + f.sold, 0))}</h3>
+           <p style="font-size:13px;color:var(--text-muted);max-width:760px">
+             Facturi emise înainte de ${esc(deLa || "prima plată cunoscută")}, adică înainte de perioada pentru care
+             s-au importat încasările din SmartBill. Apar ca neîncasate pentru că plata lor nu e în sistem, nu pentru
+             că n-ar fi fost plătite. <strong>Nu generează notificări automate și nu blochează comenzi.</strong>
+             Se lămuresc importând încasările mai vechi sau marcând factura ca încasată din pagina ei.
+           </p>
+           ${table(capete, neverificate.slice(0, 60).map((f) => randFactura(f, stari.get(f.partener_id), user)))}`
+        : ""
     }
     <p style="font-size:12px;color:var(--text-muted);margin-top:8px">
       „Automat" înseamnă un email zilnic, adaptat la vechimea restanței, până la încasare. Facturile cu scadență
