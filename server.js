@@ -19,6 +19,8 @@ require("./modules/stocuri").register(router);
 require("./modules/comenzi").register(router);
 require("./modules/facturi").register(router);
 require("./modules/crm").register(router);
+require("./modules/oferte").register(router);
+require("./modules/contacte").register(router);
 require("./modules/taskuri").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
