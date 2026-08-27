@@ -855,8 +855,13 @@ function register(router) {
     const soldTotal = clienti.reduce((s, c) => s + Math.max(0, Number(c.sold)), 0);
 
     // ---- Blocurile de marjă și topuri --------------------------------------
-    const venitMeu = marjaFacturi.reduce((s2, f) => s2 + Number(f.venit), 0);
-    const costMeu = marjaFacturi.reduce((s2, f) => s2 + Number(f.cost), 0);
+    // Totalurile se iau din agregatul pe agent, NU din lista de facturi:
+    // lista e limitată la primele 300 după valoare, iar facturile storno
+    // (negative) ar rămâne pe dinafară — totalul ar ieși mai mare decât
+    // realitatea. (Bug prins la testare pe datele reale.)
+    const randMeu = marjaPeAgenti.find((r) => r.agent === agentId);
+    const venitMeu = randMeu ? Number(randMeu.venit) : 0;
+    const costMeu = randMeu ? Number(randMeu.cost) : 0;
     const marjaMea = venitMeu - costMeu;
     const acoperire = (() => {
       const linii = marjaFacturi.reduce((s2, f) => s2 + Number(f.linii), 0);
@@ -955,7 +960,7 @@ function register(router) {
           : `<p style="color:var(--text-muted)">Facturile din perioada asta n-au produse identificate — de-aia nu pot arăta topul. Se rezolvă pe măsură ce facturile se emit din ERP sau se importă cu detaliu pe produse.</p>`
       }
 
-      <h2>Marja pe fiecare vânzare</h2>
+      <h2>Marja pe fiecare vânzare <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— primele 100 după valoare</span></h2>
       ${
         marjaFacturi.length
           ? table(
@@ -972,7 +977,14 @@ function register(router) {
                   Number(f.linii_fara_cost) === Number(f.linii) || v <= 0 ? "—" : ((m / v) * 100).toFixed(1) + "%",
                 ];
               }),
-              { total: ["TOTAL", "", "", money(venitMeu), money(costMeu), money(marjaMea), venitMeu > 0 ? ((marjaMea / venitMeu) * 100).toFixed(1) + "%" : "—"] }
+              {
+                total: (() => {
+                  const afisate = marjaFacturi.slice(0, 100);
+                  const v = afisate.reduce((s2, f) => s2 + Number(f.venit), 0);
+                  const c = afisate.reduce((s2, f) => s2 + Number(f.cost), 0);
+                  return ["TOTAL afișat", "", "", money(v), money(c), money(v - c), v > 0 ? (((v - c) / v) * 100).toFixed(1) + "%" : "—"];
+                })(),
+              }
             )
           : `<p style="color:var(--text-muted)">Nicio vânzare în ${esc(etichetaPer)}.</p>`
       }
