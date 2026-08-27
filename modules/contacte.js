@@ -124,6 +124,19 @@ async function genereazaTaskuriContact(agentId) {
 // pentru toată lumea. Le scoatem din clienții pe care nu-i lucrează nimeni:
 // fie n-au agent deloc, fie n-au mai cumpărat de peste 9 luni.
 async function genereazaSugestii() {
+  // Întâi curățenie: o sugestie nerevendicată care între timp a primit agent
+  // ȘI a cumpărat recent nu mai are ce căuta în listă. O ștergem doar dacă
+  // n-a apucat nimeni să lege un task de ea.
+  await db
+    .prepare(
+      `DELETE FROM leaduri
+        WHERE sursa = 'sugestie' AND atribuit_lui IS NULL AND partener_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM ${ALOC} a WHERE a.partener_id = leaduri.partener_id AND a.procent > 0)
+          AND EXISTS (SELECT 1 FROM facturi f WHERE f.partener_id = leaduri.partener_id AND f.directie = 'vanzare' AND f.data_emiterii >= ?)
+          AND NOT EXISTS (SELECT 1 FROM taskuri t WHERE t.lead_id = leaduri.id)`
+    )
+    .run(peste(-270));
+
   // Ieșire ieftină: dacă lista nerevendicată e deja plină, nu mai plimbăm
   // portofoliul întreg la fiecare deschidere de pagină.
   const libere = await db.prepare("SELECT COUNT(*) AS n FROM leaduri WHERE sursa = 'sugestie' AND atribuit_lui IS NULL AND stadiu <> 'pierdut'").get();
