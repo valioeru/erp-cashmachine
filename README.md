@@ -219,9 +219,24 @@ sumă mare, selector de lună (curentă / anterioară) și graficul încasărilo
 oricărui agent (`?agent=ID`) și vede în plus clasamentul întregii echipe cu
 bare comparative și totalul de plată.
 
+## Conturi, parole și sesiuni
+
+**Parola implicită pentru orice cont nou e `cashmachine`**, iar la prima
+logare utilizatorul e ținut pe pagina de profil până își pune una proprie —
+nu poate deschide nimic altceva. Același lucru se întâmplă când adminul
+resetează parola cuiva.
+
+**Sesiunile stau în baza de date**, nu în memoria procesului. Înainte, orice
+redeploy deconecta pe toată lumea; acum sesiunea rezistă la restart, iar cele
+expirate se curăță automat din oră în oră.
+
 ## Costul lunar al echipei
 
-`/costuri` — **COST COMPANY**: tot ce pleacă din firmă pentru fiecare om —
+**Costurile nu au meniu propriu** — stau în CRM, în biroul fiecărui agent,
+lângă comisionul lui, pentru că asta e întrebarea reală: cât aduce omul față
+de cât costă. Doar adminul le vede; agentul nu-și vede costul.
+
+Pagina `/costuri` (accesibilă din CRM) — **COST COMPANY**: tot ce pleacă din firmă pentru fiecare om —
 salariul net, contribuțiile lui (CAS, CASS, impozit, toate cuprinse în brut),
 CAM-ul plătit de firmă peste brut, mașina, carburantul, alte costuri.
 Tabelul arată defalcarea completă (brut → net + contribuții), ca să se vadă

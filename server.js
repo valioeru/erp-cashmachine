@@ -89,6 +89,15 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { Location: `/login?redirect=${encodeURIComponent(curat)}` });
       return res.end();
     }
+    // Parolă implicită încă neschimbată: utilizatorul e ținut pe pagina de
+    // profil până își pune una proprie. Altfel conturile ar rămâne la
+    // "cashmachine" la nesfârșit.
+    const PERMISE_CU_PAROLA_TEMPORARA = new Set(["/profil", "/profil/parola", "/logout"]);
+    if (user.parola_temporara && !PERMISE_CU_PAROLA_TEMPORARA.has(curat)) {
+      res.writeHead(302, { Location: "/profil" });
+      return res.end();
+    }
+
     // Agentul de vânzări nu are dashboard general — pagina lui de start e CRM.
     // Redirectul trebuie să fie ÎNAINTE de verificarea de acces, altfel "/"
     // i-ar da 403 în loc să-l ducă unde trebuie.
@@ -126,6 +135,8 @@ async function start() {
   await db.migrate();
   await creeazaAdminInitialDacaLipseste();
   await require("./lib/grup").asiguraFirme();
+  await auth.curataSesiuni();
+  setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, () => {
     console.log(`ERP pornit: http://localhost:${PORT}`);
