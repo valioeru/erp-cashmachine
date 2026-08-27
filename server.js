@@ -89,6 +89,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { Location: `/login?redirect=${encodeURIComponent(curat)}` });
       return res.end();
     }
+    // Agentul de vânzări nu are dashboard general — pagina lui de start e CRM.
+    // Redirectul trebuie să fie ÎNAINTE de verificarea de acces, altfel "/"
+    // i-ar da 403 în loc să-l ducă unde trebuie.
+    if (user.rol === "vanzari" && curat === "/") {
+      res.writeHead(302, { Location: "/crm/birou" });
+      return res.end();
+    }
     if (!auth.poateAccesa(user.rol, curat)) {
       res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(paginaFaraAcces(user));

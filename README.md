@@ -206,12 +206,29 @@ Rapoarte noi de grup: **Situație consolidată** (pe firme + total, cu volumul
 intern afișat separat), **Scadențar grup** (de încasat și de plătit într-o
 singură fereastră, cu poziția netă pe zi) și **Comisioane agenți**.
 
+## Agenții de vânzări văd DOAR CRM-ul
+
+Rolul „Agent vânzări" are acces exclusiv la CRM (biroul lui, pipeline,
+lead-uri, clienții alocați) plus profilul propriu. Pagina lui de start e
+`/crm/birou`, nu dashboard-ul general — tot ce ține de facturare, stocuri,
+costuri sau rapoarte financiare rămâne la admin și financiar.
+
+**Comisionul e în CRM, în biroul agentului**, nu pe dashboard-ul general:
+sumă mare, selector de lună (curentă / anterioară) și graficul încasărilor pe
+6 luni. Agentul își vede doar linia lui; adminul poate deschide biroul
+oricărui agent (`?agent=ID`) și vede în plus clasamentul întregii echipe cu
+bare comparative și totalul de plată.
+
 ## Costul lunar al echipei
 
-`/costuri` — cât costă efectiv fiecare om: **salariu brut + CAM (2,25%,
-plătit de angajator peste brut) + mașină + carburant + alte**. CAS, CASS și
-impozitul se rețin DIN brut, deci NU se adună peste el — greșeala clasică
-care umflă costul cu ~45%. Fiecare modificare se salvează ca versiune nouă,
+`/costuri` — **COST COMPANY**: tot ce pleacă din firmă pentru fiecare om —
+salariul net, contribuțiile lui (CAS, CASS, impozit, toate cuprinse în brut),
+CAM-ul plătit de firmă peste brut, mașina, carburantul, alte costuri.
+Tabelul arată defalcarea completă (brut → net + contribuții), ca să se vadă
+unde se duc banii, fără să se dubleze la total.
+Perioada e selectabilă: o lună anume, anul curent, anul trecut sau tot
+istoricul — costul se însumează lună cu lună, deci iese corect și pentru cei
+angajați la mijlocul perioadei. Fiecare modificare se salvează ca versiune nouă,
 valabilă de la o dată încolo, ca rapoartele pe lunile trecute să rămână
 corecte. Alături, în același tabel, apar încasările aduse de persoana
 respectivă în luna aleasă și diferența brută.
