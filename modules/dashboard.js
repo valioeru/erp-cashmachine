@@ -12,7 +12,7 @@
 // crede în fiecare august că firma s-a prăbușit.
 const db = require("../lib/db");
 const { esc, money, layout, table } = require("../lib/render");
-const { send } = require("../lib/router");
+const { send, redirect } = require("../lib/router");
 
 const LUNI = ["ian", "feb", "mar", "apr", "mai", "iun", "iul", "aug", "sep", "oct", "nov", "dec"];
 
@@ -162,6 +162,136 @@ function sageata(delta) {
   return "";
 }
 
+// ------------------------------------------------------------------
+// Cifra de afaceri, care nu e același lucru cu „cât am facturat".
+// ------------------------------------------------------------------
+// Într-un an intră pe facturi și lucruri care nu sunt cifră de afaceri:
+// vânzarea unui mijloc fix, o refacturare de utilități, penalități,
+// diferențe de curs. Le scoatem după o listă de tipare pe care Vali o poate
+// schimba din pagină — nu ghicim în cod ce e „activ" la firma lui, dar nici
+// nu-l punem să bifeze factură cu factură.
+const EXCLUDERI_IMPLICITE = [
+  "mijloc fix",
+  "mijloace fixe",
+  "vanzare activ",
+  "vânzare activ",
+  "casare",
+  "autoturism",
+  "autovehicul",
+  "penalit",
+  "dobând",
+  "dobanda",
+  "diferenta de curs",
+  "diferență de curs",
+  "refactur",
+].join("\n");
+
+const CHEIE_EXCLUDERI = "ca_excluderi";
+const cheieManual = (an) => `ca_manual_${an}`;
+
+async function setare(cheie, implicit) {
+  try {
+    const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = ?").get(cheie);
+    return r && r.valoare !== null && r.valoare !== undefined ? r.valoare : implicit;
+  } catch (e) {
+    return implicit;
+  }
+}
+
+async function scrieSetare(cheie, valoare) {
+  const t = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const exista = await db.prepare("SELECT cheie FROM setari_app WHERE cheie = ?").get(cheie);
+  if (exista) await db.prepare("UPDATE setari_app SET valoare = ?, actualizat_la = ? WHERE cheie = ?").run(valoare, t, cheie);
+  else await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?)").run(cheie, valoare, t);
+}
+
+function tipare(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// Facturat, minus liniile care se potrivesc cu tiparele de excludere.
+// Excluderea se face pe LINIE, nu pe factură: o factură poate avea și marfă,
+// și o penalitate — scoatem doar penalitatea.
+async function cifraAfaceriIntre(de, la, listaTipare) {
+  const linii = await db
+    .prepare(
+      `SELECT COALESCE(fl.denumire, p.denumire) AS denumire, SUM(fl.cantitate * fl.pret_unitar) AS net
+         FROM facturi f
+         JOIN facturi_linii fl ON fl.factura_id = f.id
+         LEFT JOIN produse p ON p.id = fl.produs_id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+        GROUP BY COALESCE(fl.denumire, p.denumire)`
+    )
+    .all(de, la);
+  let total = 0;
+  let scos = 0;
+  for (const l of linii) {
+    const d = String(l.denumire || "").toLowerCase();
+    const net = Number(l.net) || 0;
+    if (listaTipare.some((t) => d.includes(t))) scos += net;
+    else total += net;
+  }
+  return { total, scos };
+}
+
+// Profitul contabil dintr-o balanță: clasa 7 (venituri) minus clasa 6
+// (cheltuieli). Luăm ultima balanță din an care se încheie până la ziua
+// echivalentă — dacă nu există una exact pe zi, spunem pe ce dată e cea
+// folosită, ca să nu pară o comparație mai exactă decât e.
+async function profitContabil(an, panaLa) {
+  let sn;
+  try {
+    sn = await db
+      .prepare(
+        `SELECT eticheta, MAX(data_pana) AS pana FROM balante_snapshot
+          WHERE data_pana >= ? AND data_pana <= ?
+          GROUP BY eticheta ORDER BY MAX(data_pana) DESC LIMIT 1`
+      )
+      .get(`${an}-01-01`, panaLa);
+  } catch (e) {
+    return null;
+  }
+  if (!sn || !sn.eticheta) return null;
+  const r = await db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN (CASE WHEN ts_c <> 0 OR ts_d <> 0 THEN ts_c - ts_d ELSE r_c - r_d END) ELSE 0 END), 0) AS venituri,
+         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN (CASE WHEN ts_c <> 0 OR ts_d <> 0 THEN ts_d - ts_c ELSE r_d - r_c END) ELSE 0 END), 0) AS cheltuieli
+       FROM balante_snapshot WHERE eticheta = ? AND LENGTH(cont) <= 4`
+    )
+    .get(sn.eticheta);
+  const venituri = Number((r && r.venituri) || 0);
+  const cheltuieli = Number((r && r.cheltuieli) || 0);
+  if (!venituri && !cheltuieli) return null;
+  return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta };
+}
+
+// Un tabel „ca primul": patru ani, aceeași fereastră, bară + valoare + diferență.
+function tabelAni(randuri, culoarePrima) {
+  const acum = randuri[0] ? randuri[0].valoare : 0;
+  const max = Math.max(1, ...randuri.map((x) => Math.abs(x.valoare)));
+  return randuri
+    .map((x, i) => {
+      const lat = (Math.abs(x.valoare) / max) * 100;
+      const d = i === 0 ? null : acum - x.valoare;
+      const p = i === 0 || x.valoare <= 0 ? null : (d / x.valoare) * 100;
+      return `
+        <div class="an-rand">
+          <div class="an-eticheta">${x.an}${i === 0 ? " <span style='color:var(--text-muted);font-weight:400'>(la zi)</span>" : ""}${
+            x.nota ? ` <span style="color:var(--text-muted);font-weight:400;font-size:11px">${esc(x.nota)}</span>` : ""
+          }</div>
+          <div class="an-bara"><span style="width:${lat.toFixed(1)}%;background:${i === 0 ? culoarePrima : "var(--viz-neutru)"}"></span></div>
+          <div class="an-val">${money(x.valoare)}</div>
+          <div class="an-dif">${d === null ? "" : `${sageata(d)} ${money(Math.abs(d))}${p === null ? "" : ` · ${p >= 0 ? "+" : "−"}${Math.abs(p).toFixed(1)}%`}`}</div>
+        </div>`;
+    })
+    .join("");
+}
+
 function register(router) {
   router.get("/", async (ctx) => {
     const aziStr = azi();
@@ -195,6 +325,39 @@ function register(router) {
           </div>`;
       })
       .join("");
+
+    // ---- 1b. Cifra de afaceri (fără vânzări de active și restul) ---------
+    const listaTipare = tipare(await setare(CHEIE_EXCLUDERI, EXCLUDERI_IMPLICITE));
+    const caPeAn = [];
+    let scosTotalAnCurent = 0;
+    for (const an of ani) {
+      const r = await cifraAfaceriIntre(`${an}-01-01`, `${an}-${zileLuna}`, listaTipare);
+      if (an === anCurent) scosTotalAnCurent = r.scos;
+      caPeAn.push({ an, valoare: r.total, scos: r.scos });
+    }
+    // Suma pusă de mână pentru anul curent bate calculul — și tot tabelul se
+    // recalculează față de ea, altfel butonul n-ar servi la nimic.
+    const manualBrut = await setare(cheieManual(anCurent), null);
+    const manual = manualBrut === null || manualBrut === "" ? null : Number(manualBrut);
+    const caManualActiv = manual !== null && Number.isFinite(manual);
+    const caCalculatAnCurent = caPeAn[0].valoare;
+    if (caManualActiv) caPeAn[0].valoare = manual;
+    if (caManualActiv) caPeAn[0].nota = "corectat manual";
+
+    // ---- 1c. Profit contabil din balanțe (doar administrator) ------------
+    const esteAdminDash = ctx.user && ctx.user.rol === "admin";
+    let profitContabilPeAn = [];
+    if (esteAdminDash) {
+      for (const an of ani) {
+        const r = await profitContabil(an, `${an}-${zileLuna}`);
+        profitContabilPeAn.push({
+          an,
+          valoare: r ? r.profit : 0,
+          nota: r ? (String(r.pana).slice(0, 10) === `${an}-${zileLuna}` ? null : `balanță la ${String(r.pana).slice(0, 10)}`) : "fără balanță",
+          lipsa: !r,
+        });
+      }
+    }
 
     // ---- 2. Profit la zi + istoric lunar ---------------------------------
     const vanzariLuni = await peLuni("vanzare", anCurent);
@@ -300,7 +463,71 @@ function register(router) {
       <div class="hero">
         <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start">
           <div>
-            <div style="font-size:13px;color:var(--text-muted)">${profitLaZi >= 0 ? "Profit" : "Pierdere"} la zi (${anCurent})</div>
+            <div style="font-size:13px;color:var(--text-muted)">Cifră de afaceri la zi — fără vânzări de active și fără ce nu intră în CA</div>
+            <div class="hero-nr">${money(caPeAn[0].valoare)}</div>
+            <div class="hero-sub">
+              ${
+                caManualActiv
+                  ? `Sumă pusă de tine. Calculul din facturi dădea ${money(caCalculatAnCurent)}.`
+                  : scosTotalAnCurent > 0
+                    ? `Din facturat s-au scos ${money(scosTotalAnCurent)} care nu sunt cifră de afaceri.`
+                    : "Nimic de scos în anul curent după tiparele de mai jos."
+              }
+            </div>
+          </div>
+        </div>
+        <div class="viz" style="margin-top:14px">
+          ${tabelAni(caPeAn, "var(--viz-plus)")}
+        </div>
+        ${
+          esteAdminDash
+            ? `<details style="margin-top:10px">
+                 <summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Corectează suma anului curent și lista de excluderi</summary>
+                 <form method="post" action="/dashboard/cifra-afaceri" class="form" style="max-width:640px;margin-top:10px">
+                   <label class="field"><span>Cifra de afaceri ${anCurent}, pusă de mână (lasă gol ca să revii la calcul)</span>
+                     <input type="number" step="0.01" name="manual" value="${caManualActiv ? esc(String(manual)) : ""}" placeholder="${caCalculatAnCurent.toFixed(2)}">
+                   </label>
+                   <label class="field"><span>Ce se scoate din cifra de afaceri — un tipar pe linie, se caută în denumirea liniei de factură</span>
+                     <textarea name="excluderi" rows="6">${esc(tipare(await setare(CHEIE_EXCLUDERI, EXCLUDERI_IMPLICITE)).join("\n"))}</textarea>
+                   </label>
+                   <div class="form-actions"><button class="btn" type="submit">Salvează și recalculează</button></div>
+                 </form>
+               </details>`
+            : ""
+        }
+      </div>
+
+      ${
+        esteAdminDash
+          ? `<div class="hero">
+               <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start">
+                 <div>
+                   <div style="font-size:13px;color:var(--text-muted)">Profit contabil la zi, din balanțele din Conta — doar pentru administrator</div>
+                   <div class="hero-nr" style="color:${profitContabilPeAn[0] && profitContabilPeAn[0].valoare >= 0 ? "var(--success)" : "var(--danger)"}">
+                     ${profitContabilPeAn[0] && !profitContabilPeAn[0].lipsa ? money(profitContabilPeAn[0].valoare) : "—"}
+                   </div>
+                   <div class="hero-sub">
+                     ${
+                       profitContabilPeAn.some((x) => !x.lipsa)
+                         ? "Venituri (clasa 7) minus cheltuieli (clasa 6), din ultima balanță încărcată pentru fiecare an."
+                         : `Nu e încărcată nicio balanță. <a href="/balanta">Încarcă balanțele din Conta</a> ca să apară aici.`
+                     }
+                   </div>
+                 </div>
+                 <a class="btn secondary small" href="/balanta">Balanțe →</a>
+               </div>
+               ${profitContabilPeAn.some((x) => !x.lipsa) ? `<div class="viz" style="margin-top:14px">${tabelAni(profitContabilPeAn, "var(--viz-plus)")}</div>` : ""}
+               <p style="font-size:12px;color:var(--text-muted);margin-top:8px">
+                 Balanțele sunt fotografii pe perioade, nu pe zile. Unde nu există una fix pe ${esc(zileLuna)}, scrie lângă an data balanței folosite.
+               </p>
+             </div>`
+          : ""
+      }
+
+      <div class="hero">
+        <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start">
+          <div>
+            <div style="font-size:13px;color:var(--text-muted)">EBITDA la zi (${anCurent})</div>
             <div class="hero-nr" style="color:${profitLaZi >= 0 ? "var(--success)" : "var(--danger)"}">${money(profitLaZi)}</div>
             <div class="hero-sub">
               ${money(vanzariLaZi)} vânzări − ${money(achizitiiLaZi)} achiziții${salariiLaZi > 0 ? ` − ${money(salariiLaZi)} cost cu oamenii` : ""}
@@ -312,7 +539,7 @@ function register(router) {
         <p style="font-size:12px;color:var(--text-muted);margin-top:4px">
           ${
             salariiLaZi > 0
-              ? "Profitul scade vânzările nete cu achizițiile nete și cu costul salarial (brut + CAM)."
+              ? "EBITDA: vânzări nete − achiziții nete − cost salarial (brut + CAM). Fără amortizare, dobânzi și impozit — de-aia e EBITDA, nu profit contabil."
               : "Deocamdată e marjă brută: vânzări nete minus achiziții nete. Costul cu oamenii intră în calcul de îndată ce statele de plată sunt în sistem."
           }
         </p>
@@ -383,6 +610,23 @@ function register(router) {
     `;
 
     send(ctx.res, 200, layout({ user: ctx.user, title: "Dashboard", active: "/", body }));
+  });
+
+  // Corectura manuală a cifrei de afaceri și lista de excluderi. Se ține în
+  // setari_app, deci se ține minte peste redeploy, iar tabelul se recalculează
+  // față de suma pusă de mână.
+  router.post("/dashboard/cifra-afaceri", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const b = ctx.body || {};
+    const brut = String(b.manual === undefined ? "" : b.manual).trim();
+    const anCurent = new Date().toISOString().slice(0, 4);
+    if (brut === "") await scrieSetare(cheieManual(anCurent), "");
+    else {
+      const n = Number(brut.replace(/\s/g, "").replace(",", "."));
+      await scrieSetare(cheieManual(anCurent), Number.isFinite(n) ? String(n) : "");
+    }
+    if (b.excluderi !== undefined) await scrieSetare(CHEIE_EXCLUDERI, String(b.excluderi));
+    redirect(ctx.res, "/");
   });
 }
 

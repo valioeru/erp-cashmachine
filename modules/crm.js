@@ -50,6 +50,103 @@ function nr(v) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Pâlnia de vânzări, desenată.
+//
+// Coloanele de mai jos spun cine e unde, dar nu spun cât se pierde de la un
+// pas la altul — asta se vede dintr-o formă, nu dintr-o listă. Lățimea
+// fiecărei benzi e proporțională cu numărul de oportunități din stadiul ei,
+// iar în bandă scrie chiar ce trebuie: câte, cât fac și cât la sută au trecut
+// mai departe față de pasul dinainte.
+//
+// Culorile sunt o singură familie de albastru, de la deschis la închis: e o
+// mărime care scade, nu categorii independente — un curcubeu ar minți despre
+// relația dintre benzi. Cerneala de pe fiecare bandă e aleasă după contrast
+// (peste 4.5:1 pe toate), nu după gust.
+const PALNIE_STADII = [
+  { key: "lead", label: "Lead", fill: "#e3ecf9", ink: "#1a2233" },
+  { key: "calificat", label: "Calificat", fill: "#c2d5ef", ink: "#1a2233" },
+  { key: "oferta", label: "Ofertă trimisă", fill: "#93b3e0", ink: "#1a2233" },
+  { key: "negociere", label: "Negociere", fill: "#3a6bb0", ink: "#ffffff" },
+  { key: "castigat", label: "Câștigat", fill: "#22497e", ink: "#ffffff" },
+];
+
+function palnie(oportunitati) {
+  const trepte = PALNIE_STADII.map((s) => {
+    const items = oportunitati.filter((o) => o.stadiu === s.key);
+    return { ...s, n: items.length, valoare: items.reduce((t, o) => t + Number(o.valoare_estimata || 0), 0) };
+  });
+  const pierdute = oportunitati.filter((o) => o.stadiu === "pierdut");
+  const maxN = Math.max(...trepte.map((t) => t.n), 1);
+  const total = trepte.reduce((t, x) => t + x.n, 0);
+  if (!total && !pierdute.length) {
+    return '<p style="color:var(--text-muted)">Pâlnia se desenează singură când ai prima oportunitate în pipeline.</p>';
+  }
+
+  const L = 900;
+  const H_BANDA = 74;
+  const SPATIU = 2; // aceleași 2px de fundal între benzi ca între barele din rapoarte
+  const MIN_L = 260; // sub atât nu mai încape scrisul în bandă
+  const inaltime = trepte.length * (H_BANDA + SPATIU) + 4;
+
+  const latime = (n) => MIN_L + (L - MIN_L) * (maxN ? n / maxN : 0);
+
+  const benzi = trepte
+    .map((t, i) => {
+      const y = i * (H_BANDA + SPATIU);
+      const w1 = latime(t.n);
+      const w2 = latime(i + 1 < trepte.length ? trepte[i + 1].n : t.n);
+      const x1 = (L - w1) / 2;
+      const x2 = (L - w2) / 2;
+      const anterior = i > 0 ? trepte[i - 1].n : null;
+      const conversie = anterior ? Math.round((t.n / anterior) * 100) : null;
+      const puncte = `${x1},${y} ${x1 + w1},${y} ${x2 + w2},${y + H_BANDA} ${x2},${y + H_BANDA}`;
+      const centru = L / 2;
+      return `
+        <g>
+          <title>${esc(t.label)}: ${t.n} oportunități, ${money(t.valoare)}${conversie !== null ? `, ${conversie}% din „${esc(trepte[i - 1].label)}"` : ""}</title>
+          <polygon points="${puncte}" fill="${t.fill}"></polygon>
+          <text x="${centru}" y="${y + 28}" text-anchor="middle" fill="${t.ink}" font-size="15" font-weight="600">${esc(t.label)}</text>
+          <text x="${centru}" y="${y + 50}" text-anchor="middle" fill="${t.ink}" font-size="13" opacity="0.9">${t.n} ${
+            t.n === 1 ? "oportunitate" : "oportunități"
+          } · ${money(t.valoare)}</text>
+          ${
+            conversie !== null
+              ? `<text x="${centru}" y="${y + 68}" text-anchor="middle" fill="${t.ink}" font-size="11" opacity="0.75">${conversie}% din „${esc(
+                  trepte[i - 1].label
+                )}"</text>`
+              : ""
+          }
+        </g>`;
+    })
+    .join("");
+
+  const primul = trepte[0].n;
+  const castigate = trepte[trepte.length - 1];
+  const rataFinala = primul ? Math.round((castigate.n / primul) * 100) : null;
+
+  return `
+    <div class="palnie" style="margin:6px 0 18px">
+      <div style="overflow-x:auto">
+        <svg viewBox="0 0 ${L} ${inaltime}" width="100%" style="max-width:${L}px;height:auto;display:block" role="img"
+             aria-label="Pâlnia de vânzări pe stadii">
+          ${benzi}
+        </svg>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:13px;color:var(--text-muted);margin-top:8px">
+        <span><strong style="color:var(--text)">${total}</strong> oportunități în pâlnie</span>
+        ${rataFinala !== null ? `<span>rata de câștig <strong style="color:var(--text)">${rataFinala}%</strong> din lead-uri</span>` : ""}
+        ${
+          pierdute.length
+            ? `<span style="display:inline-flex;align-items:center;gap:6px">
+                 <span style="width:10px;height:10px;border-radius:2px;background:#b3261e;display:inline-block"></span>
+                 ${pierdute.length} pierdute · ${money(pierdute.reduce((t, o) => t + Number(o.valoare_estimata || 0), 0))}
+               </span>`
+            : ""
+        }
+      </div>
+    </div>`;
+}
+
 function register(router) {
   // ================= PIPELINE (oportunități) ==========================
   router.get("/crm", async (ctx) => {
@@ -136,6 +233,9 @@ function register(router) {
             : ""
         }
       </div>
+      <h2 style="margin-bottom:4px">Pâlnia de vânzări</h2>
+      ${palnie(oportunitati)}
+      <h2>Pe stadii, oportunitate cu oportunitate</h2>
       <div class="crm-board">${coloane}</div>
 
       <h2>Task-urile mele deschise</h2>
