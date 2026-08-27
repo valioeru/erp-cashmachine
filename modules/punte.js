@@ -283,12 +283,95 @@ async function ingestProfitProdus(randuri) {
   return { scrise, legate_de_produse: legate };
 }
 
+// --- liniile facturilor ----------------------------------------------------
+// Exportul SmartBill de facturi n-are detaliu pe produse: toate cele ~6.900
+// de linii importate sunt un text de forma „Conform document …". Fără produs
+// pe linie nu există cost, deci nu există marjă pe factură, pe client sau pe
+// produs — exact ce a cerut Vali.
+//
+// Aici intră liniile citite din pagina fiecărei facturi. Regula: o factură
+// primită în lot își pierde liniile vechi și le capătă pe cele noi, o singură
+// dată, în bloc. Nu completăm parțial: ori știm factura întreagă, ori o lăsăm
+// cum era.
+async function ingestFacturiLinii(randuri) {
+  let facturi = 0, linii = 0, negasite = 0, faraProdus = 0;
+
+  const produse = new Map();
+  for (const p of await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all()) {
+    produse.set(String(p.denumire).trim().toLowerCase(), p.id);
+    if (p.cod) produse.set(String(p.cod).trim().toLowerCase(), p.id);
+  }
+
+  // Grupăm rândurile pe factură. Cheia e ce ne dă browserul: numărul
+  // documentului aşa cum apare în SmartBill (ex. „CSHM 3080").
+  const peFactura = new Map();
+  for (const r of randuri) {
+    const cheie = curat(r.factura) || `${curat(r.serie)} ${curat(r.numar)}`.trim();
+    if (!cheie) continue;
+    if (!peFactura.has(cheie)) peFactura.set(cheie, []);
+    peFactura.get(cheie).push(r);
+  }
+
+  for (const [cheie, aleFacturii] of peFactura) {
+    // „CSHM 3080" / „CSHMUPA0041" / „CSHM3080" — despărțim seria de număr.
+    const m = String(cheie).trim().match(/^([A-Za-z][A-Za-z0-9]*?)\s*0*(\d+)$/);
+    const serie = m ? m[1].toUpperCase() : null;
+    const numar = m ? parseInt(m[2], 10) : null;
+
+    let f = null;
+    if (serie && Number.isFinite(numar)) {
+      f = await db
+        .prepare("SELECT id FROM facturi WHERE directie = 'vanzare' AND UPPER(COALESCE(serie,'')) = ? AND numar = ? ORDER BY id LIMIT 1")
+        .get(serie, numar);
+    }
+    if (!f) {
+      f = await db
+        .prepare("SELECT id FROM facturi WHERE directie = 'vanzare' AND REPLACE(UPPER(COALESCE(document_extern,'')), ' ', '') = ? ORDER BY id LIMIT 1")
+        .get(String(cheie).toUpperCase().replace(/\s/g, ""));
+    }
+    if (!f) {
+      negasite++;
+      continue;
+    }
+
+    await db.prepare("DELETE FROM facturi_linii WHERE factura_id = ?").run(f.id);
+    for (const r of aleFacturii) {
+      const denumire = curat(r.denumire) || curat(r.produs);
+      if (!denumire) continue;
+      const cod = curat(r.cod);
+      const produsId =
+        (cod && produse.get(cod.toLowerCase())) || produse.get(denumire.toLowerCase()) || null;
+      if (!produsId) faraProdus++;
+      const cant = nr(r.cantitate);
+      const pret = nr(r.pret_unitar);
+      const tva = r.cota_tva === undefined || r.cota_tva === null || r.cota_tva === "" ? 21 : nr(r.cota_tva);
+      await db
+        .prepare("INSERT INTO facturi_linii (factura_id, produs_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(f.id, produsId, denumire.slice(0, 300), cant, pret, tva);
+      linii++;
+    }
+    facturi++;
+  }
+
+  return {
+    facturi,
+    linii,
+    negasite,
+    faraProdus,
+    nota:
+      negasite > 0
+        ? `${negasite} facturi din lot n-au fost găsite în ERP după serie+număr — probabil nu sunt importate.`
+        : undefined,
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
   productie: ingestProductie,
   consum: ingestConsum,
   profit_produs: ingestProfitProdus,
+  facturi_linii: ingestFacturiLinii,
 };
 
 function register(router) {
