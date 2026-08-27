@@ -21,6 +21,7 @@ require("./modules/facturi").register(router);
 require("./modules/crm").register(router);
 require("./modules/oferte").register(router);
 require("./modules/contacte").register(router);
+require("./modules/scadente").register(router);
 require("./modules/taskuri").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
