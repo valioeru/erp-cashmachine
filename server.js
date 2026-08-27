@@ -22,6 +22,7 @@ require("./modules/crm").register(router);
 require("./modules/oferte").register(router);
 require("./modules/contacte").register(router);
 require("./modules/scadente").register(router);
+require("./modules/sincronizare").register(router);
 require("./modules/taskuri").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
@@ -47,7 +48,7 @@ router.get("/healthz", (ctx) => {
 // printr-un token temporar generat de administrator (vezi modules/import.js).
 // De-aia stă în afara gardului de sesiune — dar NU e deschisă: fără token
 // valid și nexpirat, refuză orice.
-const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest"]);
+const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest", "/api/agenda", "/api/stiri"]);
 
 async function creeazaAdminInitialDacaLipseste() {
   const nr = (await db.prepare("SELECT COUNT(*) AS n FROM utilizatori").get()).n;
