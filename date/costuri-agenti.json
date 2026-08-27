@@ -1,0 +1,36 @@
+{
+  "_nota": "Costul lunar al agenților, citit din statele de plată din Drive (Grup-Oeru). Se încarcă la pornire și se scrie în costuri_personal doar dacă nu există deja un rând pentru același om cu aceeași dată de valabilitate — modificările făcute din interfață nu se suprascriu.",
+  "_sursa": "Stat salarii - WAREHOUSE ALL SRL [08-2026] și Stat salarii - CASH MACHINE S R L [06-2026], Google Drive → Grup-Oeru",
+  "randuri": [
+    {
+      "utilizator": "Cătălin Georgescu",
+      "valabil_de_la": "2026-08-01",
+      "salariu_brut": 7692,
+      "cam_procent": 2.25,
+      "cost_masina": 1999.54,
+      "masina_detalii": "leasing, valoare comunicată de Vali",
+      "cost_carburant": 0,
+      "observatii": "Brut din statul de plată Warehouse All 08-2026 (salariu de bază). Carburantul intră când avem alimentările OMV."
+    },
+    {
+      "utilizator": "Isabela Radu",
+      "valabil_de_la": "2026-08-01",
+      "salariu_brut": 8348,
+      "cam_procent": 2.25,
+      "cost_masina": 1999.54,
+      "masina_detalii": "leasing, valoare comunicată de Vali",
+      "cost_carburant": 0,
+      "observatii": "Brut din statul de plată Warehouse All 08-2026 (salariu de bază). Carburantul intră când avem alimentările OMV."
+    },
+    {
+      "utilizator": "Mihai Moinescu",
+      "valabil_de_la": "2026-06-01",
+      "salariu_brut": 5401,
+      "cam_procent": 2.25,
+      "cost_masina": 1849.41,
+      "masina_detalii": "leasing, valoare comunicată de Vali",
+      "cost_carburant": 0,
+      "observatii": "Brut din statul de plată Cash Machine 06-2026. De actualizat cu luna curentă. Carburantul intră când avem alimentările OMV."
+    }
+  ]
+}
