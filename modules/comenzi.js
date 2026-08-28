@@ -21,6 +21,132 @@ const FLUX = ["noua", "confirmata", "in_productie", "in_stoc_depozit", "facturat
 // De la starea asta încolo agentul poate apăsa „Facturează".
 const STARE_FACTURABILA = "in_stoc_depozit";
 
+// ------------------------------------------------------------------
+// Anuntul de comanda noua
+// ------------------------------------------------------------------
+// Pe langa fluxul din ERP (comanda intra in lista depozitului), comanda pleaca
+// si pe email: la biroul firmei, la Mihai si inapoi la agentul care a plasat-o,
+// ca sa aiba dovada scrisa fara sa intre in aplicatie. Adresele stau in
+// setari_app, deci se schimba din baza fara sa mai umblam prin cod.
+const CATRE_IMPLICIT = "office@cashmachine.ro, mihai.mosneanu@cashmachine.ro";
+
+function adreseDinText(text) {
+  return String(text || "")
+    .split(/[,;\s]+/)
+    .map((x) => x.trim())
+    .filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x));
+}
+
+async function destinatariComandaNoua(agentEmail) {
+  let brut = CATRE_IMPLICIT;
+  try {
+    const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = 'comanda_noua_catre'").get();
+    if (r && String(r.valoare || "").trim()) brut = r.valoare;
+  } catch (e) {
+    // setarea lipseste: ramanem pe adresele implicite
+  }
+  const lista = adreseDinText(brut);
+  for (const a of adreseDinText(agentEmail)) lista.push(a);
+  const vazute = new Set();
+  return lista.filter((a) => {
+    const k = a.toLowerCase();
+    if (vazute.has(k)) return false;
+    vazute.add(k);
+    return true;
+  });
+}
+
+async function expeditorEmail(user) {
+  const mail = require("../lib/mail");
+  const candidati = [];
+  if (user && user.id) candidati.push(user.id);
+  for (const r of await db
+    .prepare("SELECT id FROM utilizatori WHERE activ = 1 AND smtp_host IS NOT NULL ORDER BY CASE WHEN rol = 'admin' THEN 0 ELSE 1 END, id")
+    .all())
+    candidati.push(r.id);
+  for (const id of candidati) {
+    const u = await db.prepare("SELECT * FROM utilizatori WHERE id = ?").get(id);
+    const cfg = u && mail.configUtilizator(u);
+    if (cfg) return { user: u, config: cfg };
+  }
+  return null;
+}
+
+async function anuntaComandaNoua(comandaId, user) {
+  const mail = require("../lib/mail");
+  const c = await db
+    .prepare(
+      `SELECT c.*, p.nume AS client, p.telefon AS client_telefon, p.email AS client_email, u.nume AS agent, u.email AS agent_email
+         FROM comenzi c
+         JOIN parteneri p ON p.id = c.partener_id
+         LEFT JOIN utilizatori u ON u.id = c.agent_id
+        WHERE c.id = ?`
+    )
+    .get(comandaId);
+  if (!c) return { status: "esuat", eroare: "comanda nu a fost gasita" };
+
+  const linii = await db
+    .prepare(
+      `SELECT cl.cantitate, cl.pret_unitar, pr.denumire, pr.unitate_masura
+         FROM comenzi_linii cl JOIN produse pr ON pr.id = cl.produs_id
+        WHERE cl.comanda_id = ?`
+    )
+    .all(comandaId);
+  const total = linii.reduce((s, l) => s + Number(l.cantitate) * Number(l.pret_unitar), 0);
+  const lei = (v) => Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+
+  const subiect = `Comandă nouă ${c.numar ? c.numar + " " : ""}#${c.id} — ${c.client}`;
+  const corp = [
+    `Comandă nouă în ERP.`,
+    ``,
+    `Client:   ${c.client}${c.client_telefon ? " · " + c.client_telefon : ""}${c.client_email ? " · " + c.client_email : ""}`,
+    `Agent:    ${c.agent || "—"}`,
+    `Număr:    ${c.numar || "(fără număr)"} (id ${c.id})`,
+    `Livrare cerută: ${c.data_livrare_ceruta || "—"}`,
+    ``,
+    `Produse:`,
+    ...linii.map((l) => `  - ${l.denumire} — ${l.cantitate} ${l.unitate_masura || "buc"} × ${lei(l.pret_unitar)} = ${lei(Number(l.cantitate) * Number(l.pret_unitar))}`),
+    ``,
+    `Total fără TVA: ${lei(total)}`,
+    c.observatii ? `\nObservații: ${c.observatii}` : "",
+    ``,
+    `Comanda: ${(process.env.ERP_URL || "https://erp-cashmachine-app.onrender.com").replace(/\/$/, "")}/comenzi/${c.id}`,
+  ].join("\n");
+
+  const catre = await destinatariComandaNoua(c.agent_email || (user && user.email));
+  let status = "trimis";
+  let eroare = null;
+  if (!catre.length) {
+    status = "esuat";
+    eroare = "Nu e configurată nicio adresă pentru anunțul de comandă nouă.";
+  } else {
+    const exp = await expeditorEmail(user);
+    if (!exp) {
+      status = "esuat";
+      eroare = "Niciun utilizator nu are contul de email configurat (Profilul meu → Email).";
+    } else {
+      try {
+        await mail.trimite(exp.config, { catre, subiect, corp });
+      } catch (e) {
+        status = "esuat";
+        eroare = e.message;
+      }
+    }
+  }
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO emailuri (utilizator_id, partener_id, catre, subiect, corp, status, eroare)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(user && user.id ? user.id : null, c.partener_id, catre.join(", ") || "—", subiect, corp, status, eroare);
+  } catch (e) {
+    console.error("[comenzi] nu am putut scrie emailul in istoric:", e.message);
+  }
+  return { status, eroare, catre };
+}
+
 function poateFactura(comanda) {
   const i = FLUX.indexOf(comanda.status);
   return i >= FLUX.indexOf(STARE_FACTURABILA) && comanda.status !== "anulata";
@@ -178,6 +304,15 @@ function register(router) {
     for (let i = 0; i < produsIds.length; i++) {
       const cant = Number(cantitati[i] || 0);
       if (cant > 0) await insertLinie.run(comandaId, produsIds[i], cant, Number(preturi[i] || 0));
+    }
+
+    // Anuntul pe email nu are voie sa strice plasarea comenzii: daca serverul
+    // de mail e picat, comanda ramane, iar esecul se vede in istoricul de
+    // emailuri, cu motivul scris pe el.
+    try {
+      await anuntaComandaNoua(comandaId, ctx.user);
+    } catch (e) {
+      console.error("[comenzi] anunt comanda noua:", e.message);
     }
 
     // Comanda NU mai pleacă direct în producție. Drumul ei e cel cerut de

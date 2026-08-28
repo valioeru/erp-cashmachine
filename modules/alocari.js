@@ -571,12 +571,19 @@ function register(router) {
           : `<p style="color:var(--text-muted)">Nu mai e niciun client de luat${cauta ? " pentru căutarea asta" : ""}.</p>`
       }
 
-      <h2>Clienții altora (${aiAltora.length})</h2>
-      <p style="font-size:13px;color:var(--text-muted)">Doar informativ — ca să știi cine pe cine lucrează.</p>
       ${
-        aiAltora.length
-          ? table(CAP, aiAltora.slice(0, 200).map((c) => randClient(c, false)))
-          : `<p style="color:var(--text-muted)">—</p>`
+        // Lista clienților altor agenți o vede doar administratorul. Agentul are
+        // în față exact ce poate lucra — ai lui și cei liberi — ca să nu piardă
+        // timp uitându-se la clienți pe care oricum nu-i poate lua.
+        eAdmin
+          ? `<h2>Clienții altora (${aiAltora.length})</h2>
+             <p style="font-size:13px;color:var(--text-muted)">Doar informativ — cine pe cine lucrează.</p>
+             ${
+               aiAltora.length
+                 ? table(CAP, aiAltora.slice(0, 200).map((c) => randClient(c, false)))
+                 : `<p style="color:var(--text-muted)">—</p>`
+             }`
+          : ""
       }
       ${eAdmin ? `<div class="toolbar"><a class="btn secondary" href="/alocari">Ecranul de administrare al alocărilor</a></div>` : ""}
     `;

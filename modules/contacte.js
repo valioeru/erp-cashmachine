@@ -120,6 +120,9 @@ async function genereazaTaskuriContact(agentId) {
 // ------------------------------------------------------------------
 // Generarea sugestiilor de clienți
 // ------------------------------------------------------------------
+// Cate sugestii nerevendicate tinem in permanenta in lista.
+const MINIM_SUGESTII = 20;
+
 // Sugestiile sunt lead-uri cu sursa „sugestie" și fără agent: aceeași listă
 // pentru toată lumea. Le scoatem din clienții pe care nu-i lucrează nimeni:
 // fie n-au agent deloc, fie n-au mai cumpărat de peste 9 luni.
@@ -139,8 +142,11 @@ async function genereazaSugestii() {
 
   // Ieșire ieftină: dacă lista nerevendicată e deja plină, nu mai plimbăm
   // portofoliul întreg la fiecare deschidere de pagină.
+  // Vali vrea douazeci de sugestii disponibile tot timpul. Cele venite din
+  // piata (fara partener_id) intra prin punte si stau in aceeasi lista; aici
+  // completam doar pana la prag, din portofoliul propriu nelucrat.
   const libere = await db.prepare("SELECT COUNT(*) AS n FROM leaduri WHERE sursa = 'sugestie' AND atribuit_lui IS NULL AND stadiu <> 'pierdut'").get();
-  if (Number((libere && libere.n) || 0) >= 12) return 0;
+  if (Number((libere && libere.n) || 0) >= MINIM_SUGESTII) return 0;
 
   const existente = await db.prepare("SELECT partener_id FROM leaduri WHERE sursa = 'sugestie' AND partener_id IS NOT NULL").all();
   const deja = new Set(existente.map((x) => Number(x.partener_id)));
@@ -245,11 +251,11 @@ async function blocTaskuriContact(user, agentId) {
 async function blocSugestii(user) {
   const sugestii = await db
     .prepare(
-      `SELECT l.id, l.nume, l.companie, l.email, l.telefon, l.motiv_sugestie, l.partener_id
+      `SELECT l.id, l.nume, l.companie, l.email, l.telefon, l.motiv_sugestie, l.partener_id, l.observatii
          FROM leaduri l
         WHERE l.sursa = 'sugestie' AND l.atribuit_lui IS NULL AND l.stadiu <> 'pierdut'
-        ORDER BY l.id DESC
-        LIMIT 12`
+        ORDER BY CASE WHEN l.partener_id IS NULL THEN 0 ELSE 1 END, l.id DESC
+        LIMIT ${MINIM_SUGESTII}`
     )
     .all();
 
@@ -271,7 +277,8 @@ async function blocSugestii(user) {
             <strong>${s.partener_id ? `<a href="/parteneri/${s.partener_id}">${esc(s.nume)}</a>` : esc(s.nume)}</strong>
             <span style="font-size:12px;color:var(--text-muted)">${esc([s.telefon, s.email].filter(Boolean).join(" · "))}</span>
           </div>
-          <div style="font-size:13px;color:var(--text-muted);margin:4px 0 8px">${esc(s.motiv_sugestie || "")}</div>
+          <div style="font-size:13px;color:var(--text-muted);margin:4px 0 2px">${esc(s.motiv_sugestie || "")}</div>
+          ${s.observatii ? `<div style="font-size:12px;color:var(--text-muted);margin:0 0 8px">${esc(s.observatii)}</div>` : `<div style="margin-bottom:8px"></div>`}
           <form method="post" action="/crm/sugestii/${s.id}/preia" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
             <label class="field" style="flex:1;min-width:170px"><span>Persoană de contact</span><input name="persoana_contact" placeholder="opțional"></label>
             <label class="field" style="width:140px"><span>Cum îl contactezi</span>
@@ -358,14 +365,36 @@ function register(router) {
       .prepare("UPDATE leaduri SET atribuit_lui = ?, stadiu = 'in_lucru', persoana_contact = ?, mod_contact = ?, ultima_activitate = ? WHERE id = ?")
       .run(ctx.user.id, persoana, modContact, azi(), l.id);
 
+    // Sugestiile venite din piata n-au inca fisa de client. Cand le ia cineva,
+    // ii facem fisa pe loc si i-o alocam — altfel agentul ar avea un lead pe
+    // care nu poate scrie nimic si ar trebui sa introduca clientul de mana.
+    let partenerId = l.partener_id;
+    if (!partenerId) {
+      const numeClient = String(l.companie || l.nume || "").trim();
+      if (numeClient) {
+        const deja = await db.prepare("SELECT id FROM parteneri WHERE LOWER(nume) = LOWER(?) LIMIT 1").get(numeClient);
+        if (deja) {
+          partenerId = deja.id;
+        } else {
+          const ins = await db
+            .prepare(
+              "INSERT INTO parteneri (tip, nume, email, telefon, persoana_contact, sursa, stare) VALUES ('client', ?, ?, ?, ?, ?, 'prospect') RETURNING id"
+            )
+            .run(numeClient, l.email || null, l.telefon || null, persoana, "sugestie din piata");
+          partenerId = ins.lastInsertRowid;
+        }
+        await db.prepare("UPDATE leaduri SET partener_id = ? WHERE id = ?").run(partenerId, l.id);
+      }
+    }
+
     // Dacă sugestia e un client existent nelucrat de nimeni, i-l alocăm.
     // Dacă are deja agent, nu-l furăm — rămâne doar lead-ul lui.
-    if (l.partener_id) {
-      const are = await db.prepare(`SELECT COUNT(*) AS n FROM ${ALOC} a WHERE a.partener_id = ? AND a.procent > 0`).get(l.partener_id);
+    if (partenerId) {
+      const are = await db.prepare(`SELECT COUNT(*) AS n FROM ${ALOC} a WHERE a.partener_id = ? AND a.procent > 0`).get(partenerId);
       if (Number((are && are.n) || 0) === 0) {
         await db
           .prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, valabil_de_la) VALUES (?, ?, 100, ?)")
-          .run(l.partener_id, ctx.user.id, azi());
+          .run(partenerId, ctx.user.id, azi());
       }
       await db
         .prepare(
@@ -377,12 +406,12 @@ function register(router) {
           `Client luat din sugestii.${persoana ? ` Persoană de contact: ${persoana}.` : ""}${modContact ? ` Preferă ${MODURI[modContact].toLowerCase()}.` : ""}`,
           peste(2),
           ctx.user.id,
-          l.partener_id,
+          partenerId,
           l.id
         );
       await db
         .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'nota', ?, ?, ?)")
-        .run(l.partener_id, "Client preluat din sugestii", `Preluat de ${ctx.user.nume}.${persoana ? ` Contact: ${persoana}.` : ""}`, ctx.user.id);
+        .run(partenerId, "Client preluat din sugestii", `Preluat de ${ctx.user.nume}.${persoana ? ` Contact: ${persoana}.` : ""}${l.observatii ? ` ${l.observatii}` : ""}`, ctx.user.id);
     }
 
     redirect(ctx.res, ctx.body.inapoi ? String(ctx.body.inapoi) : "/crm/birou");

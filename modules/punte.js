@@ -922,6 +922,55 @@ async function ingestSalarii(randuri) {
   };
 }
 
+// Sugestii de clienti noi, din piata. Nu vin din baza noastra: sunt firme
+// gasite in afara, cu datele de contact pe care le-am putut aduna. Intra ca
+// lead-uri fara agent, deci aceeasi lista pentru toti — cine le ia primul.
+// Nu propunem firme pe care le avem deja ca parteneri si nici una de doua ori.
+async function ingestSugestii(randuri) {
+  const parteneri = await db.prepare("SELECT nume FROM parteneri").all();
+  const leaduri = await db.prepare("SELECT nume, companie FROM leaduri").all();
+  const stiute = new Set();
+  for (const p of parteneri) stiute.add(numeCheie(p.nume));
+  for (const l of leaduri) {
+    stiute.add(numeCheie(l.nume));
+    if (l.companie) stiute.add(numeCheie(l.companie));
+  }
+
+  let adaugate = 0;
+  let sarite = 0;
+  for (const r of randuri) {
+    const nume = curat(r.nume) || curat(r.companie);
+    const k = numeCheie(nume);
+    if (!k || stiute.has(k)) {
+      sarite++;
+      continue;
+    }
+    stiute.add(k);
+    const detalii = [curat(r.oras), curat(r.site), curat(r.cui) ? `CUI ${curat(r.cui)}` : "", curat(r.adresa)]
+      .filter(Boolean)
+      .join(" · ");
+    await db
+      .prepare(
+        `INSERT INTO leaduri (nume, companie, email, telefon, sursa, stadiu, partener_id, motiv_sugestie, observatii)
+         VALUES (?, ?, ?, ?, 'sugestie', 'nou', NULL, ?, ?)`
+      )
+      .run(
+        nume.slice(0, 200),
+        nume.slice(0, 200),
+        curat(r.email) || null,
+        curat(r.telefon) || null,
+        (curat(r.motiv) || "Firmă din piață, posibil consumator de ambalaje.").slice(0, 300),
+        detalii.slice(0, 400) || null
+      );
+    adaugate++;
+  }
+
+  const libere = await db
+    .prepare("SELECT COUNT(*) AS n FROM leaduri WHERE sursa = 'sugestie' AND atribuit_lui IS NULL AND stadiu <> 'pierdut'")
+    .get();
+  return { adaugate, sarite, sugestii_libere_acum: Number((libere && libere.n) || 0) };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
@@ -935,6 +984,7 @@ const HANDLERE = {
   plati_furnizori: ingestPlatiFurnizori,
   angajati: ingestAngajati,
   salarii: ingestSalarii,
+  sugestii: ingestSugestii,
 };
 
 function register(router) {
