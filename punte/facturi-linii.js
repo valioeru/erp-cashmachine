@@ -77,17 +77,26 @@
   // factor e cantitatea și care e prețul. De-aia antetul are ultimul cuvânt,
   // iar când lipsește ne uităm la formă: cantitățile sunt mai des întregi,
   // prețurile au zecimale.
-  function coloaneDinAntet(tabel) {
-    const celule = [...tabel.querySelectorAll("thead th, thead td, tr:first-child th")].map((c) =>
-      (c.innerText || c.textContent || "").trim().toLowerCase()
-    );
+  function coloaneDinAntet(celuleAntet) {
+    const celule = (celuleAntet || []).map((t) => String(t || "").trim().toLowerCase().replace(/\s+/g, " "));
     if (celule.length < 3) return null;
     const gaseste = (re) => celule.findIndex((t) => re.test(t));
     const cant = gaseste(/cantitate|\bcant\b|\bbuc\b(?!.*pre)/);
     const pret = gaseste(/pre[țt]\s*(unitar|\/|$)|pre[țt]\b/);
-    const val = gaseste(/valoare|total\s*(f[ăa]r[ăa]|net)|\bvaloare\b/);
+    // „Valoare" da, „Valoare TVA" nu: pe factura clasica romaneasca sunt doua
+    // coloane lipite, iar TVA-ul nu e valoarea liniei.
+    const val = celule.findIndex((t) => /valoare|total\s*(f[ăa]r[ăa]|net)/.test(t) && !/tva/.test(t));
     if (cant < 0 || pret < 0 || val < 0 || cant === pret || pret === val || cant === val) return null;
     return { cant, pret, val };
+  }
+
+  // Randul de legenda al facturii clasice romanesti: „0 | 1 | 2 | 3 | 4 | 5 (3x4) | 6".
+  // Sunt numere de coloana, nu date — dar respecta si aritmetica (2 x 3 = 6),
+  // asa ca daca il lasam inauntru trage cautarea pe coloanele gresite.
+  function eRandDeLegenda(r) {
+    const pline = r.filter((c) => String(c || "").trim() !== "");
+    if (pline.length < 3) return false;
+    return pline.every((c) => /^\d{1,2}(\s*\(\s*\d+\s*[x×]\s*\d+\s*\))?$/.test(String(c).trim()));
   }
 
   function verifica(randuri, comb) {
@@ -111,12 +120,16 @@
     const linii = [...doc.querySelectorAll('div[class*="style_tabel_color"]')]
       .map((r) => [...r.children].map((c) => (c.innerText || c.textContent || "").trim()))
       .filter((c) => c.length >= 3);
-    if (linii.length) grupuri.push(linii);
+    if (linii.length) grupuri.push({ randuri: linii, antet: null });
     for (const t of doc.querySelectorAll("table")) {
-      const randuri = [...t.querySelectorAll("tr")]
-        .map((tr) => [...tr.querySelectorAll("td")].map((td) => (td.innerText || td.textContent || "").trim()))
+      const toate = [...t.querySelectorAll("tr")]
+        .map((tr) => [...tr.querySelectorAll("td, th")].map((td) => (td.innerText || td.textContent || "").trim()))
         .filter((c) => c.length >= 3);
-      if (randuri.length) grupuri.push(randuri);
+      if (!toate.length) continue;
+      // primul rand e antet daca isi spune pe nume; randul de legenda se arunca
+      const antet = /cant|pre[țt]|valoare|denumire/i.test(toate[0].join(" ")) ? toate[0] : null;
+      const randuri = toate.filter((r, i) => !(antet && i === 0) && !eRandDeLegenda(r));
+      if (randuri.length) grupuri.push({ randuri, antet });
     }
     return grupuri;
   }
@@ -124,12 +137,11 @@
   function culege(doc) {
     let celMaiBun = null;
 
-    for (const randuri of grupuriDeRanduri(doc)) {
-      const t = null;
+    for (const { randuri, antet } of grupuriDeRanduri(doc)) {
       const latime = Math.max(...randuri.map((r) => r.length));
 
       // 1. antetul, dacă există și e de încredere
-      let comb = null;
+      let comb = coloaneDinAntet(antet);
       let potriviri = comb ? verifica(randuri, comb) : 0;
 
       // 2. altfel (sau dacă antetul nu se confirmă aritmetic), căutăm tripleta
