@@ -156,6 +156,54 @@ function scurt(v) {
   return Math.round(v).toString();
 }
 
+// Cât stă un thread fără răspuns de la noi. În zile, pentru că sub o zi nu e
+// încă o problemă, iar peste două zile e deja alt tip de discuție.
+function deCand(primitLa, aziStr) {
+  if (!primitLa) return "";
+  const zile = Math.round((Date.parse(aziStr) - Date.parse(String(primitLa).slice(0, 10))) / 86400000);
+  if (!Number.isFinite(zile) || zile < 0) return "";
+  if (zile === 0) return "azi";
+  if (zile === 1) return "de ieri";
+  return `de ${zile} zile`;
+}
+
+const RADAR_BADGE = {
+  blocaj: ["rosu", "blochează operarea"],
+  calitate: ["rosu", "reclamație"],
+  comercial: ["galben", "comercial"],
+  info: ["gri", "info"],
+};
+
+// Un rând de radar. „i" e poziția în listă: ordinea e cea în care merită
+// rezolvate, deci numerotarea spune ceva, nu decorează.
+function radarRand(x, i, aziStr, cuNumar) {
+  const [culoare, eticheta] = RADAR_BADGE[x.severitate] || RADAR_BADGE.info;
+  const varsta = deCand(x.primit_la, aziStr);
+  const titlu = x.link
+    ? `<a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.subiect || "(fără subiect)")}</a>`
+    : esc(x.subiect || "(fără subiect)");
+  return `
+    <div class="radar-rand sev-${esc(x.severitate)}">
+      <div class="radar-nr">${cuNumar ? String(i + 1).padStart(2, "0") : "·"}</div>
+      <div class="radar-corp">
+        <div class="radar-cap">
+          <span class="radar-cine">${esc(x.cine)}</span>
+          ${x.firma ? `<span class="radar-firma">${esc(x.firma)}</span>` : ""}
+          <span class="badge ${culoare}">${eticheta}</span>
+          ${varsta ? `<span class="radar-firma">${esc(varsta)}</span>` : ""}
+          ${x.necitit ? '<span class="badge albastru">necitit</span>' : ""}
+          ${x.a_insistat ? '<span class="badge galben">a insistat</span>' : ""}
+        </div>
+        <div class="radar-firma">${titlu}</div>
+        ${x.cere ? `<p class="radar-cere">${esc(x.cere)}</p>` : ""}
+        ${x.pas_urmator ? `<p class="radar-pas"><b>Următorul pas</b>${esc(x.pas_urmator)}</p>` : ""}
+      </div>
+      <form class="radar-act" method="post" action="/radar/${Number(x.id)}/rezolvat">
+        <button class="btn secondary small" type="submit">Rezolvat</button>
+      </form>
+    </div>`;
+}
+
 function sageata(delta) {
   if (delta > 0) return `<span style="color:var(--success)">▲</span>`;
   if (delta < 0) return `<span style="color:var(--danger)">▼</span>`;
@@ -528,6 +576,30 @@ function register(router) {
       )
       .all();
 
+    // Radarul de răspunsuri: cine așteaptă ceva de la noi. Vine din inbox,
+    // prin `date/radar-raspunsuri.json`. Rândurile închise de mână rămân în
+    // tabel, dar nu se mai afișează.
+    let radar = [];
+    let radarLa = null;
+    try {
+      radar = await db
+        .prepare(
+          `SELECT id, sectiune, severitate, cine, firma, subiect, cere, pas_urmator, primit_la,
+                  necitit, a_insistat, link
+             FROM radar_raspunsuri
+            WHERE stare <> 'rezolvat'
+            ORDER BY ordine, primit_la`
+        )
+        .all();
+      const r = await db.prepare("SELECT MAX(actualizat_la) AS d FROM radar_raspunsuri").get();
+      radarLa = r && r.d ? String(r.d).slice(0, 16) : null;
+    } catch (e) {
+      radar = [];
+    }
+    const radarNoi = radar.filter((x) => x.sectiune === "noi");
+    const radarAsteptam = radar.filter((x) => x.sectiune === "asteptam");
+    const radarVerificat = radar.filter((x) => x.sectiune === "verificat");
+
     let agenda = [];
     let agendaLa = null;
     try {
@@ -572,7 +644,27 @@ function register(router) {
         .an-dif { font-size:12px; color:var(--text-muted); font-variant-numeric:tabular-nums; }
         .doua { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
         .trei { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; }
-        @media (max-width:640px){ .an-rand { grid-template-columns:74px 1fr 100px; } .an-dif { display:none; } }
+        .radar { display:flex; flex-direction:column; gap:8px; }
+        .radar-rand { background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--text-muted);
+                      border-radius:var(--radius); padding:11px 14px; display:grid;
+                      grid-template-columns:26px minmax(0,1fr) auto; gap:12px; align-items:start; }
+        .radar-rand.sev-blocaj { border-left-color:var(--danger); }
+        .radar-rand.sev-calitate { border-left-color:var(--danger); }
+        .radar-rand.sev-comercial { border-left-color:var(--warn); }
+        .radar-nr { grid-column:1; font-variant-numeric:tabular-nums; color:var(--text-muted);
+                    font-size:13px; padding-top:2px; }
+        .radar-corp { grid-column:2; min-width:0; }
+        .radar-cap { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:baseline; }
+        .radar-cine { font-weight:600; }
+        .radar-firma { color:var(--text-muted); font-size:13px; }
+        .radar-cere { font-size:13px; margin:3px 0 0; }
+        .radar-pas { font-size:13px; color:var(--text-muted); margin:5px 0 0; }
+        .radar-pas b { font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--primary);
+                       margin-right:6px; }
+        .radar-act { grid-column:3; }
+        @media (max-width:640px){ .an-rand { grid-template-columns:74px 1fr 100px; } .an-dif { display:none; }
+                                  .radar-rand { grid-template-columns:20px minmax(0,1fr); }
+                                  .radar-act { grid-column:2; margin-top:6px; } }
       </style>`;
 
     const body = `
@@ -767,6 +859,29 @@ function register(router) {
               ])
             )
           : '<p style="color:var(--text-muted)">Niciun client pierdut față de aceeași perioadă de anul trecut. Rar, dar se întâmplă.</p>'
+      }
+
+      <h2>Așteaptă răspuns de la noi${radarNoi.length ? ` (${radarNoi.length})` : ""}</h2>
+      ${
+        radar.length
+          ? `
+        <div class="radar">
+          ${radarNoi.map((x, i) => radarRand(x, i, aziStr, true)).join("")}
+        </div>
+        ${
+          radarAsteptam.length
+            ? `<h3 style="margin-bottom:6px">Așteptăm de la ei</h3>
+               <div class="radar">${radarAsteptam.map((x, i) => radarRand(x, i, aziStr, false)).join("")}</div>`
+            : ""
+        }
+        ${
+          radarVerificat.length
+            ? `<h3 style="margin-bottom:6px">De verificat</h3>
+               <div class="radar">${radarVerificat.map((x, i) => radarRand(x, i, aziStr, false)).join("")}</div>`
+            : ""
+        }
+        ${radarLa ? `<p style="font-size:12px;color:var(--text-muted)">Sincronizat ultima dată: ${esc(radarLa)}.</p>` : ""}`
+          : `<p style="color:var(--text-muted)">Nimeni nu așteaptă un răspuns — sau radarul n-a fost sincronizat încă.</p>`
       }
 
       <div class="doua">
