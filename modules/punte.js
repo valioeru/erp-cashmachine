@@ -872,6 +872,56 @@ async function ingestAngajati(randuri) {
   };
 }
 
+// Statele de plata lunare, citite din exporturile Conta din Drive. Un rand =
+// un om intr-o luna. Daca omul nu e in ERP, il adaugam; daca luna exista deja,
+// o rescriem, ca sa se poata rula de cate ori e nevoie fara sa se dubleze.
+async function ingestSalarii(randuri) {
+  const existenti = await db.prepare("SELECT id, nume FROM angajati").all();
+  const dupaNume = new Map();
+  for (const a of existenti) {
+    const k = numeCheie(a.nume);
+    if (k && !dupaNume.has(k)) dupaNume.set(k, a.id);
+  }
+
+  let scrise = 0;
+  let angajatiNoi = 0;
+  const luni = new Set();
+
+  for (const r of randuri) {
+    const k = numeCheie(r.nume);
+    const luna = String(r.luna || "").slice(0, 7);
+    if (!k || !/^\d{4}-\d{2}$/.test(luna)) continue;
+
+    let id = dupaNume.get(k);
+    if (!id) {
+      const ins = await db
+        .prepare("INSERT INTO angajati (nume, functie, salariu_baza, activ, sursa, actualizat_la) VALUES (?, ?, ?, ?, ?, ?) RETURNING id")
+        .run(curat(r.nume), curat(r.functie) || null, nr(r.baza), 1, "state de plata", acum());
+      id = ins.lastInsertRowid;
+      dupaNume.set(k, id);
+      angajatiNoi++;
+    }
+
+    await db.prepare("DELETE FROM salarii WHERE angajat_id = ? AND luna = ?").run(id, luna);
+    await db
+      .prepare(
+        `INSERT INTO salarii (angajat_id, luna, salariu_brut, bonusuri, deduceri, cas, cass, impozit, salariu_net, platit)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, luna, nr(r.brut), nr(r.prime), nr(r.retineri), nr(r.cas), nr(r.cass), nr(r.impozit), nr(r.net), 1);
+    scrise++;
+    luni.add(luna);
+  }
+
+  const total = await db.prepare("SELECT COUNT(*) AS n FROM salarii").get();
+  return {
+    state_scrise: scrise,
+    angajati_noi: angajatiNoi,
+    luni: [...luni].sort(),
+    state_in_erp: Number(total.n || 0),
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
@@ -884,6 +934,7 @@ const HANDLERE = {
   balante: ingestBalante,
   plati_furnizori: ingestPlatiFurnizori,
   angajati: ingestAngajati,
+  salarii: ingestSalarii,
 };
 
 function register(router) {
