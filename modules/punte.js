@@ -407,10 +407,20 @@ async function ingestBalante(randuri) {
         )
         .run(...args);
     }
-    // verificarea care contează: venituri minus cheltuieli, cum îl arată dashboard-ul
-    const v = linii.filter((c) => c.cont.startsWith("7")).reduce((s, c) => s + (nr(c.ts_c) - nr(c.ts_d)), 0);
-    const ch = linii.filter((c) => c.cont.startsWith("6")).reduce((s, c) => s + (nr(c.ts_d) - nr(c.ts_c)), 0);
-    detalii.push(`${eticheta}: ${linii.length} conturi, profit ${Math.round(v - ch).toLocaleString("ro-RO")} lei`);
+    // Verificarea care contează: rezultatul perioadei, socotit la fel ca pe
+    // dashboard — din contul 121 dacă e în balanță, altfel din rulajele
+    // claselor 7 și 6. Dacă cifra de aici nu seamănă cu ce știe Vali, se vede
+    // pe loc, nu peste o săptămână.
+    const c121 = linii.find((c) => c.cont === "121");
+    const rezultat = c121
+      ? nr(c121.r_c) - nr(c121.r_d)
+      : linii.filter((c) => c.cont.startsWith("7")).reduce((s, c) => s + (nr(c.r_c) - nr(c.r_d)), 0) -
+        linii.filter((c) => c.cont.startsWith("6")).reduce((s, c) => s + (nr(c.r_d) - nr(c.r_c)), 0);
+    detalii.push(
+      `${eticheta}: ${linii.length} ${linii.length === 1 ? "cont" : "conturi"}, rezultat ${Math.round(rezultat).toLocaleString("ro-RO")} lei${
+        c121 ? " (din contul 121)" : ""
+      }`
+    );
     etichete++;
     conturi += linii.length;
   }
