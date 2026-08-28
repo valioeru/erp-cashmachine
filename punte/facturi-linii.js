@@ -19,9 +19,11 @@
 //   3. progresul:           window.__punte.stare()
 //   4. oprire:              window.__punte.opreste()
 //
-// Bucla se conduce singură cu setTimeout: apelul de evaluare din CDP moare la
-// 45 de secunde, dar bucla merge mai departe în pagină după ce apelul s-a
-// întors. De-aia `porneste()` nu așteaptă nimic — pornește și pleacă.
+// Bucla se conduce singură: apelul de evaluare din CDP moare la 45 de secunde,
+// dar bucla merge mai departe în pagină după ce apelul s-a întors. De-aia
+// `porneste()` nu așteaptă nimic — pornește și pleacă. Bătaia vine dintr-un
+// Worker, nu din setTimeout, fiindcă filele din fundal au timerele strangulate
+// la o bătaie pe minut și puntea ar părea înghețată.
 
 (function () {
   "use strict";
@@ -198,6 +200,57 @@
     return { linii, probleme };
   }
 
+  // Chrome strangulează setTimeout/setInterval în filele din fundal: un timer
+  // de 500 ms ajunge să bată o dată pe minut, iar puntea pare că a înghețat.
+  // Un Worker nu e strangulat, așa că îi cerem lui bătaia și ținem noi
+  // socoteala termenelor. Așa merge la fel de repede și cu fila în spate.
+  const CEAS = (function () {
+    const asteapta = [];
+    let urmatorId = 1;
+    const bate = () => {
+      const acum = Date.now();
+      for (const t of asteapta.slice()) {
+        if (t.scadent > acum) continue;
+        if (t.repeta) t.scadent = acum + t.ms;
+        else asteapta.splice(asteapta.indexOf(t), 1);
+        try {
+          t.fn();
+        } catch (e) {
+          console.warn("[punte] ceas:", e);
+        }
+      }
+    };
+    let lucrator = null;
+    try {
+      const sursa = "let i=setInterval(()=>postMessage(0),200);onmessage=()=>clearInterval(i)";
+      lucrator = new Worker(URL.createObjectURL(new Blob([sursa], { type: "text/javascript" })));
+      lucrator.onmessage = bate;
+    } catch (e) {
+      // fără Worker (politici stricte) rămânem pe timerul obișnuit
+      setInterval(bate, 200);
+    }
+    return {
+      dupa(ms, fn) {
+        const t = { id: urmatorId++, scadent: Date.now() + ms, ms, fn, repeta: false };
+        asteapta.push(t);
+        return t.id;
+      },
+      fiecare(ms, fn) {
+        const t = { id: urmatorId++, scadent: Date.now() + ms, ms, fn, repeta: true };
+        asteapta.push(t);
+        return t.id;
+      },
+      opreste(id) {
+        const i = asteapta.findIndex((t) => t.id === id);
+        if (i >= 0) asteapta.splice(i, 1);
+      },
+      opresteTot() {
+        asteapta.length = 0;
+        if (lucrator) lucrator.postMessage(0);
+      },
+    };
+  })();
+
   // Deschide o factură într-un iframe ascuns și așteaptă să se randeze.
   function citeste(factura) {
     return new Promise((rezolva) => {
@@ -211,13 +264,13 @@
       const inchide = (rezultat) => {
         if (gata) return;
         gata = true;
-        clearInterval(ceas);
-        clearTimeout(limita);
+        CEAS.opreste(ceas);
+        CEAS.opreste(limita);
         cadru.remove();
         rezolva(rezultat);
       };
-      const limita = setTimeout(() => inchide({ linii: [], motiv: "incomplet" }), ASTEPTARE_MAX_MS);
-      const ceas = setInterval(() => {
+      const limita = CEAS.dupa(ASTEPTARE_MAX_MS, () => inchide({ linii: [], motiv: "incomplet" }));
+      const ceas = CEAS.fiecare(400, () => {
         let doc;
         try {
           doc = cadru.contentDocument;
@@ -228,7 +281,7 @@
         const r = culege(doc);
         // așteptăm până apar linii; dacă nu apar deloc, limita de timp taie
         if (r.linii.length) inchide(r);
-      }, 500);
+      });
       document.body.appendChild(cadru);
     });
   }
@@ -275,7 +328,7 @@
     }
 
     if (Object.keys(S.facute).length % LOT === 0 && S.linii.length) await trimite();
-    setTimeout(pas, PAUZA_MS);
+    CEAS.dupa(PAUZA_MS, pas);
   }
 
   S.incarcaCoada = function (facturi) {
@@ -286,7 +339,7 @@
   S.porneste = function () {
     if (S.ruleaza) return "merge deja";
     S.ruleaza = true;
-    setTimeout(pas, 0);
+    CEAS.dupa(0, pas);
     return "pornit, " + S.coada.length + " în coadă";
   };
   S.opreste = function () {
