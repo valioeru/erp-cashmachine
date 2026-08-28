@@ -455,7 +455,7 @@ function register(router) {
     const cauta = String(ctx.query.q || "").trim();
 
     const alocari = await db
-      .prepare(`SELECT al.partener_id, al.utilizator_id, al.procent, u.nume FROM ${ALOC} al JOIN utilizatori u ON u.id = al.utilizator_id`)
+      .prepare(`SELECT al.partener_id, al.utilizator_id, al.procent, u.nume, u.rol FROM ${ALOC} al JOIN utilizatori u ON u.id = al.utilizator_id`)
       .all();
     const peP = new Map();
     for (const a of alocari) {
@@ -468,34 +468,71 @@ function register(router) {
     if (cauta) { where += " AND LOWER(p.nume) LIKE ?"; args.push(`%${cauta.toLowerCase()}%`); }
     const clienti = await db
       .prepare(
-        `SELECT p.id, p.nume, p.cui,
+        `SELECT p.id, p.nume, p.cui, p.agent_id,
+                ua.nume AS agent_nume, ua.rol AS agent_rol,
                 COALESCE(SUM(l.total), 0) AS vanzari12,
                 MAX(f.data_emiterii) AS ultima
            FROM parteneri p
+           LEFT JOIN utilizatori ua ON ua.id = p.agent_id
            LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND f.data_emiterii >= ?
            LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
           WHERE ${where}
-          GROUP BY p.id, p.nume, p.cui
+          GROUP BY p.id, p.nume, p.cui, p.agent_id, ua.nume, ua.rol
           ORDER BY vanzari12 DESC, p.nume
-          LIMIT 500`
+          LIMIT 2000`
       )
       .all(new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10), ...args);
 
-    const aiMei = clienti.filter((c) => (peP.get(c.id) || []).some((a) => a.utilizator_id === ctx.user.id));
-    const liberi = clienti.filter((c) => !(peP.get(c.id) || []).length);
-    const aiAltora = clienti.filter((c) => {
+    // Din ce firmă a grupului a cumpărat fiecare — ca să se vadă și clienții
+    // care vin doar de la Warehouse All, nu doar cei de la Cash Machine.
+    const firmePeClient = new Map();
+    for (const r of await db
+      .prepare(
+        `SELECT f.partener_id, fi.nume
+           FROM facturi f JOIN firme fi ON fi.id = f.firma_id
+          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','necunoscut')
+          GROUP BY f.partener_id, fi.nume`
+      )
+      .all()) {
+      if (!firmePeClient.has(r.partener_id)) firmePeClient.set(r.partener_id, []);
+      firmePeClient.get(r.partener_id).push(r.nume);
+    }
+
+    // Cine ține clientul acum: alocările explicite, iar dacă nu există, agentul
+    // scris pe partener (importul îl pune pe administrator când nu știe altul).
+    const detinatori = (c) => {
       const l = peP.get(c.id) || [];
-      return l.length && !l.some((a) => a.utilizator_id === ctx.user.id);
+      if (l.length) return l;
+      if (c.agent_id) return [{ utilizator_id: c.agent_id, procent: 100, nume: c.agent_nume, rol: c.agent_rol }];
+      return [];
+    };
+    // Un client ținut de administrator e de luat: adminul îl ține doar fiindcă
+    // importul n-a știut al cui e. De la un alt agent nu se ia — acolo decide
+    // administratorul.
+    const eLaAdmin = (l) => l.length > 0 && l.every((a) => a.rol === "admin");
+    const alMeu = (l) => l.some((a) => a.utilizator_id === ctx.user.id);
+
+    const aiMei = clienti.filter((c) => alMeu(detinatori(c)));
+    const liberi = clienti.filter((c) => {
+      const l = detinatori(c);
+      return !alMeu(l) && (l.length === 0 || eLaAdmin(l));
+    });
+    const aiAltora = clienti.filter((c) => {
+      const l = detinatori(c);
+      return l.length && !alMeu(l) && !eLaAdmin(l);
     });
 
     const randClient = (c, cuBifa) => [
       cuBifa ? `<input type="checkbox" name="client" value="${c.id}">` : "",
       `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
       esc(c.cui || "—"),
+      (firmePeClient.get(c.id) || []).map((n) => `<span class="badge gri">${esc(n.replace(/ SRL$/i, ""))}</span>`).join(" ") || "—",
       money(c.vanzari12),
       c.ultima ? esc(String(c.ultima).slice(0, 10)) : "—",
-      (peP.get(c.id) || []).map((a) => `${esc(a.nume)} ${Number(a.procent).toFixed(0)}%`).join(", ") || `<span style="color:var(--text-muted)">nealocat</span>`,
+      detinatori(c).map((a) => `${esc(a.nume)}${a.rol === "admin" ? " (administrator)" : ""} ${Number(a.procent).toFixed(0)}%`).join(", ") ||
+        `<span style="color:var(--text-muted)">nealocat</span>`,
     ];
+    const CAP = ["", "Client", "CUI", "Firma", "Vânzări 12 luni", "Ultima factură", "Alocare"];
 
     const body = `
       ${subnavCrm("/crm/alocare", ctx.user)}
@@ -504,9 +541,9 @@ function register(router) {
           Aici îți iei clienții în portofoliu. Din încasările lor ți se calculează comisionul.
         </p>
         <p style="font-size:13px;color:var(--text-muted);margin-bottom:0">
-          <strong>Se face o singură dată.</strong> Un client pe care l-ai revendicat — sau pe care l-a luat
-          altcineva — nu mai poate fi mutat de tine. Dacă trebuie schimbat ceva după aceea,
-          îi spui administratorului.
+          Poți lua clienții <strong>liberi</strong> și pe cei care stau <strong>la administrator</strong> — acolo
+          au ajuns la import, fiindcă nu se știa al cui sunt. De la un alt agent nu poți lua: acolo hotărăște
+          administratorul. Ce ai luat rămâne al tău până îl mută el, deci ia doar ce chiar lucrezi.
         </p>
       </div>
 
@@ -518,25 +555,25 @@ function register(router) {
       <h2>Clienții mei (${aiMei.length})</h2>
       ${
         aiMei.length
-          ? table(["", "Client", "CUI", "Vânzări 12 luni", "Ultima factură", "Alocare"], aiMei.map((c) => randClient(c, false)))
+          ? table(CAP, aiMei.map((c) => randClient(c, false)))
           : `<p style="color:var(--text-muted)">Încă n-ai niciun client. Bifează-i mai jos.</p>`
       }
 
-      <h2>Clienți liberi (${liberi.length})</h2>
+      <h2>Clienți pe care îi poți lua (${liberi.length})</h2>
       ${
         liberi.length
           ? `<form method="post" action="/crm/alocare">
-               ${table(["<input type=\"checkbox\" onclick=\"document.querySelectorAll('input[name=client]').forEach(c=>c.checked=this.checked)\">", "Client", "CUI", "Vânzări 12 luni", "Ultima factură", "Alocare"], liberi.map((c) => randClient(c, true)))}
-               <button type="submit" class="btn" onclick="return confirm('Îi iei în portofoliu? Nu mai poți schimba după aceea.')">Ia clienții bifați în portofoliul meu</button>
+               ${table(["<input type=\"checkbox\" onclick=\"document.querySelectorAll('input[name=client]').forEach(c=>c.checked=this.checked)\">", ...CAP.slice(1)], liberi.map((c) => randClient(c, true)))}
+               <button type="submit" class="btn" onclick="return confirm('Îi iei în portofoliu?')">Ia clienții bifați în portofoliul meu</button>
              </form>`
-          : `<p style="color:var(--text-muted)">Nu mai e niciun client liber${cauta ? " pentru căutarea asta" : ""}.</p>`
+          : `<p style="color:var(--text-muted)">Nu mai e niciun client de luat${cauta ? " pentru căutarea asta" : ""}.</p>`
       }
 
       <h2>Clienții altora (${aiAltora.length})</h2>
       <p style="font-size:13px;color:var(--text-muted)">Doar informativ — ca să știi cine pe cine lucrează.</p>
       ${
         aiAltora.length
-          ? table(["", "Client", "CUI", "Vânzări 12 luni", "Ultima factură", "Alocare"], aiAltora.slice(0, 100).map((c) => randClient(c, false)))
+          ? table(CAP, aiAltora.slice(0, 200).map((c) => randClient(c, false)))
           : `<p style="color:var(--text-muted)">—</p>`
       }
       ${eAdmin ? `<div class="toolbar"><a class="btn secondary" href="/alocari">Ecranul de administrare al alocărilor</a></div>` : ""}
@@ -550,10 +587,21 @@ function register(router) {
     const ids = (Array.isArray(brut) ? brut : brut === undefined ? [] : [brut]).map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x) && x > 0);
     let luati = 0, refuzati = 0;
     for (const id of ids) {
-      // verificăm din nou pe server: între afișare și submit se putea aloca
-      const areAlocare = await db.prepare("SELECT 1 AS x FROM alocari_clienti WHERE partener_id = ?").get(id);
-      const p = await db.prepare("SELECT agent_id FROM parteneri WHERE id = ?").get(id);
-      if (areAlocare || (p && p.agent_id)) { refuzati++; continue; }
+      // Verificăm din nou pe server, nu doar în pagină: între afișare și submit
+      // se putea aloca. Regula: liber sau ținut de administrator → se poate lua.
+      // Ținut de alt agent → nu, acolo hotărăște administratorul.
+      const alocari = await db
+        .prepare("SELECT al.utilizator_id, u.rol FROM alocari_clienti al JOIN utilizatori u ON u.id = al.utilizator_id WHERE al.partener_id = ?")
+        .all(id);
+      const p = await db
+        .prepare("SELECT p.agent_id, u.rol AS agent_rol FROM parteneri p LEFT JOIN utilizatori u ON u.id = p.agent_id WHERE p.id = ?")
+        .get(id);
+      const detinatori = alocari.length ? alocari : p && p.agent_id ? [{ utilizator_id: p.agent_id, rol: p.agent_rol }] : [];
+      const alMeu = detinatori.some((d) => d.utilizator_id === ctx.user.id);
+      const laAdmin = detinatori.length > 0 && detinatori.every((d) => d.rol === "admin");
+      if (alMeu || (detinatori.length > 0 && !laAdmin)) { refuzati++; continue; }
+      // dacă îl ținea administratorul, alocarea lui se înlocuiește
+      await db.prepare("DELETE FROM alocari_clienti WHERE partener_id = ?").run(id);
       await db.prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, observatii) VALUES (?, ?, 100, ?)").run(id, ctx.user.id, "revendicat de agent");
       await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(ctx.user.id, id);
       await db.prepare("UPDATE facturi SET agent_id = ? WHERE partener_id = ? AND directie = 'vanzare' AND agent_manual = 0").run(ctx.user.id, id);
@@ -562,11 +610,11 @@ function register(router) {
     const body = `
       <div class="detail-box"><div class="detail-grid">
         <div><div class="k">Clienți luați în portofoliu</div><strong>${luati}</strong></div>
-        <div><div class="k">Refuzați (deja alocați)</div>${refuzati}</div>
+        <div><div class="k">Refuzați (sunt la alt agent)</div>${refuzati}</div>
       </div></div>
       <p style="font-size:13px;color:var(--text-muted)">
-        Facturile lor — și cele vechi — au trecut pe numele tău, deci intră la comision.
-        Dacă ceva e greșit, administratorul poate corecta.
+        Facturile lor — și cele vechi, de la ambele firme — au trecut pe numele tău, deci intră la comision.
+        Dacă ai luat pe cineva din greșeală, administratorul îl mută înapoi.
       </p>
       <div class="toolbar">
         <a class="btn" href="/crm/birou">Biroul meu</a>
