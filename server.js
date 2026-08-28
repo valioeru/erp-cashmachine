@@ -53,7 +53,7 @@ router.get("/healthz", (ctx) => {
 // printr-un token temporar generat de administrator (vezi modules/import.js).
 // De-aia stă în afara gardului de sesiune — dar NU e deschisă: fără token
 // valid și nexpirat, refuză orice.
-const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest"]);
+const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest", "/punte/facturi-linii.js"]);
 
 // Verificarea preliminară pe care o face browserul înainte de o cerere de pe
 // alt origin (OPTIONS) vine fără cookie-uri — dacă o trimitem la /login,
