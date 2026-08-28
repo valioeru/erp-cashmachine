@@ -292,6 +292,101 @@ function tabelAni(randuri, culoarePrima) {
     .join("");
 }
 
+// Cine aduce banii și cine s-a răcit — pe aceeași fereastră ca restul
+// dashboard-ului, ca să se poată compara cinstit cu anul trecut.
+async function topClienti(de, la, deAnTrecut, laAnTrecut) {
+  const acum = await db
+    .prepare(
+      `SELECT f.partener_id, p.nume, COALESCE(SUM(t.net), 0) AS net
+         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         JOIN parteneri p ON p.id = f.partener_id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+        GROUP BY f.partener_id, p.nume ORDER BY net DESC LIMIT 12`
+    )
+    .all(de, la);
+  const inainte = await db
+    .prepare(
+      `SELECT f.partener_id, COALESCE(SUM(t.net), 0) AS net
+         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+        GROUP BY f.partener_id`
+    )
+    .all(deAnTrecut, laAnTrecut);
+  const vechi = new Map(inainte.map((x) => [Number(x.partener_id), Number(x.net) || 0]));
+  return acum.map((c) => {
+    const v = vechi.get(Number(c.partener_id)) || 0;
+    return { ...c, net: Number(c.net) || 0, anul_trecut: v, delta: (Number(c.net) || 0) - v };
+  });
+}
+
+// Clienți care cumpărau anul trecut în fereastra asta și anul ăsta n-au mai
+// cumpărat deloc. Ăștia sunt cei de sunat, nu cei din top.
+async function clientiPierduti(de, la, deAnTrecut, laAnTrecut) {
+  return await db
+    .prepare(
+      `SELECT p.id, p.nume, COALESCE(SUM(t.net), 0) AS net_an_trecut
+         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         JOIN parteneri p ON p.id = f.partener_id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM facturi f2 WHERE f2.partener_id = f.partener_id AND f2.directie = 'vanzare'
+              AND f2.status NOT IN ('anulata','ciorna') AND f2.data_emiterii >= ? AND f2.data_emiterii <= ?
+          )
+        GROUP BY p.id, p.nume ORDER BY net_an_trecut DESC LIMIT 10`
+    )
+    .all(deAnTrecut, laAnTrecut, de, la);
+}
+
+// Ce s-a vândut, ca produs. Are sens doar cât detaliul pe linii e adus din
+// SmartBill — de-aia scriem lângă el pe câte facturi ne bazăm.
+async function topProduse(de, la) {
+  const randuri = await db
+    .prepare(
+      `SELECT COALESCE(pr.denumire, fl.denumire) AS denumire,
+              COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS net,
+              COALESCE(SUM(fl.cantitate), 0) AS cant
+         FROM facturi f JOIN facturi_linii fl ON fl.factura_id = f.id
+         LEFT JOIN produse pr ON pr.id = fl.produs_id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+        GROUP BY COALESCE(pr.denumire, fl.denumire) ORDER BY net DESC LIMIT 12`
+    )
+    .all(de, la);
+  const acoperire = await db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN EXISTS (SELECT 1 FROM facturi_linii fl WHERE fl.factura_id = f.id) THEN 1 ELSE 0 END) AS cu_linii
+         FROM facturi f
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+    )
+    .get(de, la);
+  return { randuri, acoperire };
+}
+
+// Banii de luat: cât, din care restant, și de când stă cea mai veche.
+async function deIncasat(aziStr) {
+  return await db
+    .prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(x.rest), 0) AS suma,
+              COALESCE(SUM(CASE WHEN x.data_scadenta < ? THEN x.rest ELSE 0 END), 0) AS restant,
+              MIN(CASE WHEN x.data_scadenta < ? THEN x.data_scadenta END) AS cea_mai_veche
+         FROM (
+           SELECT f.data_scadenta,
+                  COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
+                  - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS rest
+             FROM facturi f
+            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+         ) x
+        WHERE x.rest > 1`
+    )
+    .get(aziStr, aziStr);
+}
+
 function register(router) {
   router.get("/", async (ctx) => {
     const aziStr = azi();
@@ -372,6 +467,16 @@ function register(router) {
     const salariiLaZi = salariiLuni.slice(0, lunaAcum).reduce((s, v) => s + v, 0);
     const marjaProc = vanzariLaZi > 0 ? (profitLaZi / vanzariLaZi) * 100 : null;
     const etichetaLuni = LUNI.map((l) => `${l} ${anCurent}`);
+
+    // ---- 2b. Rapoartele de sub grafic ------------------------------------
+    const deAnul = `${anCurent}-01-01`;
+    const laAzi = `${anCurent}-${zileLuna}`;
+    const deAnTrecut = `${anCurent - 1}-01-01`;
+    const laAnTrecut = `${anCurent - 1}-${zileLuna}`;
+    const clientiTop = await topClienti(deAnul, laAzi, deAnTrecut, laAnTrecut);
+    const pierduti = await clientiPierduti(deAnul, laAzi, deAnTrecut, laAnTrecut);
+    const produse = await topProduse(deAnul, laAzi);
+    const incasat = await deIncasat(aziStr);
 
     // ---- 3. Ce am de făcut ----------------------------------------------
     const taskuri = await db
@@ -544,6 +649,69 @@ function register(router) {
           }
         </p>
       </div>
+
+      <div class="hero">
+        <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start">
+          <div>
+            <div style="font-size:13px;color:var(--text-muted)">De încasat, cu TVA</div>
+            <div class="hero-nr">${money(incasat.suma)}</div>
+            <div class="hero-sub">
+              ${Number(incasat.n || 0)} facturi neîncasate ·
+              <strong style="color:${Number(incasat.restant || 0) > 0 ? "var(--danger)" : "var(--success)"}">${money(incasat.restant)}</strong> peste scadență
+              ${incasat.cea_mai_veche ? ` · cea mai veche scadentă din ${esc(String(incasat.cea_mai_veche).slice(0, 10))}` : ""}
+            </div>
+          </div>
+          <a class="btn secondary small" href="/scadente">Scadențarul →</a>
+        </div>
+      </div>
+
+      <div class="doua">
+        <div>
+          <h2 style="margin-top:0">Clienții care aduc banii, ${esc(String(anCurent))} la zi</h2>
+          ${
+            clientiTop.length
+              ? table(
+                  ["Client", "Anul ăsta", "Aceeași perioadă anul trecut", "Diferență"],
+                  clientiTop.map((c) => [
+                    `<a href="/parteneri/${c.partener_id}">${esc(c.nume)}</a>`,
+                    money(c.net),
+                    c.anul_trecut ? money(c.anul_trecut) : "—",
+                    c.anul_trecut ? `${sageata(c.delta)} ${money(Math.abs(c.delta))}` : '<span class="badge verde">client nou</span>',
+                  ])
+                )
+              : '<p style="color:var(--text-muted)">Nicio factură în perioada asta.</p>'
+          }
+        </div>
+        <div>
+          <h2 style="margin-top:0">Cine cumpăra anul trecut și nu mai cumpără</h2>
+          ${
+            pierduti.length
+              ? table(
+                  ["Client", "Cumpăra anul trecut", ""],
+                  pierduti.map((c) => [
+                    `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                    money(c.net_an_trecut),
+                    `<a class="link-btn" href="/crm/contact/${c.id}">Contactează</a>`,
+                  ])
+                )
+              : '<p style="color:var(--text-muted)">Niciun client pierdut față de aceeași perioadă de anul trecut. Rar, dar se întâmplă.</p>'
+          }
+        </div>
+      </div>
+
+      <h2>Ce se vinde, ${esc(String(anCurent))} la zi</h2>
+      ${
+        produse.randuri.length
+          ? table(
+              ["Produs", "Cantitate", "Valoare"],
+              produse.randuri.map((p) => [esc(p.denumire), Number(p.cant).toLocaleString("ro-RO", { maximumFractionDigits: 2 }), money(p.net)])
+            ) +
+            `<p style="font-size:12px;color:var(--text-muted)">
+               Socotit din ${Number(produse.acoperire.cu_linii || 0)} din cele ${Number(produse.acoperire.total || 0)} facturi ale anului —
+               atâtea au deocamdată detaliul pe produse adus din SmartBill. Pe măsură ce puntea aduce restul, tabelul se completează singur.
+             </p>`
+          : '<p style="color:var(--text-muted)">Încă nu e adus detaliul pe produse al facturilor. Se aduce din SmartBill, prin punte.</p>'
+      }
 
       <div class="doua">
         <div>

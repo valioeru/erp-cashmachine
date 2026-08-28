@@ -365,6 +365,62 @@ async function ingestFacturiLinii(randuri) {
   };
 }
 
+// Balanțele din SmartBill Conta, citite direct din pagina lui Conta prin
+// punte — ca să nu mai exporte Vali fișiere și să le urce el.
+//
+// O balanță se identifică prin eticheta ei (perioada). Aceeași etichetă
+// înlocuiește ce era: o balanță reîncărcată e o corectură, nu un al doilea
+// adevăr pentru aceeași lună.
+async function ingestBalante(randuri) {
+  const peEticheta = new Map();
+  for (const r of randuri) {
+    const cont = String((r && r.cont) || "").replace(/[^0-9.]/g, "");
+    if (!/^\d{3,4}(\.\d+)?$/.test(cont)) continue;
+    const eticheta = String(r.eticheta || "").trim() || "balanță fără perioadă";
+    if (!peEticheta.has(eticheta)) peEticheta.set(eticheta, []);
+    peEticheta.get(eticheta).push({ ...r, cont });
+  }
+
+  let etichete = 0;
+  let conturi = 0;
+  const detalii = [];
+  for (const [eticheta, linii] of peEticheta) {
+    await db.prepare("DELETE FROM balante_snapshot WHERE eticheta = ?").run(eticheta);
+    for (let i = 0; i < linii.length; i += 100) {
+      const lot = linii.slice(i, i + 100);
+      const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+      const args = [];
+      for (const c of lot) {
+        args.push(
+          eticheta,
+          c.data_de_la ? String(c.data_de_la).slice(0, 10) : null,
+          c.data_pana ? String(c.data_pana).slice(0, 10) : null,
+          c.cont,
+          String(c.denumire || "").slice(0, 300),
+          nr(c.si_d), nr(c.si_c), nr(c.r_d), nr(c.r_c), nr(c.ts_d), nr(c.ts_c), nr(c.sf_d), nr(c.sf_c),
+          "punte Conta"
+        );
+      }
+      await db
+        .prepare(
+          `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, si_d, si_c, r_d, r_c, ts_d, ts_c, sf_d, sf_c, fisier) VALUES ${ph}`
+        )
+        .run(...args);
+    }
+    // verificarea care contează: venituri minus cheltuieli, cum îl arată dashboard-ul
+    const v = linii.filter((c) => c.cont.startsWith("7")).reduce((s, c) => s + (nr(c.ts_c) - nr(c.ts_d)), 0);
+    const ch = linii.filter((c) => c.cont.startsWith("6")).reduce((s, c) => s + (nr(c.ts_d) - nr(c.ts_c)), 0);
+    detalii.push(`${eticheta}: ${linii.length} conturi, profit ${Math.round(v - ch).toLocaleString("ro-RO")} lei`);
+    etichete++;
+    conturi += linii.length;
+  }
+
+  return {
+    rezumat: `${etichete} ${etichete === 1 ? "balanță" : "balanțe"}, ${conturi} rânduri de cont`,
+    detalii,
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
@@ -372,6 +428,7 @@ const HANDLERE = {
   consum: ingestConsum,
   profit_produs: ingestProfitProdus,
   facturi_linii: ingestFacturiLinii,
+  balante: ingestBalante,
 };
 
 function register(router) {

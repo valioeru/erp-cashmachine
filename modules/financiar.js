@@ -83,7 +83,7 @@ function register(router) {
       .all(anul);
 
     const body = `
-      ${subnavFinanciar("/financiar")}
+      ${subnavFinanciar("/financiar", ctx.user)}
       <div class="cards">
         <div class="card"><div class="label">De încasat</div><div class="value">${money(deIncasat.suma)}</div>
           <div style="font-size:12px;color:var(--text-muted)">${Number(deIncasat.n || 0)} facturi · <a href="/scadente">scadențar</a></div></div>

@@ -305,13 +305,13 @@ function register(router) {
                  <input type="hidden" name="decizie" value="astept">
                  <button class="btn secondary" type="submit">Aștept comanda completă</button>
                </form>
-               <form method="post" action="/warehouse/comanda/${comanda.id}/rezerva" class="inline-form">
+               <form method="post" action="/depozit/comanda/${comanda.id}/rezerva" class="inline-form">
                  <input type="hidden" name="inapoi" value="crm">
                  <button class="btn secondary" type="submit">Rezervă stocul 24 h</button>
                </form>
                ${
                  rezervareActiva
-                   ? `<form method="post" action="/warehouse/comanda/${comanda.id}/elibereaza" class="inline-form">
+                   ? `<form method="post" action="/depozit/comanda/${comanda.id}/elibereaza" class="inline-form">
                         <input type="hidden" name="inapoi" value="crm">
                         <button class="link-btn" type="submit">Renunț la rezervare</button>
                       </form>`

@@ -127,7 +127,7 @@ function register(router) {
         numarate.map((x) => [esc(x.tabel), x.n === null ? '<span class="badge gri">necitit</span>' : x.n.toLocaleString("ro-RO")])
       )}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Backup", active: "/admin/utilizatori", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Backup", active: "/admin/backup", body }));
   });
 
   router.get("/admin/backup/descarca", async (ctx) => {

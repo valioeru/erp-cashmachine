@@ -1,6 +1,9 @@
 "use strict";
 // Depozitul, ca loc de muncă, nu ca tabel.
 //
+// Fișierul se numește warehouse.js din motive de istorie — rutele și meniul
+// sunt „depozit", în română, ca tot restul aplicației.
+//
 // Fluxul cerut de Vali, pe scurt: comanda pusă de agent aterizează aici ca
 // „comandă deschisă". Operatorul o deschide, vede linie cu linie ce e pe
 // stoc și ce nu, și de aici pleacă trei drumuri:
@@ -18,7 +21,7 @@
 // concretă, iar `elibereazaExpirate()` rulează periodic și le stinge. Marfa
 // rezervată nu dispare din stoc — dispare doar din „disponibil".
 const db = require("../lib/db");
-const { esc, money, layout, table, subnavWarehouse } = require("../lib/render");
+const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const REZERVARE_ORE = 24;
@@ -126,8 +129,15 @@ function poateDepozit(user) {
 }
 
 function register(router) {
+  // Adresele vechi, în engleză, duc la cele noi — cine avea un link salvat
+  // nu se lovește de un 404 din cauza unei redenumiri.
+  for (const vechi of ["/warehouse", "/warehouse/aprovizionare"]) {
+    router.get(vechi, async (ctx) => redirect(ctx.res, vechi.replace("/warehouse", "/depozit")));
+  }
+  router.get("/warehouse/comanda/:id", async (ctx) => redirect(ctx.res, `/depozit/comanda/${ctx.params.id}`));
+
   // --- lista de comenzi deschise -----------------------------------------
-  router.get("/warehouse", async (ctx) => {
+  router.get("/depozit", async (ctx) => {
     await elibereazaExpirate();
     const comenzi = await db
       .prepare(
@@ -174,7 +184,7 @@ function register(router) {
     const nrRezervari = await db.prepare("SELECT COUNT(*) AS n FROM rezervari_stoc WHERE stare = 'activa'").get();
 
     const body = `
-      ${subnavWarehouse("/warehouse")}
+      ${subnavDepozit("/depozit", ctx.user)}
       <p style="max-width:760px;color:var(--text-muted)">
         Tot ce a comandat cineva — agent de vânzări sau orice alt utilizator — și încă nu a plecat pe factură.
         Deschide o comandă ca să vezi linie cu linie ce e pe stoc, ce lipsește, și ca să confirmi, să rezervi
@@ -183,9 +193,9 @@ function register(router) {
       <div class="cards">
         <div class="card"><div class="label">Comenzi deschise</div><div class="value">${comenzi.length}</div></div>
         <div class="card"><div class="label">Aprovizionări în lucru</div><div class="value">${Number(nrAprov.n || 0)}</div>
-          <div style="font-size:12px"><a href="/warehouse/aprovizionare">vezi lista</a></div></div>
+          <div style="font-size:12px"><a href="/depozit/aprovizionare">vezi lista</a></div></div>
         <div class="card"><div class="label">Cereri materie primă</div><div class="value">${Number(nrMaterii.n || 0)}</div>
-          <div style="font-size:12px"><a href="/warehouse/aprovizionare#materii">de la producție</a></div></div>
+          <div style="font-size:12px"><a href="/depozit/aprovizionare#materii">de la producție</a></div></div>
         <div class="card"><div class="label">Rezervări active</div><div class="value">${Number(nrRezervari.n || 0)}</div></div>
       </div>
       ${table(
@@ -197,20 +207,20 @@ function register(router) {
           esc(c.status),
           stareStoc(c.id),
           money(c.total),
-          `<a class="btn small" href="/warehouse/comanda/${c.id}">Deschide</a>`,
+          `<a class="btn small" href="/depozit/comanda/${c.id}">Deschide</a>`,
         ])
       )}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Warehouse — comenzi deschise", active: "/warehouse", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Warehouse — comenzi deschise", active: "/depozit", body }));
   });
 
   // --- potrivirea unei comenzi cu stocul ----------------------------------
-  router.get("/warehouse/comanda/:id", async (ctx) => {
+  router.get("/depozit/comanda/:id", async (ctx) => {
     const id = parseInt(ctx.params.id, 10);
     const c = await db
       .prepare("SELECT c.*, p.nume AS partener_nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
       .get(id);
-    if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Comanda nu există", active: "/warehouse", body: "<p>Comanda nu există.</p>" }));
+    if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Comanda nu există", active: "/depozit", body: "<p>Comanda nu există.</p>" }));
     const { linii, acoperiteTot } = await potrivire(id);
     const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 2000").all();
     const aprov = await db
@@ -236,7 +246,7 @@ function register(router) {
         : "";
       const cereForm =
         l.lipsa > 0.0001 && poateDepozit(ctx.user)
-          ? `<form method="post" action="/warehouse/comanda/${id}/aprovizionare" class="inline-form" style="gap:6px;flex-wrap:wrap">
+          ? `<form method="post" action="/depozit/comanda/${id}/aprovizionare" class="inline-form" style="gap:6px;flex-wrap:wrap">
                <input type="hidden" name="linie_id" value="${l.id}">
                <input type="number" step="0.001" name="cantitate" value="${l.lipsa.toFixed(3)}" style="width:90px">
                <select name="sursa">
@@ -264,23 +274,31 @@ function register(router) {
 
     const actiuni = poateDepozit(ctx.user)
       ? `<div class="toolbar" style="flex-wrap:wrap;gap:8px">
-           <form method="post" action="/warehouse/comanda/${id}/confirma" class="inline-form">
+           <form method="post" action="/depozit/comanda/${id}/confirma" class="inline-form">
              <button class="btn" type="submit" ${acoperiteTot ? "" : 'title="Nu tot e pe stoc — confirmarea trimite doar ce se poate acoperi"'}>
                Confirmă disponibilitatea
              </button>
            </form>
-           <form method="post" action="/warehouse/comanda/${id}/rezerva" class="inline-form">
+           <form method="post" action="/depozit/comanda/${id}/rezerva" class="inline-form">
              <button class="btn secondary" type="submit">Rezervă stocul ${REZERVARE_ORE} h</button>
            </form>
-           <form method="post" action="/warehouse/comanda/${id}/elibereaza" class="inline-form">
+           <form method="post" action="/depozit/comanda/${id}/elibereaza" class="inline-form">
              <button class="btn secondary" type="submit">Eliberează rezervarea</button>
            </form>
            <a class="btn secondary" href="/comenzi/${id}">Vezi comanda în CRM</a>
+           ${
+             aprov.some((a) => a.status === "refuzata")
+               ? `<form method="post" action="/depozit/comanda/${id}/anuleaza" class="inline-form"
+                        onsubmit="return confirm('Anulezi comanda? Rămâne în listă, marcată ca anulată.')">
+                    <button class="link-btn danger" type="submit">Anulează comanda (producția a refuzat termenul)</button>
+                  </form>`
+               : ""
+           }
          </div>`
       : `<div class="toolbar"><a class="btn secondary" href="/comenzi/${id}">Vezi comanda în CRM</a></div>`;
 
     const body = `
-      ${subnavWarehouse("/warehouse")}
+      ${subnavDepozit("/depozit", ctx.user)}
       <p style="color:var(--text-muted)">
         Status: <strong>${esc(c.status)}</strong> ·
         cerută pe ${esc(c.data_livrare_ceruta || "fără termen")} ·
@@ -306,23 +324,42 @@ function register(router) {
           : ""
       }
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: `Comanda ${c.numar || "#" + c.id} — ${c.partener_nume}`, active: "/warehouse", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Comanda ${c.numar || "#" + c.id} — ${c.partener_nume}`, active: "/depozit", body }));
   });
 
   // Confirmarea depozitului: marfa există, comanda se întoarce la agent.
-  router.post("/warehouse/comanda/:id/confirma", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse");
+  router.post("/depozit/comanda/:id/confirma", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit");
     const id = parseInt(ctx.params.id, 10);
     await db
       .prepare("UPDATE comenzi SET status = 'confirmata', verificata_depozit_la = ?, verificata_depozit_de = ? WHERE id = ?")
       .run(acum(), ctx.user.nume, id);
-    redirect(ctx.res, `/warehouse/comanda/${id}`);
+    redirect(ctx.res, `/depozit/comanda/${id}`);
+  });
+
+  // Producția n-a putut ține termenul: comanda se anulează, dar rămâne în
+  // listă, marcată — ca să se vadă de ce s-a pierdut, nu să dispară.
+  router.post("/depozit/comanda/:id/anuleaza", async (ctx) => {
+    if (!poateDepozit(ctx.user) && !(ctx.user && ctx.user.rol === "vanzari")) return redirect(ctx.res, "/depozit");
+    const id = parseInt(ctx.params.id, 10);
+    await db
+      .prepare("UPDATE comenzi SET status = 'anulata', motiv_anulare = ? WHERE id = ?")
+      .run("termen refuzat de producție", id);
+    await db.prepare("UPDATE rezervari_stoc SET stare = 'eliberata' WHERE comanda_id = ? AND stare = 'activa'").run(id);
+    await db.prepare("UPDATE aprovizionari SET status = 'anulata' WHERE comanda_id = ? AND status IN ('ceruta','refuzata')").run(id);
+    const c = await db.prepare("SELECT partener_id, numar, id FROM comenzi WHERE id = ?").get(id);
+    if (c && ctx.user) {
+      await db
+        .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+        .run(c.partener_id, `Comanda ${c.numar || "#" + c.id} anulată`, "Producția n-a putut confirma termenul cerut.", ctx.user.id);
+    }
+    redirect(ctx.res, `/depozit/comanda/${id}`);
   });
 
   // Rezervare pe termen scurt. Nu mișcă stocul, doar îl scoate din „disponibil".
-  router.post("/warehouse/comanda/:id/rezerva", async (ctx) => {
+  router.post("/depozit/comanda/:id/rezerva", async (ctx) => {
     if (!poateDepozit(ctx.user) && !(ctx.user && ["admin", "vanzari", "financiar"].includes(ctx.user.rol))) {
-      return redirect(ctx.res, "/warehouse");
+      return redirect(ctx.res, "/depozit");
     }
     const id = parseInt(ctx.params.id, 10);
     await db.prepare("UPDATE rezervari_stoc SET stare = 'inlocuita' WHERE comanda_id = ? AND stare = 'activa'").run(id);
@@ -337,27 +374,27 @@ function register(router) {
         )
         .run(id, l.id, l.produs_id, l.acoperit, acum(), expira, ctx.user ? ctx.user.nume : null);
     }
-    redirect(ctx.res, ctx.body && ctx.body.inapoi === "crm" ? `/comenzi/${id}` : `/warehouse/comanda/${id}`);
+    redirect(ctx.res, ctx.body && ctx.body.inapoi === "crm" ? `/comenzi/${id}` : `/depozit/comanda/${id}`);
   });
 
-  router.post("/warehouse/comanda/:id/elibereaza", async (ctx) => {
+  router.post("/depozit/comanda/:id/elibereaza", async (ctx) => {
     const id = parseInt(ctx.params.id, 10);
     await db.prepare("UPDATE rezervari_stoc SET stare = 'eliberata' WHERE comanda_id = ? AND stare = 'activa'").run(id);
-    redirect(ctx.res, ctx.body && ctx.body.inapoi === "crm" ? `/comenzi/${id}` : `/warehouse/comanda/${id}`);
+    redirect(ctx.res, ctx.body && ctx.body.inapoi === "crm" ? `/comenzi/${id}` : `/depozit/comanda/${id}`);
   });
 
   // Cererea de aprovizionare: fie la un terț, fie la producție. Dacă e la
   // producție, termenul cerut e cel pe care l-a promis agentul clientului.
-  router.post("/warehouse/comanda/:id/aprovizionare", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse");
+  router.post("/depozit/comanda/:id/aprovizionare", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit");
     const id = parseInt(ctx.params.id, 10);
     const b = ctx.body || {};
     const linieId = parseInt(b.linie_id, 10) || null;
     const linie = linieId ? await db.prepare("SELECT * FROM comenzi_linii WHERE id = ?").get(linieId) : null;
-    if (!linie) return redirect(ctx.res, `/warehouse/comanda/${id}`);
+    if (!linie) return redirect(ctx.res, `/depozit/comanda/${id}`);
     const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(id);
     const cantitate = Number(b.cantitate) || 0;
-    if (cantitate <= 0) return redirect(ctx.res, `/warehouse/comanda/${id}`);
+    if (cantitate <= 0) return redirect(ctx.res, `/depozit/comanda/${id}`);
     const sursa = b.sursa === "productie" ? "productie" : "tert";
     await db
       .prepare(
@@ -375,11 +412,11 @@ function register(router) {
         ctx.user ? ctx.user.nume : null,
         acum()
       );
-    redirect(ctx.res, `/warehouse/comanda/${id}`);
+    redirect(ctx.res, `/depozit/comanda/${id}`);
   });
 
   // --- aprovizionare: lista mare ------------------------------------------
-  router.get("/warehouse/aprovizionare", async (ctx) => {
+  router.get("/depozit/aprovizionare", async (ctx) => {
     const aprov = await db
       .prepare(
         `SELECT a.*, p.denumire AS produs, p.unitate_masura, f.nume AS furnizor, c.numar AS comanda_numar,
@@ -407,11 +444,11 @@ function register(router) {
     const randuriA = aprov.map((a) => {
       const actiuni =
         poateDepozit(ctx.user) && ["ceruta", "confirmata", "gata"].includes(a.status)
-          ? `<form method="post" action="/warehouse/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px">
+          ? `<form method="post" action="/depozit/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px">
                <select name="depozit_id" style="width:120px">${optDep}</select>
                <button class="btn small" type="submit">Intră în stoc</button>
              </form>
-             <form method="post" action="/warehouse/aprovizionare/${a.id}/anuleaza" class="inline-form">
+             <form method="post" action="/depozit/aprovizionare/${a.id}/anuleaza" class="inline-form">
                <button class="link-btn danger" type="submit">Anulează</button>
              </form>`
           : "";
@@ -420,7 +457,7 @@ function register(router) {
         `${nr(a.cantitate)} ${esc(a.unitate_masura || "")}`,
         a.sursa === "productie" ? "producție" : "terț",
         esc(a.furnizor || "—"),
-        a.comanda_id ? `<a href="/warehouse/comanda/${a.comanda_id}">${esc(a.comanda_numar || "#" + a.comanda_id)}</a><br><span style="font-size:12px">${esc(a.client || "")}</span>` : "pentru stoc",
+        a.comanda_id ? `<a href="/depozit/comanda/${a.comanda_id}">${esc(a.comanda_numar || "#" + a.comanda_id)}</a><br><span style="font-size:12px">${esc(a.client || "")}</span>` : "pentru stoc",
         esc(a.termen_cerut || "—"),
         esc(a.termen_confirmat || "—"),
         STATUS_APROV[a.status] || esc(a.status),
@@ -431,15 +468,15 @@ function register(router) {
     const randuriM = materii.map((m) => {
       const actiuni =
         poateDepozit(ctx.user) && m.status === "ceruta"
-          ? `<form method="post" action="/warehouse/materie/${m.id}/valideaza" class="inline-form" style="gap:6px">
+          ? `<form method="post" action="/depozit/materie/${m.id}/valideaza" class="inline-form" style="gap:6px">
                <input type="date" name="termen" value="${esc(m.termen_cerut || azi())}">
                <button class="btn small" type="submit">Confirmă termen</button>
              </form>
-             <form method="post" action="/warehouse/materie/${m.id}/refuza" class="inline-form">
+             <form method="post" action="/depozit/materie/${m.id}/refuza" class="inline-form">
                <button class="link-btn danger" type="submit">Refuză</button>
              </form>`
           : poateDepozit(ctx.user) && m.status === "confirmata"
-            ? `<form method="post" action="/warehouse/materie/${m.id}/livrata" class="inline-form" style="gap:6px">
+            ? `<form method="post" action="/depozit/materie/${m.id}/livrata" class="inline-form" style="gap:6px">
                  <select name="depozit_id" style="width:120px">${optDep}</select>
                  <button class="btn small" type="submit">Am dat marfa</button>
                </form>`
@@ -455,26 +492,82 @@ function register(router) {
       ];
     });
 
+    const produse = await db.prepare("SELECT id, denumire FROM produse ORDER BY denumire LIMIT 3000").all();
+    const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 2000").all();
+
     const body = `
-      ${subnavWarehouse("/warehouse/aprovizionare")}
+      ${subnavDepozit("/depozit/aprovizionare", ctx.user)}
       <p style="max-width:760px;color:var(--text-muted)">
         Ce s-a cerut pentru comenzile care nu se acoperă din stoc. Cererile către producție apar și la ei, cu termenul
         cerut de agent — ei îl confirmă sau nu. Când marfa e gata sau a venit de la furnizor, apeși „Intră în stoc"
         și mișcarea de stoc se scrie singură.
       </p>
+      ${
+        poateDepozit(ctx.user)
+          ? `<details style="margin:10px 0">
+               <summary style="cursor:pointer">Comandă pentru stoc (fără o comandă de client în spate)</summary>
+               <form method="post" action="/depozit/aprovizionare" class="form" style="max-width:820px;margin-top:10px">
+                 <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px">
+                   <label class="field"><span>Produs</span>
+                     <select name="produs_id" required>${produse.map((p) => `<option value="${p.id}">${esc(p.denumire)}</option>`).join("")}</select>
+                   </label>
+                   <label class="field"><span>Cantitate</span><input type="number" step="0.001" name="cantitate" required></label>
+                   <label class="field"><span>Termen dorit</span><input type="date" name="termen_cerut"></label>
+                 </div>
+                 <div style="display:grid;grid-template-columns:1fr 2fr;gap:14px">
+                   <label class="field"><span>De unde</span>
+                     <select name="sursa"><option value="tert">de la terț</option><option value="productie">din producție</option></select>
+                   </label>
+                   <label class="field"><span>Furnizor (dacă e terț)</span>
+                     <select name="furnizor_id"><option value="">—</option>${furnizori.map((f) => `<option value="${f.id}">${esc(f.nume)}</option>`).join("")}</select>
+                   </label>
+                 </div>
+                 <label class="field"><span>Observații</span><input name="observatii"></label>
+                 <div class="form-actions"><button class="btn" type="submit">Cere aprovizionarea</button></div>
+               </form>
+             </details>`
+          : ""
+      }
       ${table(["Produs", "Cantitate", "Sursă", "Furnizor", "Pentru comanda", "Termen cerut", "Termen confirmat", "Status", ""], randuriA)}
       <h2 id="materii">Materie primă cerută de producție</h2>
       ${table(["Produs / descriere", "Cantitate", "Cerut de", "Termen cerut", "Termen dat", "Status", ""], randuriM)}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "De aprovizionat", active: "/warehouse", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "De aprovizionat", active: "/depozit", body }));
+  });
+
+  // Aprovizionare fără comandă de client: depozitul vede că stocul e mic la un
+  // produs și comandă pentru stoc — la terț sau la producție.
+  router.post("/depozit/aprovizionare", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
+    const b = ctx.body || {};
+    const produsId = parseInt(b.produs_id, 10) || null;
+    const cantitate = Number(b.cantitate) || 0;
+    if (!produsId || cantitate <= 0) return redirect(ctx.res, "/depozit/aprovizionare");
+    const sursa = b.sursa === "productie" ? "productie" : "tert";
+    await db
+      .prepare(
+        `INSERT INTO aprovizionari (comanda_id, linie_id, produs_id, cantitate, sursa, furnizor_id, termen_cerut, status, cerut_de, creata_la, observatii)
+         VALUES (NULL, NULL, ?, ?, ?, ?, ?, 'ceruta', ?, ?, ?)`
+      )
+      .run(
+        produsId,
+        cantitate,
+        sursa,
+        sursa === "tert" ? parseInt(b.furnizor_id, 10) || null : null,
+        String(b.termen_cerut || "") || null,
+        ctx.user.nume,
+        acum(),
+        String(b.observatii || "").trim().slice(0, 500) || null
+      );
+    redirect(ctx.res, "/depozit/aprovizionare");
   });
 
   // Marfa a intrat: scriem intrarea de stoc și, dacă e cazul, deblocăm comanda.
-  router.post("/warehouse/aprovizionare/:id/primita", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse/aprovizionare");
+  router.post("/depozit/aprovizionare/:id/primita", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
     const id = parseInt(ctx.params.id, 10);
     const a = await db.prepare("SELECT * FROM aprovizionari WHERE id = ?").get(id);
-    if (!a) return redirect(ctx.res, "/warehouse/aprovizionare");
+    if (!a) return redirect(ctx.res, "/depozit/aprovizionare");
     let depozitId = parseInt((ctx.body || {}).depozit_id, 10) || null;
     if (!depozitId) {
       const d = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
@@ -505,35 +598,35 @@ function register(router) {
         if (acoperiteTot) await db.prepare("UPDATE comenzi SET status = 'in_stoc_depozit' WHERE id = ?").run(a.comanda_id);
       }
     }
-    redirect(ctx.res, "/warehouse/aprovizionare");
+    redirect(ctx.res, "/depozit/aprovizionare");
   });
 
-  router.post("/warehouse/aprovizionare/:id/anuleaza", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse/aprovizionare");
+  router.post("/depozit/aprovizionare/:id/anuleaza", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
     await db.prepare("UPDATE aprovizionari SET status = 'anulata' WHERE id = ?").run(parseInt(ctx.params.id, 10));
-    redirect(ctx.res, "/warehouse/aprovizionare");
+    redirect(ctx.res, "/depozit/aprovizionare");
   });
 
   // --- materie primă cerută de producție ----------------------------------
-  router.post("/warehouse/materie/:id/valideaza", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse/aprovizionare");
+  router.post("/depozit/materie/:id/valideaza", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
     const termen = String((ctx.body || {}).termen || "").slice(0, 10) || null;
     await db
       .prepare("UPDATE cereri_materie_prima SET status = 'confirmata', termen_confirmat = ? WHERE id = ?")
       .run(termen, parseInt(ctx.params.id, 10));
-    redirect(ctx.res, "/warehouse/aprovizionare#materii");
+    redirect(ctx.res, "/depozit/aprovizionare#materii");
   });
 
-  router.post("/warehouse/materie/:id/refuza", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse/aprovizionare");
+  router.post("/depozit/materie/:id/refuza", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
     await db
       .prepare("UPDATE cereri_materie_prima SET status = 'refuzata', raspuns = ? WHERE id = ?")
       .run("refuzat de depozit", parseInt(ctx.params.id, 10));
-    redirect(ctx.res, "/warehouse/aprovizionare#materii");
+    redirect(ctx.res, "/depozit/aprovizionare#materii");
   });
 
-  router.post("/warehouse/materie/:id/livrata", async (ctx) => {
-    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/warehouse/aprovizionare");
+  router.post("/depozit/materie/:id/livrata", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
     const id = parseInt(ctx.params.id, 10);
     const m = await db.prepare("SELECT * FROM cereri_materie_prima WHERE id = ?").get(id);
     if (m && m.produs_id) {
@@ -552,7 +645,7 @@ function register(router) {
       }
     }
     await db.prepare("UPDATE cereri_materie_prima SET status = 'primita' WHERE id = ?").run(id);
-    redirect(ctx.res, "/warehouse/aprovizionare#materii");
+    redirect(ctx.res, "/depozit/aprovizionare#materii");
   });
 }
 
@@ -561,9 +654,9 @@ function porneste() {
   const tic = async () => {
     try {
       const n = await elibereazaExpirate();
-      if (n) console.log(`[warehouse] ${n} rezervări expirate, stoc eliberat`);
+      if (n) console.log(`[depozit] ${n} rezervări expirate, stoc eliberat`);
     } catch (e) {
-      console.error("[warehouse] eliberare rezervări:", e.message);
+      console.error("[depozit] eliberare rezervări:", e.message);
     }
   };
   tic();
