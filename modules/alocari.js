@@ -609,6 +609,11 @@ function register(router) {
       await db.prepare("UPDATE facturi SET agent_id = ? WHERE partener_id = ? AND directie = 'vanzare' AND agent_manual = 0").run(ctx.user.id, id);
       luati++;
     }
+    // Când revendicarea vine din pagina unui client, nu-l mai plimbăm printr-un
+    // ecran de rezultat: îl ducem înapoi de unde a apăsat.
+    const inapoi = String((ctx.body && ctx.body.inapoi) || "");
+    if (/^\/parteneri\/\d+$/.test(inapoi)) return redirect(ctx.res, inapoi);
+
     const body = `
       <div class="detail-box"><div class="detail-grid">
         <div><div class="k">Clienți luați în portofoliu</div><strong>${luati}</strong></div>

@@ -238,7 +238,26 @@ function register(router) {
                    </div>
                    ${alocari.formularAlocare(partener.id, alocareLinii, utilizatoriAlocabili, true)}
                  </div>`
-              : `<span style="color:var(--text-muted)">(doar administratorul poate schimba alocarea)</span>`
+              : (() => {
+                  // Agentul își poate lua singur clientul, exact ca în lista de
+                  // alocare: dacă e liber sau dacă îl ține administratorul (acolo
+                  // a ajuns la import, fiindcă nu se știa al cui e). De la un alt
+                  // agent nu se ia — acolo hotărăște administratorul.
+                  const alMeu = alocareLinii.some((a) => a.utilizator_id === ctx.user.id);
+                  const laAdmin = alocareLinii.length > 0 && alocareLinii.every((a) => a.rol === "admin");
+                  if (alMeu) return `<span style="color:var(--text-muted)">E în portofoliul tău.</span>`;
+                  if (alocareLinii.length && !laAdmin)
+                    return `<span style="color:var(--text-muted)">E în portofoliul altui agent — doar administratorul îl poate muta.</span>`;
+                  return `<form method="post" action="/crm/alocare" style="margin-top:4px">
+                            <input type="hidden" name="client" value="${partener.id}">
+                            <input type="hidden" name="inapoi" value="/parteneri/${partener.id}">
+                            <button type="submit" class="btn" onclick="return confirm('Îl iei în portofoliul tău?')">Ia clientul în portofoliul meu</button>
+                            <div style="font-size:12px;color:var(--text-muted);margin-top:6px">
+                              ${laAdmin ? "Acum e la administrator, fiindcă la import nu se știa al cui e." : "Clientul nu e alocat nimănui."}
+                              Facturile lui — și cele vechi, de la ambele firme — trec pe numele tău și intră la comision.
+                            </div>
+                          </form>`;
+                })()
           }
         </div>
       </div>
