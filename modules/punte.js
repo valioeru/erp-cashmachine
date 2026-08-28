@@ -431,12 +431,153 @@ async function ingestBalante(randuri) {
   };
 }
 
+// --- facturile întregi (pentru firma a doua din grup) ----------------------
+// Cash Machine își are facturile din exportul SmartBill. Warehouse All are
+// alt cont SmartBill, cu altă sesiune — nu pot fi deschise amândouă odată,
+// iar exportul multiplu e blocat de browser. Așa că facturile ei intră tot
+// prin punte: se citește raportul de facturi din pagină și se trimite aici.
+//
+// Regula grupului: Cash Machine facturează marfă către Warehouse All, iar
+// Warehouse All mai departe către clientul final. Vânzarea reală către piață
+// e a doua. Prima e mutare în interiorul grupului și se marchează
+// „intercompany" la final, ca să nu fie numărat același leu de două ori.
+//
+// Partenerii sunt comuni pe tot grupul: un client al Warehouse care e deja
+// client la Cash Machine e ACELAȘI rând, cu același agent. De-aia comisionul
+// iese corect fără nicio potrivire în plus.
+async function ingestFacturi(randuri) {
+  const grup = require("../lib/grup");
+  let create = 0, sarite = 0, parteneriNoi = 0, cuPlata = 0;
+  const erori = [];
+
+  const firme = await db.prepare("SELECT id, nume, cui FROM firme").all();
+  const normCui = (v) => String(v || "").replace(/[^0-9]/g, "");
+  const firmaDupaCui = new Map(firme.map((f) => [normCui(f.cui), f.id]));
+  const firmaDupaNume = new Map(firme.map((f) => [String(f.nume || "").toLowerCase(), f.id]));
+  const implicita = (await grup.firmaImplicita()) || {};
+
+  const parteneri = await db.prepare("SELECT id, nume, cui, tip FROM parteneri").all();
+  const pDupaCui = new Map();
+  const pDupaNume = new Map();
+  for (const p of parteneri) {
+    if (normCui(p.cui)) pDupaCui.set(normCui(p.cui), p.id);
+    pDupaNume.set(String(p.nume || "").trim().toLowerCase(), p.id);
+  }
+
+  // cheile facturilor deja existente, ca reimportul aceluiași raport să nu dubleze
+  const existente = new Set();
+  for (const f of await db.prepare("SELECT serie, numar, firma_id FROM facturi WHERE directie = 'vanzare'").all()) {
+    existente.add(`${String(f.serie || "").toUpperCase()}|${f.numar}|${f.firma_id || ""}`);
+  }
+
+  const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
+
+  for (const r of randuri) {
+    const numeClient = curat(r.client) || curat(r.partener);
+    if (!numeClient) { sarite++; continue; }
+
+    // seria și numărul: fie date separat, fie lipite („CSHM3160")
+    let serie = curat(r.serie);
+    let numar = curat(r.numar);
+    if (!serie || !numar) {
+      const doc = curat(r.document) || curat(r.factura) || curat(r.cheie);
+      const m = doc.match(/^([A-Za-z][A-Za-z0-9]*?)[\s-]*(\d+)$/);
+      if (m) { serie = serie || m[1]; numar = numar || m[2]; }
+      else { serie = serie || doc; }
+    }
+    if (!serie && !numar) { sarite++; continue; }
+
+    const firmaId =
+      firmaDupaCui.get(normCui(r.firma_cui)) ||
+      firmaDupaNume.get(String(curat(r.firma)).toLowerCase()) ||
+      implicita.id ||
+      null;
+
+    const cheie = `${String(serie).toUpperCase()}|${numar}|${firmaId || ""}`;
+    if (existente.has(cheie)) { sarite++; continue; }
+
+    // partenerul: întâi după CUI, apoi după nume; comun pe tot grupul
+    const cui = normCui(r.cui);
+    let partenerId = (cui && pDupaCui.get(cui)) || pDupaNume.get(numeClient.toLowerCase()) || null;
+    if (!partenerId) {
+      const ins = await db
+        .prepare("INSERT INTO parteneri (tip, nume, cui, agent_id) VALUES ('client', ?, ?, ?) RETURNING id")
+        .run(numeClient.slice(0, 200), curat(r.cui) || null, admin ? admin.id : null);
+      partenerId = ins.lastInsertRowid;
+      if (cui) pDupaCui.set(cui, partenerId);
+      pDupaNume.set(numeClient.toLowerCase(), partenerId);
+      parteneriNoi++;
+    }
+
+    const dataEmiterii = data(r.data) || data(r.data_emiterii);
+    if (!dataEmiterii) { erori.push(`${serie}${numar}: dată nevalidă`); sarite++; continue; }
+    const net = nr(r.net !== undefined ? r.net : r.fara_tva);
+    const tva = nr(r.tva);
+    const total = nr(r.total) || net + tva;
+    const stareBruta = String(curat(r.status)).toLowerCase();
+    const status = /anulat|storn/.test(stareBruta) ? "anulata" : /ciorn|schita/.test(stareBruta) ? "ciorna" : "emisa";
+
+    try {
+      const ins = await db
+        .prepare(
+          `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, moneda, sursa_import, document_extern, firma_id)
+           VALUES (?, ?, ?, 'vanzare', ?, ?, ?, ?, 'punte SmartBill', ?, ?) RETURNING id`
+        )
+        .run(
+          String(serie).slice(0, 20),
+          parseInt(numar, 10) || null,
+          partenerId,
+          dataEmiterii,
+          data(r.scadenta) || data(r.data_scadenta),
+          status,
+          curat(r.moneda) || "RON",
+          `${serie}${numar}`,
+          firmaId
+        );
+      const facturaId = ins.lastInsertRowid;
+
+      // O linie „conform document", ca la importul din export: fără detaliu pe
+      // produse totalul trebuie totuși să iasă la ban. Cota de TVA se
+      // reconstituie din raport, cu 4 zecimale, nu rotunjită.
+      const cota = net !== 0 ? Math.round((tva / net) * 1000000) / 10000 : 0;
+      await db
+        .prepare("INSERT INTO facturi_linii (factura_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, 1, ?, ?)")
+        .run(facturaId, `Conform document ${serie}${numar} (punte SmartBill, fără detaliu pe produse)`, net !== 0 ? net : total, cota);
+
+      // Încasarea, dacă raportul o dă. Fără ea factura rămâne neîncasată —
+      // mai bine așa decât o plată inventată.
+      const incasat = nr(r.incasat !== undefined ? r.incasat : r.platit);
+      if (incasat > 0) {
+        await db
+          .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES (?, ?, ?, 'import', ?)")
+          .run(facturaId, incasat, data(r.data_incasarii) || dataEmiterii, "Încasare adusă prin punte din SmartBill");
+        cuPlata++;
+      }
+      existente.add(cheie);
+      create++;
+    } catch (e) {
+      erori.push(`${serie}${numar}: ${String((e && e.message) || e).slice(0, 120)}`);
+    }
+  }
+
+  const marcaje = await grup.marcheazaIntercompany();
+  return {
+    facturi: create,
+    sarite,
+    parteneri_noi: parteneriNoi,
+    cu_plata: cuPlata,
+    intercompany_marcate: marcaje.facturiMarcate,
+    erori: erori.slice(0, 20),
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
   productie: ingestProductie,
   consum: ingestConsum,
   profit_produs: ingestProfitProdus,
+  facturi: ingestFacturi,
   facturi_linii: ingestFacturiLinii,
   balante: ingestBalante,
 };
