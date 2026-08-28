@@ -583,26 +583,88 @@ async function ingestFacturi(randuri) {
 // Handlerul ăsta NU creează produse. Dacă numele nu se potrivește cu nimic din
 // nomenclator, rândul e raportat ca nepotrivit și atât — altfel am umple lista
 // de produse cu dubluri, exact problema pe care încercăm s-o reparăm.
-async function ingestCostProduse(randuri) {
-  const norm = (v) =>
-    String(v || "")
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[̀-ͯ]/g, "")
-      .replace(/[^a-z0-9]/g, "");
+// Potrivirea denumirilor intre ERP si rapoartele din contabilitate.
+// In ERP denumirile poarta adesea un sufix de firma ("... /400M CM"), iar in balanta
+// de stoc poarta un cod intre paranteze ("... /400M (167...)"). Dupa potrivirea exacta
+// incercam potrivirea pe prefix: una dintre denumiri o incepe pe cealalta. Daca mai
+// multe produse din ERP pornesc la fel (acelasi articol trecut de doua ori, cu coduri
+// diferite), costul se pune pe toate, fiind aceeasi marfa.
+const normCod = (v) =>
+  String(v || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
 
-  const produse = await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all();
+const normNume = (v) =>
+  String(v || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[^a-z0-9]/g, "");
+
+const PREFIX_MIN = 12;
+const PREFIX_ACOPERIRE = 0.6;
+const PREFIX_GRUP_MAX = 4;
+
+function indexProduse(produse) {
   const dupaCod = new Map();
   const dupaNume = new Map();
+  const galeti = new Map();
   for (const p of produse) {
-    const c = norm(p.cod);
+    const c = normCod(p.cod);
     if (c && !dupaCod.has(c)) dupaCod.set(c, p);
-    const n = norm(p.denumire);
-    if (n && !dupaNume.has(n)) dupaNume.set(n, p);
+    const n = normNume(p.denumire);
+    if (!n) continue;
+    if (!dupaNume.has(n)) dupaNume.set(n, []);
+    dupaNume.get(n).push(p);
+    if (n.length < PREFIX_MIN) continue;
+    const k = n.slice(0, 8);
+    if (!galeti.has(k)) galeti.set(k, []);
+    galeti.get(k).push({ n, p });
+  }
+  return { dupaCod, dupaNume, galeti };
+}
+
+function potrivesteProdus(idx, cod, den) {
+  const gasite = new Map();
+  const dinCod = cod ? idx.dupaCod.get(normCod(cod)) : null;
+  if (dinCod) gasite.set(dinCod.id, dinCod);
+
+  const n = normNume(den);
+  const exact = (n && idx.dupaNume.get(n)) || [];
+  if (n && n.length >= PREFIX_MIN) {
+    for (const it of idx.galeti.get(n.slice(0, 8)) || []) {
+      const scurt = Math.min(it.n.length, n.length);
+      const lung = Math.max(it.n.length, n.length);
+      if (scurt < PREFIX_MIN) continue;
+      if (scurt < PREFIX_ACOPERIRE * lung) continue;
+      if (it.n.slice(0, scurt) === n.slice(0, scurt)) gasite.set(it.p.id, it.p);
+    }
+    // prea multe produse pornesc la fel: ramanem doar la potrivirea exacta
+    if (gasite.size > PREFIX_GRUP_MAX) {
+      gasite.clear();
+      if (dinCod) gasite.set(dinCod.id, dinCod);
+      for (const p of exact) gasite.set(p.id, p);
+    }
+  } else {
+    for (const p of exact) gasite.set(p.id, p);
   }
 
-  let completate = 0, aveauDeja = 0, faraCost = 0;
-  const nepotrivite = [];
+  if (!gasite.size || gasite.size > PREFIX_GRUP_MAX) return [];
+  return [...gasite.values()];
+}
+
+async function ingestCostProduse(randuri) {
+  const produse = await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all();
+  const idx = indexProduse(produse);
+
+  let completate = 0;
+  let aveauDeja = 0;
+  let faraCost = 0;
+  let nepotriviteN = 0;
+  const exemple = [];
   const vazute = new Set();
 
   for (const r of randuri) {
@@ -610,15 +672,14 @@ async function ingestCostProduse(randuri) {
     const cod = curat(r.cod);
     if (!den && !cod) continue;
 
-    const p = (cod && dupaCod.get(norm(cod))) || dupaNume.get(norm(den)) || null;
-    if (!p) {
-      if (nepotrivite.length < 40) nepotrivite.push(den || cod);
+    const gasite = potrivesteProdus(idx, cod, den);
+    if (!gasite.length) {
+      nepotriviteN++;
+      if (exemple.length < 25) exemple.push(den || cod);
       continue;
     }
-    if (vazute.has(p.id)) continue;
-    vazute.add(p.id);
 
-    // costul unitar: întâi de pe marfa ieșită, apoi de pe cea intrată, apoi stoc
+    // costul unitar: intai de pe marfa iesita, apoi de pe cea intrata, apoi stoc
     const perechi = [
       [nr(r.valoare_iesiri), nr(r.cantitate_iesiri)],
       [nr(r.valoare_intrari), nr(r.cantitate_intrari)],
@@ -626,13 +687,28 @@ async function ingestCostProduse(randuri) {
     ];
     let cost = 0;
     for (const [val, cant] of perechi) {
-      if (val > 0 && cant > 0) { cost = val / cant; break; }
+      if (val > 0 && cant > 0) {
+        cost = val / cant;
+        break;
+      }
     }
-    if (!(cost > 0)) { faraCost++; continue; }
+    if (!(cost > 0)) {
+      faraCost++;
+      continue;
+    }
+    const rotunjit = Math.round(cost * 10000) / 10000;
 
-    if (Number(p.pret_achizitie) > 0) { aveauDeja++; continue; }
-    await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(Math.round(cost * 10000) / 10000, p.id);
-    completate++;
+    for (const p of gasite) {
+      if (vazute.has(p.id)) continue;
+      vazute.add(p.id);
+      if (Number(p.pret_achizitie) > 0) {
+        aveauDeja++;
+        continue;
+      }
+      await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(rotunjit, p.id);
+      p.pret_achizitie = rotunjit;
+      completate++;
+    }
   }
 
   const cuCost = await db.prepare("SELECT COUNT(*) AS n FROM produse WHERE COALESCE(pret_achizitie,0) > 0").get();
@@ -644,8 +720,8 @@ async function ingestCostProduse(randuri) {
     completate,
     aveau_deja_cost: aveauDeja,
     fara_cost_in_raport: faraCost,
-    nepotrivite: nepotrivite.length,
-    exemple_nepotrivite: nepotrivite.slice(0, 15),
+    nepotrivite: nepotriviteN,
+    exemple_nepotrivite: exemple.slice(0, 15),
     produse_cu_cost_acum: Number(cuCost.n),
     linii_de_factura_cu_cost: Number(liniiCuCost.n),
   };
