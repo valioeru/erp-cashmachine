@@ -215,6 +215,8 @@ async function calculeaza(panaLaLuna) {
         // cât din marja adusă rămâne firmei și cât se duce în costul agentului
         cota_agent: marja > 0 ? (costTotal / marja) * 100 : null,
         cota_firma: marja > 0 ? (marjaNeta / marja) * 100 : null,
+        // cât din încasări vin de pe facturi la care ȘTIM costul mărfii
+        acoperire: inc.incasat_net > 0 ? ((inc.incasat_net - inc.fara_cost) / inc.incasat_net) * 100 : null,
       });
     }
     ultima = { luna, randuri };
@@ -238,6 +240,8 @@ function register(router) {
     const totalCost = randuri.reduce((s, r) => s + r.cost_total, 0);
     const totalComision = randuri.reduce((s, r) => s + r.de_plata, 0);
     const faraCost = randuri.reduce((s, r) => s + r.fara_cost, 0);
+    const totalIncasat = randuri.reduce((s, r) => s + r.incasat_net, 0);
+    const acoperireTotala = totalIncasat > 0 ? ((totalIncasat - faraCost) / totalIncasat) * 100 : null;
 
     const body = `
       ${subnavFinanciar("/costuri", ctx.user)}
@@ -257,8 +261,20 @@ function register(router) {
         mai departe, prin salariul unei luni următoare.
       </p>
 
+      ${
+        acoperireTotala !== null && acoperireTotala < 95
+          ? `<div class="detail-box" style="border-left:4px solid #b3261e;margin-bottom:14px">
+               <strong>Marja de mai jos nu e încă marjă adevărată.</strong>
+               ${money(faraCost)} din ${money(totalIncasat)} încasați vin de pe facturi la care nu știm costul mărfii
+               (acoperire ${acoperireTotala.toFixed(0)}%), așa că acolo marja iese egală cu încasarea, iar comisionul
+               calculat pe ea e prea mare. Se îndreaptă singur pe măsură ce intră costurile de achiziție —
+               vezi <a href="/rapoarte/produse-fara-cost">produsele fără cost</a>.
+             </div>`
+          : ""
+      }
       <div class="cards">
-        <div class="card"><div class="label">Marjă adusă în ${esc(luna)}</div><div class="value">${money(totalMarja)}</div></div>
+        <div class="card"><div class="label">Marjă adusă în ${esc(luna)}</div><div class="value">${money(totalMarja)}</div>
+          ${acoperireTotala !== null && acoperireTotala < 95 ? `<div style="font-size:12px;color:#b3261e">estimare — cost marfă cunoscut pe ${acoperireTotala.toFixed(0)}% din încasări</div>` : ""}</div>
         <div class="card"><div class="label">Cost cu agenții</div><div class="value">${money(totalCost)}</div>
           <div style="font-size:12px;color:var(--text-muted)">brut + CAM + mașină + carburant</div></div>
         <div class="card"><div class="label">Rămâne firmei</div>
@@ -267,26 +283,26 @@ function register(router) {
           <div style="font-size:12px;color:var(--text-muted)">peste ${money(reguli.prag)}: max(${reguli.pctMarja}% marjă, ${reguli.pctVanzari}% încasări)</div></div>
       </div>
 
-      ${
-        faraCost > 1
-          ? `<p class="badge galben" style="display:inline-block">Atenție: ${money(faraCost)} din încasări vin de pe facturi fără cost de achiziție cunoscut — marja de acolo e umflată. Vezi <a href="/rapoarte/produse-fara-cost">produsele fără cost</a>.</p>`
-          : ""
-      }
-
       ${table(
         ["Agent", "Facturat", "Încasat (fără TVA)", "Cost marfă", "Marjă", "Cost agent", "Rămâne firmei", "Firma / agentul", "Comision câștigat", "Report", "De plată"],
         randuri.map((r) => [
-          esc(r.agent.nume),
+          `${esc(r.agent.nume)}<br><span style="font-size:12px;color:var(--text-muted)">${esc(r.agent.rol === "vanzari" ? "agent vânzări" : r.agent.rol)}</span>`,
           money(r.facturat),
           `${money(r.incasat_net)}<br><span style="font-size:12px;color:var(--text-muted)">${r.nr_facturi} facturi</span>`,
-          money(r.cost_marfa),
-          `<strong>${money(r.marja)}</strong>`,
+          `${money(r.cost_marfa)}${
+            r.acoperire !== null && r.acoperire < 95
+              ? `<br><span style="font-size:12px;color:#b3261e">cunoscut pe ${r.acoperire.toFixed(0)}%</span>`
+              : ""
+          }`,
+          `<strong>${money(r.marja)}</strong>${r.acoperire !== null && r.acoperire < 95 ? '<br><span style="font-size:12px;color:#b3261e">estimare</span>' : ""}`,
           `${money(r.cost_total)}${r.cost ? `<br><span style="font-size:12px;color:var(--text-muted)">brut ${money(r.cost.brut)} · mașină ${money(r.cost.masina)} · carburant ${money(r.cost.carburant)}</span>` : '<br><span class="badge gri">fără cost definit</span>'}`,
           `<span style="color:${r.marja_neta >= 0 ? "var(--success)" : "var(--danger)"}">${money(r.marja_neta)}</span>`,
           `${procent(r.cota_firma)} / ${procent(r.cota_agent)}`,
           `${money(r.castigat)}<br><span style="font-size:12px;color:var(--text-muted)">${esc(r.dupa)}</span>`,
           r.report_vechi < 0 ? `<span style="color:var(--danger)">${money(r.report_vechi)}</span>` : "—",
-          `<strong>${money(r.de_plata)}</strong>${r.report_nou < 0 ? `<br><span style="font-size:12px;color:var(--danger)">rămâne ${money(r.report_nou)} pentru luna viitoare</span>` : ""}`,
+          `<strong${r.acoperire !== null && r.acoperire < 95 ? ' style="color:#b3261e"' : ""}>${money(r.de_plata)}</strong>${
+            r.report_nou < 0 ? `<br><span style="font-size:12px;color:var(--danger)">rămâne ${money(r.report_nou)} pentru luna viitoare</span>` : ""
+          }`,
         ])
       )}
 
