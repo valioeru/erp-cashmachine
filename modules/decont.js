@@ -15,8 +15,11 @@
 //        • vânzări încasate (fără TVA) peste prag  → cel mai mare dintre
 //          10% din marjă și 2% din vânzările încasate;
 //        • sub prag                                 → 10% din marjă.
-//      Dacă luna iese pe minus, minusul nu se șterge: se reportează și se
-//      scade din comisionul lunii următoare.
+//      Dacă marja lunii e negativă, se reportează MARJA ÎNTREAGĂ, nu 10% din
+//      ea, și se scade din comisioanele lunilor următoare până se acoperă.
+//   6. Baza e ce s-a ÎNCASAT în lună, indiferent în ce lună s-a emis factura
+//      — dar din anul curent. Iar o factură neîncasată 12 luni e pierdută
+//      pentru agent: nu mai intră nici în bază, nici în marjă.
 //
 // Reportul nu se ține într-un tabel, ci se recalculează de fiecare dată din
 // luna de start încoace. Așa, dacă se corectează o factură veche, tot lanțul
@@ -91,6 +94,8 @@ async function incasariPeAgent(luna) {
     .prepare(
       `SELECT p.agent_id AS agent_id,
               f.id AS factura_id,
+              f.data_emiterii AS emisa,
+              pl.data AS platita,
               COALESCE(pl.suma, 0) AS platit,
               COALESCE(n.net, 0) AS net,
               COALESCE(b.brut, 0) AS brut,
@@ -111,8 +116,34 @@ async function incasariPeAgent(luna) {
     )
     .all(de, pana);
 
+  const anul = luna.slice(0, 4);
   const peAgent = new Map();
+  // Doua motive pentru care o incasare nu intra in decont, numarate separat ca
+  // sa se vada care cat taie: factura e dintr-un an trecut, sau a stat neincasata
+  // mai mult de 12 luni. Practic se suprapun (in acelasi an calendaristic nu poti
+  // depasi 12 luni), de-aia le aratam pe amandoua, nu una singura.
+  let pierduteTermen = 0;
+  let pierduteAnVechi = 0;
   for (const r of randuri) {
+    const emisa = String(r.emisa || "").slice(0, 10);
+    const platita = String(r.platita || "").slice(0, 10);
+    const platit0 = Number(r.platit) || 0;
+    const intarziere = emisa && platita ? luniIntre12(emisa, platita) : 0;
+
+    // Regula celor 12 luni: o factura care n-a fost incasata un an e pierduta
+    // pentru agent - nu mai intra nici in baza, nici in marja.
+    if (intarziere > 12) {
+      pierduteTermen += platit0;
+      continue;
+    }
+
+    // Factura trebuie sa fie din anul curent. Ce s-a incasat pe facturi din
+    // anii trecuti nu mai e baza nimanui.
+    if (emisa.slice(0, 4) !== anul) {
+      pierduteAnVechi += platit0;
+      continue;
+    }
+
     const brut = Number(r.brut) || 0;
     const net = Number(r.net) || 0;
     const platit = Number(r.platit) || 0;
@@ -127,7 +158,17 @@ async function incasariPeAgent(luna) {
     if (!Number(r.cost_marfa)) a.fara_cost += incasatNet;
     peAgent.set(r.agent_id, a);
   }
+  peAgent.pierduteTermen = pierduteTermen;
+  peAgent.pierduteAnVechi = pierduteAnVechi;
   return peAgent;
+}
+
+// Câte luni au trecut între emitere și încasare.
+function luniIntre12(emisa, platita) {
+  const a = new Date(emisa + "T00:00:00Z");
+  const b = new Date(platita + "T00:00:00Z");
+  if (isNaN(a) || isNaN(b)) return 0;
+  return (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth()) + (b.getUTCDate() >= a.getUTCDate() ? 0 : -1);
 }
 
 // Ce a facturat agentul în lună — nu intră în comision, dar e bun de văzut
@@ -150,7 +191,9 @@ async function facturatPeAgent(luna) {
 // Comisionul câștigat într-o lună, după regula lui Vali.
 function comisionLunar(marja, incasatNet, reguli) {
   const dinMarja = (marja * reguli.pctMarja) / 100;
-  if (marja < 0) return { valoare: dinMarja, dupa: "marjă negativă" };
+  // Marja negativă se duce mai departe ÎNTREAGĂ, nu 10% din ea: luna pierdută
+  // se acoperă din comisioanele următoare, până se stinge.
+  if (marja < 0) return { valoare: marja, dupa: "marjă negativă, se reportează întreagă" };
   if (incasatNet > reguli.prag) {
     const dinVanzari = (incasatNet * reguli.pctVanzari) / 100;
     return dinVanzari > dinMarja
@@ -219,10 +262,15 @@ async function calculeaza(panaLaLuna) {
         acoperire: inc.incasat_net > 0 ? ((inc.incasat_net - inc.fara_cost) / inc.incasat_net) * 100 : null,
       });
     }
-    ultima = { luna, randuri };
+    ultima = {
+      luna,
+      randuri,
+      pierdute_termen: incasari.pierduteTermen || 0,
+      pierdute_an_vechi: incasari.pierduteAnVechi || 0,
+    };
   }
 
-  return { reguli, luni, ultima: ultima || { luna: panaLaLuna, randuri: [] } };
+  return { reguli, luni, ultima: ultima || { luna: panaLaLuna, randuri: [], pierdute_termen: 0, pierdute_an_vechi: 0 } };
 }
 
 function procent(v) {
@@ -234,6 +282,8 @@ function register(router) {
     if (!ctx.user || !["admin", "financiar"].includes(ctx.user.rol)) return redirect(ctx.res, "/");
     const luna = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : lunaCurenta();
     const { reguli, ultima } = await calculeaza(luna);
+    const pierdute = Number(ultima.pierdute_termen) || 0;
+    const anVechi = Number(ultima.pierdute_an_vechi) || 0;
     const randuri = ultima.randuri.filter((r) => r.incasat_net > 0 || r.cost_total > 0 || r.report_vechi < 0);
 
     const totalMarja = randuri.reduce((s, r) => s + r.marja, 0);
@@ -260,6 +310,12 @@ function register(router) {
         mai scade încă o dată. Comisionul din tabel e cel <strong>câștigat în luna asta</strong> — el se plătește
         mai departe, prin salariul unei luni următoare.
       </p>
+      <p style="max-width:820px;color:var(--text-muted);font-size:13px">
+        Se numără <strong>ce s-a încasat în lună</strong>, indiferent când a fost făcută factura, atâta timp cât e din
+        anul curent. O factură rămasă neîncasată peste 12 luni nu mai aduce comision — nici procentul din marjă, nici
+        cel din încasări nu se mai aplică pe ea. Dacă marja unei luni iese negativă, se reportează
+        <strong>întreagă</strong> și se stinge din comisioanele lunilor următoare.
+      </p>
 
       ${
         acoperireTotala !== null && acoperireTotala < 95
@@ -269,6 +325,16 @@ function register(router) {
                (acoperire ${acoperireTotala.toFixed(0)}%), așa că acolo marja iese egală cu încasarea, iar comisionul
                calculat pe ea e prea mare. Se îndreaptă singur pe măsură ce intră costurile de achiziție —
                vezi <a href="/rapoarte/produse-fara-cost">produsele fără cost</a>.
+             </div>`
+          : ""
+      }
+      ${
+        pierdute > 0 || anVechi > 0
+          ? `<div class="detail-box" style="border-left:4px solid #8a6d1f;margin-bottom:14px">
+               <strong>${money(pierdute + anVechi)}</strong> încasați în ${esc(luna)} nu intră în decont.
+               ${pierdute > 0 ? `${money(pierdute)} sunt facturi plătite la peste 12 luni de la emitere — acolo agentul pierde comisionul. ` : ""}
+               ${anVechi > 0 ? `${money(anVechi)} sunt facturi din anii trecuți, care nu mai fac baza nimănui. ` : ""}
+               Nu intră nici în bază, nici în marjă.
              </div>`
           : ""
       }
