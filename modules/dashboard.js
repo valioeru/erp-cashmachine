@@ -238,10 +238,19 @@ async function cifraAfaceriIntre(de, la, listaTipare) {
   return { total, scos };
 }
 
-// Profitul contabil dintr-o balanță: clasa 7 (venituri) minus clasa 6
-// (cheltuieli). Luăm ultima balanță din an care se încheie până la ziua
-// echivalentă — dacă nu există una exact pe zi, spunem pe ce dată e cea
-// folosită, ca să nu pară o comparație mai exactă decât e.
+// Profitul contabil, luat din balanța din Conta.
+//
+// Nu se adună clasa 7 minus clasa 6 din „total sume": lunar, conturile de
+// venituri și cheltuieli se închid în 121, iar închiderile intră tot în
+// totalurile alea — ai număra de două ori. Adevărul stă în contul 121:
+// rulajul lui creditor (veniturile închise) minus cel debitor (cheltuielile
+// închise) e chiar rezultatul perioadei. Soldul inițial al lui 121 e profitul
+// nerepartizat al anilor trecuți și n-are ce căuta în socoteala asta.
+//
+// Dacă balanța n-are 121, cădem pe clasele 7 și 6, dar pe RULAJE, nu pe
+// total sume. Cifra depinde de cât a închis contabilul: dacă august nu e
+// închis, profitul „la zi" e de fapt la iulie — de-aia se scrie lângă an
+// data balanței folosite.
 async function profitContabil(an, panaLa) {
   let sn;
   try {
@@ -256,18 +265,28 @@ async function profitContabil(an, panaLa) {
     return null;
   }
   if (!sn || !sn.eticheta) return null;
+
+  const c121 = await db
+    .prepare("SELECT r_d, r_c FROM balante_snapshot WHERE eticheta = ? AND cont = '121' LIMIT 1")
+    .get(sn.eticheta);
+  if (c121 && (Number(c121.r_c) || Number(c121.r_d))) {
+    const venituri = Number(c121.r_c) || 0;
+    const cheltuieli = Number(c121.r_d) || 0;
+    return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, sursa: "contul 121" };
+  }
+
   const r = await db
     .prepare(
       `SELECT
-         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN (CASE WHEN ts_c <> 0 OR ts_d <> 0 THEN ts_c - ts_d ELSE r_c - r_d END) ELSE 0 END), 0) AS venituri,
-         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN (CASE WHEN ts_c <> 0 OR ts_d <> 0 THEN ts_d - ts_c ELSE r_d - r_c END) ELSE 0 END), 0) AS cheltuieli
+         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN r_c - r_d ELSE 0 END), 0) AS venituri,
+         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN r_d - r_c ELSE 0 END), 0) AS cheltuieli
        FROM balante_snapshot WHERE eticheta = ? AND LENGTH(cont) <= 4`
     )
     .get(sn.eticheta);
   const venituri = Number((r && r.venituri) || 0);
   const cheltuieli = Number((r && r.cheltuieli) || 0);
   if (!venituri && !cheltuieli) return null;
-  return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta };
+  return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, sursa: "clasele 6 și 7" };
 }
 
 // Un tabel „ca primul": patru ani, aceeași fereastră, bară + valoare + diferență.
@@ -448,6 +467,8 @@ function register(router) {
         profitContabilPeAn.push({
           an,
           valoare: r ? r.profit : 0,
+          venituri: r ? r.venituri : 0,
+          cheltuieli: r ? r.cheltuieli : 0,
           nota: r ? (String(r.pana).slice(0, 10) === `${an}-${zileLuna}` ? null : `balanță la ${String(r.pana).slice(0, 10)}`) : "fără balanță",
           lipsa: !r,
         });
@@ -614,16 +635,21 @@ function register(router) {
                    <div class="hero-sub">
                      ${
                        profitContabilPeAn.some((x) => !x.lipsa)
-                         ? "Venituri (clasa 7) minus cheltuieli (clasa 6), din ultima balanță încărcată pentru fiecare an."
-                         : `Nu e încărcată nicio balanță. <a href="/balanta">Încarcă balanțele din Conta</a> ca să apară aici.`
+                         ? `Rezultatul închis în contul 121 până la data balanței${
+                             profitContabilPeAn[0] && profitContabilPeAn[0].venituri
+                               ? ` — ${money(profitContabilPeAn[0].venituri)} venituri, ${money(profitContabilPeAn[0].cheltuieli)} cheltuieli`
+                               : ""
+                           }.`
+                         : `Nu e încărcată nicio balanță. <a href="/rapoarte/balanta/istoric">Încarcă balanțele din Conta</a> ca să apară aici.`
                      }
                    </div>
                  </div>
-                 <a class="btn secondary small" href="/balanta">Balanțe →</a>
+                 <a class="btn secondary small" href="/rapoarte/balanta/istoric">Balanțe →</a>
                </div>
                ${profitContabilPeAn.some((x) => !x.lipsa) ? `<div class="viz" style="margin-top:14px">${tabelAni(profitContabilPeAn, "var(--viz-plus)")}</div>` : ""}
                <p style="font-size:12px;color:var(--text-muted);margin-top:8px">
                  Balanțele sunt fotografii pe perioade, nu pe zile. Unde nu există una fix pe ${esc(zileLuna)}, scrie lângă an data balanței folosite.
+                 Cifra ține de cât a închis contabilul în 121: dacă luna curentă nu e închisă, „la zi" înseamnă de fapt luna trecută.
                </p>
              </div>`
           : ""

@@ -211,7 +211,7 @@ function register(router) {
         ])
       )}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Warehouse — comenzi deschise", active: "/depozit", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Depozit — comenzi deschise", active: "/depozit", body }));
   });
 
   // --- potrivirea unei comenzi cu stocul ----------------------------------
