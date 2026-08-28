@@ -96,6 +96,66 @@ async function incarcaStiri() {
   return n;
 }
 
+// Sugestiile de clienți noi — firme găsite pe internet care ar putea consuma
+// ambalaje. ERP-ul n-are căutare web, deci lista vine din fișier, ca agenda.
+//
+// Aici NU ștergem nimic și NU învieм nimic: o sugestie luată de un agent
+// rămâne luată, chiar dacă firma mai apare într-un fișier ulterior. Altfel
+// un client deja preluat s-ar întoarce în listă și l-ar lua altcineva.
+// Sugestiile încă disponibile se actualizează (se poate să fi găsit între
+// timp un telefon care lipsea).
+async function incarcaSugestii() {
+  const randuri = citesteFisier("sugestii-clienti.json");
+  if (!randuri) return 0;
+  const t = acum();
+  let n = 0;
+
+  for (const r of randuri.slice(0, 200)) {
+    const cheie = String((r && r.cheie) || "").trim().toLowerCase();
+    const nume = String((r && r.nume) || "").trim();
+    if (!cheie || !nume) continue;
+
+    const valori = [
+      nume.slice(0, 200),
+      r.domeniu ? String(r.domeniu).slice(0, 200) : null,
+      r.oras ? String(r.oras).slice(0, 100) : null,
+      r.judet ? String(r.judet).slice(0, 100) : null,
+      r.site ? String(r.site).slice(0, 300) : null,
+      r.email ? String(r.email).slice(0, 200) : null,
+      r.telefon ? String(r.telefon).slice(0, 60) : null,
+      r.persoana ? String(r.persoana).slice(0, 160) : null,
+      r.cui ? String(r.cui).slice(0, 40) : null,
+      r.motiv ? String(r.motiv).slice(0, 1000) : null,
+      r.sursa ? String(r.sursa).slice(0, 500) : null,
+      Math.min(5, Math.max(1, Number(r.scor) || 3)),
+      t,
+    ];
+
+    const existent = await db.prepare("SELECT id, stare FROM sugestii_clienti WHERE cheie = ?").get(cheie);
+    if (existent) {
+      if (existent.stare !== "disponibil") continue; // luată sau respinsă — nu se atinge
+      await db
+        .prepare(
+          `UPDATE sugestii_clienti SET nume = ?, domeniu = ?, oras = ?, judet = ?, site = ?, email = ?,
+                                       telefon = ?, persoana = ?, cui = ?, motiv = ?, sursa = ?, scor = ?,
+                                       actualizat_la = ?
+             WHERE id = ?`
+        )
+        .run(...valori, existent.id);
+    } else {
+      await db
+        .prepare(
+          `INSERT INTO sugestii_clienti (nume, domeniu, oras, judet, site, email, telefon, persoana, cui,
+                                         motiv, sursa, scor, actualizat_la, cheie, creat_la)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(...valori, cheie, t);
+    }
+    n++;
+  }
+  return n;
+}
+
 // Costul lunar al agenților, citit din statele de plată din Drive.
 // Spre deosebire de agendă și știri, aici NU ștergem nimic: un cost pus de
 // mână din interfață e mai proaspăt decât fișierul, iar dacă rândul există
@@ -221,7 +281,9 @@ async function incarcaTot() {
     const s = await incarcaStiri();
     const c = await incarcaCosturi();
     const g = await incarcaAngajati();
-    if (a || s || c || g) console.log(`[sincronizare] agendă: ${a}, știri: ${s}, costuri noi: ${c}, angajați: ${g}`);
+    const su = await incarcaSugestii();
+    if (a || s || c || g || su)
+      console.log(`[sincronizare] agendă: ${a}, știri: ${s}, costuri noi: ${c}, angajați: ${g}, sugestii: ${su}`);
   } catch (e) {
     console.error("[sincronizare] încărcarea a eșuat:", e.message);
   }
