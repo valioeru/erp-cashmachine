@@ -971,6 +971,102 @@ async function ingestSugestii(randuri) {
   return { adaugate, sarite, sugestii_libere_acum: Number((libere && libere.n) || 0) };
 }
 
+// Incasari pe facturile de vanzare, aduse din raportul SmartBill. Conteaza data
+// la care au intrat banii, nu data facturii — de ea atarna comisionul agentului
+// si scadentarul. O incasare poate acoperi mai multe facturi ("CSHM2750,
+// CSHM2752"): atunci suma se imparte intre ele, proportional cu cat mai au de
+// incasat. Dublurile se evita dupa (factura, data, suma), deci se poate rula
+// de trei ori pe zi fara sa se adune plati fantoma.
+const NOTA_INCASARE = "încasare SmartBill";
+
+async function ingestIncasari(randuri) {
+  const facturi = await db
+    .prepare("SELECT id, serie, numar, document_extern FROM facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
+    .all();
+  const dupaCheie = new Map();
+  const pune = (cheie, id) => {
+    const k = String(cheie || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!k) return;
+    if (!dupaCheie.has(k)) dupaCheie.set(k, []);
+    if (!dupaCheie.get(k).includes(id)) dupaCheie.get(k).push(id);
+  };
+  for (const f of facturi) {
+    pune(`${f.serie || ""}${f.numar || ""}`, f.id);
+    if (f.document_extern) pune(f.document_extern, f.id);
+  }
+
+  const existente = new Set(
+    (await db.prepare("SELECT factura_id, data, suma FROM plati").all()).map(
+      (x) => `${x.factura_id}|${String(x.data).slice(0, 10)}|${Number(x.suma).toFixed(2)}`
+    )
+  );
+  const solduri = new Map(
+    (
+      await db
+        .prepare(
+          `SELECT f.id,
+                  COALESCE((SELECT SUM(l.cantitate * l.pret_unitar) FROM facturi_linii l WHERE l.factura_id = f.id), 0)
+                  - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS sold
+             FROM facturi f WHERE f.directie = 'vanzare'`
+        )
+        .all()
+    ).map((x) => [x.id, Number(x.sold) || 0])
+  );
+
+  let scrise = 0;
+  let dubluri = 0;
+  let negasite = 0;
+  const exemple = [];
+
+  for (const r of randuri) {
+    const suma = Math.round(nr(r.suma) * 100) / 100;
+    const zi = String(r.data || "").slice(0, 10);
+    if (!(suma > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(zi)) continue;
+
+    const chei = String(r.factura || "")
+      .split(/[,;]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    const tinte = [];
+    for (const c of chei) {
+      const ids = dupaCheie.get(c.toUpperCase().replace(/[^A-Z0-9]/g, ""));
+      if (ids && ids.length) tinte.push(ids[0]);
+    }
+    if (!tinte.length) {
+      negasite++;
+      if (exemple.length < 15) exemple.push(String(r.factura || "").slice(0, 60));
+      continue;
+    }
+
+    // impartirea pe facturi: dupa cat mai are fiecare de incasat; daca nu se
+    // stie (facturi fara linii), in parti egale
+    const ponderi = tinte.map((id) => Math.max(solduri.get(id) || 0, 0));
+    const totalPonderi = ponderi.reduce((a, b) => a + b, 0);
+    let ramas = suma;
+    for (let i = 0; i < tinte.length; i++) {
+      const ultima = i === tinte.length - 1;
+      const parte = ultima
+        ? Math.round(ramas * 100) / 100
+        : Math.round((totalPonderi > 0 ? (suma * ponderi[i]) / totalPonderi : suma / tinte.length) * 100) / 100;
+      ramas = Math.round((ramas - parte) * 100) / 100;
+      if (!(parte > 0)) continue;
+      const amprenta = `${tinte[i]}|${zi}|${parte.toFixed(2)}`;
+      if (existente.has(amprenta)) {
+        dubluri++;
+        continue;
+      }
+      await db
+        .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES (?, ?, ?, ?, ?)")
+        .run(tinte[i], parte, zi, curat(r.metoda) || "transfer bancar", NOTA_INCASARE);
+      existente.add(amprenta);
+      solduri.set(tinte[i], (solduri.get(tinte[i]) || 0) - parte);
+      scrise++;
+    }
+  }
+
+  return { incasari_scrise: scrise, dubluri_sarite: dubluri, facturi_negasite: negasite, exemple_negasite: exemple.slice(0, 10) };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
@@ -985,6 +1081,7 @@ const HANDLERE = {
   angajati: ingestAngajati,
   salarii: ingestSalarii,
   sugestii: ingestSugestii,
+  incasari: ingestIncasari,
 };
 
 function register(router) {
