@@ -359,6 +359,20 @@ async function clientiPierduti(de, la, deAnTrecut, laAnTrecut) {
     .all(deAnTrecut, laAnTrecut, de, la);
 }
 
+// Furnizorii de la care pleacă banii — pandantul clienților.
+async function topFurnizori(de, la) {
+  return await db
+    .prepare(
+      `SELECT p.id, p.nume, COALESCE(SUM(t.net), 0) AS net, COUNT(DISTINCT f.id) AS facturi
+         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         JOIN parteneri p ON p.id = f.partener_id
+        WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+        GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 10`
+    )
+    .all(de, la);
+}
+
 // Ce s-a vândut, ca produs. Are sens doar cât detaliul pe linii e adus din
 // SmartBill — de-aia scriem lângă el pe câte facturi ne bazăm.
 async function topProduse(de, la) {
@@ -497,6 +511,7 @@ function register(router) {
     const clientiTop = await topClienti(deAnul, laAzi, deAnTrecut, laAnTrecut);
     const pierduti = await clientiPierduti(deAnul, laAzi, deAnTrecut, laAnTrecut);
     const produse = await topProduse(deAnul, laAzi);
+    const furnizori = await topFurnizori(deAnul, laAzi);
     const incasat = await deIncasat(aziStr);
 
     // ---- 3. Ce am de făcut ----------------------------------------------
@@ -556,6 +571,7 @@ function register(router) {
         .an-val { text-align:right; font-variant-numeric:tabular-nums; }
         .an-dif { font-size:12px; color:var(--text-muted); font-variant-numeric:tabular-nums; }
         .doua { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
+        .trei { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; }
         @media (max-width:640px){ .an-rand { grid-template-columns:74px 1fr 100px; } .an-dif { display:none; } }
       </style>`;
 
@@ -691,52 +707,66 @@ function register(router) {
         </div>
       </div>
 
-      <div class="doua">
+      <h2>Top la zi, ${esc(String(anCurent))}</h2>
+      <div class="trei">
         <div>
-          <h2 style="margin-top:0">Clienții care aduc banii, ${esc(String(anCurent))} la zi</h2>
+          <h3 style="margin-top:0">Produse</h3>
+          ${
+            produse.randuri.length
+              ? table(
+                  ["Produs", "Valoare"],
+                  produse.randuri.slice(0, 10).map((p) => [esc(p.denumire), money(p.net)])
+                )
+              : '<p style="color:var(--text-muted)">Încă nu e adus detaliul pe produse al facturilor.</p>'
+          }
+          ${
+            produse.acoperire.total
+              ? `<p style="font-size:12px;color:var(--text-muted)">Din ${Number(produse.acoperire.cu_linii || 0)} din cele ${Number(
+                  produse.acoperire.total || 0
+                )} facturi ale anului — atâtea au deocamdată detaliul pe produse.</p>`
+              : ""
+          }
+        </div>
+        <div>
+          <h3 style="margin-top:0">Clienți</h3>
           ${
             clientiTop.length
               ? table(
-                  ["Client", "Anul ăsta", "Aceeași perioadă anul trecut", "Diferență"],
-                  clientiTop.map((c) => [
+                  ["Client", "Anul ăsta", "Față de anul trecut"],
+                  clientiTop.slice(0, 10).map((c) => [
                     `<a href="/parteneri/${c.partener_id}">${esc(c.nume)}</a>`,
                     money(c.net),
-                    c.anul_trecut ? money(c.anul_trecut) : "—",
-                    c.anul_trecut ? `${sageata(c.delta)} ${money(Math.abs(c.delta))}` : '<span class="badge verde">client nou</span>',
+                    c.anul_trecut ? `${sageata(c.delta)} ${money(Math.abs(c.delta))}` : '<span class="badge verde">nou</span>',
                   ])
                 )
               : '<p style="color:var(--text-muted)">Nicio factură în perioada asta.</p>'
           }
         </div>
         <div>
-          <h2 style="margin-top:0">Cine cumpăra anul trecut și nu mai cumpără</h2>
+          <h3 style="margin-top:0">Furnizori</h3>
           ${
-            pierduti.length
+            furnizori.length
               ? table(
-                  ["Client", "Cumpăra anul trecut", ""],
-                  pierduti.map((c) => [
-                    `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
-                    money(c.net_an_trecut),
-                    `<a class="link-btn" href="/crm/contact/${c.id}">Contactează</a>`,
-                  ])
+                  ["Furnizor", "Cumpărat", "Facturi"],
+                  furnizori.map((f) => [`<a href="/parteneri/${f.id}">${esc(f.nume)}</a>`, money(f.net), f.facturi])
                 )
-              : '<p style="color:var(--text-muted)">Niciun client pierdut față de aceeași perioadă de anul trecut. Rar, dar se întâmplă.</p>'
+              : '<p style="color:var(--text-muted)">Nicio achiziție în perioada asta.</p>'
           }
         </div>
       </div>
 
-      <h2>Ce se vinde, ${esc(String(anCurent))} la zi</h2>
+      <h2>Cine cumpăra anul trecut și nu mai cumpără</h2>
       ${
-        produse.randuri.length
+        pierduti.length
           ? table(
-              ["Produs", "Cantitate", "Valoare"],
-              produse.randuri.map((p) => [esc(p.denumire), Number(p.cant).toLocaleString("ro-RO", { maximumFractionDigits: 2 }), money(p.net)])
-            ) +
-            `<p style="font-size:12px;color:var(--text-muted)">
-               Socotit din ${Number(produse.acoperire.cu_linii || 0)} din cele ${Number(produse.acoperire.total || 0)} facturi ale anului —
-               atâtea au deocamdată detaliul pe produse adus din SmartBill. Pe măsură ce puntea aduce restul, tabelul se completează singur.
-             </p>`
-          : '<p style="color:var(--text-muted)">Încă nu e adus detaliul pe produse al facturilor. Se aduce din SmartBill, prin punte.</p>'
+              ["Client", "Cumpăra anul trecut", ""],
+              pierduti.map((c) => [
+                `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
+                money(c.net_an_trecut),
+                `<a class="link-btn" href="/crm/contact/${c.id}">Contactează</a>`,
+              ])
+            )
+          : '<p style="color:var(--text-muted)">Niciun client pierdut față de aceeași perioadă de anul trecut. Rar, dar se întâmplă.</p>'
       }
 
       <div class="doua">

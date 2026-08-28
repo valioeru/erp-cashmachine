@@ -62,32 +62,91 @@ function nr(v) {
 // mărime care scade, nu categorii independente — un curcubeu ar minți despre
 // relația dintre benzi. Cerneala de pe fiecare bandă e aleasă după contrast
 // (peste 4.5:1 pe toate), nu după gust.
-const PALNIE_STADII = [
-  { key: "lead", label: "Lead", fill: "#e3ecf9", ink: "#1a2233" },
-  { key: "calificat", label: "Calificat", fill: "#c2d5ef", ink: "#1a2233" },
-  { key: "oferta", label: "Ofertă trimisă", fill: "#93b3e0", ink: "#1a2233" },
-  { key: "negociere", label: "Negociere", fill: "#3a6bb0", ink: "#ffffff" },
-  { key: "castigat", label: "Câștigat", fill: "#22497e", ink: "#ffffff" },
+// Culorile: o singură familie de albastru, de la deschis la închis. E o
+// mărime care scade de la un pas la altul, nu categorii independente — un
+// curcubeu ar minți despre relația dintre benzi. Cerneala fiecărei benzi e
+// aleasă după contrast, peste 4.5:1 pe toate.
+const CULORI_PALNIE = [
+  { fill: "#e3ecf9", ink: "#1a2233" },
+  { fill: "#c2d5ef", ink: "#1a2233" },
+  { fill: "#93b3e0", ink: "#1a2233" },
+  { fill: "#3a6bb0", ink: "#ffffff" },
+  { fill: "#22497e", ink: "#ffffff" },
 ];
 
-function palnie(oportunitati) {
-  const trepte = PALNIE_STADII.map((s) => {
-    const items = oportunitati.filter((o) => o.stadiu === s.key);
-    return { ...s, n: items.length, valoare: items.reduce((t, o) => t + Number(o.valoare_estimata || 0), 0) };
-  });
-  const pierdute = oportunitati.filter((o) => o.stadiu === "pierdut");
+// Treptele pâlniei, luate din ce se întâmplă de fapt: lead-uri, oferte,
+// comenzi. Dacă cineva ține și oportunități, ele se adaugă peste treapta
+// potrivită — dar pâlnia nu mai depinde de ele ca să existe.
+async function trepteleP(filtruAgent) {
+  const undeAgent = filtruAgent ? " AND (l.atribuit_lui = ? OR l.atribuit_lui IS NULL)" : "";
+  const argAgent = filtruAgent ? [filtruAgent] : [];
+
+  const leaduri = await db
+    .prepare(`SELECT stadiu, COUNT(*) AS n FROM leaduri l WHERE 1=1${undeAgent} GROUP BY stadiu`)
+    .all(...argAgent)
+    .catch(() => []);
+  const peStadiu = new Map((leaduri || []).map((r) => [String(r.stadiu), Number(r.n) || 0]));
+
+  const undeOferte = filtruAgent ? " AND o.agent_id = ?" : "";
+  const oferte = await db
+    .prepare(
+      `SELECT o.status, COUNT(*) AS n,
+              COALESCE(SUM((SELECT SUM(ol.cantitate * ol.pret_unitar) FROM oferte_linii ol WHERE ol.oferta_id = o.id)), 0) AS valoare
+         FROM oferte o WHERE 1=1${undeOferte} GROUP BY o.status`
+    )
+    .all(...argAgent)
+    .catch(() => []);
+  const peOferta = new Map((oferte || []).map((r) => [String(r.status), { n: Number(r.n) || 0, valoare: Number(r.valoare) || 0 }]));
+  const of = (k) => peOferta.get(k) || { n: 0, valoare: 0 };
+
+  const undeComenzi = filtruAgent ? " AND c.agent_id = ?" : "";
+  const comenzi = await db
+    .prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id)), 0) AS valoare
+         FROM comenzi c WHERE c.status != 'anulata'${undeComenzi}`
+    )
+    .get(...argAgent)
+    .catch(() => ({ n: 0, valoare: 0 }));
+
+  const oportunitati = await db
+    .prepare(
+      `SELECT stadiu, COUNT(*) AS n, COALESCE(SUM(valoare_estimata), 0) AS valoare FROM oportunitati o
+        WHERE 1=1${filtruAgent ? " AND o.atribuit_lui = ?" : ""} GROUP BY stadiu`
+    )
+    .all(...argAgent)
+    .catch(() => []);
+  const peOp = new Map((oportunitati || []).map((r) => [String(r.stadiu), { n: Number(r.n) || 0, valoare: Number(r.valoare) || 0 }]));
+  const op = (k) => peOp.get(k) || { n: 0, valoare: 0 };
+
+  const trepte = [
+    { label: "Lead-uri", unitate: "lead-uri", n: (peStadiu.get("nou") || 0) + (peStadiu.get("contactat") || 0) + op("lead").n, valoare: op("lead").valoare },
+    { label: "Calificate", unitate: "calificate", n: (peStadiu.get("calificat") || 0) + op("calificat").n, valoare: op("calificat").valoare },
+    { label: "Oferte trimise", unitate: "oferte", n: of("trimisa").n + op("oferta").n, valoare: of("trimisa").valoare + op("oferta").valoare },
+    { label: "În negociere", unitate: "oferte", n: of("negociere").n + op("negociere").n, valoare: of("negociere").valoare + op("negociere").valoare },
+    { label: "Comenzi", unitate: "comenzi", n: (Number(comenzi && comenzi.n) || 0) + op("castigat").n, valoare: (Number(comenzi && comenzi.valoare) || 0) + op("castigat").valoare },
+  ].map((t, i) => ({ ...t, ...CULORI_PALNIE[i] }));
+
+  const pierdute = {
+    n: (peStadiu.get("necalificat") || 0) + of("respinsa").n + op("pierdut").n,
+    valoare: of("respinsa").valoare + op("pierdut").valoare,
+  };
+
+  return { trepte, pierdute };
+}
+
+function palnie(trepte, pierdute) {
   const maxN = Math.max(...trepte.map((t) => t.n), 1);
   const total = trepte.reduce((t, x) => t + x.n, 0);
-  if (!total && !pierdute.length) {
-    return '<p style="color:var(--text-muted)">Pâlnia se desenează singură când ai prima oportunitate în pipeline.</p>';
+  if (!total && !(pierdute && pierdute.n)) {
+    return '<p style="color:var(--text-muted)">Pâlnia se desenează singură când apare primul lead sau prima ofertă.</p>';
   }
 
   const L = 900;
   const H_BANDA = 74;
-  const SPATIU = 2; // aceleași 2px de fundal între benzi ca între barele din rapoarte
-  const MIN_L = 260; // sub atât nu mai încape scrisul în bandă
+  const SPATIU = 2;
+  const MIN_L = 260;
   const inaltime = trepte.length * (H_BANDA + SPATIU) + 4;
-
   const latime = (n) => MIN_L + (L - MIN_L) * (maxN ? n / maxN : 0);
 
   const benzi = trepte
@@ -103,12 +162,14 @@ function palnie(oportunitati) {
       const centru = L / 2;
       return `
         <g>
-          <title>${esc(t.label)}: ${t.n} oportunități, ${money(t.valoare)}${conversie !== null ? `, ${conversie}% din „${esc(trepte[i - 1].label)}"` : ""}</title>
+          <title>${esc(t.label)}: ${t.n}${t.valoare ? `, ${money(t.valoare)}` : ""}${
+            conversie !== null ? `, ${conversie}% din „${esc(trepte[i - 1].label)}"` : ""
+          }</title>
           <polygon points="${puncte}" fill="${t.fill}"></polygon>
           <text x="${centru}" y="${y + 28}" text-anchor="middle" fill="${t.ink}" font-size="15" font-weight="600">${esc(t.label)}</text>
-          <text x="${centru}" y="${y + 50}" text-anchor="middle" fill="${t.ink}" font-size="13" opacity="0.9">${t.n} ${
-            t.n === 1 ? "oportunitate" : "oportunități"
-          } · ${money(t.valoare)}</text>
+          <text x="${centru}" y="${y + 50}" text-anchor="middle" fill="${t.ink}" font-size="13" opacity="0.9">${t.n} ${esc(
+            t.unitate || (t.n === 1 ? "bucată" : "bucăți")
+          )}${t.valoare ? ` · ${money(t.valoare)}` : ""}</text>
           ${
             conversie !== null
               ? `<text x="${centru}" y="${y + 68}" text-anchor="middle" fill="${t.ink}" font-size="11" opacity="0.75">${conversie}% din „${esc(
@@ -121,8 +182,8 @@ function palnie(oportunitati) {
     .join("");
 
   const primul = trepte[0].n;
-  const castigate = trepte[trepte.length - 1];
-  const rataFinala = primul ? Math.round((castigate.n / primul) * 100) : null;
+  const ultim = trepte[trepte.length - 1];
+  const rataFinala = primul ? Math.round((ultim.n / primul) * 100) : null;
 
   return `
     <div class="palnie" style="margin:6px 0 18px">
@@ -133,13 +194,13 @@ function palnie(oportunitati) {
         </svg>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:13px;color:var(--text-muted);margin-top:8px">
-        <span><strong style="color:var(--text)">${total}</strong> oportunități în pâlnie</span>
-        ${rataFinala !== null ? `<span>rata de câștig <strong style="color:var(--text)">${rataFinala}%</strong> din lead-uri</span>` : ""}
+        <span><strong style="color:var(--text)">${total}</strong> în pâlnie</span>
+        ${rataFinala !== null ? `<span>ajung comenzi <strong style="color:var(--text)">${rataFinala}%</strong> din lead-uri</span>` : ""}
         ${
-          pierdute.length
+          pierdute && pierdute.n
             ? `<span style="display:inline-flex;align-items:center;gap:6px">
                  <span style="width:10px;height:10px;border-radius:2px;background:#b3261e;display:inline-block"></span>
-                 ${pierdute.length} pierdute · ${money(pierdute.reduce((t, o) => t + Number(o.valoare_estimata || 0), 0))}
+                 ${pierdute.n} pierdute${pierdute.valoare ? ` · ${money(pierdute.valoare)}` : ""}
                </span>`
             : ""
         }
@@ -190,6 +251,7 @@ function register(router) {
       .all(...(ctx.user ? [ctx.user.id] : []));
 
     const nrLeaduriNoi = (await db.prepare("SELECT COUNT(*) AS n FROM leaduri WHERE stadiu IN ('nou','contactat')").get()).n;
+    const dateP = await trepteleP(filtruAgent);
 
     const coloane = STADII.map((s) => {
       const items = oportunitati.filter((o) => o.stadiu === s.key);
@@ -234,9 +296,9 @@ function register(router) {
         }
       </div>
       <h2 style="margin-bottom:4px">Pâlnia de vânzări</h2>
-      ${palnie(oportunitati)}
-      <h2>Pe stadii, oportunitate cu oportunitate</h2>
-      <div class="crm-board">${coloane}</div>
+      ${palnie(dateP.trepte, dateP.pierdute)}
+      ${oportunitati.length ? "<h2>Oportunitățile, una câte una</h2>" : ""}
+      ${oportunitati.length ? `<div class="crm-board">${coloane}</div>` : ""}
 
       <h2>Task-urile mele deschise</h2>
       ${
