@@ -68,24 +68,68 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
 - [x] **Cost pe produs**: din evaluarea stocului SmartBill și, pentru
       produsele fabricate, din rețetă.
 
+- [x] **Meniu restructurat**: nouă zone în loc de șaisprezece — Warehouse
+      (comenzi deschise, stocuri, depozite, aprovizionare, achiziții),
+      Financiar (bancă, angajați, salarizare, cost company, import) și CRM
+      (cu comenzi, produse, calculator de preț).
+- [x] **Fluxul nou de comenzi**: comanda intră în depozit, se potrivește cu
+      stocul linie cu linie, se confirmă / se rezervă 24 h / se cere
+      aprovizionare de la terț sau din producție. Producția confirmă sau
+      refuză termenul cerut de agent; la confirmare comanda de producție se
+      deschide singură. Agentul alege apoi: facturează tot, facturează parțial
+      ce e în stoc, sau așteaptă comanda completă. Producția cere la rândul ei
+      materie primă de la depozit, cu același drum invers.
+- [x] **Pâlnia de vânzări desenată**, o bandă per stadiu, cu numărul,
+      valoarea și conversia scrise în bandă.
+- [x] **Dashboard**: al doilea tabel cu cifra de afaceri fără vânzările de
+      active (listă de excluderi editabilă) și cu suma anului curent
+      corectabilă de mână; al treilea tabel, doar pentru administrator, cu
+      profitul contabil din balanțele Conta; „Profit" redenumit EBITDA;
+      plus de încasat, clienții care aduc banii, clienții pierduți față de
+      anul trecut și ce se vinde.
+- [x] **Calculator de preț** pe categorii de produs, cu formule editabile din
+      interfață, marjă și trimitere directă în ofertă sau comandă.
+- [x] **Angajații din statele de plată din Drive** — 11 oameni, fără CNP-uri.
+- [x] **Backup** al întregii baze într-un singur fișier, cu task programat
+      noaptea.
+
 ## De făcut
 
-### 1. Ce mai lipsește la cost company
-- **Carburantul OMV** — singurul lucru care lipsește din cost company. Cere
-  login-ul lui Vali (nu introduc parole) și permisiune pentru extensie pe
-  `fleet.omv.com`.
-- Statele de plată se citesc azi manual, din Drive, și ajung în ERP prin
-  `date/costuri-agenti.json`. Conectorul Google Drive NU vede folderul
-  Grup-Oeru (e partajat, nu deținut de contul cashmachine.ro), deci drumul
-  rămâne browserul.
+### 1. Restul detaliului pe produse din facturi
+Din cele 594 de facturi de vânzare pe 2026 s-a adus detaliul pe linii pentru
+~316. Puntea din browser își ia acum coada din `/api/facturi-fara-linii?an=2026`,
+deci nu mai recitește ce e adus. Ritmul e ~5 facturi/minut, limitat de cât
+durează randarea paginii SmartBill. Rămâne un lot în `/import/punte` care
+așteaptă „aplică".
 
-### 2. Restul detaliului pe produse
-- Din cele 594 de facturi pe 2026 s-a importat detaliul pentru primele ~100,
-  de la cele mai noi spre vechi. Restul se pot lua rulând din nou puntea —
-  ritmul e ~5 facturi/minut, limitat de cât durează randarea paginii SmartBill.
-- Top-vânzătorii lunii curente încă apar cu cost 0: produsele potrivite pe
-  linia de factură n-au preț de achiziție nici din stoc, nici din rețetă.
-  Probabil sunt rânduri duplicate de produs — de verificat în nomenclator.
+Facturi care n-au dat linii nici după citire: ~25 („fără linii", șablonul A al
+SmartBill nu e citit complet) și ~8 cu linii care nu trec validarea aritmetică
+(taxa de mediu în procente, deșeuri cu cantitate negativă). Se rezolvă lărgind
+validarea, nu citind din nou.
+
+### 2. Ce mai lipsește la cost company
+- **Carburantul OMV** — singurul lucru care lipsește. Cere login-ul lui Vali
+  (nu introduc parole) și permisiune pentru extensie pe `fleet.omv.com`.
+- Angajații se iau acum automat din statele de plată (`date/angajati.json`,
+  11 oameni). Costul mașinii și carburantul rămân de completat pe fiecare.
+
+### 3. Backup-ul în Drive
+Aplicația face backup-ul (`/admin/backup`, 42 de tabele, ~130.000 de rânduri,
+2,5 MB gzip). Sesiunea programată din Cowork îl descarcă noaptea la 03:00 în
+`C:\Users\PC\Downloads`. **Ca să meargă, Vali trebuie să aprobe o dată
+task-ul programat pentru calculatorul lui** — altfel rulează în cloud, unde nu
+are nici browser, nici acces la fișierele lui.
+
+Pentru copia în Google Drive: contul din browser (`valentin.oeru@gmail.com`) și
+contul conectorului Drive (`valentin.oeru@cashmachine.ro`) sunt diferite, iar
+fișierul de 2,5 MB nu poate trece prin conector. Variante: un folder sincronizat
+cu Google Drive for desktop (scriu direct în el), sau conectarea contului
+gmail.com la Cowork.
+
+### 4. Calculatorul de preț
+Formulele implicite (folie stretch, bandă adezivă) sunt puse cu bun-simț, nu cu
+cifrele din fabrică. Se schimbă din `/calculator/categorii` — Vali dă cifrele
+lui și le înlocuim.
 
 ## Blocaje care țin de altcineva
 
@@ -98,3 +142,5 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
   SMTP al primului utilizator care are unul configurat (Profilul meu → Email).
   Până când cineva îl configurează, notificările se înregistrează ca „eșuat",
   cu motivul scris pe ele.
+- **Balanțele din Conta**: al treilea tabel de pe dashboard (profitul contabil)
+  se completează singur când sunt încărcate balanțele în `/balanta`.
