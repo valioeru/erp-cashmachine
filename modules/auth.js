@@ -47,44 +47,64 @@ function register(router) {
   });
 
   // Schimbare parolă proprie (orice utilizator autentificat).
-  router.get("/profil", async (ctx) => {
-    const body = `
+  // Formularul e scos afară din rută fiindcă îl refolosim și când parola dată
+  // n-a trecut verificarea: omul rămâne pe el și corectează, nu e trimis pe o
+  // pagină moartă cu un singur link „Înapoi".
+  //
+  // autocomplete="new-password" nu e cosmetic: fără el, Chrome umple singur
+  // primul câmp cu parola salvată pentru site, omul scrie doar în al doilea,
+  // cele două nu coincid și pare că aplicația „nu vrea" să schimbe parola.
+  function paginaProfil(user, eroare) {
+    return layout({
+      user,
+      title: "Profilul meu",
+      active: "/profil",
+      body: `
       <div class="detail-box"><div class="detail-grid">
-        <div><div class="k">Nume</div>${esc(ctx.user.nume)}</div>
-        <div><div class="k">Email</div>${esc(ctx.user.email)}</div>
-        <div><div class="k">Rol</div>${esc(auth.ROLURI[ctx.user.rol] || ctx.user.rol)}</div>
+        <div><div class="k">Nume</div>${esc(user.nume)}</div>
+        <div><div class="k">Email</div>${esc(user.email)}</div>
+        <div><div class="k">Rol</div>${esc(auth.ROLURI[user.rol] || user.rol)}</div>
       </div></div>
       ${
-        ctx.user.parola_temporara
+        user.parola_temporara
           ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
               <strong>Ai încă parola implicită.</strong> Alege una proprie mai jos — până atunci nu poți folosi restul aplicației.
             </div>`
           : ""
       }
+      ${eroare ? `<div class="flash" style="background:#fdecec;border-color:#f0b4b4;color:var(--danger)">${esc(eroare)}</div>` : ""}
       <h2>Schimbă parola</h2>
-      <form method="post" action="/profil/parola" class="form" style="max-width:420px">
-        <label class="field"><span>Parolă nouă</span><input type="password" name="parola" required minlength="6"></label>
-        <label class="field"><span>Confirmă parola nouă</span><input type="password" name="parola2" required minlength="6"></label>
+      <form method="post" action="/profil/parola" class="form" style="max-width:420px" autocomplete="off">
+        <input type="text" name="email_ascuns" value="${esc(user.email)}" autocomplete="username" style="display:none" readonly>
+        <label class="field"><span>Parolă nouă</span>
+          <input type="password" name="parola" required minlength="6" autocomplete="new-password" autofocus>
+          <small style="color:var(--text-muted)">Minim 6 caractere. Scrie-o tu, nu lăsa browserul s-o completeze.</small>
+        </label>
+        <label class="field"><span>Confirmă parola nouă</span>
+          <input type="password" name="parola2" required minlength="6" autocomplete="new-password">
+        </label>
         <button type="submit" class="btn">Schimbă parola</button>
       </form>
-    `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Profilul meu", active: "/profil", body }));
+    `,
+    });
+  }
+
+  router.get("/profil", async (ctx) => {
+    send(ctx.res, 200, paginaProfil(ctx.user, null));
   });
 
   router.post("/profil/parola", async (ctx) => {
-    const { parola, parola2 } = ctx.body;
-    if (!parola || parola.length < 6 || parola !== parola2) {
-      return send(
-        ctx.res,
-        200,
-        layout({
-          user: ctx.user,
-          title: "Profilul meu",
-          active: "/profil",
-          body: `<p style="color:var(--danger)">Parolele nu coincid sau sunt prea scurte (minim 6 caractere).</p><a href="/profil" class="btn secondary">Înapoi</a>`,
-        })
-      );
-    }
+    const parola = String(ctx.body.parola || "");
+    const parola2 = String(ctx.body.parola2 || "");
+    // Spunem exact ce n-a mers. „Nu coincid sau sunt prea scurte" îl lasă pe om
+    // să ghicească, iar cel mai des vinovat e câmpul de confirmare completat de
+    // browser cu altceva.
+    let eroare = null;
+    if (!parola) eroare = "N-ai scris nicio parolă nouă.";
+    else if (parola.length < 6) eroare = `Parola are ${parola.length} caractere, sunt necesare cel puțin 6.`;
+    else if (!parola2) eroare = "Trebuie să scrii parola a doua oară, în câmpul de confirmare.";
+    else if (parola !== parola2) eroare = "Cele două parole nu sunt identice. Verifică dacă browserul n-a completat singur primul câmp — șterge-l și scrie-le tu pe amândouă.";
+    if (eroare) return send(ctx.res, 200, paginaProfil(ctx.user, eroare));
     const { hash, salt } = auth.hashParola(parola);
     await db.prepare("UPDATE utilizatori SET parola_hash = ?, parola_salt = ?, parola_temporara = 0 WHERE id = ?").run(hash, salt, ctx.user.id);
     redirect(ctx.res, ctx.user.rol === "vanzari" ? "/crm/birou" : "/");
