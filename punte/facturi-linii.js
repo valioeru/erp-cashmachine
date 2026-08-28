@@ -180,11 +180,25 @@
       if (scor > scorMax) { scorMax = scor; colDenumire = i; }
     }
 
+    // Denumirea vine din pagina cu tot cu codul produsului in fata, in forma
+    // (sac1000) Sac transparent..., si cu descrierea pe randurile urmatoare.
+    // Rupem codul, ca ERP-ul sa poata lega linia de produs, si stoarcem numele
+    // intr-un singur rand.
+    function despartitCod(brut) {
+      const intreg = String(brut || "").replace(/\s+/g, " ").trim();
+      const m = intreg.match(/^\(([^)]{1,40})\)\s*(.+)$/);
+      if (m) return { cod: m[1].trim(), denumire: m[2].trim() };
+      return { cod: "", denumire: intreg };
+    }
+
     const linii = [];
     const probleme = [];
     for (const r of randuri) {
-      const denumire = String(r[colDenumire] || "").trim();
-      if (!denumire || /^total/i.test(denumire)) continue;
+      const brut = String(r[colDenumire] || "").trim();
+      if (!brut || /^total/i.test(brut)) continue;
+      const desp = despartitCod(brut);
+      const cod = desp.cod;
+      const denumire = desp.denumire;
       const cant = cell(r[comb.cant]);
       const pret = cell(r[comb.pret]);
       const val = cell(r[comb.val]);
@@ -198,12 +212,12 @@
       // cantitate × preț = valoare. Le păstrăm cu valoarea declarată și
       // cantitatea 1, și notăm de ce.
       if (iese) {
-        linii.push({ denumire, cantitate: cant, pret_unitar: pret });
+        linii.push({ cod, denumire, cantitate: cant, pret_unitar: pret });
       } else if (!isNaN(val) && val !== 0) {
-        linii.push({ denumire, cantitate: 1, pret_unitar: val, nepotrivit: true });
+        linii.push({ cod, denumire, cantitate: 1, pret_unitar: val, nepotrivit: true });
         probleme.push(denumire);
       } else if (!isNaN(pret) && pret !== 0) {
-        linii.push({ denumire, cantitate: isNaN(cant) ? 1 : cant, pret_unitar: pret, nepotrivit: true });
+        linii.push({ cod, denumire, cantitate: isNaN(cant) ? 1 : cant, pret_unitar: pret, nepotrivit: true });
         probleme.push(denumire);
       }
     }
