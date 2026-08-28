@@ -110,6 +110,8 @@ function register(router) {
     table: "parteneri",
     title: "Parteneri (clienți & furnizori)",
     singular: "partener",
+    // Clientul introdus de un agent rămâne al lui, 100%.
+    afterCreate: (id, ctx) => alocari.alocaLaCreare(id, ctx.user),
     fields: [
       {
         name: "tip",
