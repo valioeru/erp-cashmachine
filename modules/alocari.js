@@ -464,7 +464,9 @@ function register(router) {
     }
 
     const args = [];
-    let where = "p.tip IN ('client','ambele')";
+    // Firmele din grup nu sunt clienți de lucrat: nu se alocă pe agenți și nu
+    // intră în portofoliul nimănui, chiar dacă în contabilitate există facturi.
+    let where = "p.tip IN ('client','ambele') AND p.firma_grup_id IS NULL";
     if (cauta) { where += " AND LOWER(p.nume) LIKE ?"; args.push(`%${cauta.toLowerCase()}%`); }
     const clienti = await db
       .prepare(
@@ -631,7 +633,9 @@ function register(router) {
     const utilizatori = await db.prepare("SELECT id, nume, rol FROM utilizatori WHERE activ = 1 AND rol IN ('admin','vanzari') ORDER BY rol DESC, nume").all();
 
     const args = [];
-    let where = "p.tip IN ('client','ambele')";
+    // Firmele din grup nu sunt clienți de lucrat: nu se alocă pe agenți și nu
+    // intră în portofoliul nimănui, chiar dacă în contabilitate există facturi.
+    let where = "p.tip IN ('client','ambele') AND p.firma_grup_id IS NULL";
     if (cauta) { where += " AND LOWER(p.nume) LIKE ?"; args.push(`%${cauta.toLowerCase()}%`); }
 
     const clienti = await db

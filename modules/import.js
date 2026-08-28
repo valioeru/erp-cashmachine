@@ -237,7 +237,7 @@ function paginaRezultat(titlu, rezumat, erori) {
 
 function register(router) {
   router.get("/import", async (ctx) => {
-    const firmeGrup = await grup.listaFirme();
+    const firmeGrup = await grup.listaFirmeOperationale();
     const stats = {
       parteneri: (await db.prepare("SELECT COUNT(*) n FROM parteneri").get()).n,
       facturiVanzare: (await db.prepare("SELECT COUNT(*) n FROM facturi WHERE directie='vanzare'").get()).n,

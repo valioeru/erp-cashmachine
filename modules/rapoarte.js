@@ -592,7 +592,7 @@ function register(router) {
   router.get("/rapoarte/consolidat", async (ctx) => {
     const interval = intervalDinQuery(ctx, 12);
     const { deLa, panaLa } = interval;
-    const firme = await grup.listaFirme();
+    const firme = await grup.listaFirmeOperationale();
 
     async function cifre(filtruFirma) {
       const q = async (sql, ...args) => (await db.prepare(sql).get(...args)) || {};
