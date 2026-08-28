@@ -111,6 +111,38 @@ async function alocariPentruPartener(partenerId) {
   return { explicite: false, linii: [] };
 }
 
+// Clientul adus de un agent rămâne al lui: la creare se alocă 100% celui
+// care l-a băgat. Fără asta, agentul trebuia să-și revendice singur clientul
+// pe care tot el l-a introdus — un pas pe care e ușor să-l uiți, iar apoi
+// comisionul merge pe lângă.
+//
+// Se aplică DOAR agenților de vânzări. Când administratorul introduce un
+// client, acesta rămâne nealocat și apare în lista de revendicat, ca oricare
+// dintre agenți să-l poată lua.
+//
+// Alocarea se face doar dacă partenerul chiar e client (nu furnizor) și doar
+// dacă n-are deja o alocare — nu suprascriem niciodată o alocare existentă.
+// Marcajul din „observatii" e diferit de „alocat automat...", pentru că
+// recalcularea din registrul de comenzi șterge alocările automate, iar
+// clientul adus de un agent nu trebuie să dispară la o recalculare.
+async function alocaLaCreare(partenerId, user) {
+  const id = Number(partenerId);
+  if (!Number.isFinite(id) || !user || user.rol !== "vanzari") return false;
+
+  const p = await db.prepare("SELECT id, tip, agent_id FROM parteneri WHERE id = ?").get(id);
+  if (!p || !["client", "ambele"].includes(String(p.tip))) return false;
+  if (p.agent_id) return false;
+
+  const are = await db.prepare("SELECT 1 AS x FROM alocari_clienti WHERE partener_id = ?").get(id);
+  if (are) return false;
+
+  await db
+    .prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, observatii) VALUES (?, ?, 100, ?)")
+    .run(id, user.id, "adus de agent la creare");
+  await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(user.id, id);
+  return true;
+}
+
 // Formularul de alocare, refolosit și în pagina partenerului și în lista de
 // alocări. Admite până la 3 agenți pe client — mai mult n-are sens practic.
 function formularAlocare(partenerId, linii, utilizatori, compact) {
@@ -722,4 +754,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, ALOC, ALOC_FACTURA, recalculeazaAgentiFacturi, alocariPentruPartener, formularAlocare };
+module.exports = { register, ALOC, ALOC_FACTURA, recalculeazaAgentiFacturi, alocariPentruPartener, formularAlocare, alocaLaCreare };

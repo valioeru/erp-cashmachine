@@ -6,7 +6,7 @@
 //   2. Oportunități: pipeline-ul de vânzare pe stadii.
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
-const { ALOC, ALOC_FACTURA } = require("./alocari");
+const { ALOC, ALOC_FACTURA, alocaLaCreare } = require("./alocari");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
@@ -1556,6 +1556,10 @@ function register(router) {
         .prepare("INSERT INTO parteneri (tip, nume, cui, email, telefon, adresa, sursa, stare) VALUES ('client', ?, ?, ?, ?, ?, ?, 'client_activ') RETURNING id")
         .run(nume, cui || null, String(b.email || "").trim() || null, String(b.telefon || "").trim() || null, String(b.adresa || "").trim() || null, `lead: ${l.sursa || "manual"}`);
       partenerId = ins.lastInsertRowid;
+      // Client nou adus prin conversia unui lead: rămâne al agentului care a
+      // făcut conversia, 100%. Dacă firma exista deja în ERP (ramura de mai
+      // sus), nu ne atingem de alocarea ei — poate fi a altcuiva.
+      await alocaLaCreare(partenerId, ctx.user);
     }
 
     await db.prepare("UPDATE leaduri SET stadiu = 'convertit', partener_id = ?, ultima_activitate = ? WHERE id = ?").run(partenerId, azi(), id);
