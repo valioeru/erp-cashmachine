@@ -145,15 +145,21 @@ function palnie(trepte, pierdute) {
   const L = 900;
   const H_BANDA = 74;
   const SPATIU = 2;
-  const MIN_L = 260;
   const inaltime = trepte.length * (H_BANDA + SPATIU) + 4;
-  const latime = (n) => MIN_L + (L - MIN_L) * (maxN ? n / maxN : 0);
+
+  // Lățimea benzii spune cât e treapta, dar are și un minim care se strânge cu
+  // fiecare treaptă. Fara asta, o pâlnie cu zerouri sub prima treaptă iese un
+  // teanc de dreptunghiuri egale, nu o pâlnie. Cifra scrie oricum pe fiecare
+  // bandă, așa că nimeni nu se ia după lățime ca să afle numărul.
+  const nrTrepte = Math.max(trepte.length - 1, 1);
+  const minimLa = (i) => L * (0.58 - 0.42 * (i / nrTrepte));
+  const latime = (n, i) => Math.max(L * (maxN ? n / maxN : 0), minimLa(i));
 
   const benzi = trepte
     .map((t, i) => {
       const y = i * (H_BANDA + SPATIU);
-      const w1 = latime(t.n);
-      const w2 = latime(i + 1 < trepte.length ? trepte[i + 1].n : t.n);
+      const w1 = latime(t.n, i);
+      const w2 = i + 1 < trepte.length ? latime(trepte[i + 1].n, i + 1) : latime(t.n, i) * 0.92;
       const x1 = (L - w1) / 2;
       const x2 = (L - w2) / 2;
       const anterior = i > 0 ? trepte[i - 1].n : null;
@@ -185,6 +191,10 @@ function palnie(trepte, pierdute) {
   const ultim = trepte[trepte.length - 1];
   const rataFinala = primul ? Math.round((ultim.n / primul) * 100) : null;
 
+  // Dacă totul de sub prima treaptă e gol, pâlnia n-are ce arăta. Spunem de ce,
+  // în loc s-o lăsăm să pară că nu se vinde nimic.
+  const subPrimaGol = trepte.slice(1).every((t) => !t.n);
+
   return `
     <div class="palnie" style="margin:6px 0 18px">
       <div style="overflow-x:auto">
@@ -193,6 +203,16 @@ function palnie(trepte, pierdute) {
           ${benzi}
         </svg>
       </div>
+      ${
+        subPrimaGol && primul
+          ? `<div class="detail-box" style="border-left:4px solid #8a6d1f;margin-top:10px">
+               Pâlnia se oprește la lead-uri fiindcă <strong>ofertele și comenzile nu se înregistrează încă în ERP</strong> —
+               facturile intră direct din SmartBill, fără ofertă și comandă în spate. Prima
+               <a href="/oferte/nou">ofertă</a> sau <a href="/comenzi/nou">comandă</a> introdusă aici umple treptele de jos
+               și abia atunci pâlnia arată conversia reală.
+             </div>`
+          : ""
+      }
       <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:13px;color:var(--text-muted);margin-top:8px">
         <span><strong style="color:var(--text)">${total}</strong> în pâlnie</span>
         ${rataFinala !== null ? `<span>ajung comenzi <strong style="color:var(--text)">${rataFinala}%</strong> din lead-uri</span>` : ""}
