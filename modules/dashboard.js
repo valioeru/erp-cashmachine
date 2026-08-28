@@ -251,20 +251,34 @@ async function cifraAfaceriIntre(de, la, listaTipare) {
 // total sume. Cifra depinde de cât a închis contabilul: dacă august nu e
 // închis, profitul „la zi" e de fapt la iulie — de-aia se scrie lângă an
 // data balanței folosite.
+// O balanță trasă la mijlocul lunii NU e închisă: veniturile și cheltuielile
+// lunii curente nu s-au închis încă în 121, deci profitul citit de acolo e
+// greșit — și, mai rău, incomparabil cu anii trecuți, care au luni întregi.
+// De-aia luăm ultima balanță ÎNCHISĂ: cea trasă la sfârșit de lună.
+function eSfarsitDeLuna(d) {
+  const s = String(d || "").slice(0, 10);
+  const dt = new Date(s + "T00:00:00Z");
+  if (isNaN(dt)) return false;
+  return new Date(dt.getTime() + 86400000).getUTCDate() === 1;
+}
+
 async function profitContabil(an, panaLa) {
-  let sn;
+  let candidati = [];
   try {
-    sn = await db
+    candidati = await db
       .prepare(
         `SELECT eticheta, MAX(data_pana) AS pana FROM balante_snapshot
           WHERE data_pana >= ? AND data_pana <= ?
-          GROUP BY eticheta ORDER BY MAX(data_pana) DESC LIMIT 1`
+          GROUP BY eticheta ORDER BY MAX(data_pana) DESC LIMIT 24`
       )
-      .get(`${an}-01-01`, panaLa);
+      .all(`${an}-01-01`, panaLa);
   } catch (e) {
     return null;
   }
+  // ultima lună închisă; dacă nu există niciuna, luăm ce e și spunem pe față
+  const sn = candidati.find((c) => eSfarsitDeLuna(c.pana)) || candidati[0];
   if (!sn || !sn.eticheta) return null;
+  const inchisa = eSfarsitDeLuna(sn.pana);
 
   const c121 = await db
     .prepare("SELECT r_d, r_c FROM balante_snapshot WHERE eticheta = ? AND cont = '121' LIMIT 1")
@@ -272,7 +286,7 @@ async function profitContabil(an, panaLa) {
   if (c121 && (Number(c121.r_c) || Number(c121.r_d))) {
     const venituri = Number(c121.r_c) || 0;
     const cheltuieli = Number(c121.r_d) || 0;
-    return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, sursa: "contul 121" };
+    return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, inchisa, sursa: "contul 121" };
   }
 
   const r = await db
@@ -286,7 +300,7 @@ async function profitContabil(an, panaLa) {
   const venituri = Number((r && r.venituri) || 0);
   const cheltuieli = Number((r && r.cheltuieli) || 0);
   if (!venituri && !cheltuieli) return null;
-  return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, sursa: "clasele 6 și 7" };
+  return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, inchisa, sursa: "clasele 6 și 7" };
 }
 
 // Un tabel „ca primul": patru ani, aceeași fereastră, bară + valoare + diferență.
@@ -483,7 +497,9 @@ function register(router) {
           valoare: r ? r.profit : 0,
           venituri: r ? r.venituri : 0,
           cheltuieli: r ? r.cheltuieli : 0,
-          nota: r ? (String(r.pana).slice(0, 10) === `${an}-${zileLuna}` ? null : `balanță la ${String(r.pana).slice(0, 10)}`) : "fără balanță",
+          nota: r
+            ? `balanță la ${String(r.pana).slice(0, 10)}${r.inchisa ? "" : " — lună neînchisă"}`
+            : "fără balanță",
           lipsa: !r,
         });
       }
