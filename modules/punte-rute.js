@@ -511,9 +511,16 @@ module.exports = function registerRute(router, deps) {
   });
 
   // --- ruta de primire ------------------------------------------------------
-  // Ce facturi n-au încă linii. Puntea din browser își construiește coada de
-  // aici, ca să nu recitească din SmartBill ce e deja adus. Cere sesiune de
-  // admin — e o listă a facturilor firmei, nu ceva public.
+  // Ce facturi n-au încă detaliul pe produse.
+  //
+  // Atenție la capcană: importul inițial din SmartBill a pus pe fiecare
+  // factură o singură linie de rezumat, „Conform document CSHM…". Tehnic
+  // factura ARE linii, practic nu știi ce s-a vândut. Așa că numărăm doar
+  // liniile adevărate — cele care nu sunt rezumatul ăla.
+  //
+  // Puntea din browser își construiește coada de aici, ca să nu recitească din
+  // SmartBill ce e deja adus. Cere sesiune de admin — e lista facturilor
+  // firmei, nu ceva public.
   router.get("/api/facturi-fara-linii", async (ctx) => {
     const raspunde = (cod, obj) => {
       ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8" });
@@ -526,7 +533,10 @@ module.exports = function registerRute(router, deps) {
         `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii
            FROM facturi f
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
-            AND NOT EXISTS (SELECT 1 FROM facturi_linii fl WHERE fl.factura_id = f.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM facturi_linii fl
+               WHERE fl.factura_id = f.id AND COALESCE(fl.denumire, '') NOT LIKE 'Conform document%'
+            )
             ${an ? "AND SUBSTR(f.data_emiterii, 1, 4) = ?" : ""}
           ORDER BY f.data_emiterii DESC, f.id DESC
           LIMIT 2000`
