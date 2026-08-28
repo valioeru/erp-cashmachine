@@ -723,6 +723,85 @@ async function ingestCostProduse(randuri) {
   };
 }
 
+// Plati catre furnizori, reconciliate din raportul SmartBill de documente
+// furnizori. Nu inventam plati: luam suma achitata pe care o stie SmartBill si
+// completam diferenta fata de ce e deja in ERP, cu o nota proprie, ca sa poata
+// fi refacuta oricand. Statusul se schimba doar in bine (spre platit), niciodata
+// invers, ca sa nu umflam datoria din greseala.
+const NOTA_RECONCILIERE = "reconciliere SmartBill";
+
+function doarCifre(v) {
+  return String(v || "").replace(/[^0-9]/g, "");
+}
+
+async function ingestPlatiFurnizori(randuri) {
+  let potrivite = 0;
+  let negasite = 0;
+  let platiScrise = 0;
+  let statusSchimbat = 0;
+  let sumaScrisa = 0;
+  const exemple = [];
+
+  for (const r of randuri) {
+    const doc = String(r.document || "").toUpperCase().replace(/\s+/g, "");
+    if (!doc) continue;
+    const cui = doarCifre(r.cui);
+
+    const gasite = await db
+      .prepare(
+        `SELECT f.id, f.status, p.cui AS cui FROM facturi f
+           LEFT JOIN parteneri p ON p.id = f.partener_id
+          WHERE f.directie = 'achizitie'
+            AND REPLACE(UPPER(COALESCE(f.document_extern, '')), ' ', '') = ?`
+      )
+      .all(doc);
+
+    let f = gasite[0] || null;
+    if (gasite.length > 1 && cui) {
+      f = gasite.find((g) => doarCifre(g.cui) && doarCifre(g.cui) === cui) || gasite[0];
+    }
+    if (!f) {
+      negasite++;
+      if (exemple.length < 20) exemple.push(String(r.document || "").slice(0, 60));
+      continue;
+    }
+    potrivite++;
+    if (f.status === "anulata") continue;
+
+    const platit = Math.round(nr(r.platit) * 100) / 100;
+    const total = Math.round(nr(r.total) * 100) / 100;
+
+    await db.prepare("DELETE FROM plati WHERE factura_id = ? AND observatii = ?").run(f.id, NOTA_RECONCILIERE);
+    const alte = await db.prepare("SELECT COALESCE(SUM(suma), 0) AS s FROM plati WHERE factura_id = ?").get(f.id);
+    const lipsa = Math.round((platit - Number(alte.s || 0)) * 100) / 100;
+    if (lipsa > 0.009) {
+      const data = String(r.data || "").slice(0, 10) || null;
+      await db
+        .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES (?, ?, ?, ?, ?)")
+        .run(f.id, lipsa, data, "transfer bancar", NOTA_RECONCILIERE);
+      platiScrise++;
+      sumaScrisa += lipsa;
+    }
+
+    let stare = null;
+    if (total > 0 && platit + 0.01 >= total) stare = "platita";
+    else if (platit > 0.009) stare = "platita_partial";
+    if (stare && stare !== f.status) {
+      await db.prepare("UPDATE facturi SET status = ? WHERE id = ?").run(stare, f.id);
+      statusSchimbat++;
+    }
+  }
+
+  return {
+    potrivite,
+    negasite,
+    plati_scrise: platiScrise,
+    suma_scrisa: Math.round(sumaScrisa * 100) / 100,
+    status_schimbat: statusSchimbat,
+    exemple_negasite: exemple.slice(0, 10),
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
@@ -733,6 +812,7 @@ const HANDLERE = {
   facturi: ingestFacturi,
   facturi_linii: ingestFacturiLinii,
   balante: ingestBalante,
+  plati_furnizori: ingestPlatiFurnizori,
 };
 
 function register(router) {
