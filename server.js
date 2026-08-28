@@ -54,6 +54,14 @@ router.get("/healthz", (ctx) => {
 // valid și nexpirat, refuză orice.
 const RUTE_PUBLICE = new Set(["/healthz", "/login", "/api/ingest"]);
 
+// Verificarea preliminară pe care o face browserul înainte de o cerere de pe
+// alt origin (OPTIONS) vine fără cookie-uri — dacă o trimitem la /login,
+// cererea adevărată nici nu mai pleacă. Preflight-ul trece, cererea de după el
+// e cea care cere sesiune.
+function ePreflight(req, cale) {
+  return req.method === "OPTIONS" && (cale === "/api/ingest" || cale === "/api/facturi-fara-linii");
+}
+
 async function creeazaAdminInitialDacaLipseste() {
   const nr = (await db.prepare("SELECT COUNT(*) AS n FROM utilizatori").get()).n;
   if (nr > 0) return;
@@ -104,7 +112,7 @@ const server = http.createServer(async (req, res) => {
     if (preflight) return;
   }
 
-  if (!RUTE_PUBLICE.has(curat) && curat !== "/logout") {
+  if (!RUTE_PUBLICE.has(curat) && curat !== "/logout" && !ePreflight(req, curat)) {
     const cookies = auth.parseCookies(req);
     const user = await auth.utilizatorDinToken(cookies[auth.COOKIE_NAME]);
     if (!user) {
