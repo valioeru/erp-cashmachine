@@ -571,12 +571,93 @@ async function ingestFacturi(randuri) {
   };
 }
 
+// --- costul de achiziție pe produs, din balanța stocului --------------------
+// Balanța stocului din SmartBill dă, pe fiecare produs, cantitatea și valoarea
+// pe intrări, ieșiri și sold. Împărțite, dau costul unitar — singurul cost real
+// disponibil pe produsele care nu mai au stoc, deci nu apar în evaluarea de
+// inventar.
+//
+// Ordinea de preferință: costul mărfii IEȘITE (ăsta e costul vânzării, exact ce
+// intră în marjă), apoi al celei INTRATE, apoi al stocului rămas.
+//
+// Handlerul ăsta NU creează produse. Dacă numele nu se potrivește cu nimic din
+// nomenclator, rândul e raportat ca nepotrivit și atât — altfel am umple lista
+// de produse cu dubluri, exact problema pe care încercăm s-o reparăm.
+async function ingestCostProduse(randuri) {
+  const norm = (v) =>
+    String(v || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^a-z0-9]/g, "");
+
+  const produse = await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all();
+  const dupaCod = new Map();
+  const dupaNume = new Map();
+  for (const p of produse) {
+    const c = norm(p.cod);
+    if (c && !dupaCod.has(c)) dupaCod.set(c, p);
+    const n = norm(p.denumire);
+    if (n && !dupaNume.has(n)) dupaNume.set(n, p);
+  }
+
+  let completate = 0, aveauDeja = 0, faraCost = 0;
+  const nepotrivite = [];
+  const vazute = new Set();
+
+  for (const r of randuri) {
+    const den = curat(r.denumire) || curat(r.produs);
+    const cod = curat(r.cod);
+    if (!den && !cod) continue;
+
+    const p = (cod && dupaCod.get(norm(cod))) || dupaNume.get(norm(den)) || null;
+    if (!p) {
+      if (nepotrivite.length < 40) nepotrivite.push(den || cod);
+      continue;
+    }
+    if (vazute.has(p.id)) continue;
+    vazute.add(p.id);
+
+    // costul unitar: întâi de pe marfa ieșită, apoi de pe cea intrată, apoi stoc
+    const perechi = [
+      [nr(r.valoare_iesiri), nr(r.cantitate_iesiri)],
+      [nr(r.valoare_intrari), nr(r.cantitate_intrari)],
+      [nr(r.valoare_stoc), nr(r.cantitate_stoc)],
+    ];
+    let cost = 0;
+    for (const [val, cant] of perechi) {
+      if (val > 0 && cant > 0) { cost = val / cant; break; }
+    }
+    if (!(cost > 0)) { faraCost++; continue; }
+
+    if (Number(p.pret_achizitie) > 0) { aveauDeja++; continue; }
+    await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(Math.round(cost * 10000) / 10000, p.id);
+    completate++;
+  }
+
+  const cuCost = await db.prepare("SELECT COUNT(*) AS n FROM produse WHERE COALESCE(pret_achizitie,0) > 0").get();
+  const liniiCuCost = await db
+    .prepare("SELECT COUNT(*) AS n FROM facturi_linii fl JOIN produse p ON p.id = fl.produs_id WHERE COALESCE(p.pret_achizitie,0) > 0")
+    .get();
+
+  return {
+    completate,
+    aveau_deja_cost: aveauDeja,
+    fara_cost_in_raport: faraCost,
+    nepotrivite: nepotrivite.length,
+    exemple_nepotrivite: nepotrivite.slice(0, 15),
+    produse_cu_cost_acum: Number(cuCost.n),
+    linii_de_factura_cu_cost: Number(liniiCuCost.n),
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
   productie: ingestProductie,
   consum: ingestConsum,
   profit_produs: ingestProfitProdus,
+  cost_produse: ingestCostProduse,
   facturi: ingestFacturi,
   facturi_linii: ingestFacturiLinii,
   balante: ingestBalante,
