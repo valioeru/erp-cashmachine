@@ -596,6 +596,28 @@ module.exports = function registerRute(router, deps) {
     ctx.res.end();
   });
 
+  // Scriptul punții, servit ca fișier. Ca să-l pornești dintr-o filă SmartBill
+  // deschisă, în consolă:
+  //   fetch("https://erp-cashmachine-app.onrender.com/punte/facturi-linii.js").then(r=>r.text()).then(eval)
+  // Nu conține nimic secret — doar cod care citește pagina de față și trimite
+  // liniile în /api/ingest, unde tot stau până le aprobi din ERP.
+  router.get("/punte/facturi-linii.js", async (ctx) => {
+    const fs = require("fs");
+    const path = require("path");
+    try {
+      const cod = fs.readFileSync(path.join(__dirname, "..", "punte", "facturi-linii.js"), "utf8");
+      ctx.res.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      ctx.res.end(cod);
+    } catch (e) {
+      ctx.res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      ctx.res.end("scriptul punții nu a fost găsit");
+    }
+  });
+
   router.post("/api/ingest", async (ctx) => {
     const raspunde = (cod, obj) => {
       ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" });
