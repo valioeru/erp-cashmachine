@@ -521,9 +521,33 @@ module.exports = function registerRute(router, deps) {
   // Puntea din browser își construiește coada de aici, ca să nu recitească din
   // SmartBill ce e deja adus. Cere sesiune de admin — e lista facturilor
   // firmei, nu ceva public.
+  router.options("/api/facturi-fara-linii", async (ctx) => {
+    const ORIGINI = ["https://cloud.smartbill.ro", "https://conta.smartbill.ro"];
+    const origine = String((ctx.req && ctx.req.headers && ctx.req.headers.origin) || "");
+    const antet = { "Access-Control-Max-Age": "600", Vary: "Origin" };
+    if (ORIGINI.includes(origine)) {
+      antet["Access-Control-Allow-Origin"] = origine;
+      antet["Access-Control-Allow-Credentials"] = "true";
+      antet["Access-Control-Allow-Methods"] = "GET, OPTIONS";
+    }
+    ctx.res.writeHead(204, antet);
+    ctx.res.end();
+  });
+
   router.get("/api/facturi-fara-linii", async (ctx) => {
+    // Puntea rulează în pagina SmartBill, deci cererea vine de pe alt origin.
+    // Deschidem CORS DOAR pentru originile SmartBill și doar cu sesiunea
+    // adminului — nu e o listă publică, e lista lui, citită din alt tab.
+    const ORIGINI = ["https://cloud.smartbill.ro", "https://conta.smartbill.ro"];
+    const origine = String((ctx.req && ctx.req.headers && ctx.req.headers.origin) || "");
+    const antet = { "Content-Type": "application/json; charset=utf-8" };
+    if (ORIGINI.includes(origine)) {
+      antet["Access-Control-Allow-Origin"] = origine;
+      antet["Access-Control-Allow-Credentials"] = "true";
+      antet["Vary"] = "Origin";
+    }
     const raspunde = (cod, obj) => {
-      ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8" });
+      ctx.res.writeHead(cod, antet);
       ctx.res.end(JSON.stringify(obj));
     };
     if (!ctx.user || ctx.user.rol !== "admin") return raspunde(403, { ok: false, eroare: "doar administrator" });
