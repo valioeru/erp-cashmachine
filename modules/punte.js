@@ -296,11 +296,7 @@ async function ingestProfitProdus(randuri) {
 async function ingestFacturiLinii(randuri) {
   let facturi = 0, linii = 0, negasite = 0, faraProdus = 0;
 
-  const produse = new Map();
-  for (const p of await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all()) {
-    produse.set(String(p.denumire).trim().toLowerCase(), p.id);
-    if (p.cod) produse.set(String(p.cod).trim().toLowerCase(), p.id);
-  }
+  const idxProduse = indexProduse(await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all());
 
   // Grupăm rândurile pe factură. Cheia e ce ne dă browserul: numărul
   // documentului aşa cum apare în SmartBill (ex. „CSHM 3080").
@@ -339,8 +335,8 @@ async function ingestFacturiLinii(randuri) {
       const denumire = curat(r.denumire) || curat(r.produs);
       if (!denumire) continue;
       const cod = curat(r.cod);
-      const produsId =
-        (cod && produse.get(cod.toLowerCase())) || produse.get(denumire.toLowerCase()) || null;
+      const potriviri = potrivesteProdus(idxProduse, cod, denumire);
+      const produsId = potriviri.length ? potriviri[0].id : null;
       if (!produsId) faraProdus++;
       const cant = nr(r.cantitate);
       const pret = nr(r.pret_unitar);
