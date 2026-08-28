@@ -802,6 +802,76 @@ async function ingestPlatiFurnizori(randuri) {
   };
 }
 
+// Angajati adusi din Conta: contractul de munca e sursa care nu minte pentru
+// functie, salariu brut, data angajarii si daca omul mai e in firma. Potrivirea
+// se face pe nume normalizat; ce nu se gaseste, se adauga. Nu aducem niciodata
+// CNP-ul si nici datele din actul de identitate — nu ne trebuie si nu le vrem.
+function numeCheie(v) {
+  return String(v || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
+}
+
+async function ingestAngajati(randuri) {
+  const existenti = await db.prepare("SELECT id, nume, salariu_baza, activ FROM angajati").all();
+  const dupaNume = new Map();
+  for (const a of existenti) {
+    const k = numeCheie(a.nume);
+    if (k && !dupaNume.has(k)) dupaNume.set(k, a);
+  }
+
+  // pastram un singur contract per om: cel cu data de start cea mai noua
+  const peOm = new Map();
+  for (const r of randuri) {
+    const k = numeCheie(r.nume);
+    if (!k) continue;
+    const vechi = peOm.get(k);
+    if (!vechi || String(r.angajat_din || "") > String(vechi.angajat_din || "")) peOm.set(k, r);
+  }
+
+  let adaugati = 0;
+  let actualizati = 0;
+  let inactivati = 0;
+  const noi = [];
+
+  for (const [k, r] of peOm) {
+    const activ = r.incetare ? 0 : 1;
+    const brut = nr(r.brut);
+    const a = dupaNume.get(k);
+    if (!a) {
+      await db
+        .prepare(
+          "INSERT INTO angajati (nume, functie, data_angajarii, salariu_baza, sediu, activ, sursa, actualizat_la) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(curat(r.nume), curat(r.functie) || null, r.angajat_din || null, brut, curat(r.locatie) || null, activ, "Conta", acum());
+      adaugati++;
+      noi.push(curat(r.nume));
+      continue;
+    }
+    await db
+      .prepare(
+        "UPDATE angajati SET functie = COALESCE(?, functie), data_angajarii = COALESCE(?, data_angajarii), salariu_baza = ?, activ = ?, sursa = ?, actualizat_la = ? WHERE id = ?"
+      )
+      .run(curat(r.functie) || null, r.angajat_din || null, brut, activ, "Conta", acum(), a.id);
+    actualizati++;
+    if (a.activ && !activ) inactivati++;
+  }
+
+  const total = await db.prepare("SELECT COUNT(*) AS n FROM angajati").get();
+  const activi = await db.prepare("SELECT COUNT(*) AS n FROM angajati WHERE activ = 1").get();
+  return {
+    adaugati,
+    actualizati,
+    inactivati,
+    nume_noi: noi.slice(0, 15),
+    angajati_in_erp: Number(total.n || 0),
+    activi_acum: Number(activi.n || 0),
+  };
+}
+
 const HANDLERE = {
   produse: ingestProduse,
   stoc: ingestStoc,
@@ -813,6 +883,7 @@ const HANDLERE = {
   facturi_linii: ingestFacturiLinii,
   balante: ingestBalante,
   plati_furnizori: ingestPlatiFurnizori,
+  angajati: ingestAngajati,
 };
 
 function register(router) {
