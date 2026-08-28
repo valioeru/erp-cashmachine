@@ -33,7 +33,7 @@
 
   // Adresa paginii unei facturi. Se verifică o dată, pe o factură reală, și
   // se corectează aici dacă SmartBill își schimbă rutele.
-  const URL_FACTURA = (id) => `/factura/#/view/${id}`;
+  const URL_FACTURA = (id) => `/raport/factura/${id}/`;
 
   const S = (window.__punte = window.__punte || {});
   S.coada = S.coada || [];
@@ -98,19 +98,36 @@
     return n;
   }
 
-  function culege(doc) {
-    const tabele = [...doc.querySelectorAll("table")];
-    let celMaiBun = null;
-
-    for (const t of tabele) {
+  // De unde luăm rândurile.
+  //
+  // Factura SmartBill nu e un <table>: e randată cu divuri poziționate absolut
+  // (șablonul Jasper), fiecare linie fiind un div cu clasa „style_tabel_color"
+  // și cu câte un copil per celulă. De-aia căutăm întâi așa, și abia apoi
+  // tabele adevărate — ca să meargă și pe alte pagini, dacă apar.
+  function grupuriDeRanduri(doc) {
+    const grupuri = [];
+    const linii = [...doc.querySelectorAll('div[class*="style_tabel_color"]')]
+      .map((r) => [...r.children].map((c) => (c.innerText || c.textContent || "").trim()))
+      .filter((c) => c.length >= 3);
+    if (linii.length) grupuri.push(linii);
+    for (const t of doc.querySelectorAll("table")) {
       const randuri = [...t.querySelectorAll("tr")]
         .map((tr) => [...tr.querySelectorAll("td")].map((td) => (td.innerText || td.textContent || "").trim()))
         .filter((c) => c.length >= 3);
-      if (randuri.length < 1) continue;
+      if (randuri.length) grupuri.push(randuri);
+    }
+    return grupuri;
+  }
+
+  function culege(doc) {
+    let celMaiBun = null;
+
+    for (const randuri of grupuriDeRanduri(doc)) {
+      const t = null;
       const latime = Math.max(...randuri.map((r) => r.length));
 
-      // 1. antetul, dacă e de încredere
-      let comb = coloaneDinAntet(t);
+      // 1. antetul, dacă există și e de încredere
+      let comb = null;
       let potriviri = comb ? verifica(randuri, comb) : 0;
 
       // 2. altfel (sau dacă antetul nu se confirmă aritmetic), căutăm tripleta
@@ -185,7 +202,10 @@
   function citeste(factura) {
     return new Promise((rezolva) => {
       const cadru = document.createElement("iframe");
-      cadru.style.cssText = "position:fixed;left:-9999px;top:0;width:1200px;height:900px;opacity:0";
+      // Iframe-ul trebuie să fie PE ECRAN, nu tras la -9999px: browserul nu
+      // randează cadrele scoase din vizor, iar pagina rămâne la „loading" la
+      // nesfârșit. Aici e în ecran, dar în spate și aproape transparent.
+      cadru.style.cssText = "position:fixed;left:0;top:0;width:1100px;height:800px;opacity:0.01;z-index:-1;pointer-events:none";
       cadru.src = URL_FACTURA(factura.id);
       let gata = false;
       const inchide = (rezultat) => {
