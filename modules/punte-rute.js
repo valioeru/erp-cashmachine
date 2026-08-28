@@ -618,6 +618,24 @@ module.exports = function registerRute(router, deps) {
     }
   });
 
+  // Scriptul de sincronizare zilnica, servit la fel ca punte-a de linii.
+  router.get("/punte/sincronizare.js", async (ctx) => {
+    const fs = require("fs");
+    const path = require("path");
+    try {
+      const cod = fs.readFileSync(path.join(__dirname, "..", "punte", "sincronizare.js"), "utf8");
+      ctx.res.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      ctx.res.end(cod);
+    } catch (e) {
+      ctx.res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      ctx.res.end("scriptul de sincronizare nu a fost găsit");
+    }
+  });
+
   router.post("/api/ingest", async (ctx) => {
     const raspunde = (cod, obj) => {
       ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" });
