@@ -96,16 +96,14 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
 ## De făcut
 
 ### 1. Restul detaliului pe produse din facturi
-Din cele 594 de facturi de vânzare pe 2026 s-a adus detaliul pe linii pentru
-~316. Puntea din browser își ia acum coada din `/api/facturi-fara-linii?an=2026`,
-deci nu mai recitește ce e adus. Ritmul e ~5 facturi/minut, limitat de cât
-durează randarea paginii SmartBill. Rămâne un lot în `/import/punte` care
-așteaptă „aplică".
+Din cele 594 de facturi de vânzare pe 2026, 204 au detaliu real pe produse;
+**390 mai au doar linia de rezumat** pusă de importul inițial („Conform
+document CSHM…"). Puntea își ia coada singură din `/api/facturi-fara-linii`
+(CORS deschis doar pentru originile SmartBill, doar cu sesiunea adminului),
+iar scriptul stă în `punte/facturi-linii.js`.
 
-Facturi care n-au dat linii nici după citire: ~25 („fără linii", șablonul A al
-SmartBill nu e citit complet) și ~8 cu linii care nu trec validarea aritmetică
-(taxa de mediu în procente, deșeuri cu cantitate negativă). Se rezolvă lărgind
-validarea, nu citind din nou.
+**Blocat**: sesiunea din `cloud.smartbill.ro` a expirat. Vali se loghează o
+dată acolo și pot rula restul singur — la ~5 facturi/minut, vreo 80 de minute.
 
 ### 2. Ce mai lipsește la cost company
 - **Carburantul OMV** — singurul lucru care lipsește. Cere login-ul lui Vali
