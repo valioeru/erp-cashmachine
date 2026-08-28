@@ -168,6 +168,7 @@ async function start() {
   await creeazaAdminInitialDacaLipseste();
   await require("./lib/grup").asiguraFirme();
   await require("./modules/sincronizare").incarcaTot();
+  await require("./modules/sincronizare").incarcaSugestii();
   await require("./modules/calculator").seed();
   require("./modules/warehouse").porneste();
   await auth.curataSesiuni();
