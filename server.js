@@ -19,6 +19,7 @@ require("./modules/stocuri").register(router);
 require("./modules/comenzi").register(router);
 require("./modules/facturi").register(router);
 require("./modules/crm").register(router);
+require("./modules/sugestii").register(router);
 require("./modules/oferte").register(router);
 require("./modules/contacte").register(router);
 require("./modules/scadente").register(router);
