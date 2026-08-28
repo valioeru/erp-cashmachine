@@ -274,6 +274,19 @@ async function incarcaSugestii() {
   return n;
 }
 
+// Chemată separat la pornire, din server.js — nu din incarcaTot. Nu e o
+// preferință de stil: incarcaTot e un loc pe care îl modifică orice funcție
+// nouă alimentată din fișier, iar două astfel de funcții adăugate în paralel
+// se bat pe aceleași linii. Aici stă singură și nu încurcă pe nimeni.
+async function incarcaSugestiiSigur() {
+  try {
+    const n = await incarcaSugestii();
+    if (n) console.log(`[sincronizare] sugestii de clienți: ${n}`);
+  } catch (e) {
+    console.error("[sincronizare] încărcarea sugestiilor a eșuat:", e.message);
+  }
+}
+
 // Chemată o dată la pornire, din server.js.
 async function incarcaTot() {
   try {
@@ -282,8 +295,6 @@ async function incarcaTot() {
     const c = await incarcaCosturi();
     const g = await incarcaAngajati();
     if (a || s || c || g) console.log(`[sincronizare] agendă: ${a}, știri: ${s}, costuri noi: ${c}, angajați: ${g}`);
-    const su = await incarcaSugestii();
-    if (su) console.log(`[sincronizare] sugestii de clienți: ${su}`);
   } catch (e) {
     console.error("[sincronizare] încărcarea a eșuat:", e.message);
   }
@@ -330,4 +341,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, incarcaTot };
+module.exports = { register, incarcaTot, incarcaSugestii: incarcaSugestiiSigur };
