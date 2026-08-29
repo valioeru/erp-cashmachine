@@ -570,34 +570,33 @@ function register(router) {
 
   // ---- Cantități și prețuri inversate pe linia de factură ----------------
   //
-  // Pe facturile de rolă jumbo din martie 2026 (CSHM2768 si urmatoarele) linia
-  // arata „1720 buc x 1,00 lei" in loc de „1 buc x 1.720,00 lei". Totalul
-  // facturii e corect — doar impartirea e pe dos, fiindca importul a citit
-  // pretul unitar in coloana de cantitate si a pus 1 la pret.
+  // Linia scrie „1720 buc x 1,00 lei" in loc de „1 buc x 1.720,00 lei", sau
+  // „735 x 17 lei" in loc de „17 x 735 lei". Importul a citit cele doua
+  // coloane pe dos. Totalul liniei e corect — de-aia nu s-a vazut la
+  // facturare — dar costul se calculeaza din cantitate, si iese umflat de
+  // sute de ori.
   //
-  // Se vede imediat dupa doua semne care trebuie sa apara IMPREUNA:
-  //   1. pretul unitar e exact 1 leu (sau -1, pe storno)
-  //   2. „cantitatea" seamana cu un pret, nu cu o cantitate: e in acelasi ordin
-  //      de marime cu pretul de vanzare sau cu cel de achizitie al produsului
-  // Fara al doilea semn n-am atinge nimic: exista marfa vanduta chiar cu 1 leu
-  // bucata, iar aia e o linie corecta.
+  // Reparatia e simpla si nu inventeaza nimic: se schimba cele doua numere
+  // intre ele. Totalul ramane identic la banut, prin constructie.
   //
-  // Reparatia pastreaza totalul liniei la banut. Daca produsul are pret de
-  // vanzare si „cantitatea" iese fix un multiplu al lui, se propune acel
-  // numar de bucati; altfel o bucata la pretul intreg. Ce nu se potriveste
-  // exact nu se atinge deloc — se listeaza separat, pentru mana de om.
+  // Cand stim ca e chiar inversare si nu o linie corecta? Cand inversarea
+  // REZOLVA problema: costul liniei, azi de cateva ori mai mare decat
+  // incasarea, intra sub ea dupa schimb. Daca nu se rezolva, linia nu se
+  // atinge — acolo greseala e in pretul de achizitie al produsului, si are
+  // pagina ei separata.
   async function cantitatiStrambe() {
     const randuri = await db
       .prepare(
         `SELECT fl.id, fl.factura_id, fl.cantitate, fl.pret_unitar, fl.denumire AS linie,
                 f.serie, f.numar, f.data_emiterii, f.document_extern,
-                pr.id AS produs_id, pr.cod, pr.denumire AS produs, pr.pret_vanzare, pr.pret_achizitie
+                pr.id AS produs_id, pr.cod, pr.denumire AS produs, pr.unitate_masura,
+                pr.pret_vanzare, pr.pret_achizitie
            FROM facturi_linii fl
            JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
            JOIN produse pr ON pr.id = fl.produs_id
-          WHERE f.status NOT IN ('anulata','ciorna')
-            AND ABS(fl.pret_unitar) = 1
-            AND ABS(fl.cantitate) >= 50
+          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+            AND COALESCE(pr.pret_achizitie, 0) > 0
+            AND fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100
           ORDER BY f.data_emiterii, fl.id`
       )
       .all();
@@ -607,27 +606,11 @@ function register(router) {
     for (const r of randuri) {
       const cant = nr(r.cantitate);
       const pret = nr(r.pret_unitar);
-      const total = cant * pret;
-      const pv = nr(r.pret_vanzare);
       const pa = nr(r.pret_achizitie);
-      const marime = Math.abs(cant);
-
-      // Semnul al doilea: „cantitatea" e de marimea unui pret.
-      const caPretVanzare = pv > 0 && marime >= 0.5 * pv;
-      const caPretAchizitie = pa > 0 && marime >= 0.3 * pa && marime <= 4 * pa;
-      if (!caPretVanzare && !caPretAchizitie) continue;
-
-      let bucati = 1;
-      let pretNou = marime;
-      if (pv > 0) {
-        const n = Math.round(marime / pv);
-        if (n >= 1 && Math.abs(n * pv - marime) <= 0.01 * marime) {
-          bucati = n;
-          pretNou = marime / n;
-        }
-      }
-      const cantNoua = pret < 0 ? -bucati : bucati;
-      const totalNou = cantNoua * pretNou;
+      const total = cant * pret;
+      // Inversarea propriu-zisă: cele două numere își schimbă locul.
+      const cantNoua = pret;
+      const pretNou = cant;
       const rand = {
         ...r,
         cant,
@@ -635,11 +618,16 @@ function register(router) {
         total,
         cantNoua,
         pretNou,
-        totalNou,
+        totalNou: cantNoua * pretNou,
         costVechi: Math.abs(cant) * pa,
         costNou: Math.abs(cantNoua) * pa,
       };
-      if (Math.abs(totalNou - total) <= 0.01) reparabile.push(rand);
+      // Se repară doar dacă inversarea chiar rezolvă: costul intră sub
+      // încasarea liniei. Și doar dacă din coloana de preț iese o cantitate
+      // credibilă — cel puțin o bucată. „0,01" e un preț, nu o cantitate, deci
+      // acolo nu e inversare, ci prețul de achiziție al produsului e greșit.
+      const rezolva = rand.costNou <= Math.abs(total) && Math.abs(cantNoua) >= 1;
+      if (rezolva) reparabile.push(rand);
       else incerte.push(rand);
     }
     const produse = new Set(reparabile.map((r) => r.produs_id));
@@ -698,9 +686,11 @@ function register(router) {
 
       ${
         d.incerte.length
-          ? `<h2>Nu le ating — nu iese totalul la fix</h2>
+          ? `<h2>Nu le ating — inversarea nu rezolvă</h2>
              <p style="margin:-6px 0 10px;color:var(--text-muted);font-size:13px;max-width:860px">
-               Aici corecția ar schimba totalul liniei, deci n-o fac automat. Se rezolvă de mână, din pagina facturii.
+               Aici inversarea nu rezolvă nimic: costul rămâne peste încasare și după schimb. Înseamnă că nu linia
+               e strâmbă, ci <strong>prețul de achiziție al produsului</strong> — se repară cu butonul
+               „Repară prețurile de achiziție" din <a href="/admin/date">Verificări</a>.
              </p>
              ${table(
                ["Factură", "Data", "Produs", "Acum", "Total linie"],
@@ -736,10 +726,10 @@ function register(router) {
     }
     const body = `
       <h2>Reparat</h2>
-      <p>Am corectat <strong>${n}</strong> linii pe ${d.facturi} facturi, ${d.produse} produse.
+      <p>Am corectat <strong>${n}</strong> ${n === 1 ? "linie" : "linii"} pe ${d.facturi} ${d.facturi === 1 ? "factură" : "facturi"}, ${d.produse} ${d.produse === 1 ? "produs" : "produse"}.
       Totalul fiecărei linii a rămas neschimbat — s-au mutat doar cifrele între cantitate și preț unitar.</p>
       <p>Costul fals scos din calcul: <strong>${money(d.costVechi - d.costNou)}</strong>.</p>
-      ${d.incerte.length ? `<p style="color:var(--text-muted);font-size:13px">Au rămas ${d.incerte.length} linii pe care nu le-am atins, fiindcă acolo corecția ar fi schimbat totalul.</p>` : ""}
+      ${d.incerte.length ? `<p style="color:var(--text-muted);font-size:13px">${d.incerte.length === 1 ? "A rămas o linie pe care n-am atins-o" : `Au rămas ${d.incerte.length} linii pe care nu le-am atins`}: acolo greșeala e în prețul de achiziție al produsului, nu în linie.</p>` : ""}
       <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare cantități", active: "/admin/date", body }));
   });
