@@ -429,12 +429,18 @@ async function incasariDeCuratat() {
     // Condiția care ține totul în siguranță e a doua: copia se scoate DOAR
     // dacă factura rămâne acoperită și fără ea. O factură plătită cinstit în
     // două rate egale nu e supraîncasată, deci nici nu ajunge aici.
+    //
+    // Și pragul „rămâne acoperită" are aceeași toleranță: patru copii de
+    // 987.607,90 pe o factură de 987.607,85 se împart în bani diferiți, iar
+    // ultima scoatere lasă 987.607,80 — cu cinci bani sub total. La bănuț,
+    // copia aia ar rămâne pe veci în cifre.
     const vazute = [];
     for (const p of plati) {
       const suma = nr(p.suma);
       const toleranta = Math.max(1, Math.abs(suma) * 0.001);
+      const prag = Math.max(1, Math.abs(total) * 0.001);
       const repeta = vazute.some((v) => Math.abs(v - suma) <= toleranta);
-      if (repeta && platit - suma >= total - 0.01) {
+      if (repeta && platit - suma >= total - prag) {
         scos.add(p.id);
         platit -= suma;
         deScos.push({ ...p, factura: f, motiv: "repetare" });
