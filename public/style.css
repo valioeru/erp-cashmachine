@@ -217,6 +217,17 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 .userbox-nume:hover { text-decoration: underline; }
 .userbox-rol { color: var(--text-muted); }
 
+/* Poza de profil din colțul din dreapta sus. Când lipsește, caricatura are un
+   „+" într-o bulină, ca să se vadă că e ceva de făcut acolo, nu o decorațiune. */
+.userbox-poza { display: inline-flex; text-decoration: none; }
+.avatar { display: inline-flex; align-items: center; justify-content: center; position: relative; border-radius: 50%; overflow: hidden; background: #e8edf3; object-fit: cover; flex: none; }
+.avatar-gol { overflow: visible; }
+.avatar-gol svg { border-radius: 50%; width: 100%; height: 100%; }
+.avatar-plus { position: absolute; right: -2px; bottom: -2px; width: 14px; height: 14px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 11px; line-height: 14px; text-align: center; font-weight: 700; box-shadow: 0 0 0 2px #fff; }
+.userbox-poza:hover .avatar-plus { transform: scale(1.12); }
+.avatar-mare { width: 96px; height: 96px; }
+.profil-poza { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+
 /* Filtre + paginare pe listele mari (facturi, parteneri) */
 .filtre { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
 .filtre input[type="search"] {
