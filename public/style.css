@@ -342,3 +342,26 @@ th.sortabil.sort-desc::after { content: " ▼"; font-size: 9px; }
 .agent-fill { background: #fff; height: 100%; border-radius: 4px; }
 .agent-cifre { text-align: right; }
 .agent-cifre span { display: block; font-size: 11px; opacity: .8; }
+
+/* Bara de perioada — aceleasi patru presetari peste tot in aplicatie. */
+.perioade { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 14px; }
+.perioade-titlu { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-right: 2px; }
+.chip {
+  display: inline-block; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px;
+  font-size: 13px; color: var(--text); background: var(--surface); text-decoration: none; white-space: nowrap;
+}
+button.chip { font-family: inherit; cursor: pointer; }
+.chip:hover { background: var(--bg); border-color: var(--primary); }
+.chip.activ { background: var(--primary); border-color: var(--primary); color: #fff; }
+.perioade-select { padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; font-family: inherit; }
+.perioade-custom { display: flex; gap: 6px; align-items: center; margin-left: 6px; }
+.perioade-custom input[type="date"] { padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; font-family: inherit; }
+.perioade-sageata { font-size: 13px; color: var(--text-muted); }
+.perioade-interval { font-size: 12px; color: var(--text-muted); margin-left: 4px; }
+@media (max-width: 700px) { .perioade-interval { display: none; } }
+/* Pe fundal inchis (caseta de comision din biroul agentului) chipurile isi
+   inverseaza rolurile: cel ales e alb plin, restul sunt transparente. */
+.comision-box .chip { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.35); color: #fff; }
+.comision-box .chip:hover { background: rgba(255,255,255,.26); border-color: #fff; }
+.comision-box .chip.activ { background: #fff; border-color: #fff; color: var(--primary-dark); font-weight: 600; }
+.comision-box .perioade-sageata, .comision-box .perioade-titlu { color: rgba(255,255,255,.75); }
