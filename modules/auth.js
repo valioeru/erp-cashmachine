@@ -1,7 +1,7 @@
 "use strict";
 const db = require("../lib/db");
 const auth = require("../lib/auth");
-const { esc, layout } = require("../lib/render");
+const { esc, layout, avatar } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 function paginaLogin(eroare, redirectTo) {
@@ -54,7 +54,7 @@ function register(router) {
   // autocomplete="new-password" nu e cosmetic: fără el, Chrome umple singur
   // primul câmp cu parola salvată pentru site, omul scrie doar în al doilea,
   // cele două nu coincid și pare că aplicația „nu vrea" să schimbe parola.
-  function paginaProfil(user, eroare) {
+  function paginaProfil(user, eroare, mesaj) {
     return layout({
       user,
       title: "Profilul meu",
@@ -73,6 +73,74 @@ function register(router) {
           : ""
       }
       ${eroare ? `<div class="flash" style="background:#fdecec;border-color:#f0b4b4;color:var(--danger)">${esc(eroare)}</div>` : ""}
+      ${mesaj ? `<div class="flash" style="background:#e7f5ec;border-color:#b6dcc4;color:var(--success)">${esc(mesaj)}</div>` : ""}
+
+      <h2>Poza mea</h2>
+      <div class="detail-box profil-poza">
+        <span class="avatar-mare-wrap">${avatar(user, 96)}</span>
+        <div style="min-width:260px;flex:1">
+          <p style="margin:0 0 10px;color:var(--text-muted);font-size:13px">
+            ${user.poza ? "Poza apare în colțul din dreapta sus, pe orice ecran." : "N-ai încă poză. Alege una și va apărea în colțul din dreapta sus, pe orice ecran."}
+          </p>
+          <form method="post" action="/profil/poza" id="form-poza" class="inline-form" style="gap:10px;flex-wrap:wrap">
+            <input type="hidden" name="poza" id="poza-date">
+            <input type="file" id="poza-fisier" accept="image/*" style="max-width:260px">
+            <button type="submit" class="btn" id="poza-buton" disabled>Salvează poza</button>
+          </form>
+          ${
+            user.poza
+              ? `<form method="post" action="/profil/poza/sterge" class="inline-form" style="margin-top:8px">
+                   <button type="submit" class="link-btn" style="color:var(--danger)">Șterge poza</button>
+                 </form>`
+              : ""
+          }
+          <p style="margin:10px 0 0;color:var(--text-muted);font-size:12px">
+            Poza e micșorată în browser la 256×256 și tăiată pătrat înainte să plece spre server, deci
+            poți alege liniștit o fotografie mare de pe telefon — nu se încarcă tot fișierul.
+          </p>
+        </div>
+      </div>
+      <script>
+      (function () {
+        // Micșorăm poza aici, în pagină, și o trimitem ca text (data-URI) într-un
+        // câmp normal de formular. Așa nu ne trebuie nici upload de fișiere, nici
+        // un director pe disc — pe Render discul se pierde la fiecare redeploy,
+        // deci pozele trebuie să stea în baza de date.
+        var LATURA = 256;
+        var fisier = document.getElementById("poza-fisier");
+        var camp = document.getElementById("poza-date");
+        var buton = document.getElementById("poza-buton");
+        var previzualizare = document.querySelector(".avatar-mare-wrap");
+        if (!fisier || !camp || !buton) return;
+        fisier.addEventListener("change", function () {
+          var f = fisier.files && fisier.files[0];
+          if (!f) { camp.value = ""; buton.disabled = true; return; }
+          buton.disabled = true;
+          var cititor = new FileReader();
+          cititor.onload = function () {
+            var img = new Image();
+            img.onload = function () {
+              // Tăiem pătratul din mijloc, ca fața să nu iasă din bulină.
+              var latura = Math.min(img.width, img.height);
+              var sx = (img.width - latura) / 2;
+              var sy = (img.height - latura) / 2;
+              var c = document.createElement("canvas");
+              c.width = LATURA; c.height = LATURA;
+              var ctx = c.getContext("2d");
+              ctx.drawImage(img, sx, sy, latura, latura, 0, 0, LATURA, LATURA);
+              var date = c.toDataURL("image/jpeg", 0.85);
+              camp.value = date;
+              buton.disabled = false;
+              if (previzualizare) previzualizare.innerHTML = '<img src="' + date + '" class="avatar" style="width:96px;height:96px" alt="">';
+            };
+            img.onerror = function () { alert("Fișierul ales nu pare să fie o imagine."); };
+            img.src = cititor.result;
+          };
+          cititor.readAsDataURL(f);
+        });
+      })();
+      </script>
+
       <h2>Schimbă parola</h2>
       <form method="post" action="/profil/parola" class="form" style="max-width:420px" autocomplete="off">
         <input type="text" name="email_ascuns" value="${esc(user.email)}" autocomplete="username" style="display:none" readonly>
@@ -90,7 +158,28 @@ function register(router) {
   }
 
   router.get("/profil", async (ctx) => {
-    send(ctx.res, 200, paginaProfil(ctx.user, null));
+    send(ctx.res, 200, paginaProfil(ctx.user, null, ctx.query.ok ? "Poza a fost salvată." : null));
+  });
+
+  // Limita e pusă pe textul data-URI, nu pe fișierul original: 256×256 JPEG
+  // înseamnă în jur de 15–25 KB, deci 300 000 de caractere e loc berechet și
+  // în același timp o plasă de siguranță dacă cineva trimite altceva de mână.
+  const POZA_MAX = 300000;
+
+  router.post("/profil/poza", async (ctx) => {
+    const poza = String(ctx.body.poza || "");
+    let eroare = null;
+    if (!poza) eroare = "N-a ajuns nicio poză. Alege un fișier imagine și încearcă din nou.";
+    else if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(poza)) eroare = "Formatul pozei nu e recunoscut. Alege un fișier JPG, PNG sau WEBP.";
+    else if (poza.length > POZA_MAX) eroare = "Poza e prea mare chiar și după micșorare. Alege alta.";
+    if (eroare) return send(ctx.res, 200, paginaProfil(ctx.user, eroare, null));
+    await db.prepare("UPDATE utilizatori SET poza = ? WHERE id = ?").run(poza, ctx.user.id);
+    redirect(ctx.res, "/profil?ok=1");
+  });
+
+  router.post("/profil/poza/sterge", async (ctx) => {
+    await db.prepare("UPDATE utilizatori SET poza = NULL WHERE id = ?").run(ctx.user.id);
+    redirect(ctx.res, "/profil");
   });
 
   router.post("/profil/parola", async (ctx) => {
