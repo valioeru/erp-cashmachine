@@ -129,7 +129,7 @@ async function comenziNefacturate(agentId) {
       `SELECT c.id, c.numar, c.tip_produs, c.cantitate, c.um, c.data_livrare, c.valoare_estimata,
               c.partener_id, COALESCE(p.nume, c.client_text) AS client
          FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id
-        WHERE c.agent_id = ? AND c.status NOT IN ('anulata', 'facturata')
+        WHERE c.agent_id = ? AND c.status = 'in_productie'
           AND (c.facturat IS NULL OR c.facturat = '' OR LOWER(c.facturat) = 'nu')
         ORDER BY (c.data_livrare IS NULL OR c.data_livrare = ''), c.data_livrare DESC, c.id DESC`
     )
@@ -372,7 +372,7 @@ function register(router) {
         <div class="card"><div class="label">Comision viitor (facturi emise, neîncasate)</div><div class="value">${lei(viitorTotal)}</div>
           <div class="mic">${viitor.length} facturi · ${pct}% din partea ta din ce a mai rămas de încasat</div></div>
         <div class="card"><div class="label">Comision potențial (comenzi + lead-uri)</div><div class="value">${lei(potentialPonderat + comenziComision)}</div>
-          <div class="mic">${lei(comenziComision)} din ${comenzi.length} ${comenzi.length === 1 ? "comandă nefacturată" : "comenzi nefacturate"}${
+          <div class="mic">${lei(comenziComision)} din ${comenzi.length} ${comenzi.length === 1 ? "comandă în producție" : "comenzi în producție"}${
             comenziFaraTemei ? ` (${comenziFaraTemei} fără valoare, deci nesocotite)` : ""
           } · ${lei(potentialPonderat)} din ${potential.length} ${potential.length === 1 ? "oportunitate" : "oportunități"}</div></div>
         <div class="card"><div class="label">Încasat luna asta pe facturile mele</div><div class="value">${lei(acum.incasat)}</div>
@@ -414,10 +414,12 @@ function register(router) {
       )}
       ${viitor.length > 100 ? `<p class="mic">Se arată primele 100 din ${viitor.length}.</p>` : ""}
 
-      <h2>Comision din comenzile nefacturate</h2>
+      <h2>Comision din comenzile aflate în producție</h2>
       <p class="explic">
-        Comenzile tale care încă n-au fost facturate. Sunt câștigate — clientul a comandat — dar banii n-au intrat,
-        deci comisionul din ele e încă o promisiune. Registrul de comenzi vine dintr-un Excel <strong>fără prețuri</strong>,
+        Doar comenzile tale cu statusul <strong>În producție</strong>. Sunt câștigate — clientul a comandat — dar banii
+        n-au intrat, deci comisionul din ele e încă o promisiune. Comenzile finalizate sau facturate rămân în
+        Producție → Comenzi, dar nu mai apar aici: ele se văd la facturi, unde comisionul e deja real.
+        Registrul de comenzi vine dintr-un Excel <strong>fără prețuri</strong>,
         așa că valoarea se ia în ordinea asta: <strong>cât ai scris tu pe comandă</strong>; dacă n-ai scris,
         <strong>media facturilor clientului</strong> din ultimul an; dacă nici asta nu se poate, comanda apare în listă
         dar nu se pune la socoteală. Valoarea o scrii din pagina comenzii, la „Valoare estimată".

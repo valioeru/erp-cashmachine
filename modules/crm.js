@@ -128,9 +128,11 @@ async function trepteleP(filtruAgent) {
   // Comenzile din registrul de producție intră în aceeași treaptă. Sunt
   // comenzi reale de client, doar că se scriu în Producție, nu în CRM — omul
   // de vânzări trebuie să le vadă în pâlnia lui, altfel pâlnia îl minte.
+  // Doar cele „în producție": finalizatele și facturatele au ieșit din pâlnie,
+  // se văd la facturi. Ele rămân în listă la Producție → Comenzi, dar nu aici.
   const undeProd = filtruAgent ? " AND cp.agent_id = ?" : "";
   const comenziProd = await db
-    .prepare(`SELECT COUNT(*) AS n FROM comenzi_productie cp WHERE cp.status != 'anulata'${undeProd}`)
+    .prepare(`SELECT COUNT(*) AS n FROM comenzi_productie cp WHERE cp.status = 'in_productie'${undeProd}`)
     .get(...argAgent)
     .catch(() => ({ n: 0 }));
 
