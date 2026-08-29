@@ -6,6 +6,7 @@
 const db = require("../lib/db");
 const grup = require("../lib/grup");
 const costuri = require("./costuri");
+const { ALOC_FACTURA } = require("./alocari");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -93,6 +94,11 @@ const CATEGORII = [
       { href: "/rapoarte/produse-top", nume: "Top produse & marjă pe produs", desc: "Ce se vinde cel mai bine și cu ce marjă — pe toată firma sau pe portofoliul unui agent." },
       { href: "/rapoarte/forecast", nume: "Forecast vânzări", desc: "Proiecție pe următoarele luni din sezonalitatea și trendul istoricului real, cu scenarii pesimist/probabil/optimist și pipeline-ul CRM ponderat." },
       { href: "/rapoarte/agenti", nume: "Profitabilitate pe agent & client", desc: "Venit, marjă (unde există costuri), pipeline și solduri pe fiecare agent — cu detaliu pe clienții lui." },
+      {
+        href: "/rapoarte/agenti-lunar",
+        nume: "Facturări & încasări pe agent, lunar",
+        desc: "Cât a facturat și cât a încasat fiecare agent, lună de lună — pe luna curentă, luna trecută, anul curent, anul trecut sau orice perioadă, cu export CSV.",
+      },
       { href: "/rapoarte/pipeline", nume: "Pipeline oportunități", desc: "Valoarea oportunităților deschise pe fiecare stadiu din CRM." },
       { href: "/rapoarte/clienti", nume: "Clienți activi & inactivi", desc: "Cine a cumpărat recent și cine n-a mai cumpărat de mult." },
     ],
@@ -121,7 +127,15 @@ function intervalDinQuery(ctx, implicitLuni = 12) {
   const preset = String(ctx.query.perioada || `${implicitLuni}luni`);
   let deLa;
   let panaLa = aziStr;
-  if (preset === "an_curent") deLa = `${an}-01-01`;
+  const luna = Number(aziStr.slice(5, 7));
+  const ultimaZi = (a, l) => `${a}-${String(l).padStart(2, "0")}-${new Date(Date.UTC(a, l, 0)).getUTCDate()}`;
+  if (preset === "luna_curenta") deLa = `${aziStr.slice(0, 7)}-01`;
+  else if (preset === "luna_trecuta") {
+    const a = luna === 1 ? an - 1 : an;
+    const l = luna === 1 ? 12 : luna - 1;
+    deLa = `${a}-${String(l).padStart(2, "0")}-01`;
+    panaLa = ultimaZi(a, l);
+  } else if (preset === "an_curent") deLa = `${an}-01-01`;
   else if (preset === "an_trecut") {
     deLa = `${an - 1}-01-01`;
     panaLa = `${an - 1}-12-31`;
@@ -142,6 +156,8 @@ function selectorPerioada(actiune, interval, extraCampuri = "") {
   return `
     <form class="filtre" method="get" action="${actiune}">
       <select name="perioada" onchange="if(this.value!=='custom')this.form.submit(); else {this.form.querySelector('.datele-custom').style.display='flex';}">
+        ${opt("luna_curenta", "luna curentă")}
+        ${opt("luna_trecuta", "luna trecută")}
         ${opt("3", "ultimele 3 luni")}
         ${opt("6", "ultimele 6 luni")}
         ${opt("12", "ultimele 12 luni")}
@@ -1646,6 +1662,216 @@ function register(router) {
       ${detaliuClienti}
     `;
     send(ctx.res, 200, pagina(ctx, "Profitabilitate pe agent & client", "/rapoarte/agenti", continut));
+  });
+
+
+
+  // ---- Comercial: facturări & încasări pe agent, lună de lună -------------
+  // Două întrebări diferite, puse una lângă alta: cât a facturat fiecare agent
+  // în luna X (după data facturii) și cât a intrat efectiv în bancă în luna X
+  // (după data plății). Nu coincid niciodată — între ele stă termenul de
+  // plată — și tocmai diferența e informația utilă.
+  //
+  // Împărțirea pe agenți e cea din ALOC_FACTURA, aceeași folosită la comision
+  // și în biroul agentului: dacă un client e împărțit 60/40, și banii se împart
+  // 60/40. Altfel raportul ăsta ar arăta alte cifre decât cele pe care le vede
+  // agentul la el, iar oamenii s-ar certa pe care e „adevărat".
+  router.get("/rapoarte/agenti-lunar", async (ctx) => {
+    const interval = intervalDinQuery(ctx, 12);
+    const { deLa, panaLa } = interval;
+    const arata = ["ambele", "facturat", "incasat"].includes(String(ctx.query.arata)) ? String(ctx.query.arata) : "ambele";
+
+    // Lunile din interval. Peste 24 de luni tabelul devine ilizibil pe lat,
+    // așa că trecem automat pe granulație anuală.
+    const luni = [];
+    {
+      let [a, l] = [Number(deLa.slice(0, 4)), Number(deLa.slice(5, 7))];
+      const [aF, lF] = [Number(panaLa.slice(0, 4)), Number(panaLa.slice(5, 7))];
+      while ((a < aF || (a === aF && l <= lF)) && luni.length < 400) {
+        luni.push(`${a}-${String(l).padStart(2, "0")}`);
+        l++;
+        if (l > 12) {
+          l = 1;
+          a++;
+        }
+      }
+    }
+    const peAni = luni.length > 24;
+    const coloane = peAni ? [...new Set(luni.map((m) => m.slice(0, 4)))] : luni;
+    const cheia = (m) => (peAni ? m.slice(0, 4) : m);
+
+    const facturat = await db
+      .prepare(
+        `SELECT al.utilizator_id AS agent, SUBSTR(f.data_emiterii, 1, 7) AS luna,
+                COALESCE(SUM(COALESCE(t.total,0) * al.procent / 100.0), 0) AS suma,
+                COUNT(DISTINCT f.id) AS nr
+         FROM facturi f
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+         GROUP BY al.utilizator_id, SUBSTR(f.data_emiterii, 1, 7)`
+      )
+      .all(deLa, panaLa);
+
+    const incasat = await db
+      .prepare(
+        `SELECT al.utilizator_id AS agent, SUBSTR(pl.data, 1, 7) AS luna,
+                COALESCE(SUM(pl.suma * al.procent / 100.0), 0) AS suma,
+                COUNT(*) AS nr
+         FROM plati pl
+         JOIN facturi f ON f.id = pl.factura_id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+           AND pl.data >= ? AND pl.data <= ?
+         GROUP BY al.utilizator_id, SUBSTR(pl.data, 1, 7)`
+      )
+      .all(deLa, panaLa);
+
+    const utilizatori = await db.prepare("SELECT id, nume, rol, activ FROM utilizatori").all();
+    const numeAgent = new Map(utilizatori.map((u) => [u.id, u.nume]));
+
+    // agent -> { luna -> {f, i}, totalF, totalI, nrF, nrI }
+    const date = new Map();
+    const linie = (id) => {
+      if (!date.has(id)) date.set(id, { id, nume: numeAgent.get(id) || "Fără agent", pe: new Map(), totalF: 0, totalI: 0, nrF: 0, nrI: 0 });
+      return date.get(id);
+    };
+    const celula = (r, k) => {
+      if (!r.pe.has(k)) r.pe.set(k, { f: 0, i: 0 });
+      return r.pe.get(k);
+    };
+    for (const r of facturat) {
+      const k = cheia(String(r.luna || ""));
+      if (!coloane.includes(k)) continue;
+      const x = linie(r.agent);
+      celula(x, k).f += Number(r.suma) || 0;
+      x.totalF += Number(r.suma) || 0;
+      x.nrF += Number(r.nr) || 0;
+    }
+    for (const r of incasat) {
+      const k = cheia(String(r.luna || ""));
+      if (!coloane.includes(k)) continue;
+      const x = linie(r.agent);
+      celula(x, k).i += Number(r.suma) || 0;
+      x.totalI += Number(r.suma) || 0;
+      x.nrI += Number(r.nr) || 0;
+    }
+
+    const randuri = [...date.values()].filter((r) => r.totalF > 0 || r.totalI > 0).sort((a, b) => b.totalF - a.totalF || b.totalI - a.totalI);
+    const totalPeColoana = coloane.map((k) => ({
+      k,
+      f: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).f : 0), 0),
+      i: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).i : 0), 0),
+    }));
+    const totalF = randuri.reduce((s, r) => s + r.totalF, 0);
+    const totalI = randuri.reduce((s, r) => s + r.totalI, 0);
+
+    // Export CSV: aceleași cifre, pentru cine vrea să le ducă în Excel.
+    if (String(ctx.query.format) === "csv") {
+      const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
+      const n2 = (v) => Number(v || 0).toFixed(2).replace(".", ",");
+      const cap = ["Agent", ...coloane.flatMap((k) => [`${k} facturat`, `${k} incasat`]), "Total facturat", "Total incasat"];
+      const linii = randuri.map((r) => [
+        q(r.nume),
+        ...coloane.flatMap((k) => {
+          const c = r.pe.get(k) || { f: 0, i: 0 };
+          return [n2(c.f), n2(c.i)];
+        }),
+        n2(r.totalF),
+        n2(r.totalI),
+      ]);
+      const totalLinie = ["TOTAL", ...totalPeColoana.flatMap((c) => [n2(c.f), n2(c.i)]), n2(totalF), n2(totalI)];
+      const csv = "﻿" + [cap.map(q).join(";"), ...linii.map((l) => l.join(";")), totalLinie.join(";")].join("\r\n");
+      return send(ctx.res, 200, csv, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="agenti-${deLa}_${panaLa}.csv"`,
+      });
+    }
+
+    const linkCsv = `/rapoarte/agenti-lunar?${new URLSearchParams({ perioada: interval.preset, de_la: deLa, pana_la: panaLa, arata, format: "csv" }).toString()}`;
+    const procentIncasare = totalF > 0 ? (totalI / totalF) * 100 : 0;
+
+    const celulaHtml = (c) => {
+      const f = c ? c.f : 0;
+      const i = c ? c.i : 0;
+      if (!f && !i) return '<span style="color:var(--text-muted)">—</span>';
+      if (arata === "facturat") return money(f);
+      if (arata === "incasat") return money(i);
+      return `${money(f)}<br><span style="font-size:11px;color:var(--success)">${money(i)}</span>`;
+    };
+
+    const antet = ["Agent", ...coloane.map((k) => (peAni ? k : k.slice(5) + "." + k.slice(2, 4))), "Total facturat", "Total încasat", "% încasat"];
+    const corp = randuri.map((r) => [
+      `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
+      ...coloane.map((k) => celulaHtml(r.pe.get(k))),
+      `<strong>${money(r.totalF)}</strong>`,
+      `<span style="color:var(--success)">${money(r.totalI)}</span>`,
+      r.totalF > 0 ? `${((r.totalI / r.totalF) * 100).toFixed(0)}%` : "—",
+    ]);
+    const randTotal = [
+      "<strong>TOTAL</strong>",
+      ...totalPeColoana.map((c) => celulaHtml(c)),
+      `<strong>${money(totalF)}</strong>`,
+      `<span style="color:var(--success)">${money(totalI)}</span>`,
+      totalF > 0 ? `${procentIncasare.toFixed(0)}%` : "—",
+    ];
+
+    // Evoluția totală pe lună, ca să se vadă dintr-o privire dacă încasările
+    // țin pasul cu facturarea.
+    const maxLuna = Math.max(1, ...totalPeColoana.map((c) => Math.max(c.f, c.i)));
+
+    const continut = `
+      ${selectorPerioada(
+        "/rapoarte/agenti-lunar",
+        interval,
+        `<select name="arata" onchange="this.form.submit()">
+           <option value="ambele"${arata === "ambele" ? " selected" : ""}>facturat + încasat</option>
+           <option value="facturat"${arata === "facturat" ? " selected" : ""}>doar facturat</option>
+           <option value="incasat"${arata === "incasat" ? " selected" : ""}>doar încasat</option>
+         </select>
+         <a class="link-btn" href="${linkCsv}">descarcă CSV</a>`
+      )}
+
+      <div class="cards">
+        <div class="card"><div class="label">Facturat în perioadă</div><div class="value">${money(totalF)}</div></div>
+        <div class="card"><div class="label">Încasat în perioadă</div><div class="value">${money(totalI)}</div></div>
+        <div class="card"><div class="label">Încasat / facturat</div><div class="value">${totalF > 0 ? procentIncasare.toFixed(0) + "%" : "—"}</div></div>
+        <div class="card"><div class="label">Agenți cu activitate</div><div class="value">${randuri.length}</div></div>
+        <div class="card"><div class="label">${peAni ? "Ani" : "Luni"} în raport</div><div class="value">${coloane.length}</div></div>
+      </div>
+
+      <h2>Pe agent și ${peAni ? "an" : "lună"}</h2>
+      ${table(antet, corp, { total: randTotal })}
+      <p style="font-size:12px;color:var(--text-muted)">
+        ${arata === "ambele" ? "În fiecare celulă: sus <strong>facturat</strong> (după data facturii), jos, cu verde, <strong>încasat</strong> (după data plății). " : ""}
+        Facturatul e cu TVA. Încasarea se pune pe luna în care au intrat banii, nu pe luna facturii — de aceea liniile nu se
+        potrivesc una peste alta, iar diferența e chiar creditul pe care îl dai clienților.
+        ${peAni ? "Perioada aleasă depășește 24 de luni, așa că tabelul e grupat pe ani; alege un interval mai scurt pentru detaliu lunar." : ""}
+      </p>
+
+      <h2>Total ${peAni ? "pe an" : "pe lună"} — facturat vs. încasat</h2>
+      <div class="chart">
+        ${totalPeColoana
+          .map(
+            (c) => `<div class="chart-row">
+              <div class="chart-label">${esc(c.k)}</div>
+              <div class="chart-bars">
+                ${bar((c.f / maxLuna) * 100, "albastru")}
+                ${bar((c.i / maxLuna) * 100, "verde")}
+              </div>
+              <div class="chart-values">${money(c.f)} / ${money(c.i)}</div>
+            </div>`
+          )
+          .join("")}
+      </div>
+      <p style="font-size:12px;color:var(--text-muted)">
+        Bară albastră = facturat, bară verde = încasat. Împărțirea pe agenți respectă alocările din
+        <a href="/alocari">Alocări clienți</a>: un client împărțit 60/40 își duce și banii 60/40. Facturile între firmele
+        grupului sunt scoase, ca să nu umfle cifrele nimănui.
+      </p>
+    `;
+    send(ctx.res, 200, pagina(ctx, "Facturări & încasări pe agent, lunar", "/rapoarte/agenti-lunar", continut));
   });
 
 
