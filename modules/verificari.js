@@ -357,23 +357,98 @@ const RECONSTITUITE = [
   "Încasare adusă prin punte din SmartBill",
 ];
 
-// Câte plăți născocite mai stau pe facturi care au și încasări adevărate.
-// Pe alea trebuie să le ștergem: adevărul e ce scrie în raportul de încasări.
-async function surogateDeSters() {
-  const semne = RECONSTITUITE.map(() => "?").join(", ");
-  return db
+// Încasările numărate de mai multe ori.
+//
+// De unde vin: raportul de încasări din SmartBill se importă pe perioade care
+// se suprapun, iar o încasare poate lista mai multe facturi deodată. Suma se
+// împarte între ele proporțional cu soldul rămas — dar soldul se schimbă după
+// primul import, deci a doua oară aceeași încasare se împarte altfel. Cheia de
+// dedublare (factură + zi + sumă) nu mai prinde nimic și banul intră a doua
+// oară. Așa a ajuns CSHM1762 să aibă cinci plăți pe o factură de 987.607 lei,
+// adică exact de patru ori cât s-a facturat.
+//
+// Curățarea are două trepte, aplicate DOAR pe facturile încasate peste total:
+//   1. repetările identice — pe aceeași factură, două plăți de exact aceeași
+//      sumă, iar factura rămâne acoperită și fără a doua. Se ține prima (cea
+//      mai veche), se scot copiile.
+//   2. plățile născocite din statusul facturii, pe facturi care au și încasări
+//      adevărate și rămân supraîncasate. Ele erau doar un surogat pentru
+//      „SmartBill zice că e plătită" — adevărul e raportul de încasări.
+//
+// Ce nu se atinge: facturile care nu sunt supraîncasate, și excesul care
+// rămâne după cele două trepte. Un singur plătit mai mare decât factura nu e
+// dublură, e o încasare pusă pe factura greșită — aia se rezolvă de mână.
+const SUB_TOTAL_FACTURA =
+  "(SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
+
+async function incasariDeCuratat() {
+  const supra = await db
     .prepare(
-      `SELECT pl.id, pl.factura_id, pl.suma, pl.data
-         FROM (SELECT * FROM plati WHERE activ = 1) pl
-         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
-        WHERE f.directie = 'vanzare'
-          AND pl.observatii IN (${semne})
-          AND EXISTS (
-            SELECT 1 FROM (SELECT * FROM plati WHERE activ = 1) x
-             WHERE x.factura_id = pl.factura_id AND x.observatii NOT IN (${semne})
-          )`
+      `SELECT f.id, f.numar, f.serie, f.data_emiterii, t.total, s.platit, p.nume AS partener
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+         JOIN ${SUB_TOTAL_FACTURA} t ON t.factura_id = f.id
+         JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) s
+           ON s.factura_id = f.id
+         LEFT JOIN parteneri p ON p.id = f.partener_id
+        WHERE f.directie = 'vanzare' AND s.platit > t.total + 1
+        ORDER BY (s.platit - t.total) DESC`
     )
-    .all(...RECONSTITUITE, ...RECONSTITUITE);
+    .all();
+  if (!supra.length) return { deScos: [], facturi: [], curate: 0, ramas: 0 };
+
+  const ids = supra.map((f) => f.id);
+  const toate = await db
+    .prepare(
+      `SELECT id, factura_id, suma, data, observatii FROM (SELECT * FROM plati WHERE activ = 1) plati
+        WHERE factura_id IN (${ids.map(() => "?").join(", ")}) ORDER BY data, id`
+    )
+    .all(...ids);
+  const peFactura = new Map();
+  for (const p of toate) {
+    if (!peFactura.has(Number(p.factura_id))) peFactura.set(Number(p.factura_id), []);
+    peFactura.get(Number(p.factura_id)).push(p);
+  }
+
+  const deScos = [];
+  const facturi = [];
+  let curate = 0;
+  let ramas = 0;
+  for (const f of supra) {
+    const plati = peFactura.get(Number(f.id)) || [];
+    const total = nr(f.total);
+    let platit = nr(f.platit);
+    const scos = new Set();
+
+    // 1. repetări identice
+    const vazute = new Set();
+    for (const p of plati) {
+      const cheie = Math.round(nr(p.suma) * 100);
+      if (vazute.has(cheie) && platit - nr(p.suma) >= total - 0.01) {
+        scos.add(p.id);
+        platit -= nr(p.suma);
+        deScos.push({ ...p, factura: f, motiv: "repetare identică" });
+      } else vazute.add(cheie);
+    }
+
+    // 2. surogate rămase, dar numai dacă pe factură a mai rămas o încasare adevărată
+    const areReale = plati.some((p) => !scos.has(p.id) && !RECONSTITUITE.includes(p.observatii));
+    if (areReale && platit > total + 1) {
+      for (const p of plati) {
+        if (scos.has(p.id) || !RECONSTITUITE.includes(p.observatii)) continue;
+        if (platit - nr(p.suma) <= 0) continue;
+        scos.add(p.id);
+        platit -= nr(p.suma);
+        deScos.push({ ...p, factura: f, motiv: "plată născocită din status" });
+      }
+    }
+
+    const excesRamas = platit - total;
+    if (excesRamas > 1) {
+      ramas += excesRamas;
+      facturi.push({ ...f, dupa: platit, exces: excesRamas, scoase: scos.size });
+    } else curate++;
+  }
+  return { deScos, facturi, curate, ramas, supra: supra.length };
 }
 
 // --- Prețuri de achiziție aberante ----------------------------------------
@@ -476,22 +551,101 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare prețuri de achiziție", active: "/admin/date", body }));
   });
 
-  router.post("/admin/date/curata-surogate", async (ctx) => {
+  // Curățarea încasărilor numărate de mai multe ori. Nu șterge: pune
+  // „activ = 0". Plățile scoase rămân în baza de date și se văd (și se pot
+  // aduce înapoi) din Configurări → Date. Pe bani de zeci de milioane, o
+  // ștergere ireversibilă n-are ce căuta.
+  // Lista, factură cu factură, a ce s-ar scoate. Se deschide înainte de a
+  // apăsa butonul: nimeni nu semnează o curățare de zeci de milioane pe
+  // baza unui număr.
+  router.get("/admin/date/incasari-duble", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
-    const deSters = await surogateDeSters();
-    let sterse = 0;
+    const { deScos, facturi, curate, ramas, supra } = await incasariDeCuratat();
+    const suma = deScos.reduce((a, p) => a + nr(p.suma), 0);
+
+    const body = `
+      <div class="toolbar"><a class="btn secondary" href="/admin/date">← Înapoi la verificări</a></div>
+      <h1 style="margin:6px 0 2px">Încasări numărate de mai multe ori</h1>
+      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:860px">
+        ${supra} facturi au încasat mai mult decât s-a facturat. Mai jos, plată cu plată, ce s-ar scoate din calcul
+        și de ce. „Repetare identică" = pe aceeași factură există deja o plată de exact aceeași sumă, iar factura
+        rămâne acoperită și fără copie. „Plată născocită din status" = plata pusă doar fiindcă SmartBill zicea
+        „platită", pe o factură care are și încasarea adevărată.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">Plăți de scos</div><div class="value">${deScos.length}</div></div>
+        <div class="card"><div class="label">Sumă scoasă din calcul</div><div class="value">${money(suma)}</div></div>
+        <div class="card"><div class="label">Facturi care ies curate</div><div class="value">${curate} / ${supra}</div></div>
+        <div class="card"><div class="label">Exces rămas</div><div class="value">${money(ramas)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${facturi.length} facturi, de rezolvat de mână</div></div>
+      </div>
+
+      <h2>Ce se scoate</h2>
+      ${table(
+        ["Factură", "Data facturii", "Partener", "Facturat", "Plata scoasă", "Data plății", "De ce"],
+        deScos.slice(0, 300).map((p) => [
+          `<a href="/facturi/${p.factura.id}">${esc(String(p.factura.serie || "") + String(p.factura.numar || ""))}</a>`,
+          esc(String(p.factura.data_emiterii || "").slice(0, 10)),
+          esc(p.factura.partener || "—"),
+          money(p.factura.total),
+          `<strong>${money(p.suma)}</strong>`,
+          esc(String(p.data || "").slice(0, 10)),
+          esc(p.motiv),
+        ])
+      )}
+      ${deScos.length > 300 ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele 300 din ${deScos.length}.</p>` : ""}
+
+      <h2>Ce rămâne supraîncasat după curățare</h2>
+      <p style="margin:-6px 0 10px;color:var(--text-muted);font-size:13px;max-width:860px">
+        Astea nu sunt dubluri: o singură plată mai mare decât factura înseamnă că banii au fost puși pe factura
+        greșită, sau că o plată bancară care acoperea mai multe facturi a intrat toată pe una. Se rezolvă de mână,
+        din pagina facturii.
+      </p>
+      ${table(
+        ["Factură", "Data", "Partener", "Facturat", "Încasat după curățare", "Exces"],
+        facturi.slice(0, 100).map((f) => [
+          `<a href="/facturi/${f.id}">${esc(String(f.serie || "") + String(f.numar || ""))}</a>`,
+          esc(String(f.data_emiterii || "").slice(0, 10)),
+          esc(f.partener || "—"),
+          money(f.total),
+          money(f.dupa),
+          `<span style="color:var(--danger)">${money(f.exces)}</span>`,
+        ])
+      )}
+      ${facturi.length > 100 ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele 100 din ${facturi.length}.</p>` : ""}
+
+      <form method="post" action="/admin/date/curata-incasari" style="margin-top:18px"
+            onsubmit="return confirm('Se scot din calcul ${deScos.length} plăți (${money(suma)}). Nu se șterge nimic. Continui?')">
+        <button class="btn" type="submit">Scoate cele ${deScos.length} plăți din calcul</button>
+      </form>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Încasări duble", active: "/admin/date", body }));
+  });
+
+  router.post("/admin/date/curata-incasari", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const { deScos, curate, ramas, supra } = await incasariDeCuratat();
+    let n = 0;
     let suma = 0;
-    for (const r of deSters) {
-      await db.prepare("DELETE FROM plati WHERE id = ?").run(r.id);
-      sterse++;
-      suma += nr(r.suma);
+    const peMotiv = new Map();
+    for (const p of deScos) {
+      await db.prepare("UPDATE plati SET activ = 0 WHERE id = ?").run(p.id);
+      n++;
+      suma += nr(p.suma);
+      peMotiv.set(p.motiv, (peMotiv.get(p.motiv) || 0) + 1);
     }
     const body = `
       <h2>Curățare făcută</h2>
-      <p>S-au șters <strong>${sterse}</strong> plăți născocite din statusul facturii, în valoare de <strong>${money(suma)}</strong>.
-      Toate erau pe facturi care au și încasarea adevărată, cu data ei reală — deci nu s-a pierdut nimic, doar s-a oprit numărarea de două ori.</p>
+      <p>Am scos din calcul <strong>${n}</strong> plăți, în valoare de <strong>${money(suma)}</strong>:</p>
+      <ul>${[...peMotiv].map(([m, c]) => `<li>${esc(m)}: ${c} plăți</li>`).join("")}</ul>
+      <p>Din cele ${supra} facturi încasate peste total, <strong>${curate}</strong> ies curate.
+      Pe restul rămâne un exces de ${money(ramas)} — ăla nu e dublură, ci încasare pusă pe factura greșită,
+      și se rezolvă de mână.</p>
+      <p style="color:var(--text-muted);font-size:13px">
+        Nimic nu s-a șters: plățile scoase sunt marcate inactive și se văd în
+        <a href="/configurari/date">Configurări → Date</a>, de unde pot fi aduse înapoi.
+      </p>
       <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Curățare plăți", active: "/admin/date", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Curățare încasări", active: "/admin/date", body }));
   });
 
   router.get("/admin/date", async (ctx) => {
@@ -543,8 +697,8 @@ function register(router) {
       })
       .join("");
 
-    const surogate = await surogateDeSters();
-    const surogateSuma = surogate.reduce((s2, r) => s2 + nr(r.suma), 0);
+    const curatare = await incasariDeCuratat();
+    const curatareSuma = curatare.deScos.reduce((s2, r) => s2 + nr(r.suma), 0);
     const costuriRele = await costuriDeReparat();
 
     const body = `
@@ -566,17 +720,24 @@ function register(router) {
           : ""
       }
       ${
-        surogate.length
+        curatare.deScos.length
           ? `<div class="card" style="border-left:4px solid var(--danger);margin-bottom:16px">
-               <div class="label">Plăți născocite din statusul facturii, pe facturi care au și încasarea adevărată</div>
-               <div class="value">${surogate.length} plăți · ${money(surogateSuma)}</div>
+               <div class="label">Încasări numărate de mai multe ori</div>
+               <div class="value">${curatare.deScos.length} plăți · ${money(curatareSuma)}</div>
                <p style="font-size:13px;margin:8px 0 10px;color:var(--text-muted)">
-                 Astea sunt banii numărați de două ori. Se pot șterge fără pierdere: încasarea adevărată,
-                 cu data ei reală, rămâne pe factură. Facturile care n-au nicio încasare adevărată nu se ating.
+                 Pe ${curatare.supra} facturi s-a încasat mai mult decât s-a facturat. Cauza: raportul de încasări
+                 s-a importat pe perioade care se suprapun, iar o încasare care listează mai multe facturi se împarte
+                 altfel la al doilea import — deci nu se mai recunoaște ca dublură. Se scot din calcul
+                 ${curatare.deScos.filter((x) => x.motiv === "repetare identică").length} repetări identice și
+                 ${curatare.deScos.filter((x) => x.motiv !== "repetare identică").length} plăți născocite din status.
+                 Ies curate ${curatare.curate} facturi din ${curatare.supra}.
                </p>
-               <form method="post" action="/admin/date/curata-surogate" onsubmit="return confirm('Se șterg ${surogate.length} plăți născocite. Încasările adevărate rămân. Continui?')">
-                 <button class="btn" type="submit">Șterge cele ${surogate.length} plăți născocite</button>
+               <form method="post" action="/admin/date/curata-incasari" onsubmit="return confirm('Se scot din calcul ${curatare.deScos.length} plăți (${money(curatareSuma)}). Nu se șterge nimic — se pot aduce înapoi din Configurări → Date. Continui?')">
+                 <button class="btn" type="submit">Scoate cele ${curatare.deScos.length} plăți din calcul</button>
                </form>
+               <p style="font-size:12px;margin:10px 0 0;color:var(--text-muted)">
+                 <a href="/admin/date/incasari-duble">Vezi exact ce plăți se scot, factură cu factură →</a>
+               </p>
              </div>`
           : ""
       }

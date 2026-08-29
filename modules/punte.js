@@ -1039,6 +1039,14 @@ async function ingestIncasari(randuri) {
       (x) => `${x.factura_id}|${String(x.data).slice(0, 10)}|${Number(x.suma).toFixed(2)}`
     )
   );
+  // Amprenta randului sursa. Cheia de mai sus nu prinde randurile care
+  // listeaza mai multe facturi: suma se imparte dupa soldul ramas, iar soldul
+  // se schimba dupa prima trecere, deci a doua oara aceeasi incasare se
+  // sparge in alte sume. Amprenta e a randului, nu a bucatii, si nu se
+  // schimba oricat de des ar trece puntea peste acelasi raport.
+  const amprente = new Set(
+    (await db.prepare("SELECT amprenta FROM plati WHERE amprenta IS NOT NULL").all()).map((x) => String(x.amprenta))
+  );
   const solduri = new Map(
     (
       await db
@@ -1078,6 +1086,13 @@ async function ingestIncasari(randuri) {
       continue;
     }
 
+    const amprenta = `${zi}|${String(r.factura || "").toUpperCase().replace(/[^A-Z0-9,;]/g, "")}|${suma.toFixed(2)}`;
+    if (amprente.has(amprenta)) {
+      dubluri++;
+      continue;
+    }
+    amprente.add(amprenta);
+
     // impartirea pe facturi: dupa cat mai are fiecare de incasat; daca nu se
     // stie (facturi fara linii), in parti egale
     const ponderi = tinte.map((id) => Math.max(solduri.get(id) || 0, 0));
@@ -1116,8 +1131,8 @@ async function ingestIncasari(randuri) {
         surogateSterse++;
       }
       await db
-        .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES (?, ?, ?, ?, ?)")
-        .run(tinte[i], parte, zi, curat(r.metoda) || "transfer bancar", NOTA_INCASARE);
+        .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii, amprenta) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(tinte[i], parte, zi, curat(r.metoda) || "transfer bancar", NOTA_INCASARE, amprenta);
       existente.add(amprenta);
       solduri.set(tinte[i], (solduri.get(tinte[i]) || 0) - parte);
       scrise++;

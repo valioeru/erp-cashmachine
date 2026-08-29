@@ -1110,10 +1110,21 @@ function register(router) {
       dupaCheie.get(cheie).push(f.id);
     }
     // Plățile deja existente, ca să nu dublăm la reimport.
+    //
+    // Două site: una pe „factură + zi + sumă", care prinde reimportul unui
+    // rând care merge pe o singură factură; și una pe amprenta rândului sursă,
+    // singura care prinde rândurile ce listează mai multe facturi. Pe alea
+    // suma se împarte proporțional cu soldul rămas, iar soldul se schimbă
+    // după primul import — deci a doua oară aceeași încasare se sparge în
+    // alte sume și cheia veche n-o mai recunoaște. Așa s-au strâns milioanele
+    // de încasări numărate de patru ori.
     const existente = new Set(
       (await db.prepare("SELECT factura_id, data, suma FROM plati").all()).map(
         (p) => `${p.factura_id}|${String(p.data).slice(0, 10)}|${Number(p.suma).toFixed(2)}`
       )
+    );
+    const amprente = new Set(
+      (await db.prepare("SELECT amprenta FROM plati WHERE amprenta IS NOT NULL").all()).map((p) => String(p.amprenta))
     );
     // Soldul curent al fiecărei facturi — pentru împărțirea unei încasări
     // care acoperă mai multe facturi.
@@ -1147,6 +1158,12 @@ function register(router) {
       if (!(suma > 0)) continue;
       randuri++;
 
+      // Amprenta rândului sursă: data, lista de facturi exact cum e scrisă și
+      // totalul încasării. Nu depinde de cum se împarte suma, deci reimportul
+      // aceluiași raport nu mai adaugă nimic.
+      const amprenta = `${data}|${brutFactura.toUpperCase().replace(/[^A-Z0-9,;]/g, "")}|${suma.toFixed(2)}`;
+      if (amprente.has(amprenta)) { duplicate++; continue; }
+
       // O încasare poate lista mai multe facturi, separate prin virgulă.
       const bucati = brutFactura.split(/[,;]+/).map((x) => x.trim()).filter(Boolean);
       const tinte = [];
@@ -1166,19 +1183,20 @@ function register(router) {
         const cheieDup = `${id}|${data}|${rotunjit.toFixed(2)}`;
         if (existente.has(cheieDup)) { duplicate++; return; }
         existente.add(cheieDup);
-        deInserat.push([id, rotunjit, data]);
+        deInserat.push([id, rotunjit, data, amprenta]);
         adaugate++;
       });
+      amprente.add(amprenta);
     }
 
     // inserare în loturi
     const LOT = 200;
     for (let i = 0; i < deInserat.length; i += LOT) {
       const lot = deInserat.slice(i, i + LOT);
-      const ph = lot.map(() => "(?, ?, ?, 'import smartbill', 'Încasare importată din raportul SmartBill')").join(", ");
+      const ph = lot.map(() => "(?, ?, ?, 'import smartbill', 'Încasare importată din raportul SmartBill', ?)").join(", ");
       const args = [];
-      for (const l of lot) args.push(l[0], l[1], l[2]);
-      await db.prepare(`INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES ${ph}`).run(...args);
+      for (const l of lot) args.push(l[0], l[1], l[2], l[3]);
+      await db.prepare(`INSERT INTO plati (factura_id, suma, data, metoda, observatii, amprenta) VALUES ${ph}`).run(...args);
     }
 
     // Statusul facturilor se recalculează din plăți: achitat integral,
