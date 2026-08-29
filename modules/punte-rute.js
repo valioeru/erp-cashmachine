@@ -12,6 +12,7 @@ module.exports = function registerRute(router, deps) {
     productie: "Rapoarte de producție (dau rețetele)",
     consum: "Bonuri de consum",
     profit_produs: "Profit pe produs (marja reală)",
+    registru_comenzi: "Registrul de comenzi (Excel)",
   };
 
   // Marja pe produs, cu costul real al bunurilor vândute.

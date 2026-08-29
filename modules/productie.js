@@ -5,7 +5,7 @@
 // pentru că le stabilesc oameni diferiți — exact ce era ținut până acum în
 // Excelul "Comenzi_in_lucru.xlsx".
 const db = require("../lib/db");
-const { esc, layout, table } = require("../lib/render");
+const { esc, layout, table, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
 const { comenziSpreAlocare, ore } = require("./utilaje");
@@ -98,6 +98,106 @@ function initiale(nume) {
 
 function daNu(v) {
   return /^da$/i.test(String(v || "").trim()) ? 1 : 0;
+}
+
+// Excel ține datele ca număr de zile de la 30.12.1899. Când registrul vine
+// prin browser (nu ca fișier), celulele de dată sosesc exact așa — un număr.
+function dinSerialExcel(v) {
+  const n = Number(String(v || "").trim());
+  if (!Number.isFinite(n) || n < 20000 || n > 60000) return null;
+  const ms = Math.round((n - 25569) * 86400000);
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+// O dată din registru: fie serial Excel, fie scrisă. Ce nu e nici una, nici
+// alta (în registru sunt și celule cu „KCK 1564*572" pe coloana de dată) se
+// întoarce ca text, ca să se vadă în listă așa cum e scris — nu-l repar eu.
+function dataRegistru(v) {
+  const s = String(v || "").trim();
+  if (!s) return { data: null, text: null };
+  const ser = dinSerialExcel(s);
+  if (ser) return { data: ser, text: null };
+  const parsat = parseDataComenzi(s);
+  if (parsat) return { data: parsat, text: null };
+  return { data: null, text: s };
+}
+
+// Un rând de registru → o comandă de producție. Stă într-un singur loc
+// fiindcă registrul intră pe două căi: încărcat ca fișier din Import, sau
+// trimis din browser prin punte (când fișierul e într-un OneDrive la care
+// serverul n-are cum să ajungă). Aceleași reguli, același rezultat.
+async function scrieRandRegistru(v, cacheP, existente) {
+  const numar = String(v.numar || "").trim();
+  const client = String(v.client || "").trim();
+  if (!client || !/\d/.test(numar)) return "sarit";
+  if (existente.has(numar)) return "sarit";
+  existente.add(numar);
+
+  const stare = String(v.stare || "").toLowerCase();
+  const facturatTxt = String(v.facturat || "").trim();
+  const eFacturat = /^da$/i.test(facturatTxt);
+  let status;
+  if (/anulat/.test(stare)) status = "anulata";
+  else if (eFacturat) status = "facturata";
+  else if (/finalizat/.test(stare)) status = "finalizata";
+  else status = "in_productie"; // stare goală în registru = încă în lucru
+
+  const plasare = dataRegistru(v.plasare);
+  const livrare = dataRegistru(v.livrare);
+  // Ce nu s-a putut citi ca dată nu se pierde: ajunge în observații, cu
+  // eticheta coloanei din care vine.
+  const bucati = [String(v.observatii || "").trim()];
+  if (plasare.text) bucati.push("Data plasare, scrisă în registru: " + plasare.text);
+  if (livrare.text) bucati.push("Data livrare, scrisă în registru: " + livrare.text);
+  const observatii = bucati.filter(Boolean).join(" · ") || null;
+
+  await db
+    .prepare(
+      `INSERT INTO comenzi_productie (numar, reprezentant, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, observatii, reteta, sursa)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_registru')`
+    )
+    .run(
+      numar,
+      String(v.reprezentant || "").trim() || null,
+      await partenerDupaNume(client, cacheP),
+      client,
+      String(v.produs || "").trim() || null,
+      String(v.caracteristici || "").trim() || null,
+      String(v.cantitate || "").trim() || null,
+      String(v.um || "").trim() || "buc",
+      String(v.ambalare || "").trim() || null,
+      plasare.data,
+      livrare.data,
+      livrare.data,
+      /finalizat/.test(stare) || eFacturat ? livrare.data : null,
+      status,
+      daNu(v.doc),
+      daNu(v.fisa),
+      String(v.doc || "").trim() || null,
+      String(v.fisa || "").trim() || null,
+      facturatTxt || null,
+      observatii,
+      String(v.reteta || "").trim() || null
+    );
+  return "creat";
+}
+
+// Handlerul de punte: primește rândurile registrului din browser.
+async function ingestRegistruComenzi(randuri) {
+  const existente = new Set((await db.prepare("SELECT numar FROM comenzi_productie WHERE numar IS NOT NULL").all()).map((r) => String(r.numar)));
+  const cacheP = new Map();
+  let create = 0;
+  let sarite = 0;
+  const erori = [];
+  for (const v of randuri) {
+    try {
+      if ((await scrieRandRegistru(v, cacheP, existente)) === "creat") create++;
+      else sarite++;
+    } catch (e) {
+      erori.push(String((e && e.message) || e).slice(0, 160));
+    }
+  }
+  return { comenzi_scrise: create, sarite, erori: erori.slice(0, 10) };
 }
 
 // Tabelul „Comenzi spre alocare". Pentru fiecare comandă deschisă și
@@ -205,7 +305,6 @@ function register(router) {
         <a href="/productie/planificare" class="btn secondary">Planificare</a>
         <a href="/import" class="btn secondary">Import din Excel</a>
       </div>
-      ${sectiuneSpreAlocare(spre)}
       <div class="cards">
         ${STATUSURI.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div></div>`).join("")}
         <div class="card"><div class="label">Cu termenul depășit</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
@@ -220,29 +319,43 @@ function register(router) {
         <button class="btn small" type="submit">Filtrează</button>
       </form>
       <form method="post" action="/productie/sterge" onsubmit="return confirm('Ștergi comenzile selectate? Nu se pot recupera.')">
+      <div class="tabel-lat">
       ${table(
-        ["<input type=\"checkbox\" onclick=\"document.querySelectorAll('.sel-cmd').forEach(c=>c.checked=this.checked)\">", "#", "Client", "Produs", "Caracteristici", "Cant.", "Rep.", "Livrare", "DoC/FT", "Status"],
+        ["<input type=\"checkbox\" onclick=\"document.querySelectorAll('.sel-cmd').forEach(c=>c.checked=this.checked)\">",
+         "Nr. comandă", "Client", "Reprezentant", "Produs comandat", "Caracteristici produs",
+         "Cantitate", "UM", "Tip ambalare", "Data plasare", "Data livrare", "Stare",
+         "DoC", "Fișă tehnică", "Facturat", "Rețetă", "Observații", ""],
         comenzi.map((c) => [
           `<input type="checkbox" class="sel-cmd" name="ids" value="${c.id}">`,
           `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
           c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—"),
-          esc(c.tip_produs || "—"),
-          `<span style="font-size:12px;color:var(--text-muted)">${esc(String(c.caracteristici || "").slice(0, 40))}</span>`,
-          esc([c.cantitate, c.um].filter(Boolean).join(" ")),
           esc(c.reprezentant || "—"),
+          esc(c.tip_produs || "—"),
+          `<span class="cel-lung">${esc(c.caracteristici || "")}</span>`,
+          esc(c.cantitate || ""),
+          esc(c.um || ""),
+          esc(c.tip_ambalare || ""),
+          esc(c.data_initiere || ""),
           c.data_livrare
             ? ["noua", "in_productie"].includes(c.status) && c.data_livrare < aziStr
               ? `<span class="badge rosu">${esc(c.data_livrare)}</span>`
               : esc(c.data_livrare)
-            : "—",
-          `${c.doc_emisa ? '<span class="badge verde">DoC</span>' : ""} ${c.fisa_tehnica ? '<span class="badge verde">FT</span>' : ""}`,
+            : "",
           badge(c.status),
+          esc(c.doc_emisa_txt || (c.doc_emisa ? "DA" : "")),
+          esc(c.fisa_tehnica_txt || (c.fisa_tehnica ? "DA" : "")),
+          esc(c.facturat || ""),
+          `<span class="cel-lung">${esc(c.reteta || "")}</span>`,
+          `<span class="cel-lung">${esc(c.observatii || "")}</span>`,
+          `<a class="btn small" href="/productie/${c.id}/pdf" target="_blank" title="Comanda de dat în producție, gata de printat">Comandă PDF</a>`,
         ])
       )}
+      </div>
       <div class="toolbar" style="margin-top:10px">
         <button class="btn secondary" type="submit">Șterge selectatele</button>
       </div>
       </form>
+      ${sectiuneSpreAlocare(spre)}
       <form method="post" action="/productie/sterge-tot" class="inline-form" onsubmit="return confirm('Ștergi TOATE comenzile de producție? Folosește asta doar înainte de un reimport curat.')">
         <button class="link-btn danger" type="submit">Șterge toate comenzile (pentru reimport)</button>
       </form>
@@ -538,6 +651,141 @@ function register(router) {
   });
 
   // ---- Detaliu + actualizare ----------------------------------------------
+  // ---- Comanda de dat în producție, gata de printat ----------------------
+  // Hârtia care ajunge pe utilaj. Are pe ea tot ce trebuie să știe omul care
+  // o execută — ce, cât, din ce, până când, pe ce mașină și cu cine — și
+  // nimic din ce nu-l privește (preț, client-bani, comision). Se deschide
+  // într-o filă nouă și se scoate cu Ctrl+P → „Salvează ca PDF".
+  router.get("/productie/:id/pdf", async (ctx) => {
+    const c = await db
+      .prepare(
+        `SELECT c.*, p.nume AS partener_nume, p.cui AS partener_cui
+           FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id
+          WHERE c.id = ?`
+      )
+      .get(ctx.params.id);
+    if (!c) return send(ctx.res, 404, "Comanda nu există.");
+
+    const aloc = await db
+      .prepare(
+        `SELECT a.*, u.denumire AS utilaj, u.cod AS utilaj_cod
+           FROM alocari_productie a LEFT JOIN utilaje u ON u.id = a.utilaj_id
+          WHERE a.comanda_productie_id = ? ORDER BY a.data, a.ora_start`
+      )
+      .all(c.id);
+    const oameni = new Map();
+    for (const a of aloc) {
+      const r = await db
+        .prepare("SELECT r.nume FROM alocari_resurse ar JOIN resurse r ON r.id = ar.resursa_id WHERE ar.alocare_id = ?")
+        .all(a.id);
+      oameni.set(a.id, r.map((x) => x.nume));
+    }
+
+    const ora = (v) => {
+      const n = Number(v || 0);
+      const h = Math.floor(n);
+      const m = Math.round((n - h) * 60);
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    };
+    const rand = (et, val) => (val ? `<tr><th>${esc(et)}</th><td>${esc(val)}</td></tr>` : "");
+    const stareText = (STATUSURI.find(([v]) => v === c.status) || [null, c.status])[1];
+
+    const alocHtml = aloc.length
+      ? `<h2>Alocare</h2>
+         <table class="cp-tabel">
+           <tr><th>Data</th><th>Interval</th><th>Utilaj</th><th>Cantitate</th><th>Oameni</th></tr>
+           ${aloc
+             .map(
+               (a) => `<tr>
+                 <td>${esc(a.data || "")}</td>
+                 <td>${esc(ora(a.ora_start))}–${esc(ora(Number(a.ora_start) + Number(a.ore || 0)))}</td>
+                 <td>${esc([a.utilaj_cod, a.utilaj].filter(Boolean).join(" · ") || "—")}</td>
+                 <td>${esc(a.cantitate != null ? String(a.cantitate) : "")}</td>
+                 <td>${esc((oameni.get(a.id) || []).join(", "))}</td>
+               </tr>`
+             )
+             .join("")}
+         </table>`
+      : `<h2>Alocare</h2><p class="cp-gol">Comanda nu e încă alocată pe utilaj. Se alocă din <b>Producție → Planificare</b>, apoi se tipărește din nou.</p>`;
+
+    const corp = `<!doctype html>
+<html lang="ro"><head><meta charset="utf-8">
+<title>Comanda ${esc(c.numar || c.id)} · producție</title>
+<style>
+  @page { size: A4; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif; color: #14314f; margin: 0; background: #eef2f6; }
+  .bara { padding: 10px 16px; background: #fff; border-bottom: 1px solid #d7dfe8; font-size: 14px; }
+  .bara button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #2f5f92; background: #2f5f92; color: #fff; cursor: pointer; }
+  .bara a { color: #2f5f92; margin-left: 12px; }
+  .foaie { width: 210mm; min-height: 297mm; margin: 16px auto; padding: 16mm; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.12); }
+  .cap { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #14314f; padding-bottom: 8px; margin-bottom: 14px; }
+  .cap .firma { font-size: 13px; letter-spacing: 1px; font-weight: 700; }
+  .cap .tip { font-size: 11px; color: #5b6b7d; letter-spacing: 2px; text-transform: uppercase; }
+  .cap .nr { text-align: right; }
+  .cap .nr b { font-size: 26px; font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 1px; }
+  h1 { font-size: 21px; margin: 0 0 2px; }
+  .sub { color: #5b6b7d; font-size: 13px; margin-bottom: 14px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; color: #4a6b8c; margin: 18px 0 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #e2e9f0; vertical-align: top; }
+  .cp-date th { width: 42mm; color: #5b6b7d; font-weight: 600; }
+  .cp-tabel th { background: #f2f6fa; font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; color: #4a6b8c; }
+  .mare { font-size: 19px; font-weight: 700; }
+  .cp-gol { color: #7b8794; font-size: 13px; font-style: italic; }
+  .semnaturi { display: flex; gap: 18px; margin-top: 26px; }
+  .semnaturi div { flex: 1; border-top: 1px solid #98a6b5; padding-top: 5px; font-size: 11.5px; color: #5b6b7d; }
+  .obs { border-left: 3px solid #e0a14a; background: #fdf7ee; padding: 8px 12px; font-size: 13px; }
+  @media print { .bara { display: none; } body { background: #fff; } .foaie { margin: 0; box-shadow: none; width: auto; min-height: 0; padding: 0; } }
+</style></head>
+<body>
+<div class="bara">
+  <button onclick="window.print()">Tipărește / salvează ca PDF</button>
+  <a href="/productie">← Înapoi la comenzi</a>
+</div>
+<div class="foaie">
+  <div class="cap">
+    <div>
+      <div class="firma">CASH MACHINE SRL</div>
+      <div class="tip">Comandă de producție</div>
+    </div>
+    <div class="nr"><b>${esc(c.numar || String(c.id))}</b><br><span class="tip">${esc(stareText || "")}</span></div>
+  </div>
+
+  <h1>${esc(c.tip_produs || "Produs")}</h1>
+  <div class="sub">${esc(c.caracteristici || "")}</div>
+
+  <h2>Ce se face</h2>
+  <table class="cp-date">
+    <tr><th>Cantitate</th><td class="mare">${esc([c.cantitate, c.um].filter(Boolean).join(" ") || "—")}</td></tr>
+    ${rand("Tip ambalare", c.tip_ambalare)}
+    ${rand("Rețetă", c.reteta)}
+  </table>
+
+  <h2>Pentru cine și până când</h2>
+  <table class="cp-date">
+    ${rand("Client", c.partener_nume || c.client_text)}
+    ${rand("Reprezentant vânzări", c.reprezentant)}
+    ${rand("Data plasării", c.data_initiere)}
+    ${rand("Data livrării", c.data_livrare)}
+    ${rand("DoC emisă", c.doc_emisa_txt || (c.doc_emisa ? "DA" : ""))}
+    ${rand("Fișă tehnică emisă", c.fisa_tehnica_txt || (c.fisa_tehnica ? "DA" : ""))}
+  </table>
+
+  ${alocHtml}
+
+  ${c.observatii ? `<h2>Observații</h2><div class="obs">${esc(c.observatii)}</div>` : ""}
+
+  <div class="semnaturi">
+    <div>Predat de (planificare) — nume, semnătura, data</div>
+    <div>Primit de (producție) — nume, semnătura, data</div>
+    <div>Cantitate realizată / observații la execuție</div>
+  </div>
+</div>
+</body></html>`;
+    send(ctx.res, 200, dateleInText(corp));
+  });
+
   router.get("/productie/:id", async (ctx) => {
     const c = await db
       .prepare("SELECT c.*, p.nume AS partener_nume FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
@@ -756,53 +1004,31 @@ function register(router) {
     for (let r = randHeader + 1; r < rows.length; r++) {
       const row = rows[r];
       if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
-      const numar = val(row, "numar");
-      const client = val(row, "client");
-      // rânduri reziduale (ex: un "l" singur pe rând) sau fără date reale
-      if (!client || !/\d/.test(numar)) {
-        sarite++;
-        continue;
-      }
-      if (existente.has(numar)) {
-        sarite++;
-        continue;
-      }
-      existente.add(numar);
       try {
-        const stare = val(row, "stare").toLowerCase();
-        const facturat = daNu(val(row, "facturat"));
-        let status;
-        if (/anulat/.test(stare)) status = "anulata";
-        else if (facturat) status = "facturata";
-        else if (/finalizat/.test(stare)) status = "finalizata";
-        else if (/curs|lucru/.test(stare)) status = "in_productie";
-        else status = "in_productie"; // stare goală în registru = încă în lucru
-        await db
-          .prepare(
-            `INSERT INTO comenzi_productie (numar, reprezentant, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, observatii, reteta, sursa)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_registru')`
-          )
-          .run(
-            numar,
-            val(row, "reprezentant") || null,
-            await partenerDupaNume(client, cacheP),
-            client,
-            val(row, "produs") || null,
-            val(row, "caracteristici") || null,
-            val(row, "cantitate") || null,
-            val(row, "um") || "buc",
-            val(row, "ambalare") || null,
-            parseDataComenzi(val(row, "plasare")),
-            parseDataComenzi(val(row, "livrare")),
-            parseDataComenzi(val(row, "livrare")),
-            /finalizat/.test(stare) || facturat ? parseDataComenzi(val(row, "livrare")) : null,
-            status,
-            daNu(val(row, "doc")),
-            daNu(val(row, "fisa")),
-            val(row, "observatii") || null,
-            val(row, "reteta") || null
-          );
-        create++;
+        const rez = await scrieRandRegistru(
+          {
+            numar: val(row, "numar"),
+            client: val(row, "client"),
+            reprezentant: val(row, "reprezentant"),
+            produs: val(row, "produs"),
+            caracteristici: val(row, "caracteristici"),
+            cantitate: val(row, "cantitate"),
+            um: val(row, "um"),
+            ambalare: val(row, "ambalare"),
+            plasare: val(row, "plasare"),
+            livrare: val(row, "livrare"),
+            stare: val(row, "stare"),
+            doc: val(row, "doc"),
+            fisa: val(row, "fisa"),
+            facturat: val(row, "facturat"),
+            reteta: val(row, "reteta"),
+            observatii: val(row, "observatii"),
+          },
+          cacheP,
+          existente
+        );
+        if (rez === "creat") create++;
+        else sarite++;
       } catch (e) {
         erori.push(`Rând ${r + 1}: ${e.message}`);
       }
@@ -991,4 +1217,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, STATUSURI };
+module.exports = { register, STATUSURI, ingestRegistruComenzi };

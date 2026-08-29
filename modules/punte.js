@@ -1157,6 +1157,7 @@ const HANDLERE = {
   salarii: ingestSalarii,
   sugestii: ingestSugestii,
   incasari: ingestIncasari,
+  registru_comenzi: (randuri) => require("./productie").ingestRegistruComenzi(randuri),
 };
 
 function register(router) {
