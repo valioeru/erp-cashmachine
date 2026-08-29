@@ -358,6 +358,7 @@ button.chip { font-family: inherit; cursor: pointer; }
 .perioade-custom input[type="date"] { padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; font-family: inherit; }
 .perioade-sageata { font-size: 13px; color: var(--text-muted); }
 .perioade-interval { font-size: 12px; color: var(--text-muted); margin-left: 4px; }
+.perioade-alte { display: flex; gap: 8px; align-items: center; margin-left: auto; padding-left: 12px; border-left: 1px solid var(--border); }
 @media (max-width: 700px) { .perioade-interval { display: none; } }
 /* Pe fundal inchis (caseta de comision din biroul agentului) chipurile isi
    inverseaza rolurile: cel ales e alb plin, restul sunt transparente. */
