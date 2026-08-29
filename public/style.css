@@ -366,3 +366,35 @@ button.chip { font-family: inherit; cursor: pointer; }
 .comision-box .chip:hover { background: rgba(255,255,255,.26); border-color: #fff; }
 .comision-box .chip.activ { background: #fff; border-color: #fff; color: var(--primary-dark); font-weight: 600; }
 .comision-box .perioade-sageata, .comision-box .perioade-titlu { color: rgba(255,255,255,.75); }
+
+/* Numele firmei în bara de sus. */
+.brand { text-decoration: none; display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.brand-erp { font-weight: 800; color: var(--primary-dark); letter-spacing: .02em; }
+.brand-firma { font-weight: 700; color: var(--text); }
+.brand-srl { font-size: 11px; font-weight: 600; color: var(--text-muted); letter-spacing: .08em; }
+
+/* Bifele de acces pe secțiuni, din fișa utilizatorului. */
+.bife { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px 14px; margin-top: 6px; }
+.bifa { display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.bifa input { margin: 0; }
+.bifa:hover { border-color: var(--primary); }
+.ajutor { font-size: 12px; color: var(--text-muted); margin: 8px 0 0; }
+
+/* Pâlnia de vânzări: centrată în pagină, cu aer în jur. */
+.palnie { margin: 10px auto 22px; max-width: 780px; }
+.palnie-desen { display: block; width: 100%; max-width: 760px; height: auto; margin: 0 auto; }
+.palnie-legenda {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 18px;
+  font-size: 13px; color: var(--text-muted); margin-top: 14px;
+}
+
+/* Alegerea destinației la ieșirea de marfă. */
+.destinatii { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 6px; }
+.destinatie {
+  display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; font-size: 14px;
+}
+.destinatie:hover { border-color: var(--primary); }
+.destinatie input { margin: 3px 0 0; }
+.destinatie:has(input:checked) { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.flash-rosu { border-left: 4px solid var(--danger); }
