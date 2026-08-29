@@ -1,6 +1,7 @@
 "use strict";
 const db = require("../lib/db");
 const { esc, money, layout, table, actionLinks } = require("../lib/render");
+const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
 // Drumul unei comenzi, în ordinea în care se întâmplă de fapt:
@@ -182,16 +183,28 @@ function lineRowsScript() {
 
 function register(router) {
   router.get("/comenzi", async (ctx) => {
+    const per = perioadaDin(ctx.query, "tot");
     const comenzi = await db
       .prepare(
         `SELECT c.*, p.nume AS partener_nume,
                 COALESCE((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id), 0) AS total
          FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
+         WHERE c.data >= ? AND c.data <= ?
          ORDER BY c.id DESC`
       )
-      .all();
+      .all(per.de, per.la + " 23:59:59");
     const body = `
       <div class="toolbar"><a href="/comenzi/nou" class="btn">+ Comandă nouă</a></div>
+      <form class="filtre perioade" method="get" action="/comenzi">
+        <span class="perioade-titlu">Perioada</span>
+        ${chipuriPerioada(per.cheie)}
+        <span class="perioade-custom">
+          <input type="date" name="de_la" value="${esc(per.de)}">
+          <span class="perioade-sageata">→</span>
+          <input type="date" name="pana_la" value="${esc(per.la)}">
+          <button class="chip${per.cheie === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
+        </span>
+      </form>
       ${table(
         ["Nr.", "Client", "Data", "Status", "Total", "Acțiuni"],
         comenzi.map((c) => [

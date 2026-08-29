@@ -10,6 +10,7 @@
 // Un client care sună și comandă pe loc n-are nevoie de ofertă.
 const db = require("../lib/db");
 const { esc, layout, table, money, subnavCrm } = require("../lib/render");
+const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
 const STATUS = {
@@ -64,6 +65,9 @@ function register(router) {
     const stare = String(ctx.query.status || "").trim();
     if (stare && STATUS[stare]) { where += " AND o.status = ?"; args.push(stare); }
     else if (!stare) where += " AND o.status <> 'inlocuita'";
+    const per = perioadaDin(ctx.query, "tot");
+    where += " AND o.creat_la >= ? AND o.creat_la <= ?";
+    args.push(per.de, per.la + " 23:59:59");
 
     const oferte = await db
       .prepare(
@@ -86,6 +90,17 @@ function register(router) {
         <a class="btn secondary" href="/oferte?status=trimisa">Trimise</a>
         <a class="btn secondary" href="/oferte?status=inlocuita">Versiuni vechi</a>
       </div>
+      <form class="filtre perioade" method="get" action="/oferte">
+        ${stare ? `<input type="hidden" name="status" value="${esc(stare)}">` : ""}
+        <span class="perioade-titlu">Perioada</span>
+        ${chipuriPerioada(per.cheie)}
+        <span class="perioade-custom">
+          <input type="date" name="de_la" value="${esc(per.de)}">
+          <span class="perioade-sageata">→</span>
+          <input type="date" name="pana_la" value="${esc(per.la)}">
+          <button class="chip${per.cheie === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
+        </span>
+      </form>
       ${table(
         ["Ofertă", "Client", "Titlu", "Valoare", "Valabilă până", "Agent", "Stare"],
         oferte.map((o) => [

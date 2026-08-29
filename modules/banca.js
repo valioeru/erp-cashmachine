@@ -23,6 +23,7 @@
 const db = require("../lib/db");
 const crypto = require("crypto");
 const { esc, money, layout, table } = require("../lib/render");
+const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, parseNumar, parseData } = require("../lib/import-utils");
 
@@ -100,12 +101,16 @@ function register(router) {
   // ---- Pagina principală -------------------------------------------------
   router.get("/banca", async (ctx) => {
     const filtru = String(ctx.query.status || "de_lucrat");
-    const where =
-      filtru === "de_lucrat"
-        ? "WHERE t.status IN ('nepotrivita', 'potrivita')"
-        : filtru === "toate"
-        ? ""
-        : `WHERE t.status = '${["nepotrivita", "potrivita", "confirmata", "ignorata"].includes(filtru) ? filtru : "nepotrivita"}'`;
+    // Extrasul se lucreaza de obicei pe luna curenta, dar tot istoricul e la un
+    // click — presetarile sunt aceleasi ca peste tot in aplicatie.
+    const per = perioadaDin(ctx.query, "tot");
+    const conditii = [];
+    if (filtru === "de_lucrat") conditii.push("t.status IN ('nepotrivita', 'potrivita')");
+    else if (filtru !== "toate")
+      conditii.push(`t.status = '${["nepotrivita", "potrivita", "confirmata", "ignorata"].includes(filtru) ? filtru : "nepotrivita"}'`);
+    conditii.push("t.data >= ?", "t.data <= ?");
+    const argePer = [per.de, per.la + " 23:59:59"];
+    const where = "WHERE " + conditii.join(" AND ");
 
     const tranzactii = await db
       .prepare(
@@ -116,7 +121,7 @@ function register(router) {
          ${where}
          ORDER BY t.data DESC, t.id DESC LIMIT 300`
       )
-      .all();
+      .all(...argePer);
     const contoare = await db.prepare("SELECT status, COUNT(*) AS n, COALESCE(SUM(suma),0) AS s FROM tranzactii_banca GROUP BY status").all();
     const cnt = Object.fromEntries(contoare.map((r) => [r.status, r]));
     const v = (st, camp) => Number((cnt[st] || {})[camp] || 0);
@@ -145,21 +150,31 @@ function register(router) {
         </form>
       </div>
 
-      <form class="filtre" method="get" action="/banca">
+      <form class="filtre perioade" method="get" action="/banca">
+        <span class="perioade-titlu">Perioada</span>
+        ${chipuriPerioada(per.cheie)}
+        <span class="perioade-custom">
+          <input type="date" name="de_la" value="${esc(per.de)}">
+          <span class="perioade-sageata">→</span>
+          <input type="date" name="pana_la" value="${esc(per.la)}">
+          <button class="chip${per.cheie === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
+        </span>
         <select name="status" onchange="this.form.submit()">
           <option value="de_lucrat"${filtru === "de_lucrat" ? " selected" : ""}>De lucrat (propuse + nepotrivite)</option>
           <option value="toate"${filtru === "toate" ? " selected" : ""}>Toate</option>
           <option value="confirmata"${filtru === "confirmata" ? " selected" : ""}>Confirmate</option>
           <option value="ignorata"${filtru === "ignorata" ? " selected" : ""}>Ignorate</option>
         </select>
-        ${
-          v("potrivita", "n") > 0
-            ? `<form method="post" action="/banca/confirma-toate" class="inline-form" onsubmit="return confirm('Confirmi toate cele ${v("potrivita", "n")} potriviri propuse? Fiecare devine o plată în ERP.')">
-                <button class="btn" type="submit">✓ Confirmă toate potrivirile propuse (${v("potrivita", "n")})</button>
-              </form>`
-            : ""
-        }
       </form>
+      ${
+        // Formularul de confirmare sta separat: un <form> in alt <form> nu e
+        // HTML valid, iar browserul il arunca — butonul ar fi trimis filtrul.
+        v("potrivita", "n") > 0
+          ? `<form method="post" action="/banca/confirma-toate" class="filtre" onsubmit="return confirm('Confirmi toate cele ${v("potrivita", "n")} potriviri propuse? Fiecare devine o plată în ERP.')">
+              <button class="btn" type="submit">✓ Confirmă toate potrivirile propuse (${v("potrivita", "n")})</button>
+            </form>`
+          : ""
+      }
 
       ${table(
         ["Data", "Suma", "Descriere", "Factura potrivită", "Motiv", "Status", "Acțiuni"],

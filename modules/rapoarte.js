@@ -21,6 +21,7 @@ const grup = require("../lib/grup");
 const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
 const { esc, money, layout, table } = require("../lib/render");
+const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
 // Subinterogări refolosite: totalul fiecărei facturi (calculat din liniile ei)
@@ -144,7 +145,12 @@ function lunileUltimele(n) {
 function intervalDinQuery(ctx, implicitLuni = 12, presetImplicit = null) {
   const aziStr = azi();
   const an = Number(aziStr.slice(0, 4));
-  const preset = String(ctx.query.perioada || presetImplicit || `${implicitLuni}luni`);
+  // „perioada" vine de la presetari (butoane), „luni" din selectul cu ultimele
+  // N luni. Cand se apasa o presetare, formularul trimite si selectul — de-aia
+  // presetarea are intaietate; selectul conteaza doar cand el a fost schimbat.
+  const luniAlese = String(ctx.query.luni || "").trim();
+  const presetCerut = String(ctx.query.perioada || "").trim();
+  const preset = presetCerut || luniAlese || String(presetImplicit || implicitLuni);
   let deLa;
   let panaLa = aziStr;
   const luna = Number(aziStr.slice(5, 7));
@@ -170,31 +176,30 @@ function intervalDinQuery(ctx, implicitLuni = 12, presetImplicit = null) {
   return { preset, deLa, panaLa };
 }
 
+// Aceleasi patru presetari ca peste tot in aplicatie, la un click — plus
+// „tot", „ultimele N luni" (specific rapoartelor) si intervalul la alegere.
+// Sunt butoane, nu linkuri, ca sa se pastreze singure celelalte campuri ale
+// formularului (de exemplu partenerii exclusi din raportul de parteneri).
 function selectorPerioada(actiune, interval, extraCampuri = "") {
   const { preset, deLa, panaLa } = interval;
+  const luniAltele = [["3", "3 luni"], ["6", "6 luni"], ["12", "12 luni"], ["24", "24 de luni"]];
   const opt = (v, t) => `<option value="${v}"${preset === v ? " selected" : ""}>${t}</option>`;
   return `
-    <form class="filtre" method="get" action="${actiune}">
-      <select name="perioada" onchange="if(this.value!=='custom')this.form.submit(); else {this.form.querySelector('.datele-custom').style.display='flex';}">
-        ${opt("luna_curenta", "luna curentă")}
-        ${opt("luna_trecuta", "luna trecută")}
-        ${opt("3", "ultimele 3 luni")}
-        ${opt("6", "ultimele 6 luni")}
-        ${opt("12", "ultimele 12 luni")}
-        ${opt("24", "ultimele 24 de luni")}
-        ${opt("an_curent", "anul curent")}
-        ${opt("an_trecut", "anul trecut")}
-        ${opt("tot", "tot istoricul")}
-        ${opt("custom", "perioadă custom…")}
-      </select>
-      <span class="datele-custom" style="display:${preset === "custom" ? "flex" : "none"};gap:8px;align-items:center">
-        <input type="date" name="de_la" value="${deLa}">
-        <span style="font-size:13px">→</span>
-        <input type="date" name="pana_la" value="${panaLa}">
-        <button class="btn small" type="submit">Aplică</button>
-      </span>
+    <form class="filtre perioade" method="get" action="${actiune}">
       ${extraCampuri}
-      <span style="font-size:12px;color:var(--text-muted)">${deLa} → ${panaLa}</span>
+      <span class="perioade-titlu">Perioada</span>
+      ${chipuriPerioada(preset)}
+      <select name="luni" onchange="this.form.submit()" title="ultimele N luni" class="perioade-select">
+        <option value="">ultimele…</option>
+        ${luniAltele.map(([v, t]) => opt(v, t)).join("")}
+      </select>
+      <span class="perioade-custom">
+        <input type="date" name="de_la" value="${deLa}">
+        <span class="perioade-sageata">→</span>
+        <input type="date" name="pana_la" value="${panaLa}">
+        <button class="chip${preset === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
+      </span>
+      <span class="perioade-interval">${deLa} → ${panaLa}</span>
     </form>`;
 }
 

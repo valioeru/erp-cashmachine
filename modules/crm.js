@@ -20,6 +20,7 @@ const COST_LINIE =
   "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
 const { ALOC, ALOC_FACTURA } = require("./alocari");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
+const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
 
@@ -527,7 +528,10 @@ function register(router) {
       return `${luna}-${String(new Date(Date.UTC(a, m, 0)).getUTCDate()).padStart(2, "0")}`;
     };
     const dataOk = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
+    // Cheile presetarilor sunt cele din lib/perioada („luna_curenta"), dar
+    // linkurile vechi cu „luna" trebuie sa mearga mai departe.
     let perioada = String(ctx.query.perioada || "luna");
+    if (perioada === "luna_curenta") perioada = "luna";
     let de, la, etichetaPer;
     if (perioada === "luna_trecuta") {
       de = `${lunaPrecedentaStr}-01`; la = ultimaZiDin(lunaPrecedentaStr);
@@ -763,20 +767,15 @@ function register(router) {
       <section class="comision-box">
         <div class="comision-head">
           <h2 style="margin:0">Comision — ${esc(agent.nume)}</h2>
-          <form method="get" action="/crm/birou" class="comision-filtru">
+          <form method="get" action="/crm/birou" class="comision-filtru perioade">
             ${esteAdmin ? `<input type="hidden" name="agent" value="${agentId}">` : ""}
-            <select name="perioada" onchange="this.form.submit()">
-              <option value="luna"${perioada === "luna" ? " selected" : ""}>luna curentă (${lunaCurentaStr})</option>
-              <option value="luna_trecuta"${perioada === "luna_trecuta" ? " selected" : ""}>luna trecută (${lunaPrecedentaStr})</option>
-              <option value="an_curent"${perioada === "an_curent" ? " selected" : ""}>anul curent (${anCurentNr})</option>
-              <option value="an_trecut"${perioada === "an_trecut" ? " selected" : ""}>anul trecut (${anCurentNr - 1})</option>
-              <option value="custom"${perioada === "custom" ? " selected" : ""}>perioadă la alegere</option>
-            </select>
-            ${
-              perioada === "custom"
-                ? `<input type="date" name="de" value="${esc(de)}"><input type="date" name="la" value="${esc(la)}"><button type="submit" class="btn secondary" style="padding:6px 12px">Aplică</button>`
-                : ""
-            }
+            ${chipuriPerioada(perioada === "luna" ? "luna_curenta" : perioada, { faraTot: true })}
+            <span class="perioade-custom">
+              <input type="date" name="de" value="${esc(de)}">
+              <span class="perioade-sageata">→</span>
+              <input type="date" name="la" value="${esc(la)}">
+              <button class="chip${perioada === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
+            </span>
           </form>
         </div>
         <div class="comision-grid">

@@ -10,7 +10,7 @@
 // hârtie.
 const db = require("../lib/db");
 const { SUB_STOC } = require("../lib/stoc");
-const { esc, layout, table } = require("../lib/render");
+const { esc, layout, table, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const ADANCIME = 1100; // adâncimea unui rând de raft, văzută în secțiune
@@ -1100,7 +1100,9 @@ function register(router) {
       </div>
       ${etichete}
       </body></html>`;
-    send(ctx.res, 200, html);
+    // Pagina de etichete isi face singura HTML-ul, deci nu trece prin layout:
+    // ii traducem datele la fel ca peste tot.
+    send(ctx.res, 200, dateleInText(html));
   });
 
   // ---- Configurarea rândurilor -------------------------------------------

@@ -2,6 +2,7 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, actionLinks } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const smartbill = require("../lib/smartbill");
 
 const STATUS_LABEL = {
@@ -83,9 +84,12 @@ function register(router) {
     const cauta = String(ctx.query.q || "").trim();
     const status = String(ctx.query.status || "").trim();
     const pagina = Math.max(1, parseInt(ctx.query.p || "1", 10) || 1);
+    // Lista se deschide pe „tot": cine intra in facturi vrea sa le vada, nu sa
+    // se intrebe de ce lipsesc. Presetarile sunt la un click.
+    const per = perioadaDin(ctx.query, "tot");
 
-    const where = ["f.directie = ?"];
-    const args = [directie];
+    const where = ["f.directie = ?", "f.data_emiterii >= ?", "f.data_emiterii <= ?"];
+    const args = [directie, per.de, per.la + " 23:59:59"];
     if (cauta) {
       where.push("(p.nume ILIKE ? OR f.serie ILIKE ? OR f.document_extern ILIKE ? OR CAST(f.numar AS TEXT) LIKE ?)");
       args.push(`%${cauta}%`, `%${cauta}%`, `%${cauta}%`, `%${cauta}%`);
@@ -133,6 +137,8 @@ function register(router) {
       const u = new URLSearchParams();
       if (cauta) u.set("q", cauta);
       if (status) u.set("status", status);
+      u.set("perioada", per.cheie);
+      if (per.cheie === "custom") { u.set("de_la", per.de); u.set("pana_la", per.la); }
       u.set("p", String(p));
       return "?" + u.toString();
     };
@@ -158,6 +164,16 @@ function register(router) {
         <select name="status">${optiuniStatus}</select>
         <button class="btn small" type="submit">Filtrează</button>
         ${cauta || status ? `<a class="btn secondary small" href="${bazaUrl}">Resetează</a>` : ""}
+        <span class="perioade" style="margin:0">
+          <span class="perioade-titlu">Perioada</span>
+          ${chipuriPerioada(per.cheie)}
+          <span class="perioade-custom">
+            <input type="date" name="de_la" value="${esc(per.de)}">
+            <span class="perioade-sageata">→</span>
+            <input type="date" name="pana_la" value="${esc(per.la)}">
+            <button class="chip${per.cheie === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
+          </span>
+        </span>
       </form>
       ${table(["Document", directie === "achizitie" ? "Furnizor" : "Client", "Data", "Status", "Total", directie === "achizitie" ? "Plătit" : "Încasat", "Acțiuni"], rows)}
       ${paginare}
