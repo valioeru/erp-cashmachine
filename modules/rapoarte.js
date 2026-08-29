@@ -839,6 +839,17 @@ function register(router) {
   // Agenții lucrează pentru tot grupul, deci comisionul se calculează pe
   // vânzările din AMBELE firme, fără facturile interne. Procentul se
   // setează per agent în pagina Utilizatori (implicit 0 = fără comision).
+  //
+  // Baza de calcul, regula lui Vali: TOATE încasările intrate în luna
+  // respectivă pe facturile agentului, indiferent când au fost emise. O
+  // factură din martie încasată în august aduce comision în august. De aceea
+  // filtrul e pe data plății, nu pe data facturii.
+  //
+  // Agentul unei facturi se ia din alocarea ei (ALOC_FACTURA), la fel ca în
+  // biroul agentului și în raportul lunar. Varianta veche se lua după agentul
+  // PARTENERULUI, ceea ce dădea alte cifre pe aceeași lună: un client mutat
+  // între agenți își muta retroactiv tot istoricul, iar facturile cu agent pus
+  // pe ele nu se potriveau cu cine e trecut acum pe client.
   router.get("/rapoarte/comisioane", async (ctx) => {
     const interval = intervalDinQuery(ctx, 3);
     const { deLa, panaLa } = interval;
@@ -847,16 +858,18 @@ function register(router) {
     const agenti = await db
       .prepare(
         `SELECT u.id, u.nume, u.rol, COALESCE(u.comision_procent,0) AS pct,
-                COUNT(DISTINCT f.id) AS nr_facturi,
-                COUNT(DISTINCT p.id) AS nr_clienti,
-                COALESCE(SUM(n.net),0) AS facturat_net,
-                COALESCE(SUM(t.total),0) AS facturat_total
+                COUNT(DISTINCT x.factura_id) AS nr_facturi,
+                COUNT(DISTINCT x.partener_id) AS nr_clienti,
+                COALESCE(SUM(COALESCE(n.net,0) * x.procent / 100.0),0) AS facturat_net,
+                COALESCE(SUM(COALESCE(t.total,0) * x.procent / 100.0),0) AS facturat_total
          FROM utilizatori u
-         LEFT JOIN parteneri p ON p.agent_id = u.id
-         LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
-              AND f.data_emiterii >= ? AND f.data_emiterii <= ?
-         LEFT JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
-         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
+         LEFT JOIN (SELECT al.utilizator_id, al.procent, f.id AS factura_id, f.partener_id
+                      FROM ${ALOC_FACTURA} al
+                      JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = al.factura_id
+                     WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+                       AND f.data_emiterii >= ? AND f.data_emiterii <= ?) x ON x.utilizator_id = u.id
+         LEFT JOIN ${SUB_NET} n ON n.factura_id = x.factura_id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = x.factura_id
          WHERE u.activ = 1
          GROUP BY u.id, u.nume, u.rol, u.comision_procent
          ORDER BY facturat_net DESC`
@@ -866,10 +879,13 @@ function register(router) {
     // încasat efectiv pe agent (baza corectă pentru comision, de regulă)
     const incasat = await db
       .prepare(
-        `SELECT p.agent_id AS agent, COALESCE(SUM(pl.suma),0) AS s
-         FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
-         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND pl.data >= ? AND pl.data <= ? AND p.agent_id IS NOT NULL
-         GROUP BY p.agent_id`
+        `SELECT al.utilizator_id AS agent, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS s
+         FROM (SELECT * FROM plati WHERE activ = 1) pl
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+           AND pl.data >= ? AND pl.data <= ?
+         GROUP BY al.utilizator_id`
       )
       .all(deLa, panaLa);
     const incasatPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s)]));
