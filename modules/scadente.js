@@ -29,6 +29,7 @@ const ZILE_GALBEN = 7; // peste atâtea zile de întârziere clientul devine ro�
 const ZILE_BLOCARE_TOTALA = 90; // 3 luni pe roșu ⇒ notificări obligatoriu automate
 const ZILE_PREAVIZ = 3; // cu atâtea zile înainte de scadență anunțăm politicos
 const TERMEN_IMPLICIT = 30; // facturile importate fără scadență: emitere + 30 zile
+const URMATOARELE = 10; // câte facturi se arată la „urmează la încasare"
 
 function azi() {
   return new Date().toISOString().slice(0, 10);
@@ -450,7 +451,11 @@ async function blocScadente(user, agentId) {
   const neverificate = facturi.filter((f) => f.neverificat).sort((a, b) => b.sold - a.sold);
   const cunoscute = facturi.filter((f) => !f.neverificat);
   const restante = cunoscute.filter((f) => f.zile > 0).sort((a, b) => b.zile - a.zile);
-  const urmeaza = cunoscute.filter((f) => f.zile <= 0).sort((a, b) => a.zile - b.zile);
+  // Ce urmează la încasare: cea mai apropiată scadență sus. `zile` e pozitiv
+  // când factura e deja întârziată, deci pentru cele neajunse la scadență
+  // valoarea e negativă și cu cât e mai aproape de zero, cu atât mai repede
+  // trebuie încasată — de aici sortarea descrescătoare.
+  const urmeaza = cunoscute.filter((f) => f.zile <= 0).sort((a, b) => b.zile - a.zile);
   const deLa = await dataStart();
   const capete = ["Factura", "Client", "Scadență", "Stare", "Sold", "Notificare", "Manual", "Ultima notificare"];
 
@@ -472,10 +477,10 @@ async function blocScadente(user, agentId) {
         ? table(capete, restante.slice(0, 120).map((f) => randFactura(f, stari.get(f.partener_id), user)))
         : `<p style="color:var(--text-muted)">Nicio factură restantă. </p>`
     }
-    <h3 style="margin-top:18px">Urmează la încasare (${urmeaza.length})</h3>
+    <h3 style="margin-top:18px">Urmează la încasare — următoarele ${Math.min(URMATOARELE, urmeaza.length)} din ${urmeaza.length}</h3>
     ${
       urmeaza.length
-        ? table(capete, urmeaza.slice(0, 60).map((f) => randFactura(f, stari.get(f.partener_id), user)))
+        ? table(capete, urmeaza.slice(0, URMATOARELE).map((f) => randFactura(f, stari.get(f.partener_id), user)))
         : `<p style="color:var(--text-muted)">Nimic de încasat în perioada următoare.</p>`
     }
     ${
