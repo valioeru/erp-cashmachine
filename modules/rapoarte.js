@@ -4,6 +4,7 @@
 // agregat, în SQL: baza reală are mii de facturi importate din SmartBill, iar
 // varianta "aduc tot în memorie și calculez în JS" ar face paginile inutilizabile.
 const db = require("../lib/db");
+const { SUB_STOC, SUB_STOC_PRODUS } = require("../lib/stoc");
 
 // Costul unei linii se ia în calcul doar dacă e credibil. O linie cu preț de
 // achiziție de peste cinci ori mai mare decât ce s-a încasat pe ea (plus 100
@@ -1032,10 +1033,9 @@ function register(router) {
     const stocuri = await db
       .prepare(
         `SELECT p.id, p.denumire, p.cod, p.unitate_masura, p.stoc_minim, p.pret_achizitie,
-                COALESCE(SUM(CASE WHEN m.tip = 'intrare' THEN m.cantitate ELSE -m.cantitate END), 0) AS stoc
+                COALESCE(s.stoc, 0) AS stoc
          FROM produse p
-         LEFT JOIN miscari_stoc m ON m.produs_id = p.id
-         GROUP BY p.id, p.denumire, p.cod, p.unitate_masura, p.stoc_minim, p.pret_achizitie
+         LEFT JOIN ${SUB_STOC_PRODUS} s ON s.produs_id = p.id
          ORDER BY p.denumire`
       )
       .all();
@@ -1044,9 +1044,9 @@ function register(router) {
 
     const peDepozit = await db
       .prepare(
-        `SELECT d.denumire AS depozit, COUNT(DISTINCT m.produs_id) AS produse,
-                COALESCE(SUM(CASE WHEN m.tip = 'intrare' THEN m.cantitate ELSE -m.cantitate END), 0) AS bucati
-         FROM depozite d LEFT JOIN miscari_stoc m ON m.depozit_id = d.id
+        `SELECT d.denumire AS depozit, COUNT(DISTINCT s.produs_id) AS produse,
+                COALESCE(SUM(s.stoc), 0) AS bucati
+         FROM depozite d LEFT JOIN ${SUB_STOC} s ON s.depozit_id = d.id
          GROUP BY d.id, d.denumire ORDER BY d.denumire`
       )
       .all();

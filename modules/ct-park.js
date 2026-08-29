@@ -9,6 +9,7 @@
 // e tot în milimetri (viewBox), deci ce citești în cod e ce se măsoară pe
 // hârtie.
 const db = require("../lib/db");
+const { SUB_STOC } = require("../lib/stoc");
 const { esc, layout } = require("../lib/render");
 const { send } = require("../lib/router");
 
@@ -219,10 +220,10 @@ function register(router) {
       locatii = await db
         .prepare(
           `SELECT d.id, d.denumire, d.locatie,
-                  COUNT(DISTINCT m.produs_id) AS produse,
-                  COALESCE(SUM(CASE WHEN m.tip = 'intrare' THEN m.cantitate ELSE -m.cantitate END), 0) AS stoc
+                  COUNT(DISTINCT s.produs_id) AS produse,
+                  COALESCE(SUM(s.stoc), 0) AS stoc
              FROM depozite d
-             LEFT JOIN miscari_stoc m ON m.depozit_id = d.id
+             LEFT JOIN ${SUB_STOC} s ON s.depozit_id = d.id
             GROUP BY d.id, d.denumire, d.locatie
             ORDER BY d.denumire`
         )

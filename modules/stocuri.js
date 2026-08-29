@@ -1,5 +1,6 @@
 "use strict";
 const db = require("../lib/db");
+const { SUB_STOC } = require("../lib/stoc");
 const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table, actionLinks } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
@@ -21,11 +22,10 @@ function register(router) {
     const stocCurent = await db
       .prepare(
         `SELECT p.id AS produs_id, p.denumire, p.unitate_masura, p.stoc_minim, d.denumire AS depozit,
-                COALESCE(SUM(CASE WHEN m.tip = 'intrare' THEN m.cantitate ELSE -m.cantitate END), 0) AS stoc
-         FROM miscari_stoc m
-         JOIN produse p ON p.id = m.produs_id
-         JOIN depozite d ON d.id = m.depozit_id
-         GROUP BY p.id, d.id, p.denumire, p.unitate_masura, p.stoc_minim, d.denumire
+                COALESCE(s.stoc, 0) AS stoc
+         FROM ${SUB_STOC} s
+         JOIN produse p ON p.id = s.produs_id
+         JOIN depozite d ON d.id = s.depozit_id
          ORDER BY p.denumire`
       )
       .all();
