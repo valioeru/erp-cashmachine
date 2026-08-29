@@ -49,6 +49,7 @@ require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
 require("./modules/forecast").register(router);
 require("./modules/comision").register(router);
+require("./modules/ghid").register(router);
 
 router.get("/healthz", (ctx) => {
   ctx.res.writeHead(200, { "Content-Type": "text/plain" });
