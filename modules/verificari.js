@@ -233,7 +233,7 @@ const VERIFICARI = [
     cheie: "cost-aberant",
     titlu: "Linii de factură cu cost de marfă aberant",
     de_ce:
-      "Costul liniei (cantitate × prețul de achiziție al produsului) sare de câteva ori peste cât s-a vândut linia. De obicei prețul de achiziție al produsului e greșit — luat în altă unitate de măsură, sau calculat dintr-o intrare cu cantitate aproape zero. Un singur produs stricat aici poate scoate marja firmei pe minus cu zeci de milioane.",
+      "Costul liniei (cantitate × prețul de achiziție al produsului) sare de câteva ori peste cât s-a vândut linia. Se compară în valoare absolută, altfel orice storno ar apărea aici degeaba: cu cantitate negativă, comparația se inversează. De obicei prețul de achiziție al produsului e greșit — luat în altă unitate de măsură, sau calculat dintr-o intrare cu cantitate aproape zero. Un singur produs stricat aici poate scoate marja firmei pe minus cu zeci de milioane.",
     gravitate: "rosu",
     async ruleaza() {
       const randuri = await db
@@ -241,15 +241,15 @@ const VERIFICARI = [
           `SELECT f.id AS factura_id, f.serie, f.numar, f.data_emiterii,
                   pr.id AS produs_id, pr.denumire, pr.cod, pr.unitate_masura, pr.pret_achizitie,
                   fl.cantitate, fl.pret_unitar,
-                  fl.cantitate * COALESCE(pr.pret_achizitie, 0) AS cost,
-                  fl.cantitate * fl.pret_unitar AS venit
+                  ABS(fl.cantitate) * COALESCE(pr.pret_achizitie, 0) AS cost,
+                  ABS(fl.cantitate * fl.pret_unitar) AS venit
              FROM facturi_linii fl
              JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
              JOIN produse pr ON pr.id = fl.produs_id
             WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
               AND COALESCE(pr.pret_achizitie, 0) > 0
-              AND fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100
-            ORDER BY fl.cantitate * COALESCE(pr.pret_achizitie, 0) DESC`
+              AND ABS(fl.cantitate) * COALESCE(pr.pret_achizitie, 0) > 5 * ABS(fl.cantitate * fl.pret_unitar) + 100
+            ORDER BY ABS(fl.cantitate) * COALESCE(pr.pret_achizitie, 0) DESC`
         )
         .all();
       const cost = randuri.reduce((s, r) => s + nr(r.cost), 0);
@@ -596,7 +596,7 @@ function register(router) {
            JOIN produse pr ON pr.id = fl.produs_id
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
             AND COALESCE(pr.pret_achizitie, 0) > 0
-            AND fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100
+            AND ABS(fl.cantitate) * COALESCE(pr.pret_achizitie, 0) > 5 * ABS(fl.cantitate * fl.pret_unitar) + 100
           ORDER BY f.data_emiterii, fl.id`
       )
       .all();
