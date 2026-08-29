@@ -92,6 +92,23 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
 - [x] **Angajații din statele de plată din Drive** — 11 oameni, fără CNP-uri.
 - [x] **Backup** al întregii baze într-un singur fișier, cu task programat
       noaptea.
+- [x] **Ieșire marfă din CT-Park** cu destinație obligatorie (producție /
+      fulfillment / comandă); la comandă se alege exact comanda, iar eticheta
+      de ieșire poartă clientul, numărul comenzii și data.
+- [x] **Accesul pe secțiunile din meniu**, bifate pe fiecare om. Adminul vede
+      tot, oricum. Cine n-are nicio bifă rămâne pe împărțirea veche a rolului,
+      ca nimeni să nu rămână blocat pe dinafară. Rolul „Gestionar depozit" s-a
+      redenumit **„Achiziții"**.
+- [x] **Filtrul din Configurări → Date importate** caută în tot setul, nu doar
+      în pagina afișată, și după numărul documentului (CSHM3157, cu sau fără
+      spațiu, indiferent de majuscule).
+- [x] **Ghidul de utilizare**: PDF de 47 de pagini cu capturi, plus același
+      text în aplicație (`/ghid`, pe capitole). Fiecare pagină are sus-dreapta
+      „? Cum se folosește", care duce în capitolul secțiunii ei. Fiecare om
+      vede doar capitolele secțiunilor pe care le are bifate.
+- [x] **Registrul de comenzi în Producție** (29.08.2026): lista arată exact ca
+      Excelul (16 coloane), fiecare rând are buton **„Comandă PDF"** — o foaie
+      A4 fără prețuri, cu alocarea pe utilaj și trei rubrici de semnătură.
 
 ## De făcut
 
@@ -150,12 +167,35 @@ lui și le înlocuim.
 Toate patru arată întâi, rând cu rând, ce s-ar schimba; niciunul n-a fost
 apăsat de mine. Stau în Configurări → Verificări date.
 
-| Buton | Ce face | Cât, la 29.08.2026 |
+**Vali a apăsat trei dintre ele pe 29.08.2026** — încasările duble,
+unitățile de măsură și cantitățile inversate. Efectul se vede în „Facturat vs.
+încasat": 2026 a coborât de la 245% la 112%, 2025 de la 188% la 73%, 2024 de la
+214% la 107%.
+
+| Verificare | Cât era | Cât e acum |
 |---|---|---|
-| Curățare storno | scoate din calcul stornourile dublate | construit mai demult |
-| Curățare încasări duble | pune `activ = 0` pe plățile numărate de mai multe ori (nu șterge) | 367 plăți · 41,8 mil. lei |
-| Cantități inversate | schimbă cantitatea cu prețul pe linie, totalul rămâne identic | 32 linii · 35,4 mil. lei cost fals |
-| Unități de măsură | pune o unitate reală în loc de denumirea produsului | 3.000 produse |
+| Încasări duble | 367 plăți · 41,8 mil. lei | 14 perechi · 184.310 lei |
+| Facturi încasate peste valoarea lor | 1.343 | 446 · 5,7 mil. lei |
+| Cantități inversate (cost aberant) | 32 linii · 35,4 mil. lei | 4 linii |
+| Unități de măsură | 3.000 produse | rezolvat |
+| Facturi de vânzare fără linii | — | curat |
+| Plăți pe facturi anulate sau ciornă | — | curat |
+
+Rămân, neapăsate: coduri de produs la mai multe articole (13), parteneri cu
+același CUI (5), facturi de achiziție cu același număr (6), facturi de vânzare
+fără agent (1.031 — se rezolvă din Alocări, nu cu un buton).
+
+### 5. Registrul de comenzi, la fiecare actualizare
+Fișierul stă într-un OneDrive la care serverul n-are acces. Se citește din
+browser (care are sesiunea lui Vali) și se trimite prin punte, cu
+`tip: "registru_comenzi"`, în tranșe de ~90 de rânduri. Pe 29.08.2026 au intrat
+251 de comenzi din `Registru_Comenzi_CASH_MACHINE_3.xlsx`, în locul celor 134
+dintr-o versiune mai veche — verificat întâi că toate 134 se regăsesc în
+fișierul nou. Datele din Excel vin ca seriale (46237 = 03.08.2026); celulele de
+dată care conțin text („KCK 1564*572") ajung în observații, scrise ca atare.
+
+Se poate și din interfață: Financiar → Import date → registru comenzi, cu
+fișierul descărcat.
 
 ## Blocaje care țin de altcineva
 
@@ -170,10 +210,14 @@ apăsat de mine. Stau în Configurări → Verificări date.
   cu motivul scris pe ele.
 - **Balanțele din Conta**: al treilea tabel de pe dashboard (profitul contabil)
   se completează singur când sunt încărcate balanțele în `/balanta`.
-- **Fișa contului Warehouse All din Conta**: îmi trebuie o sesiune deschisă în
-  Conta, în browserul lui Vali. În Drive e doar un PDF din iulie 2024.
-- **Statele de plată**: nu sunt în Drive-ul contului `cashmachine.ro`. De aflat
-  unde stau (alt cont, alt folder, atașate pe email).
+- **Fișa contului Warehouse All din Conta**: Vali a deschis sesiunea, dar
+  lipsește adresa aplicației Conta — fără ea nu știu unde să mă duc. În Drive e
+  doar un PDF din iulie 2024.
+- **Statele de plată**: Vali spune că sunt în „grupul Oeru → Warehouse All →
+  Financiare → State". Conectorul de Drive vede doar Drive-ul personal al
+  contului `cashmachine.ro` (care are exact două foldere), nu și unitățile
+  partajate. Soluția: Vali deschide folderul în browser și dă link-ul — se
+  citește din pagină prin extensie, ca registrul de comenzi din OneDrive.
 - **Cardurile REZERVA de carburant → persoană**: regula s-a pierdut și nu e
   nicăieri în baza de date (`utilizatori.card_carburant` și `masina_detalii`
   sunt goale). REZERVA 2 e diferit între Cash Machine și Warehouse — Vali
