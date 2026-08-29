@@ -4,6 +4,18 @@
 // agregat, în SQL: baza reală are mii de facturi importate din SmartBill, iar
 // varianta "aduc tot în memorie și calculez în JS" ar face paginile inutilizabile.
 const db = require("../lib/db");
+
+// Costul unei linii se ia în calcul doar dacă e credibil. O linie cu preț de
+// achiziție de peste cinci ori mai mare decât ce s-a încasat pe ea (plus 100
+// de lei, ca să nu se agațe de fleacuri) nu e marjă proastă, e o greșeală de
+// date: fie prețul produsului e luat în altă unitate, fie cantitatea de pe
+// factură a fost importată strâmb — 1.720 bucăți la 1 leu în loc de o rolă la
+// 1.720 de lei. Astfel de linii se numără la „fără cost", exact ca cele fără
+// produs identificat, iar rapoartele spun pe față că marja e o estimare în
+// plus. Praguri identice cu verificarea „cost de marfă aberant" din
+// modules/verificari.js, ca cele două să arate aceleași rânduri.
+const COST_LINIE =
+  "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
 const grup = require("../lib/grup");
 const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
@@ -1546,7 +1558,7 @@ function register(router) {
     const agentAles = parseInt(ctx.query.agent, 10) || null;
 
     const SUB_COST =
-      "(SELECT fl.factura_id, SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0)) AS cost, SUM(CASE WHEN fl.produs_id IS NOT NULL AND COALESCE(pr.pret_achizitie,0) > 0 THEN fl.cantitate * fl.pret_unitar ELSE 0 END) AS venit_cu_cost FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id GROUP BY fl.factura_id)";
+      `(SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost, SUM(CASE WHEN fl.produs_id IS NOT NULL AND COALESCE(pr.pret_achizitie,0) > 0 AND fl.cantitate * COALESCE(pr.pret_achizitie, 0) <= 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN fl.cantitate * fl.pret_unitar ELSE 0 END) AS venit_cu_cost FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id GROUP BY fl.factura_id)`;
     const SUB_NET = "(SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id)";
 
     const peAgent = await db
@@ -2065,7 +2077,7 @@ function register(router) {
         `SELECT pr.id, pr.denumire, pr.cod, pr.pret_achizitie,
                 SUM(fl.cantitate) AS cantitate,
                 SUM(fl.cantitate * fl.pret_unitar) AS venit,
-                SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0)) AS cost,
+                SUM(${COST_LINIE}) AS cost,
                 COUNT(DISTINCT f.id) AS facturi,
                 COUNT(DISTINCT f.partener_id) AS clienti
          FROM facturi_linii fl

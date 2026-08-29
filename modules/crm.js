@@ -6,6 +6,18 @@
 //   2. Oportunități: pipeline-ul de vânzare pe stadii.
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
+
+// Costul unei linii se ia în calcul doar dacă e credibil. O linie cu preț de
+// achiziție de peste cinci ori mai mare decât ce s-a încasat pe ea (plus 100
+// de lei, ca să nu se agațe de fleacuri) nu e marjă proastă, e o greșeală de
+// date: fie prețul produsului e luat în altă unitate, fie cantitatea de pe
+// factură a fost importată strâmb — 1.720 bucăți la 1 leu în loc de o rolă la
+// 1.720 de lei. Astfel de linii se numără la „fără cost", exact ca cele fără
+// produs identificat, iar rapoartele spun pe față că marja e o estimare în
+// plus. Praguri identice cu verificarea „cost de marfă aberant" din
+// modules/verificari.js, ca cele două să arate aceleași rânduri.
+const COST_LINIE =
+  "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
 const { ALOC, ALOC_FACTURA } = require("./alocari");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
@@ -682,13 +694,13 @@ function register(router) {
     // SmartBill n-au detaliu pe produse, deci acoperirea e parțială — o
     // spunem explicit, ca cifra să nu fie citită greșit.
     const SUM_VENIT = "SUM(fl.cantitate * fl.pret_unitar)";
-    const SUM_COST = "SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0))";
+    const SUM_COST = `SUM(${COST_LINIE})`;
 
     const marjaFacturi = await db
       .prepare(
         `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client,
                 ${SUM_VENIT} AS venit, ${SUM_COST} AS cost,
-                SUM(CASE WHEN pr.id IS NULL OR COALESCE(pr.pret_achizitie,0) = 0 THEN 1 ELSE 0 END) AS linii_fara_cost,
+                SUM(CASE WHEN pr.id IS NULL OR COALESCE(pr.pret_achizitie,0) = 0 OR fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 1 ELSE 0 END) AS linii_fara_cost,
                 COUNT(fl.id) AS linii
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id

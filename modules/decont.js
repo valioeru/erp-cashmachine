@@ -25,6 +25,18 @@
 // luna de start încoace. Așa, dacă se corectează o factură veche, tot lanțul
 // se îndreaptă singur — nu rămâne un sold greșit înghețat undeva.
 const db = require("../lib/db");
+
+// Costul unei linii se ia în calcul doar dacă e credibil. O linie cu preț de
+// achiziție de peste cinci ori mai mare decât ce s-a încasat pe ea (plus 100
+// de lei, ca să nu se agațe de fleacuri) nu e marjă proastă, e o greșeală de
+// date: fie prețul produsului e luat în altă unitate, fie cantitatea de pe
+// factură a fost importată strâmb — 1.720 bucăți la 1 leu în loc de o rolă la
+// 1.720 de lei. Astfel de linii se numără la „fără cost", exact ca cele fără
+// produs identificat, iar rapoartele spun pe față că marja e o estimare în
+// plus. Praguri identice cu verificarea „cost de marfă aberant" din
+// modules/verificari.js, ca cele două să arate aceleași rânduri.
+const COST_LINIE =
+  "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
 const { esc, money, layout, table, subnavFinanciar } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const costuri = require("./costuri");
@@ -107,7 +119,7 @@ async function incasariPeAgent(luna) {
               ON n.factura_id = f.id
          LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS brut FROM facturi_linii GROUP BY factura_id) b
               ON b.factura_id = f.id
-         LEFT JOIN (SELECT fl.factura_id, SUM(fl.cantitate * COALESCE(pr.pret_achizitie, 0)) AS cost
+         LEFT JOIN (SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost
                       FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id
                      GROUP BY fl.factura_id) c
               ON c.factura_id = f.id
