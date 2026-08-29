@@ -376,11 +376,106 @@ async function surogateDeSters() {
     .all(...RECONSTITUITE, ...RECONSTITUITE);
 }
 
+// --- Prețuri de achiziție aberante ----------------------------------------
+//
+// De unde vin: importul de balanță a stocului calculează costul unitar ca
+// valoare / cantitate. Când produsul are stoc negativ, sau cantitatea e
+// trecută în altă unitate decât cea de pe factură (kg în loc de bucăți),
+// raportul explodează: un sac vândut cu 0,57 lei ajunge să aibă „preț de
+// achiziție" 499,42 lei. O singură linie de 50.000 de bucăți scoate atunci
+// marja firmei pe minus cu 25 de milioane.
+//
+// Reparația are două trepte, în ordinea asta:
+//   1. dacă produsul are rețetă, costul se recalculează din componente
+//      (cantitate × costul fiecărei componente) — adevărul pentru un produs
+//      finit e ce intră în el, nu ce a ieșit dintr-o balanță stricată
+//   2. dacă nu are rețetă, sau costul din rețetă e la fel de aberant, prețul
+//      se golește. Zero nu e o minciună: înseamnă „nu știm cât ne-a costat",
+//      iar rapoartele numără linia la „fără cost" și spun asta pe față.
+//
+// Referința față de care judecăm: cât se vinde produsul în realitate — prețul
+// lui de vânzare sau media de pe liniile de factură, care e mai mare. Peste
+// cinci ori referința, e greșit, nu marjă proastă.
+const PRAG_ABERANT = 5;
+
+async function costuriDeReparat() {
+  const produse = await db
+    .prepare(
+      `SELECT pr.id, pr.cod, pr.denumire, pr.unitate_masura, pr.pret_vanzare, pr.pret_achizitie,
+              COALESCE(v.pret_mediu, 0) AS pret_mediu,
+              COALESCE(r.cost_reteta, 0) AS cost_reteta,
+              COALESCE(r.componente, 0) AS componente,
+              COALESCE(r.componente_fara_cost, 0) AS componente_fara_cost
+         FROM produse pr
+         LEFT JOIN (SELECT fl.produs_id,
+                           SUM(fl.cantitate * fl.pret_unitar) / NULLIF(SUM(fl.cantitate), 0) AS pret_mediu
+                      FROM facturi_linii fl
+                      JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
+                     WHERE f.directie = 'vanzare' AND fl.cantitate > 0
+                     GROUP BY fl.produs_id) v ON v.produs_id = pr.id
+         LEFT JOIN (SELECT rc.produs_id,
+                           SUM(rc.cantitate * COALESCE(c.pret_achizitie, 0)) AS cost_reteta,
+                           COUNT(*) AS componente,
+                           SUM(CASE WHEN COALESCE(c.pret_achizitie, 0) > 0 THEN 0 ELSE 1 END) AS componente_fara_cost
+                      FROM retete_componente rc
+                      JOIN produse c ON c.id = rc.componenta_id
+                     GROUP BY rc.produs_id) r ON r.produs_id = pr.id
+        WHERE COALESCE(pr.pret_achizitie, 0) > 0`
+    )
+    .all();
+
+  const deReparat = [];
+  for (const p of produse) {
+    const referinta = Math.max(nr(p.pret_vanzare), nr(p.pret_mediu));
+    if (!(referinta > 0)) continue; // n-avem cu ce compara, nu ne atingem de el
+    if (!(nr(p.pret_achizitie) > PRAG_ABERANT * referinta)) continue;
+
+    const costReteta = nr(p.cost_reteta);
+    const potrivit = costReteta > 0 && costReteta <= PRAG_ABERANT * referinta;
+    deReparat.push({
+      ...p,
+      referinta,
+      nou: potrivit ? Math.round(costReteta * 10000) / 10000 : 0,
+      sursa: potrivit ? "rețetă" : nr(p.componente) ? "rețetă tot aberantă → golit" : "fără rețetă → golit",
+    });
+  }
+  deReparat.sort((a, b) => nr(b.pret_achizitie) - nr(a.pret_achizitie));
+  return deReparat;
+}
+
 function register(router) {
   // Curățarea plăților născocite. Se șterg DOAR cele de pe facturi care au
   // deja o încasare adevărată, adusă din raportul de încasări — deci nu se
   // pierde informația „a fost plătită", ea rămâne în încasarea reală, cu data
   // ei corectă. Facturile care n-au nicio încasare reală rămân neatinse.
+  router.post("/admin/date/repara-costuri", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const deReparat = await costuriDeReparat();
+    let dinReteta = 0;
+    let golite = 0;
+    for (const p of deReparat) {
+      await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(p.nou, p.id);
+      if (p.nou > 0) dinReteta++;
+      else golite++;
+    }
+    const body = `
+      <h2>Prețuri de achiziție reparate</h2>
+      <p>S-au corectat <strong>${deReparat.length}</strong> produse: <strong>${dinReteta}</strong> recalculate din rețetă,
+      <strong>${golite}</strong> golite (nu avem din ce le calcula — rapoartele le vor număra la „linii fără cost").</p>
+      ${table(
+        ["Produs", "Preț vânzare de referință", "Preț achiziție vechi", "Preț achiziție nou", "De unde"],
+        deReparat.slice(0, LIMITA).map((p) => [
+          `<a href="/produse/${p.id}">${esc(p.denumire)}</a>${p.cod ? ` <span style="color:var(--text-muted)">(${esc(p.cod)})</span>` : ""}`,
+          money(p.referinta),
+          `<span style="color:var(--danger)">${money(p.pret_achizitie)}</span>`,
+          p.nou > 0 ? `<strong style="color:var(--success)">${money(p.nou)}</strong>` : "—",
+          esc(p.sursa),
+        ])
+      )}
+      <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare prețuri de achiziție", active: "/admin/date", body }));
+  });
+
   router.post("/admin/date/curata-surogate", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
     const deSters = await surogateDeSters();
@@ -450,8 +545,26 @@ function register(router) {
 
     const surogate = await surogateDeSters();
     const surogateSuma = surogate.reduce((s2, r) => s2 + nr(r.suma), 0);
+    const costuriRele = await costuriDeReparat();
 
     const body = `
+      ${
+        costuriRele.length
+          ? `<div class="card" style="border-left:4px solid var(--danger);margin-bottom:16px">
+               <div class="label">Produse cu preț de achiziție aberant</div>
+               <div class="value">${costuriRele.length} produse</div>
+               <p style="font-size:13px;margin:8px 0 10px;color:var(--text-muted)">
+                 Prețul lor de achiziție e de peste ${PRAG_ABERANT} ori mai mare decât prețul la care se vând —
+                 vine dintr-o balanță cu stoc negativ sau cu altă unitate de măsură. Din cauza lor marja
+                 apare pe minus cu zeci de milioane. Reparația ia costul din rețetă acolo unde produsul are una,
+                 iar unde nu are golește prețul, ca linia să fie numărată cinstit la „fără cost".
+               </p>
+               <form method="post" action="/admin/date/repara-costuri" onsubmit="return confirm('Se corectează prețul de achiziție la ${costuriRele.length} produse. Continui?')">
+                 <button class="btn" type="submit">Repară cele ${costuriRele.length} prețuri</button>
+               </form>
+             </div>`
+          : ""
+      }
       ${
         surogate.length
           ? `<div class="card" style="border-left:4px solid var(--danger);margin-bottom:16px">

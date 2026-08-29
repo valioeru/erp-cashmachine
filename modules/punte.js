@@ -652,14 +652,37 @@ function potrivesteProdus(idx, cod, den) {
   return [...gasite.values()];
 }
 
+// Costul scos din balanța stocului e valoare / cantitate. Când stocul e
+// negativ sau cantitatea e trecută în altă unitate decât cea de pe factură,
+// raportul explodează — un sac vândut cu 0,57 lei ajunge cu „cost" 499,42 lei,
+// iar o linie de 50.000 de bucăți scoate marja firmei pe minus cu 25 de
+// milioane. De aceea costul se compară cu prețul la care produsul chiar se
+// vinde (prețul lui de vânzare sau media de pe facturi, care e mai mare) și,
+// dacă îl depășește de peste cinci ori, nu se scrie deloc.
+const PRAG_COST_ABERANT = 5;
+
 async function ingestCostProduse(randuri) {
-  const produse = await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all();
+  const produse = await db
+    .prepare(
+      `SELECT pr.id, pr.cod, pr.denumire, pr.pret_achizitie, pr.pret_vanzare,
+              COALESCE(v.pret_mediu, 0) AS pret_mediu
+         FROM produse pr
+         LEFT JOIN (SELECT fl.produs_id,
+                           SUM(fl.cantitate * fl.pret_unitar) / NULLIF(SUM(fl.cantitate), 0) AS pret_mediu
+                      FROM facturi_linii fl
+                      JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
+                     WHERE f.directie = 'vanzare' AND fl.cantitate > 0
+                     GROUP BY fl.produs_id) v ON v.produs_id = pr.id`
+    )
+    .all();
   const idx = indexProduse(produse);
 
   let completate = 0;
   let aveauDeja = 0;
   let faraCost = 0;
   let nepotriviteN = 0;
+  let aberante = 0;
+  const exempleAberante = [];
   const exemple = [];
   const vazute = new Set();
 
@@ -701,6 +724,14 @@ async function ingestCostProduse(randuri) {
         aveauDeja++;
         continue;
       }
+      const referinta = Math.max(Number(p.pret_vanzare) || 0, Number(p.pret_mediu) || 0);
+      if (referinta > 0 && rotunjit > PRAG_COST_ABERANT * referinta) {
+        aberante++;
+        if (exempleAberante.length < 15) {
+          exempleAberante.push(`${p.denumire || p.cod}: cost ${rotunjit} față de preț de vânzare ${referinta}`);
+        }
+        continue;
+      }
       await db.prepare("UPDATE produse SET pret_achizitie = ? WHERE id = ?").run(rotunjit, p.id);
       p.pret_achizitie = rotunjit;
       completate++;
@@ -717,6 +748,8 @@ async function ingestCostProduse(randuri) {
     aveau_deja_cost: aveauDeja,
     fara_cost_in_raport: faraCost,
     nepotrivite: nepotriviteN,
+    costuri_aberante_sarite: aberante,
+    exemple_aberante: exempleAberante,
     exemple_nepotrivite: exemple.slice(0, 15),
     produse_cu_cost_acum: Number(cuCost.n),
     linii_de_factura_cu_cost: Number(liniiCuCost.n),
