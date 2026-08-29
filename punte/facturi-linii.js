@@ -13,7 +13,9 @@
 // Cum se folosește:
 //   1. în tab-ul ERP:      copy(await (await fetch('/api/facturi-fara-linii?an=2026')).json())
 //      → de acolo iese lista de facturi care încă n-au linii
-//   2. în tab-ul SmartBill: se lipește fișierul ăsta, apoi
+//   2. în tab-ul SmartBill, pe /raport/facturi/, cu perioada pusă pe anul
+//      care te interesează: se lipește fișierul ăsta, apoi
+//        await window.__punte.culegeHarta()   ← număr document → id SmartBill
 //        window.__punte.incarcaCoada(lista.facturi)
 //        window.__punte.porneste()
 //   3. progresul:           window.__punte.stare()
@@ -33,8 +35,11 @@
   const PAUZA_MS = 400; // răgaz între facturi, ca să nu sufocăm SmartBill
   const ASTEPTARE_MAX_MS = 12000; // cât așteptăm randarea unei pagini
 
-  // Adresa paginii unei facturi. Se verifică o dată, pe o factură reală, și
-  // se corectează aici dacă SmartBill își schimbă rutele.
+  // Adresa paginii unei facturi. Atenție, aici s-a pierdut o rundă întreagă:
+  // id-ul din adresă e al lui SmartBill (nouă cifre, ex. 307103155), NU id-ul
+  // facturii din ERP. Lista din `/api/facturi-fara-linii` dă id-uri de ERP,
+  // deci trebuie trecută prin harta culeasă din raport — altfel fiecare
+  // factură dă 404, iar puntea raportează liniștită „incomplet" la toate.
   const URL_FACTURA = (id) => `/raport/factura/${id}/`;
 
   const S = (window.__punte = window.__punte || {});
@@ -357,9 +362,56 @@
     CEAS.dupa(PAUZA_MS, pas);
   }
 
+  // Harta „număr document → id SmartBill", culeasă din raportul de facturi.
+  //
+  // Se rulează O DATĂ, cu /raport/facturi/ deschis și cu perioada pusă pe anul
+  // care te interesează. Umblă singură prin paginile grilei și adună perechile;
+  // nu trimite nimic nicăieri și nu schimbă nimic în SmartBill.
+  S.harta = S.harta || {};
+  S.culegeHarta = async function (pagini) {
+    const strange = () => {
+      let n = 0;
+      for (const tr of document.querySelectorAll("tbody tr")) {
+        const a = tr.querySelector('a[href*="/raport/factura/"]');
+        if (!a) continue;
+        const m = a.getAttribute("href").match(/\/raport\/factura\/(\d+)\//);
+        if (!m) continue;
+        const cheie = (tr.innerText || "").trim().split(/\s+/)[0];
+        if (!cheie || !/^[A-Z]/.test(cheie)) continue;
+        if (!S.harta[cheie]) { S.harta[cheie] = Number(m[1]); n++; }
+      }
+      return n;
+    };
+    strange();
+    const pag = document.querySelector(".dataTables_paginate");
+    if (!pag) return Object.keys(S.harta).length;
+    const urmatorul = () =>
+      [...pag.querySelectorAll("span, div, a")].find(
+        (e) => /(^|\s)next(\s|$)/.test(String(e.className)) && !/disabled/.test(String(e.className))
+      );
+    for (let i = 0; i < (pagini || 40); i++) {
+      const n = urmatorul();
+      if (!n) break;
+      n.click();
+      await new Promise((r) => setTimeout(r, 3500));
+      strange();
+    }
+    return Object.keys(S.harta).length;
+  };
+
+  // Coada primește lista din ERP („id" = id de ERP) și o traduce prin hartă.
+  // Ce nu se găsește în hartă NU se pune în coadă — altfel ar fi 404 mut.
   S.incarcaCoada = function (facturi) {
     const deja = new Set(Object.keys(S.facute));
-    S.coada = (facturi || []).filter((f) => f && f.id && !deja.has(f.cheie));
+    const areHarta = Object.keys(S.harta).length > 0;
+    S.fara_harta = [];
+    S.coada = [];
+    for (const f of facturi || []) {
+      if (!f || !f.cheie || deja.has(f.cheie)) continue;
+      const sb = areHarta ? S.harta[f.cheie] : f.id;
+      if (!sb) { S.fara_harta.push(f.cheie); continue; }
+      S.coada.push({ id: sb, cheie: f.cheie });
+    }
     return S.coada.length;
   };
   S.porneste = function () {
@@ -378,6 +430,8 @@
     for (const e of S.esuate) motive[e.motiv] = (motive[e.motiv] || 0) + 1;
     return {
       facute: Object.keys(S.facute).length,
+      in_harta: Object.keys(S.harta).length,
+      fara_harta: (S.fara_harta || []).length,
       ramase: S.coada.length,
       netrimise: S.linii.length,
       trimise: S.trimise,
