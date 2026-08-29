@@ -115,6 +115,57 @@ async function oportunitatiDeschise(agentId) {
     .catch(() => []);
 }
 
+// Comenzile agentului care încă n-au fost facturate. Sunt deja câștigate —
+// clientul a comandat — dar banii n-au plecat încă spre noi, deci comisionul
+// din ele e potențial, nu viitor.
+//
+// Registrul de comenzi vine dintr-un Excel fără prețuri, deci valoarea se ia
+// în ordinea asta: ce a scris agentul pe comandă; altfel media facturilor
+// clientului din ultimul an; altfel nimic — și atunci comanda se numără, dar
+// nu se pune la lei. Cifra e cinstită doar dacă spune și cât din ea lipsește.
+async function comenziNefacturate(agentId) {
+  const randuri = await db
+    .prepare(
+      `SELECT c.id, c.numar, c.tip_produs, c.cantitate, c.um, c.data_livrare, c.valoare_estimata,
+              c.partener_id, COALESCE(p.nume, c.client_text) AS client
+         FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id
+        WHERE c.agent_id = ? AND c.status NOT IN ('anulata', 'facturata')
+          AND (c.facturat IS NULL OR c.facturat = '' OR LOWER(c.facturat) = 'nu')
+        ORDER BY (c.data_livrare IS NULL OR c.data_livrare = ''), c.data_livrare DESC, c.id DESC`
+    )
+    .all(agentId)
+    .catch(() => []);
+  if (!randuri.length) return [];
+
+  // Media pe client, dintr-o singură interogare — nu una pe fiecare comandă.
+  const ids = [...new Set(randuri.map((r) => r.partener_id).filter(Boolean))];
+  const medii = new Map();
+  if (ids.length) {
+    const anul = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const m = await db
+      .prepare(
+        `SELECT f.partener_id, AVG(ABS(t.total)) AS medie
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total
+                   FROM facturi_linii GROUP BY factura_id) t ON t.factura_id = f.id
+          WHERE f.partener_id IN (${ids.map(() => "?").join(",")}) AND f.directie = 'vanzare'
+            AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut') AND f.intercompany = 0
+            AND f.data_emiterii >= ? AND t.total > 0
+          GROUP BY f.partener_id`
+      )
+      .all(...ids, anul)
+      .catch(() => []);
+    for (const r of m) medii.set(Number(r.partener_id), Number(r.medie) || 0);
+  }
+
+  return randuri.map((r) => {
+    const scrisa = Number(r.valoare_estimata) || 0;
+    const media = medii.get(Number(r.partener_id)) || 0;
+    const valoare = scrisa || media;
+    return { ...r, valoare, temei: scrisa ? "scrisă pe comandă" : media ? "media facturilor clientului" : "fără temei" };
+  });
+}
+
 async function cererileLui(agentId, deLaLuna) {
   return db
     .prepare("SELECT * FROM cereri_comision WHERE utilizator_id = ? AND luna >= ? ORDER BY luna DESC, id DESC")
@@ -242,6 +293,15 @@ function register(router) {
     const potentialBrut = potential.reduce((s, o) => s + o.brut, 0);
     const potentialPonderat = potential.reduce((s, o) => s + o.ponderat, 0);
 
+    // ---- comisionul din comenzile nefacturate -----------------------------
+    // O comandă e deja câștigată, nu o speranță ca un lead — de asta n-are
+    // șansă ponderată. Singura necunoscută e valoarea, iar aceea se vede
+    // rând cu rând, cu tot cu temeiul ei.
+    const comenzi = (await comenziNefacturate(agentId)).map((c) => ({ ...c, comision: (nr(c.valoare) * pct) / 100 }));
+    const comenziValoare = comenzi.reduce((s, c) => s + nr(c.valoare), 0);
+    const comenziComision = comenzi.reduce((s, c) => s + c.comision, 0);
+    const comenziFaraTemei = comenzi.filter((c) => !c.valoare).length;
+
     const cerutMax = Math.max(0, Math.round(acum.disponibil * 100) / 100);
     const mesaj = String(ctx.query.mesaj || "");
     const eroare = String(ctx.query.eroare || "");
@@ -311,8 +371,10 @@ function register(router) {
       <div class="cards">
         <div class="card"><div class="label">Comision viitor (facturi emise, neîncasate)</div><div class="value">${lei(viitorTotal)}</div>
           <div class="mic">${viitor.length} facturi · ${pct}% din partea ta din ce a mai rămas de încasat</div></div>
-        <div class="card"><div class="label">Comision potențial (lead-uri deschise)</div><div class="value">${lei(potentialPonderat)}</div>
-          <div class="mic">din ${lei(potentialBrut)} dacă s-ar câștiga toate · ${potential.length} oportunități</div></div>
+        <div class="card"><div class="label">Comision potențial (comenzi + lead-uri)</div><div class="value">${lei(potentialPonderat + comenziComision)}</div>
+          <div class="mic">${lei(comenziComision)} din ${comenzi.length} ${comenzi.length === 1 ? "comandă nefacturată" : "comenzi nefacturate"}${
+            comenziFaraTemei ? ` (${comenziFaraTemei} fără valoare, deci nesocotite)` : ""
+          } · ${lei(potentialPonderat)} din ${potential.length} ${potential.length === 1 ? "oportunitate" : "oportunități"}</div></div>
         <div class="card"><div class="label">Încasat luna asta pe facturile mele</div><div class="value">${lei(acum.incasat)}</div>
           <div class="mic">baza din care iese comisionul lunii</div></div>
       </div>
@@ -351,6 +413,34 @@ function register(router) {
         ])
       )}
       ${viitor.length > 100 ? `<p class="mic">Se arată primele 100 din ${viitor.length}.</p>` : ""}
+
+      <h2>Comision din comenzile nefacturate</h2>
+      <p class="explic">
+        Comenzile tale care încă n-au fost facturate. Sunt câștigate — clientul a comandat — dar banii n-au intrat,
+        deci comisionul din ele e încă o promisiune. Registrul de comenzi vine dintr-un Excel <strong>fără prețuri</strong>,
+        așa că valoarea se ia în ordinea asta: <strong>cât ai scris tu pe comandă</strong>; dacă n-ai scris,
+        <strong>media facturilor clientului</strong> din ultimul an; dacă nici asta nu se poate, comanda apare în listă
+        dar nu se pune la socoteală. Valoarea o scrii din pagina comenzii, la „Valoare estimată".
+      </p>
+      ${
+        comenzi.length
+          ? table(
+              ["Comanda", "Client", "Produs", "Cantitate", "Livrare", "Valoare", "De unde e valoarea", `Comision (${pct}%)`],
+              comenzi.slice(0, 60).map((c) => [
+                `<a href="/productie/${c.id}">${esc(c.numar || String(c.id))}</a>`,
+                esc(c.client || "—"),
+                esc(c.tip_produs || "—"),
+                esc([c.cantitate, c.um].filter(Boolean).join(" ")),
+                esc(c.data_livrare || "—"),
+                c.valoare ? lei(c.valoare) : `<span class="mic">—</span>`,
+                c.valoare ? `<span class="mic">${esc(c.temei)}</span>` : `<a class="mic" href="/productie/${c.id}">scrie o valoare</a>`,
+                c.valoare ? `<strong>${lei(c.comision)}</strong>` : `<span class="mic">—</span>`,
+              ]),
+              { total: ["Total", "", "", "", "", lei(comenziValoare), "", `<strong>${lei(comenziComision)}</strong>`] }
+            )
+          : `<p class="mic">Nicio comandă nefacturată pe numele tău.</p>`
+      }
+      ${comenzi.length > 60 ? `<p class="mic">Se arată primele 60 din ${comenzi.length}.</p>` : ""}
 
       <h2>Comision potențial, din lead-urile deschise</h2>
       <p class="explic">

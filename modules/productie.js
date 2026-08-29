@@ -392,6 +392,11 @@ function register(router) {
       )
       .all(...args);
 
+    const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
+    // Adresa curentă, ca după schimbarea agentului să te întorci exact unde erai
+    // — cu filtrul și căutarea puse, nu la începutul listei.
+    const inapoi = "/productie?" + new URLSearchParams({ status: filtru, ...(cauta ? { q: cauta } : {}) }).toString();
+
     const contoare = await db.prepare("SELECT status, COUNT(*) AS n FROM comenzi_productie GROUP BY status").all();
     const cnt = Object.fromEntries(contoare.map((r) => [r.status, Number(r.n)]));
     const aziStr = azi();
@@ -441,7 +446,13 @@ function register(router) {
           `<input type="checkbox" class="sel-cmd" name="ids" value="${c.id}">`,
           `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
           c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—"),
-          esc(c.agent_nume || c.reprezentant || "—"),
+          `<select name="agent_id" form="schimba-agent" class="sel-agent" data-comanda="${c.id}"
+                   onchange="document.getElementById('agent-comanda').value = this.dataset.comanda; this.form.submit()">
+             ${c.agent_id ? "" : `<option value="" selected>${esc(c.reprezentant || "fără agent")}</option>`}
+             ${utilizatori
+               .map((u) => `<option value="${u.id}"${Number(u.id) === Number(c.agent_id) ? " selected" : ""}>${esc(u.nume)}</option>`)
+               .join("")}
+           </select>`,
           esc(c.tip_produs || "—"),
           `<span class="cel-lung">${esc(c.caracteristici || "")}</span>`,
           esc(c.cantitate || ""),
@@ -466,6 +477,10 @@ function register(router) {
       <div class="toolbar" style="margin-top:10px">
         <button class="btn secondary" type="submit">Șterge selectatele</button>
       </div>
+      </form>
+      <form id="schimba-agent" method="post" action="/productie/agent" hidden>
+        <input type="hidden" name="inapoi" value="${esc(inapoi)}">
+        <input type="hidden" name="comanda_id" id="agent-comanda">
       </form>
       ${sectiuneSpreAlocare(spre)}
       <form method="post" action="/productie/sterge-tot" class="inline-form" onsubmit="return confirm('Ștergi TOATE comenzile de producție? Folosește asta doar înainte de un reimport curat.')">
@@ -703,6 +718,24 @@ function register(router) {
   // atinge doar ce n-are încă legătură, deci a doua oară nu mai face nimic.
   // Util și după ce schimbi codul unui om — comenzile lui vechi rămân la
   // cine erau, dar cele nelegate se prind acum.
+  // Schimbarea agentului direct din listă. Mută și clientul la noul agent
+  // dacă n-avea deja alocare — altfel comanda ar fi a unuia și clientul a
+  // altuia, iar pâlnia ar arăta două povești diferite.
+  router.post("/productie/agent", async (ctx) => {
+    const agentId = parseInt(ctx.body.agent_id, 10) || null;
+    const comandaId = parseInt(ctx.body.comanda_id, 10) || null;
+    const inapoi = String(ctx.body.inapoi || "/productie");
+    if (!agentId || !comandaId) return redirect(ctx.res, inapoi);
+    const u = await db.prepare("SELECT nume, cod_agent FROM utilizatori WHERE id = ?").get(agentId);
+    if (!u) return redirect(ctx.res, inapoi);
+    const c = await db.prepare("SELECT partener_id FROM comenzi_productie WHERE id = ?").get(comandaId);
+    await db
+      .prepare("UPDATE comenzi_productie SET agent_id = ?, reprezentant = ? WHERE id = ?")
+      .run(agentId, String(u.cod_agent || "").trim() || initialeNume(u.nume), comandaId);
+    if (c && c.partener_id) await alocaClientul(c.partener_id, agentId);
+    redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
+  });
+
   router.post("/productie/leaga-agenti", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/productie");
     uitaAgentii();
@@ -793,6 +826,9 @@ function register(router) {
           </label>
         </div>
 
+        <label class="field">Valoare estimată (lei, opțional)<input name="valoare_estimata" inputmode="decimal" placeholder="Ex: 12500"></label>
+        <p class="ajutor">Registrul n-are prețuri. Scrie aici cât crezi că valorează comanda și intră în „comisionul potențial" din pagina ta de comision. Se poate completa și mai târziu.</p>
+
         <label class="field">Rețetă / consum estimat<textarea name="reteta" rows="2" placeholder="Ex: 190 kg, LDPE-23, LLDPE-80, MB 4, Tape 15 role"></textarea></label>
         <label class="field">Observații<textarea name="observatii" rows="2"></textarea></label>
         <div class="form-actions"><button class="btn" type="submit">Înregistrează comanda</button> <a class="btn secondary" href="/productie">Renunță</a></div>
@@ -821,8 +857,8 @@ function register(router) {
 
     const ins = await db
       .prepare(
-        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, agent_id, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, observatii, reteta, sursa)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
+        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, agent_id, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, valoare_estimata, observatii, reteta, sursa)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
       )
       .run(
         numar,
@@ -847,6 +883,7 @@ function register(router) {
         String(b.doc || "").trim() || null,
         String(b.fisa || "").trim() || null,
         String(b.facturat || "").trim() || null,
+        Number(String(b.valoare_estimata || "").replace(/\s/g, "").replace(",", ".")) || null,
         String(b.observatii || "").trim() || null,
         String(b.reteta || "").trim() || null
       );
@@ -987,9 +1024,11 @@ function register(router) {
 
   router.get("/productie/:id", async (ctx) => {
     const c = await db
-      .prepare("SELECT c.*, p.nume AS partener_nume FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+      .prepare("SELECT c.*, p.nume AS partener_nume, u.nume AS agent_nume FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id LEFT JOIN utilizatori u ON u.id = c.agent_id WHERE c.id = ?")
       .get(ctx.params.id);
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
+
+    const utilizatoriComanda = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
 
     // Alocările: pe ce mașină și cu cine stă comanda asta. Fără ele, pagina
     // spune ce e de făcut, dar nu și cine o face.
@@ -1027,7 +1066,7 @@ function register(router) {
           <div><div class="k">Caracteristici</div>${esc(c.caracteristici || "—")}</div>
           <div><div class="k">Cantitate</div>${esc([c.cantitate, c.um].filter(Boolean).join(" "))}</div>
           <div><div class="k">Ambalare</div>${esc(c.tip_ambalare || "—")}</div>
-          <div><div class="k">Reprezentant</div>${esc(c.reprezentant || c.initiator || "—")}</div>
+          <div><div class="k">Reprezentant</div>${esc(c.agent_nume || c.reprezentant || c.initiator || "—")}</div>
           <div><div class="k">Plasată la</div>${esc(c.data_initiere || "—")}</div>
           <div><div class="k">Livrare promisă</div>${esc(c.data_livrare || c.data_solicitata || "—")}</div>
           <div><div class="k">Finalizată la</div>${esc(c.data_finalizare || "—")}</div>
@@ -1072,6 +1111,12 @@ function register(router) {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
           <label class="field">Caracteristici<input name="caracteristici" value="${esc(c.caracteristici || "")}"></label>
           <label class="field">Tip ambalare<input name="tip_ambalare" value="${esc(c.tip_ambalare || "")}"></label>
+          <label class="field">Reprezentant vânzări
+            <select name="agent_id">${utilizatoriComanda
+              .map((u) => `<option value="${u.id}"${Number(u.id) === Number(c.agent_id) ? " selected" : ""}>${esc(u.nume)}</option>`)
+              .join("")}</select>
+          </label>
+          <label class="field">Valoare estimată (lei)<input name="valoare_estimata" inputmode="decimal" value="${c.valoare_estimata != null ? esc(String(c.valoare_estimata)) : ""}" placeholder="ex. 12500"></label>
         </div>
         <label class="field">Rețetă / consum<textarea name="reteta" rows="2">${esc(c.reteta || "")}</textarea></label>
         <label class="field">Observații<textarea name="observatii" rows="2">${esc(c.observatii || "")}</textarea></label>
@@ -1088,7 +1133,7 @@ function register(router) {
     await db
       .prepare(
         `UPDATE comenzi_productie SET status = ?, data_livrare = ?, doc_emisa = ?, fisa_tehnica = ?, caracteristici = ?, tip_ambalare = ?, observatii = ?, reteta = ?,
-         data_finalizare = COALESCE(data_finalizare, ?) WHERE id = ?`
+         agent_id = COALESCE(?, agent_id), valoare_estimata = ?, data_finalizare = COALESCE(data_finalizare, ?) WHERE id = ?`
       )
       .run(
         status,
@@ -1099,6 +1144,8 @@ function register(router) {
         String(b.tip_ambalare || "").trim() || null,
         String(b.observatii || "").trim() || null,
         String(b.reteta || "").trim() || null,
+        parseInt(b.agent_id, 10) || null,
+        Number(String(b.valoare_estimata || "").replace(/\s/g, "").replace(",", ".")) || null,
         finalizare,
         ctx.params.id
       );
