@@ -1,4 +1,4 @@
-// Sincronizarea zilnică din SmartBill — facturi noi, încasări și costuri.
+// Sincronizarea zilnică din SmartBill — facturi noi, încasări, producție și costuri.
 //
 // Se rulează într-o filă deschisă pe cloud.smartbill.ro, logată. Nu cere
 // parole și nu ține minte nimic: citește rapoartele pe care le vede omul
@@ -213,6 +213,92 @@
     return randuri.length;
   };
 
+  // ---- producție (rețete) -------------------------------------------------
+  // Raportul de mișcări ne dă, document cu document, ce a intrat și ce a ieșit
+  // din gestiune. Un raport de producție are ambele: produsul finit intră,
+  // componentele ies. Din raportul lunii se reconstruiește rețeta — de aceea
+  // se trimite tot ce s-a mișcat, iar ERP-ul calculează cât intră pe bucată.
+  const CSRF = () =>
+    (document.querySelector("input[name=csrfmiddlewaretoken]") || {}).value ||
+    (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] ||
+    "";
+
+  async function miscari(de, la, pagina) {
+    const s = {
+      product_list: [], product_name: "", product_code: "", warehouse: "-1",
+      from: de, to: la, measuring_unit: -1, document_types: [], document_series: [],
+      show_unit_price: true, show_product_totals: false,
+      hide_no_stock_and_transactions: true, hide_no_transactions: true, hide_no_stock: false,
+      page: pagina, results_per_page: 200,
+    };
+    const r = await fetch("/gestiune/raport/miscari_stocuri/ajax/", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-CSRFToken": CSRF(),
+      },
+      body: "sSearch=" + encodeURIComponent(JSON.stringify(s)),
+    });
+    return r.json();
+  }
+
+  // documente care sigur nu sunt producție, chiar dacă au și intrări și ieșiri
+  const NU_E_PRODUCTIE = /transfer|inventar|recep|aviz|factur|retur|dezmembr|stoc initial|stoc inițial/i;
+  const E_PRODUCTIE = /produc|predare/i;
+
+  S.productie = async function (zile) {
+    const de = acumMinus(zile);
+    const la = aziText();
+    const documente = new Map();
+    let total = Infinity;
+    let vazute = 0;
+    for (let pagina = 1; pagina <= 30 && vazute < total; pagina++) {
+      const j = await miscari(de, la, pagina);
+      if (j && j.csrf_fails) throw new Error("SmartBill a refuzat cererea (CSRF). Reîncarcă pagina și încearcă din nou.");
+      const info = String((j && j.info) || "");
+      const m = info.match(/din\s+(\d+)/);
+      if (m) total = Number(m[1]);
+      let peAceastaPagina = 0;
+      for (const w of (j && j.warehouses) || []) {
+        for (const p of w.products || []) {
+          peAceastaPagina++;
+          const denumire = String(p.productName || "").replace(/^\s*\d+\s*-\s*/, "").trim();
+          const cod = p.productCode || "";
+          const um = p.measuringUnit || p.productMeasuringUnit || "";
+          if (!denumire) continue;
+          for (const o of p.operations || []) {
+            const numar = o.documentNumber || o.stockDocumentId || "";
+            if (!numar) continue;
+            const tip = String(o.documentType || o.documentSymbol || "");
+            const cheie = `${tip}|${o.documentSeries || ""}|${numar}`;
+            let doc = documente.get(cheie);
+            if (!doc) {
+              doc = { document: cheie, tip, data: doarZi(o.operationDate), finite: [], consum: [] };
+              documente.set(cheie, doc);
+            }
+            const intra = Number(o.quantityIn) || 0;
+            const iese = Number(o.quantityOut) || 0;
+            if (intra > 0) doc.finite.push({ produs: denumire, cod, um, cantitate: intra });
+            else if (iese > 0) doc.consum.push({ produs: denumire, cod, um, cantitate: iese });
+          }
+        }
+      }
+      if (!peAceastaPagina) break;
+      vazute += peAceastaPagina;
+    }
+
+    const randuri = [...documente.values()].filter(
+      (d) =>
+        d.finite.length &&
+        d.consum.length &&
+        (E_PRODUCTIE.test(d.tip) || !NU_E_PRODUCTIE.test(d.tip))
+    );
+    await trimite("productie", randuri, `sincronizare ${S.firma()} — producție ${zile} zile`);
+    return randuri.length;
+  };
+
   // ---- totul, pe rând -----------------------------------------------------
   // Un pas căzut nu-i oprește pe ceilalți: fiecare are try/catch, iar ce n-a
   // mers rămâne scris în jurnal cu motivul.
@@ -220,7 +306,12 @@
     const z = zile || 14;
     S.jurnal = [];
     log("pornit", { firma: S.firma(), zile: z });
-    for (const [nume, f] of [["facturi", () => S.facturi(z)], ["incasari", () => S.incasari(z)], ["costuri", () => S.costuri()]]) {
+    for (const [nume, f] of [
+      ["facturi", () => S.facturi(z)],
+      ["incasari", () => S.incasari(z)],
+      ["productie", () => S.productie(Math.max(z, 30))],
+      ["costuri", () => S.costuri()],
+    ]) {
       try {
         await f();
       } catch (e) {
