@@ -33,6 +33,10 @@ require("./modules/cashflow").register(router);
 require("./modules/costuri").register(router);
 require("./modules/import").register(router);
 require("./modules/punte").register(router);
+// Utilajele se inregistreaza INAINTE de productie: rutele se potrivesc in
+// ordinea inregistrarii, iar "/productie/:id" din productie.js ar inghiti
+// "/productie/utilaje" daca ar veni primul.
+require("./modules/utilaje").register(router);
 require("./modules/productie").register(router);
 require("./modules/banca").register(router);
 require("./modules/angajati").register(router);
