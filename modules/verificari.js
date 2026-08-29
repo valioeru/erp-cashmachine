@@ -419,15 +419,26 @@ async function incasariDeCuratat() {
     let platit = nr(f.platit);
     const scos = new Set();
 
-    // 1. repetări identice
-    const vazute = new Set();
+    // 1. repetări.
+    //
+    // „Aceeași sumă" cu o toleranță de un leu, nu la bănuț: când o încasare
+    // acoperă mai multe facturi, suma se împarte proporțional și se rotunjește,
+    // iar la al doilea import soldurile sunt altele — așa ies două copii de
+    // 987.607,85 și 987.607,90. La bănuț nu s-ar recunoaște.
+    //
+    // Condiția care ține totul în siguranță e a doua: copia se scoate DOAR
+    // dacă factura rămâne acoperită și fără ea. O factură plătită cinstit în
+    // două rate egale nu e supraîncasată, deci nici nu ajunge aici.
+    const vazute = [];
     for (const p of plati) {
-      const cheie = Math.round(nr(p.suma) * 100);
-      if (vazute.has(cheie) && platit - nr(p.suma) >= total - 0.01) {
+      const suma = nr(p.suma);
+      const toleranta = Math.max(1, Math.abs(suma) * 0.001);
+      const repeta = vazute.some((v) => Math.abs(v - suma) <= toleranta);
+      if (repeta && platit - suma >= total - 0.01) {
         scos.add(p.id);
-        platit -= nr(p.suma);
-        deScos.push({ ...p, factura: f, motiv: "repetare identică" });
-      } else vazute.add(cheie);
+        platit -= suma;
+        deScos.push({ ...p, factura: f, motiv: "repetare" });
+      } else vazute.push(suma);
     }
 
     // 2. surogate rămase, dar numai dacă pe factură a mai rămas o încasare adevărată
@@ -568,7 +579,7 @@ function register(router) {
       <h1 style="margin:6px 0 2px">Încasări numărate de mai multe ori</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:860px">
         ${supra} facturi au încasat mai mult decât s-a facturat. Mai jos, plată cu plată, ce s-ar scoate din calcul
-        și de ce. „Repetare identică" = pe aceeași factură există deja o plată de exact aceeași sumă, iar factura
+        și de ce. „Repetare" = pe aceeași factură există deja o plată de aceeași sumă (cu un leu toleranță, fiindcă împărțirea rotunjește), iar factura
         rămâne acoperită și fără copie. „Plată născocită din status" = plata pusă doar fiindcă SmartBill zicea
         „platită", pe o factură care are și încasarea adevărată.
       </p>
@@ -728,8 +739,8 @@ function register(router) {
                  Pe ${curatare.supra} facturi s-a încasat mai mult decât s-a facturat. Cauza: raportul de încasări
                  s-a importat pe perioade care se suprapun, iar o încasare care listează mai multe facturi se împarte
                  altfel la al doilea import — deci nu se mai recunoaște ca dublură. Se scot din calcul
-                 ${curatare.deScos.filter((x) => x.motiv === "repetare identică").length} repetări identice și
-                 ${curatare.deScos.filter((x) => x.motiv !== "repetare identică").length} plăți născocite din status.
+                 ${curatare.deScos.filter((x) => x.motiv === "repetare").length} repetări și
+                 ${curatare.deScos.filter((x) => x.motiv !== "repetare").length} plăți născocite din status.
                  Ies curate ${curatare.curate} facturi din ${curatare.supra}.
                </p>
                <form method="post" action="/admin/date/curata-incasari" onsubmit="return confirm('Se scot din calcul ${curatare.deScos.length} plăți (${money(curatareSuma)}). Nu se șterge nimic — se pot aduce înapoi din Configurări → Date. Continui?')">
