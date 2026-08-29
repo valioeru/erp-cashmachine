@@ -643,6 +643,153 @@ function register(router) {
     };
   }
 
+  // ---- Unitatea de măsură înlocuită cu denumirea produsului ---------------
+  //
+  // Acelasi soi de import strambat, dar in tabelul de produse: in coloana
+  // „UM" a ajuns denumirea produsului, sau „cod - denumire". Se vede pe orice
+  // ecran cu produse: „1720 JUMBO BD 1620MMX 4050" in loc de „1 buc".
+  //
+  // Nu atingem unitatile adevarate, oricat de lungi ar fi: „o mie de bucati",
+  // „centimetru patrat" si „unitate activa" sunt unitati reale din SmartBill.
+  // Se repara doar cele care REPETA denumirea, sau care sunt doar cifre.
+  //
+  // Cu ce se inlocuieste: daca acelasi produs exista si sub alt rand, cu o
+  // unitate sanatoasa, se ia aia — e cea mai buna dovada pe care o avem.
+  // Altfel „buc", care e si valoarea implicita a coloanei.
+  function umCurata(v) {
+    return String(v || "").trim();
+  }
+  function umSanatoasa(v) {
+    const u = umCurata(v);
+    if (!u || u.length > 24) return false;
+    if (/^[\d.,\s]+$/.test(u)) return false;
+    return true;
+  }
+  function cheieDenumire(v) {
+    // Același produs apare uneori scris „Cerneala Galbena" și alteori
+    // „Cerneala Galbena (25PC0010-5)" sau „25PC0010-5 - Cerneala Galbena".
+    // Le aducem la aceeași cheie, ca să se poată împrumuta unitatea între ele.
+    return String(v || "")
+      .toLowerCase()
+      .replace(/\s*\([^()]*\)\s*$/, "")
+      .replace(/^[a-z0-9._\/-]+\s+-\s+/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async function umStrambe() {
+    const produse = await db.prepare("SELECT id, cod, denumire, unitate_masura FROM produse ORDER BY denumire, id").all();
+
+    // Unitățile sănătoase, grupate pe denumire și pe cod — dovada pentru cele
+    // stricate. Codul e dovada mai bună când există.
+    const dovezi = new Map();
+    const dovezi0 = new Map();
+    for (const p of produse) {
+      const den = cheieDenumire(p.denumire);
+      const um = umCurata(p.unitate_masura);
+      if (!umSanatoasa(um)) continue;
+      if (den && cheieDenumire(um) === den) continue;
+      const pune = (harta, cheie) => {
+        if (!cheie) return;
+        if (!harta.has(cheie)) harta.set(cheie, new Map());
+        const h = harta.get(cheie);
+        h.set(um, (h.get(um) || 0) + 1);
+      };
+      pune(dovezi, den);
+      pune(dovezi0, String(p.cod || "").trim().toLowerCase());
+    }
+
+    const deReparat = [];
+    for (const p of produse) {
+      const den = umCurata(p.denumire);
+      const um = umCurata(p.unitate_masura);
+      if (!um) continue;
+      const repetaDenumirea = den && (cheieDenumire(um) === cheieDenumire(den) || (den.length >= 8 && cheieDenumire(um).includes(cheieDenumire(den))));
+      const doarCifre = /^[\d.,\s]+$/.test(um);
+      if (!repetaDenumirea && !doarCifre) continue;
+
+      let nou = "buc";
+      let sursa = "implicit";
+      const hCod = dovezi0.get(String(p.cod || "").trim().toLowerCase());
+      const hDen = dovezi.get(cheieDenumire(den));
+      const h = hCod && hCod.size ? hCod : hDen;
+      if (h && h.size) {
+        const [cel] = [...h.entries()].sort((a, b) => b[1] - a[1]);
+        nou = cel[0];
+        sursa = hCod && hCod.size ? `același cod, alt rând (${cel[1]}×)` : `același produs, alt rând (${cel[1]}×)`;
+      }
+      if (umCurata(nou) === um) continue;
+      deReparat.push({ ...p, um, nou, sursa, motiv: doarCifre ? "doar cifre" : "repetă denumirea" });
+    }
+    return deReparat;
+  }
+
+  router.get("/admin/date/um-strambe", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const d = await umStrambe();
+    const dinDovada = d.filter((x) => x.sursa !== "implicit").length;
+
+    const body = `
+      <div class="toolbar"><a class="btn secondary" href="/admin/date">← Înapoi la verificări</a></div>
+      <h1 style="margin:6px 0 2px">Unitatea de măsură ține denumirea produsului</h1>
+      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:880px">
+        În coloana <strong>UM</strong> a ajuns denumirea produsului, nu o unitate — importul a citit coloanele pe dos.
+        De-aia cantitățile se citesc aiurea peste tot: „1720 JUMBO BD 1620MMX 4050" în loc de „1 buc".
+        Unitățile adevărate, oricât de neobișnuite (<em>o mie de bucăți</em>, <em>centimetru pătrat</em>,
+        <em>unitate activă</em>), rămân neatinse — se repară doar cele care repetă denumirea sau sunt doar cifre.
+      </p>
+
+      <div class="cards">
+        <div class="card"><div class="label">Produse de reparat</div><div class="value">${d.length}</div></div>
+        <div class="card"><div class="label">Cu unitate dovedită</div><div class="value" style="color:var(--success)">${dinDovada}</div>
+          <div style="font-size:12px;color:var(--text-muted)">luată de la același produs, alt rând</div></div>
+        <div class="card"><div class="label">Puse pe „buc"</div><div class="value">${d.length - dinDovada}</div>
+          <div style="font-size:12px;color:var(--text-muted)">n-avem altă dovadă</div></div>
+      </div>
+
+      <h2>Ce se schimbă</h2>
+      ${table(
+        ["Produs", "Cod", "UM acum", "Devine", "De unde", "De ce"],
+        d.slice(0, 300).map((p) => [
+          `<a href="/produse/${p.id}">${esc(String(p.denumire || "").slice(0, 60))}</a>`,
+          esc(p.cod || "—"),
+          `<span style="color:var(--danger)">${esc(String(p.um).slice(0, 40))}</span>`,
+          `<strong style="color:var(--success)">${esc(p.nou)}</strong>`,
+          esc(p.sursa),
+          esc(p.motiv),
+        ])
+      )}
+      ${d.length > 300 ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele 300 din ${d.length}.</p>` : ""}
+
+      ${
+        d.length
+          ? `<form method="post" action="/admin/date/repara-um" style="margin-top:18px"
+                   onsubmit="return confirm('Se schimbă unitatea de măsură la ${d.length} produse. Nimic altceva nu se atinge. Continui?')">
+               <button class="btn" type="submit">Repară unitățile la cele ${d.length} produse</button>
+             </form>`
+          : `<p style="color:var(--success)">Nu e nimic de reparat.</p>`
+      }`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Unități de măsură", active: "/admin/date", body }));
+  });
+
+  router.post("/admin/date/repara-um", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const d = await umStrambe();
+    let n = 0;
+    for (const p of d) {
+      await db.prepare("UPDATE produse SET unitate_masura = ? WHERE id = ?").run(p.nou, p.id);
+      n++;
+    }
+    const dinDovada = d.filter((x) => x.sursa !== "implicit").length;
+    const body = `
+      <h2>Reparat</h2>
+      <p>Am pus unitatea de măsură la <strong>${n}</strong> ${n === 1 ? "produs" : "produse"}:
+      ${dinDovada} cu unitatea luată de la același produs de pe alt rând, ${n - dinDovada} pe „buc".</p>
+      <p style="color:var(--text-muted);font-size:13px">Nimic altceva nu s-a schimbat — nici prețuri, nici stocuri, nici linii de factură.</p>
+      <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare unități", active: "/admin/date", body }));
+  });
+
   router.get("/admin/date/cantitati-strambe", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
     const d = await cantitatiStrambe();
@@ -883,6 +1030,7 @@ function register(router) {
     const curatare = await incasariDeCuratat();
     const curatareSuma = curatare.deScos.reduce((s2, r) => s2 + nr(r.suma), 0);
     const strambe = await cantitatiStrambe();
+    const umRele = await umStrambe();
     const costuriRele = await costuriDeReparat();
 
     const body = `
@@ -937,6 +1085,21 @@ function register(router) {
                </p>
                <p style="font-size:12px;margin:0;color:var(--text-muted)">
                  <a href="/admin/date/cantitati-strambe">Vezi ce se schimbă pe fiecare linie →</a>
+               </p>
+             </div>`
+          : ""
+      }
+      ${
+        umRele.length
+          ? `<div class="card" style="border-left:4px solid var(--warn);margin-bottom:16px">
+               <div class="label">Unitatea de măsură ține denumirea produsului</div>
+               <div class="value">${umRele.length} produse</div>
+               <p style="font-size:13px;margin:8px 0 10px;color:var(--text-muted)">
+                 În coloana „UM" a ajuns denumirea produsului, nu o unitate — de-aia cantitățile se citesc
+                 „1720 JUMBO BD 1620MMX 4050" în loc de „1 buc". Unitățile adevărate rămân neatinse.
+               </p>
+               <p style="font-size:12px;margin:0;color:var(--text-muted)">
+                 <a href="/admin/date/um-strambe">Vezi ce se schimbă la fiecare produs →</a>
                </p>
              </div>`
           : ""
