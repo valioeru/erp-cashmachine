@@ -41,6 +41,15 @@ const GHID = [
 "sfat":"În colțul din dreapta sus e numele tău. De acolo intri în profil (poză, parolă) și tot de acolo ieși din cont."
 },
 {
+"t":"Ajutorul, pe fiecare pagină",
+"p":[
+"Lângă titlul fiecărei pagini, în dreapta, e un buton <b>„? Cum se folosește”</b>. Îl apeși și se deschide capitolul din ghid al secțiunii în care te afli — nu cuprinsul, ci exact bucata care explică ce ai pe ecran.",
+"Ghidul e același text pe care îl citești acum. Îl ai deci în două feluri: pe hârtie (documentul ăsta) și în aplicație, la un click distanță de locul unde te-ai împotmolit."
+],
+"pasi":[],
+"sfat":null
+},
+{
 "t":"Profilul tău",
 "p":[
 "Aici îți pui o poză și îți schimbi parola. Poza apare lângă numele tău sus și în listele unde e nevoie să se vadă cine a făcut ce.",
@@ -300,11 +309,28 @@ const GHID = [
 "intro":"Zona de producție ține comenzile în lucru, planificarea pe utilaje și oameni, și legătura cu depozitul pentru materie primă.",
 "pagini":[
 {
-"t":"Comenzi în lucru",
+"t":"Registrul de comenzi",
 "p":[
-"Comenzile de producție deschise: ce se face, cât, pentru ce comandă de client și în ce stadiu. Sus apar comenzile care încă n-au fost alocate nimănui — alea așteaptă o decizie."
+"Asta e lista de comenzi a firmei, aceeași pe care o țineam în Excel, cu <b>exact aceleași coloane</b>: nr. comandă, client, reprezentant, produs, caracteristici, cantitate, UM, tip ambalare, data plasării, data livrării, stare, DoC, fișă tehnică, facturat, rețetă, observații.",
+"Tabelul se derulează lateral (are șaisprezece coloane) și <b>orice coloană se sortează</b> cu un click pe capul ei. Sus sunt cifrele: câte sunt în producție, câte finalizate, câte facturate și câte au trecut de termenul de livrare — alea din urmă apar cu data pe roșu.",
+"Mai jos, sub tabel, e <b>„Comenzi spre alocare”</b>: ce e deschis și n-a fost încă pus pe nicio mașină. Aia e întrebarea de dimineață — nu „ce lucrăm”, ci „ce n-are încă cine și pe ce să lucreze”."
 ],
 "pasi":[],
+"sfat":"Data livrării scrisă cu roșu înseamnă că a trecut termenul și comanda e încă deschisă."
+},
+{
+"t":"Comanda PDF — hârtia care ajunge în hală",
+"p":[
+"Pe fiecare rând, la capătul din dreapta, e butonul <b>„Comandă PDF”</b>. Se deschide o pagină A4 cu tot ce trebuie să știe omul care execută comanda și cu nimic din ce nu-l privește — <b>pe ea nu apar prețuri</b>.",
+"Are patru părți: <b>ce se face</b> (produs, caracteristici, cantitate scrisă mare, ambalare, rețeta), <b>pentru cine și până când</b> (client, reprezentant, datele, DoC și fișa tehnică), <b>alocarea</b> (pe ce utilaj, în ce interval, cu ce oameni) și <b>trei rubrici de semnătură</b>: predat de planificare, primit de producție, cantitate realizată.",
+"Alocarea se completează singură <b>după</b> ce pui comanda pe o mașină din Planificare. Dacă tipărești înainte, pe hârtie scrie că nu e alocată încă — deci tipărește după ce ai alocat."
+],
+"pasi":[
+"Aloci comanda pe utilaj din <b>Producție → Planificare</b>.",
+"Te întorci în listă și apeși <b>„Comandă PDF”</b> pe rândul ei.",
+"Apeși „Tipărește / salvează ca PDF” din colțul de sus.",
+"Alegi imprimanta, sau „Salvează ca PDF” dacă vrei fișierul."
+],
 "sfat":null
 },
 {
