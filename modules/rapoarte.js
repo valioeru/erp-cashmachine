@@ -186,7 +186,6 @@ function selectorPerioada(actiune, interval, extraCampuri = "") {
   const opt = (v, t) => `<option value="${v}"${preset === v ? " selected" : ""}>${t}</option>`;
   return `
     <form class="filtre perioade" method="get" action="${actiune}">
-      ${extraCampuri}
       <span class="perioade-titlu">Perioada</span>
       ${chipuriPerioada(preset)}
       <select name="luni" onchange="this.form.submit()" title="ultimele N luni" class="perioade-select">
@@ -200,6 +199,7 @@ function selectorPerioada(actiune, interval, extraCampuri = "") {
         <button class="chip${preset === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
       </span>
       <span class="perioade-interval">${deLa} → ${panaLa}</span>
+      ${extraCampuri ? `<span class="perioade-alte">${extraCampuri}</span>` : ""}
     </form>`;
 }
 
@@ -1722,6 +1722,10 @@ function register(router) {
     const interval = intervalDinQuery(ctx, 12, "luna_curenta");
     const { deLa, panaLa } = interval;
     const arata = ["ambele", "facturat", "incasat"].includes(String(ctx.query.arata)) ? String(ctx.query.arata) : "ambele";
+    // Cu sau fara TVA. Contabilitatea vorbeste in net, banca in brut — raportul
+    // le da pe amandoua, dar spune mereu, sus si mare, pe care o arata acum.
+    const cuTva = String(ctx.query.tva || "fara") === "cu";
+    const eticheta = cuTva ? "cu TVA" : "fără TVA";
 
     // Lunile din interval. Peste 24 de luni tabelul devine ilizibil pe lat,
     // așa că trecem automat pe granulație anuală.
@@ -1745,11 +1749,12 @@ function register(router) {
     const facturat = await db
       .prepare(
         `SELECT al.utilizator_id AS agent, SUBSTR(f.data_emiterii, 1, 7) AS luna,
-                COALESCE(SUM(COALESCE(n.net,0) * al.procent / 100.0), 0) AS suma,
+                COALESCE(SUM(COALESCE(${cuTva ? "t.total" : "n.net"},0) * al.procent / 100.0), 0) AS suma,
                 COUNT(DISTINCT f.id) AS nr
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
            AND f.data_emiterii >= ? AND f.data_emiterii <= ?
          GROUP BY al.utilizator_id, SUBSTR(f.data_emiterii, 1, 7)`
@@ -1760,7 +1765,7 @@ function register(router) {
       .prepare(
         `SELECT al.utilizator_id AS agent, SUBSTR(pl.data, 1, 7) AS luna,
                 COALESCE(SUM(pl.suma * al.procent / 100.0
-                             * CASE WHEN COALESCE(t.total,0) > 0 THEN COALESCE(n.net,0) / t.total ELSE 1 END), 0) AS suma,
+                             ${cuTva ? "" : "* CASE WHEN COALESCE(t.total,0) > 0 THEN COALESCE(n.net,0) / t.total ELSE 1 END"}), 0) AS suma,
                 COUNT(*) AS nr
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
@@ -1816,7 +1821,8 @@ function register(router) {
     if (String(ctx.query.format) === "csv") {
       const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
       const n2 = (v) => Number(v || 0).toFixed(2).replace(".", ",");
-      const cap = ["Agent", ...coloane.flatMap((k) => [`${k} facturat`, `${k} incasat`]), "Total facturat", "Total incasat"];
+      const et = cuTva ? "cu TVA" : "fara TVA";
+      const cap = ["Agent", ...coloane.flatMap((k) => [`${k} facturat (${et})`, `${k} incasat (${et})`]), `Total facturat (${et})`, `Total incasat (${et})`];
       const linii = randuri.map((r) => [
         q(r.nume),
         ...coloane.flatMap((k) => {
@@ -1834,8 +1840,7 @@ function register(router) {
       });
     }
 
-    const linkCsv = `/rapoarte/agenti-lunar?${new URLSearchParams({ perioada: interval.preset, de_la: deLa, pana_la: panaLa, arata, format: "csv" }).toString()}`;
-    const procentIncasare = totalF > 0 ? (totalI / totalF) * 100 : 0;
+    const linkCsv = `/rapoarte/agenti-lunar?${new URLSearchParams({ perioada: interval.preset, de_la: deLa, pana_la: panaLa, arata, tva: cuTva ? "cu" : "fara", format: "csv" }).toString()}`;
 
     const celulaHtml = (c) => {
       const f = c ? c.f : 0;
@@ -1846,20 +1851,18 @@ function register(router) {
       return `${money(f)}<br><span style="font-size:11px;color:var(--success)">${money(i)}</span>`;
     };
 
-    const antet = ["Agent", ...coloane.map((k) => (peAni ? k : k.slice(5) + "." + k.slice(2, 4))), "Total facturat", "Total încasat", "% încasat"];
+    const antet = ["Agent", ...coloane.map((k) => (peAni ? k : k.slice(5) + "." + k.slice(2, 4))), "Total facturat", "Total încasat"];
     const corp = randuri.map((r) => [
       `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
       ...coloane.map((k) => celulaHtml(r.pe.get(k))),
       `<strong>${money(r.totalF)}</strong>`,
       `<span style="color:var(--success)">${money(r.totalI)}</span>`,
-      r.totalF > 0 ? `${((r.totalI / r.totalF) * 100).toFixed(0)}%` : "—",
     ]);
     const randTotal = [
       "<strong>TOTAL</strong>",
       ...totalPeColoana.map((c) => celulaHtml(c)),
       `<strong>${money(totalF)}</strong>`,
       `<span style="color:var(--success)">${money(totalI)}</span>`,
-      totalF > 0 ? `${procentIncasare.toFixed(0)}%` : "—",
     ];
 
     // Evoluția totală pe lună, ca să se vadă dintr-o privire dacă încasările
@@ -1875,23 +1878,30 @@ function register(router) {
            <option value="facturat"${arata === "facturat" ? " selected" : ""}>doar facturat</option>
            <option value="incasat"${arata === "incasat" ? " selected" : ""}>doar încasat</option>
          </select>
+         <button type="submit" name="tva" value="fara" class="chip${cuTva ? "" : " activ"}">fără TVA</button>
+         <button type="submit" name="tva" value="cu" class="chip${cuTva ? " activ" : ""}">cu TVA</button>
          <a class="link-btn" href="${linkCsv}">descarcă CSV</a>`
       )}
 
+      <p style="margin:0 0 12px;font-size:14px">
+        Sumele din raport sunt <strong>${eticheta}</strong>.
+        ${cuTva
+          ? "Adică exact banii de pe factură și exact banii intrați în cont."
+          : "Adică baza de impozitare — încasările, care intră în cont cu TVA, sunt împărțite la raportul net/brut al facturii pe care s-au încasat."}
+        Diferența nu e „restul de încasat": se încasează și facturi din lunile trecute, deci poate ieși și negativă.
+      </p>
+
       <div class="cards">
-        <div class="card"><div class="label">Facturat în perioadă</div><div class="value">${money(totalF)}</div></div>
-        <div class="card"><div class="label">Încasat în perioadă</div><div class="value">${money(totalI)}</div></div>
-        <div class="card"><div class="label">Încasat / facturat</div><div class="value">${totalF > 0 ? procentIncasare.toFixed(0) + "%" : "—"}</div></div>
-        <div class="card"><div class="label">Agenți cu activitate</div><div class="value">${randuri.length}</div></div>
-        <div class="card"><div class="label">${peAni ? "Ani" : "Luni"} în raport</div><div class="value">${coloane.length}</div></div>
+        <div class="card"><div class="label">Facturat, ${eticheta}</div><div class="value">${money(totalF)}</div></div>
+        <div class="card"><div class="label">Încasat, ${eticheta}</div><div class="value" style="color:var(--success)">${money(totalI)}</div></div>
+        <div class="card"><div class="label">Diferență (facturat − încasat)</div><div class="value" style="color:${totalF - totalI >= 0 ? "inherit" : "var(--warn)"}">${money(totalF - totalI)}</div></div>
       </div>
 
       <h2>Pe agent și ${peAni ? "an" : "lună"}</h2>
       ${table(antet, corp, { total: randTotal })}
       <p style="font-size:12px;color:var(--text-muted)">
         ${arata === "ambele" ? "În fiecare celulă: sus <strong>facturat</strong> (după data facturii), jos, cu verde, <strong>încasat</strong> (după data plății). " : ""}
-        Toate sumele sunt <strong>fără TVA</strong>. Încasările intră în cont cu TVA, așa că fiecare e împărțită la
-        raportul net/brut al facturii pe care s-a încasat. Încasarea se pune pe luna în care au intrat banii, nu pe luna facturii — de aceea liniile nu se
+        Încasarea se pune pe luna în care au intrat banii, nu pe luna facturii — de aceea liniile nu se
         potrivesc una peste alta, iar diferența e chiar creditul pe care îl dai clienților.
         ${peAni ? "Perioada aleasă depășește 24 de luni, așa că tabelul e grupat pe ani; alege un interval mai scurt pentru detaliu lunar." : ""}
       </p>
