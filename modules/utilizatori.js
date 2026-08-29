@@ -13,16 +13,55 @@ function optiuniRoluri(rolSelectat) {
 }
 
 function register(router) {
+  // Bifele de acces. O secțiune = o intrare din meniul de sus; ce nu e bifat
+  // nu apare în meniu și dă 403 dacă omul nimerește adresa direct.
+  //
+  // Cât timp nu e bifat nimic, rămâne în picioare împărțirea veche pe roluri —
+  // altfel, la prima salvare fără bife, omul ar rămâne fără nimic.
+  function bifeSectiuni(u) {
+    const alese = new Set(auth.sectiuniLista(u && u.sectiuni));
+    const nimicBifat = alese.size === 0;
+    const linii = auth.ZONE.map(
+      (z) => `<label class="bifa">
+          <input type="checkbox" name="sectiuni" value="${esc(z.cheie)}"${alese.has(z.cheie) ? " checked" : ""}>
+          <span>${esc(z.eticheta)}${z.sensibil ? ' <span class="badge galben">sensibil</span>' : ""}</span>
+        </label>`
+    ).join("");
+    return `<div class="field">
+        <span>Ce secțiuni vede</span>
+        <div class="bife">${linii}</div>
+        <p class="ajutor">
+          Sunt exact intrările din meniul de sus. Administratorul vede tot, oricum — nu i se poate lua nimic.
+          ${nimicBifat ? "Momentan nu e bifat nimic, deci omul vede ce-i dădea rolul lui dinainte." : ""}
+        </p>
+      </div>`;
+  }
+
+  function sectiuniDinFormular(body) {
+    const cerute = [].concat(body.sectiuni || []).map((x) => String(x).trim());
+    const valide = new Set(auth.ZONE.map((z) => z.cheie));
+    const alese = [...new Set(cerute.filter((x) => valide.has(x)))];
+    return alese.length ? alese.join(",") : null;
+  }
+
   router.get("/admin/utilizatori", async (ctx) => {
     const utilizatori = await db.prepare("SELECT * FROM utilizatori ORDER BY id ASC").all();
     const body = `
       <div class="toolbar"><a href="/admin/utilizatori/nou" class="btn">+ Utilizator nou</a></div>
       ${table(
-        ["Nume", "Email", "Rol", "Comision", "Stare", "Acțiuni"],
+        ["Nume", "Email", "Rol", "Vede", "Comision", "Stare", "Acțiuni"],
         utilizatori.map((u) => [
           esc(u.nume),
           esc(u.email),
           esc(auth.ROLURI[u.rol] || u.rol),
+          u.rol === "admin"
+            ? '<span class="badge verde">tot</span>'
+            : (() => {
+                const alese = auth.sectiuniLista(u.sectiuni);
+                if (!alese.length) return '<span style="color:var(--text-muted);font-size:12px">după rol</span>';
+                const et = new Map(auth.ZONE.map((z) => [z.cheie, z.eticheta]));
+                return alese.map((c) => `<span class="badge gri">${esc(et.get(c) || c)}</span>`).join(" ");
+              })(),
           `${Number(u.comision_procent ?? 0).toFixed(2)}%`,
           u.activ ? '<span class="badge verde">activ</span>' : '<span class="badge gri">dezactivat</span>',
           actionLinks([
@@ -39,9 +78,9 @@ function register(router) {
         ])
       )}
       <p style="font-size:13px;color:var(--text-muted);margin-top:14px">
-        Roluri: ${Object.entries(auth.ROLURI).map(([, l]) => esc(l)).join(" · ")}. Un rol vede doar secțiunile relevante
-        (ex. „Agent vânzări" nu vede Facturare/Salarizare; „Financiar" nu vede CRM/Comenzi). Administratorul are acces la tot,
-        inclusiv la această pagină.
+        Rolul spune ce fel de treabă face omul; <strong>ce vede</strong> se bifează separat, pe secțiunile din meniul de sus,
+        din fișa lui. Administratorul are acces la tot. Cine n-are nicio bifă vede ce-i dădea rolul lui dinainte,
+        ca nimeni să nu rămână blocat pe dinafară.
       </p>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Utilizatori", active: "/admin/utilizatori", body }));
@@ -53,6 +92,7 @@ function register(router) {
       <label class="field"><span>Email (folosit la login)</span><input type="email" name="email" required></label>
       <label class="field"><span>Parolă inițială</span><input type="text" name="parola" value="cashmachine" required minlength="6"></label>
       <label class="field"><span>Rol</span><select name="rol">${optiuniRoluri("vanzari")}</select></label>
+      ${bifeSectiuni(null)}
       <label class="field"><span>Comision din încasări (%)</span><input type="number" step="0.01" name="comision_procent" value="2"></label>
       <label class="field"><span>Cost mașină pe lună (lei)</span><input type="number" step="0.01" name="cost_masina_lunar" value="0"></label>
       <label class="field"><span>Mașina (detalii)</span><input name="masina_detalii" value="" placeholder="ex. leasing Dacia Jogger"></label>
@@ -72,13 +112,14 @@ function register(router) {
       // Parola implicită pentru orice cont nou; la prima logare e obligat s-o schimbe.
       const { hash, salt } = auth.hashParola(parola || "cashmachine");
       await db
-        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, comision_procent, cost_masina_lunar, masina_detalii, card_carburant, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
+        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, sectiuni, comision_procent, cost_masina_lunar, masina_detalii, card_carburant, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
         .run(
           nume,
           (email || "").toLowerCase().trim(),
           hash,
           salt,
           rol || "vanzari",
+          sectiuniDinFormular(ctx.body),
           Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0,
           Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
           String(ctx.body.masina_detalii || "").trim() || null,
@@ -112,6 +153,8 @@ function register(router) {
       <label class="field"><span>Mașina (detalii)</span><input name="masina_detalii" value="${esc(u.masina_detalii || "")}" placeholder="ex. leasing Dacia Jogger"></label>
       <label class="field"><span>Card carburant OMV (nr. card / rezervă)</span><input name="card_carburant" value="${esc(u.card_carburant || "")}" placeholder="ex. 003"></label>
 
+      ${bifeSectiuni(u)}
+
       <label class="field"><span>Parolă nouă (opțional — lasă gol ca să nu o schimbi)</span><input type="password" name="parola" minlength="6"></label>
       <div class="form-actions">
         <button type="submit" class="btn">Salvează</button>
@@ -126,10 +169,11 @@ function register(router) {
     const comision = Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0;
     if (parola && parola.length >= 6) {
       const { hash, salt } = auth.hashParola(parola);
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
+      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, sectiuni = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
         nume,
         (email || "").toLowerCase().trim(),
         rol,
+        sectiuniDinFormular(ctx.body),
         comision,
         Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
         String(ctx.body.masina_detalii || "").trim() || null,
@@ -140,11 +184,12 @@ function register(router) {
       );
     } else {
       await db
-        .prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ? WHERE id = ?")
+        .prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, sectiuni = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ? WHERE id = ?")
         .run(
           nume,
           (email || "").toLowerCase().trim(),
           rol,
+          sectiuniDinFormular(ctx.body),
           comision,
           Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
           String(ctx.body.masina_detalii || "").trim() || null,

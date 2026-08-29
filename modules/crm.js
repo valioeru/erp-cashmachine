@@ -133,11 +133,11 @@ async function trepteleP(filtruAgent) {
   const op = (k) => peOp.get(k) || { n: 0, valoare: 0 };
 
   const trepte = [
-    { label: "Lead-uri", unitate: "lead-uri", n: (peStadiu.get("nou") || 0) + (peStadiu.get("contactat") || 0) + op("lead").n, valoare: op("lead").valoare },
-    { label: "Calificate", unitate: "calificate", n: (peStadiu.get("calificat") || 0) + op("calificat").n, valoare: op("calificat").valoare },
-    { label: "Oferte trimise", unitate: "oferte", n: of("trimisa").n + op("oferta").n, valoare: of("trimisa").valoare + op("oferta").valoare },
-    { label: "În negociere", unitate: "oferte", n: of("negociere").n + op("negociere").n, valoare: of("negociere").valoare + op("negociere").valoare },
-    { label: "Comenzi", unitate: "comenzi", n: (Number(comenzi && comenzi.n) || 0) + op("castigat").n, valoare: (Number(comenzi && comenzi.valoare) || 0) + op("castigat").valoare },
+    { label: "Lead-uri", unitate: "lead-uri", unitate1: "lead", n: (peStadiu.get("nou") || 0) + (peStadiu.get("contactat") || 0) + op("lead").n, valoare: op("lead").valoare },
+    { label: "Calificate", unitate: "calificate", unitate1: "calificat", n: (peStadiu.get("calificat") || 0) + op("calificat").n, valoare: op("calificat").valoare },
+    { label: "Oferte trimise", unitate: "oferte", unitate1: "ofertă", n: of("trimisa").n + op("oferta").n, valoare: of("trimisa").valoare + op("oferta").valoare },
+    { label: "În negociere", unitate: "oferte", unitate1: "ofertă", n: of("negociere").n + op("negociere").n, valoare: of("negociere").valoare + op("negociere").valoare },
+    { label: "Comenzi", unitate: "comenzi", unitate1: "comandă", n: (Number(comenzi && comenzi.n) || 0) + op("castigat").n, valoare: (Number(comenzi && comenzi.valoare) || 0) + op("castigat").valoare },
   ].map((t, i) => ({ ...t, ...CULORI_PALNIE[i] }));
 
   const pierdute = {
@@ -155,43 +155,65 @@ function palnie(trepte, pierdute) {
     return '<p style="color:var(--text-muted)">Pâlnia se desenează singură când apare primul lead sau prima ofertă.</p>';
   }
 
-  const L = 900;
-  const H_BANDA = 74;
-  const SPATIU = 2;
-  const inaltime = trepte.length * (H_BANDA + SPATIU) + 4;
+  // Pâlnia se desenează ca o singură siluetă, nu ca un teanc de trapeze
+  // lipite: conturul (cu colțurile de sus și de jos rotunjite) devine o
+  // mască, iar culorile se toarnă în ea. Așa nu mai apar cusături între
+  // benzi, iar marginile ies curate la orice lățime.
+  const L = 760;
+  const H = 82;
+  const R = 14; // cât de rotunjite sunt capetele
+  const inaltime = trepte.length * H;
 
   // Lățimea benzii spune cât e treapta, dar are și un minim care se strânge cu
   // fiecare treaptă. Fara asta, o pâlnie cu zerouri sub prima treaptă iese un
   // teanc de dreptunghiuri egale, nu o pâlnie. Cifra scrie oricum pe fiecare
   // bandă, așa că nimeni nu se ia după lățime ca să afle numărul.
   const nrTrepte = Math.max(trepte.length - 1, 1);
-  const minimLa = (i) => L * (0.58 - 0.42 * (i / nrTrepte));
+  const minimLa = (i) => L * (0.66 - 0.36 * (i / nrTrepte));
   const latime = (n, i) => Math.max(L * (maxN ? n / maxN : 0), minimLa(i));
+
+  // Lățimile la fiecare linie orizontală: n+1 valori pentru n benzi.
+  const w = trepte.map((t, i) => latime(t.n, i));
+  w.push(latime(trepte[trepte.length - 1].n, trepte.length - 1) * 0.88);
+  const st = (k) => (L - w[k]) / 2;
+  const dr = (k) => (L + w[k]) / 2;
+  const y = (k) => k * H;
+  const ultimul = trepte.length;
+
+  // Conturul: coborâm pe dreapta, trecem prin fund, urcăm pe stânga.
+  const contur = [
+    `M ${st(0) + R} 0`,
+    `L ${dr(0) - R} 0`,
+    `Q ${dr(0)} 0 ${dr(0)} ${R}`,
+    ...trepte.map((_, k) => `L ${dr(k + 1)} ${y(k + 1) - (k + 1 === ultimul ? R : 0)}`),
+    `Q ${dr(ultimul)} ${y(ultimul)} ${dr(ultimul) - R} ${y(ultimul)}`,
+    `L ${st(ultimul) + R} ${y(ultimul)}`,
+    `Q ${st(ultimul)} ${y(ultimul)} ${st(ultimul)} ${y(ultimul) - R}`,
+    ...trepte.map((_, k) => `L ${st(ultimul - k - 1)} ${y(ultimul - k - 1) + (ultimul - k - 1 === 0 ? R : 0)}`),
+    `Q ${st(0)} 0 ${st(0) + R} 0`,
+    "Z",
+  ].join(" ");
 
   const benzi = trepte
     .map((t, i) => {
-      const y = i * (H_BANDA + SPATIU);
-      const w1 = latime(t.n, i);
-      const w2 = i + 1 < trepte.length ? latime(trepte[i + 1].n, i + 1) : latime(t.n, i) * 0.92;
-      const x1 = (L - w1) / 2;
-      const x2 = (L - w2) / 2;
       const anterior = i > 0 ? trepte[i - 1].n : null;
       const conversie = anterior ? Math.round((t.n / anterior) * 100) : null;
-      const puncte = `${x1},${y} ${x1 + w1},${y} ${x2 + w2},${y + H_BANDA} ${x2},${y + H_BANDA}`;
-      const centru = L / 2;
+      const c = L / 2;
+      const yy = y(i);
       return `
         <g>
           <title>${esc(t.label)}: ${t.n}${t.valoare ? `, ${money(t.valoare)}` : ""}${
             conversie !== null ? `, ${conversie}% din „${esc(trepte[i - 1].label)}"` : ""
           }</title>
-          <polygon points="${puncte}" fill="${t.fill}"></polygon>
-          <text x="${centru}" y="${y + 28}" text-anchor="middle" fill="${t.ink}" font-size="15" font-weight="600">${esc(t.label)}</text>
-          <text x="${centru}" y="${y + 50}" text-anchor="middle" fill="${t.ink}" font-size="13" opacity="0.9">${t.n} ${esc(
-            t.unitate || (t.n === 1 ? "bucată" : "bucăți")
-          )}${t.valoare ? ` · ${money(t.valoare)}` : ""}</text>
+          <rect x="0" y="${yy}" width="${L}" height="${H}" fill="${t.fill}" clip-path="url(#palnie-masca)"></rect>
+          ${i ? `<line x1="0" y1="${yy}" x2="${L}" y2="${yy}" stroke="#fff" stroke-width="2" opacity="0.85" clip-path="url(#palnie-masca)"></line>` : ""}
+          <text x="${c}" y="${yy + 30}" text-anchor="middle" fill="${t.ink}" font-size="15" font-weight="700" letter-spacing="0.2">${esc(t.label)}</text>
+          <text x="${c}" y="${yy + 54}" text-anchor="middle" fill="${t.ink}" font-size="19" font-weight="700">${t.n}<tspan font-size="12" font-weight="500" opacity="0.85"> ${esc(
+            t.n === 1 ? t.unitate1 || "bucată" : t.unitate || "bucăți"
+          )}${t.valoare && Math.min(w[i], w[i + 1]) > 250 ? ` · ${money(t.valoare)}` : ""}</tspan></text>
           ${
             conversie !== null
-              ? `<text x="${centru}" y="${y + 68}" text-anchor="middle" fill="${t.ink}" font-size="11" opacity="0.75">${conversie}% din „${esc(
+              ? `<text x="${c}" y="${yy + 72}" text-anchor="middle" fill="${t.ink}" font-size="11" opacity="0.8">${conversie}% din „${esc(
                   trepte[i - 1].label
                 )}"</text>`
               : ""
@@ -209,13 +231,24 @@ function palnie(trepte, pierdute) {
   const subPrimaGol = trepte.slice(1).every((t) => !t.n);
 
   return `
-    <div class="palnie" style="margin:6px 0 18px">
-      <div style="overflow-x:auto">
-        <svg viewBox="0 0 ${L} ${inaltime}" width="100%" style="max-width:${L}px;height:auto;display:block" role="img"
-             aria-label="Pâlnia de vânzări pe stadii">
+    <div class="palnie">
+      <svg viewBox="-14 -10 ${L + 28} ${inaltime + 20}" class="palnie-desen" role="img" aria-label="Pâlnia de vânzări pe stadii">
+        <defs>
+          <clipPath id="palnie-masca"><path d="${contur}"></path></clipPath>
+          <linearGradient id="palnie-lumina" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#fff" stop-opacity="0.16"></stop>
+            <stop offset="45%" stop-color="#fff" stop-opacity="0"></stop>
+            <stop offset="100%" stop-color="#000" stop-opacity="0.07"></stop>
+          </linearGradient>
+          <filter id="palnie-umbra" x="-10%" y="-10%" width="120%" height="125%">
+            <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#1c2230" flood-opacity="0.16"></feDropShadow>
+          </filter>
+        </defs>
+        <g filter="url(#palnie-umbra)">
           ${benzi}
-        </svg>
-      </div>
+          <rect x="0" y="0" width="${L}" height="${inaltime}" fill="url(#palnie-lumina)" clip-path="url(#palnie-masca)" pointer-events="none"></rect>
+        </g>
+      </svg>
       ${
         subPrimaGol && primul
           ? `<div class="detail-box" style="border-left:4px solid #8a6d1f;margin-top:10px">
@@ -226,7 +259,7 @@ function palnie(trepte, pierdute) {
              </div>`
           : ""
       }
-      <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:13px;color:var(--text-muted);margin-top:8px">
+      <div class="palnie-legenda">
         <span><strong style="color:var(--text)">${total}</strong> în pâlnie</span>
         ${rataFinala !== null ? `<span>ajung comenzi <strong style="color:var(--text)">${rataFinala}%</strong> din lead-uri</span>` : ""}
         ${

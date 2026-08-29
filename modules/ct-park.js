@@ -392,14 +392,21 @@ function codPaleta(id, data) {
   return `CT${String(data || aziStr()).replace(/-/g, "").slice(2)}-${String(id).padStart(4, "0")}`;
 }
 
+// Desenul tehnic de secțiune (rândul văzut din lateral, cu cotele de montaj)
+// e scos din meniu: la treaba de zi cu zi nu ajută pe nimeni. Codul și ruta
+// rămân întregi — se aprinde înapoi punând asta pe „true", și reapare în
+// subnavigație exact unde era.
+const ARATA_SECTIUNEA_TEHNICA = false;
+
 function subtabs(activ) {
   const linkuri = [
     ["/stocuri/ct-park", "Harta depozitului"],
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
+    ["/stocuri/ct-park/iesire", "Ieșire marfă"],
     ["/stocuri/ct-park/paleti", "Paleți în depozit"],
     ["/stocuri/ct-park/configurare", "Configurare rânduri"],
-    ["/stocuri/ct-park/sectiune", "Secțiune tehnică"],
   ];
+  if (ARATA_SECTIUNEA_TEHNICA) linkuri.push(["/stocuri/ct-park/sectiune", "Secțiune tehnică"]);
   return `<div class="subnav" style="margin-top:-6px">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
     .join("")}</div>`;
@@ -476,7 +483,7 @@ function register(router) {
              sunt deja pregătite cele ${GRUPURI.flat().length} rânduri din planul de montaj, trebuie doar spus
              câte niveluri și câte câmpuri au.</p>
           <a class="btn" href="/stocuri/ct-park/configurare">Configurează rândurile</a>
-          <a class="btn secondary" href="/stocuri/ct-park/sectiune">Vezi secțiunea tehnică</a>
+          ${ARATA_SECTIUNEA_TEHNICA ? `<a class="btn secondary" href="/stocuri/ct-park/sectiune">Vezi secțiunea tehnică</a>` : ""}
         </div>`;
       return send(ctx.res, 200, layout({ user: ctx.user, title: "Depozit CT-Park", active: "/stocuri/ct-park", body }));
     }
@@ -707,18 +714,247 @@ function register(router) {
       ${
         p.data_iesire
           ? ""
-          : `<form method="post" action="/stocuri/ct-park/palet/${p.id}/scoate" onsubmit="return confirm('Scoți paleta din depozit? Locurile devin libere.')">
-               <button class="btn secondary" type="submit">Scoate paleta din depozit</button>
-             </form>`
+          : // Scoaterea trece prin ecranul de ieșire, ca să se aleagă destinația.
+            // Un buton care doar „scoate" ar lăsa marfa fără drum scris nicăieri.
+            `<a class="btn secondary" href="/stocuri/ct-park/iesire?palet=${p.id}">Scoate paleta din depozit →</a>`
       }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: esc(p.cod), active: "/stocuri/ct-park", body }));
   });
 
+  // Ruta veche de scoatere, fără destinație. Nu mai scoate nimic: trimite la
+  // ecranul de ieșire, unde destinația e obligatorie. E păstrată pentru
+  // eventuale linkuri sau taburi rămase deschise din versiunea dinainte.
   router.post("/stocuri/ct-park/palet/:id/scoate", async (ctx) => {
-    await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ? AND data_iesire IS NULL").run(aziStr(), ctx.params.id);
-    await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(ctx.params.id);
-    redirect(ctx.res, "/stocuri/ct-park");
+    redirect(ctx.res, "/stocuri/ct-park/iesire?palet=" + encodeURIComponent(ctx.params.id));
+  });
+
+  // ---- Ieșirea de marfă ---------------------------------------------------
+  //
+  // Simetric cu intrarea, cu o singură diferență care contează: la ieșire
+  // trebuie spus OBLIGATORIU unde se duce paleta. Marfa care „a plecat" fără
+  // să se știe unde e marfă pierdută pe hârtie, chiar dacă în realitate a
+  // ajuns unde trebuia.
+  //
+  // Trei drumuri: producție, fulfillment, sau o comandă anume. La comandă se
+  // alege exact comanda, iar clientul și numărul ei ajung pe etichetă.
+  const DESTINATII = [
+    ["productie", "Producție", "Materie primă care intră în fabricație."],
+    ["fulfillment", "Fulfillment", "Marfă care pleacă spre pregătirea comenzilor."],
+    ["comanda", "Comandă", "Livrare pe o comandă anume — se alege mai jos."],
+  ];
+  const eDestinatie = (v) => DESTINATII.some(([c]) => c === String(v || ""));
+  const etichetaDestinatie = (v) => (DESTINATII.find(([c]) => c === String(v || "")) || [, String(v || "")])[1];
+
+  async function comenziDeschise() {
+    return db
+      .prepare(
+        `SELECT c.id, c.numar, c.data, c.status, p.nume AS client
+           FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
+          WHERE c.status NOT IN ('anulata')
+          ORDER BY c.id DESC LIMIT 300`
+      )
+      .all()
+      .catch(() => []);
+  }
+
+  router.get("/stocuri/ct-park/iesire", async (ctx) => {
+    const cauta = String(ctx.query.q || "").trim();
+    const preselectat = nr(ctx.query.palet) || 0;
+    const undeCauta = cauta
+      ? " AND (COALESCE(pr.denumire, p.produs_text) ILIKE ? OR p.cod ILIKE ? OR COALESCE(p.lot,'') ILIKE ?)"
+      : "";
+    const argCauta = cauta ? [`%${cauta}%`, `%${cauta}%`, `%${cauta}%`] : [];
+
+    const paleti = await db
+      .prepare(
+        `SELECT p.id, p.cod, p.cantitate, p.um, p.lot, p.categorie, p.data_intrare,
+                COALESCE(pr.denumire, p.produs_text) AS marfa
+           FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
+          WHERE p.data_iesire IS NULL${undeCauta}
+          ORDER BY p.id DESC LIMIT 200`
+      )
+      .all(...argCauta);
+
+    const adrese = await db
+      .prepare(
+        `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id
+          ORDER BY l.camp, l.pozitie`
+      )
+      .all();
+    const ha = new Map();
+    for (const a of adrese) {
+      const k = Number(a.palet_id);
+      if (!ha.has(k)) ha.set(k, []);
+      ha.get(k).push(a.adresa);
+    }
+
+    const comenzi = await comenziDeschise();
+
+    const body = `
+      ${subtabs("/stocuri/ct-park/iesire")}
+      ${ctx.query.eroare ? `<div class="flash flash-rosu">${esc(String(ctx.query.eroare))}</div>` : ""}
+      <h1 style="margin:6px 0 2px">Ieșire marfă din CT-Park</h1>
+      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
+        Bifezi paleții care pleacă și spui <strong>unde se duc</strong> — fără destinație nu iese nimic din depozit.
+        Locurile se eliberează pe loc, iar la final primești etichetele de ieșire, tot 100 × 150 mm.
+      </p>
+
+      <form class="filtre" method="get" action="/stocuri/ct-park/iesire">
+        <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după marfă, cod de paletă sau lot…" style="min-width:300px">
+        <button class="btn small" type="submit">Caută</button>
+        ${cauta ? `<a class="btn secondary small" href="/stocuri/ct-park/iesire">Arată tot</a>` : ""}
+      </form>
+
+      <form class="form" method="post" action="/stocuri/ct-park/iesire" style="max-width:960px">
+        <div class="field">
+          <span>Unde se duce marfa</span>
+          <div class="destinatii">
+            ${DESTINATII.map(
+              ([cheie, eticheta, explicatie]) => `<label class="destinatie">
+                <input type="radio" name="destinatie" value="${cheie}" required>
+                <span><strong>${esc(eticheta)}</strong><br><span class="ajutor" style="margin:0">${esc(explicatie)}</span></span>
+              </label>`
+            ).join("")}
+          </div>
+        </div>
+
+        <label class="field" id="camp-comanda">
+          <span>Care comandă</span>
+          <select name="comanda_id">
+            <option value="">— alege comanda —</option>
+            ${comenzi
+              .map(
+                (c) =>
+                  `<option value="${c.id}">${esc(c.numar || "#" + c.id)} · ${esc(c.client)} · ${esc(String(c.data || "").slice(0, 10))}${
+                    c.status ? " · " + esc(c.status) : ""
+                  }</option>`
+              )
+              .join("")}
+          </select>
+          <span class="ajutor">Obligatoriu dacă destinația e „Comandă". Clientul, numărul și data ajung pe etichetă.</span>
+        </label>
+
+        <label class="field"><span>Observații (opțional)</span><input name="observatii" placeholder="ex. ridicat de Cargus, AWB 123"></label>
+
+        ${
+          paleti.length
+            ? table(
+                ['<input type="checkbox" id="bifa-toti">', "Paletă", "Marfă", "Cantitate", "Lot", "Adresă", "Intrată la"],
+                paleti.map((p) => {
+                  const adr = ha.get(Number(p.id)) || [];
+                  return [
+                    `<input type="checkbox" class="bifa-palet" name="paleti" value="${p.id}"${preselectat === Number(p.id) ? " checked" : ""}>`,
+                    `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a>`,
+                    esc(p.marfa || "—"),
+                    nr(p.cantitate) ? `${nr(p.cantitate).toLocaleString("ro-RO")} ${esc(p.um || "")}` : "—",
+                    esc(p.lot || "—"),
+                    adr.length ? `<code>${adr.map((a) => esc(a)).join(" + ")}</code>` : "—",
+                    esc(String(p.data_intrare || "").slice(0, 10)),
+                  ];
+                })
+              )
+            : `<p style="color:var(--text-muted)">${cauta ? "Niciun palet care să semene cu „" + esc(cauta) + "”." : "Nu e nimic în depozit."}</p>`
+        }
+
+        <div class="form-actions">
+          <button class="btn" type="submit"${paleti.length ? "" : " disabled"}>Scoate paleții și tipărește etichetele →</button>
+          <a class="btn secondary" href="/stocuri/ct-park">Renunță</a>
+        </div>
+      </form>
+
+      <script>
+      (function () {
+        var toti = document.getElementById("bifa-toti");
+        if (toti) toti.addEventListener("change", function () {
+          var b = document.querySelectorAll(".bifa-palet");
+          for (var i = 0; i < b.length; i++) b[i].checked = toti.checked;
+        });
+        // Câmpul comenzii apare doar când destinația e „Comandă" — altfel e
+        // o cutie goală care încurcă.
+        var camp = document.getElementById("camp-comanda");
+        var radio = document.querySelectorAll('input[name="destinatie"]');
+        function comuta() {
+          var ales = null;
+          for (var i = 0; i < radio.length; i++) if (radio[i].checked) ales = radio[i].value;
+          camp.style.display = ales === "comanda" ? "" : "none";
+          camp.querySelector("select").required = ales === "comanda";
+        }
+        for (var i = 0; i < radio.length; i++) radio[i].addEventListener("change", comuta);
+        comuta();
+      })();
+      </script>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Ieșire marfă CT-Park", active: "/stocuri/ct-park", body }));
+  });
+
+  router.post("/stocuri/ct-park/iesire", async (ctx) => {
+    const b = ctx.body;
+    const ids = [].concat(b.paleti || []).map((x) => nr(x)).filter(Boolean);
+    const destinatie = String(b.destinatie || "");
+    const inapoi = (mesaj) => redirect(ctx.res, "/stocuri/ct-park/iesire?eroare=" + encodeURIComponent(mesaj));
+
+    if (!ids.length) return inapoi("N-ai bifat niciun palet.");
+    if (!eDestinatie(destinatie)) return inapoi("Alege unde se duce marfa: producție, fulfillment sau comandă.");
+
+    let comanda = null;
+    if (destinatie === "comanda") {
+      const cid = nr(b.comanda_id);
+      if (!cid) return inapoi("La destinația „Comandă” trebuie aleasă exact comanda.");
+      comanda = await db
+        .prepare(
+          `SELECT c.id, c.numar, c.data, p.nume AS client FROM comenzi c
+             JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`
+        )
+        .get(cid);
+      if (!comanda) return inapoi("Comanda aleasă nu mai există.");
+    }
+
+    // Adresa de unde pleacă fiecare paletă, luată ÎNAINTE de a elibera
+    // locurile — după ștergere n-am mai avea de unde s-o scriem pe etichetă.
+    const adrese = await db
+      .prepare(
+        `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id
+          WHERE o.palet_id IN (${ids.map(() => "?").join(",")}) ORDER BY l.camp, l.pozitie`
+      )
+      .all(...ids);
+    const ha = new Map();
+    for (const a of adrese) {
+      const k = Number(a.palet_id);
+      if (!ha.has(k)) ha.set(k, []);
+      ha.get(k).push(a.adresa);
+    }
+
+    const azi = aziStr();
+    const cine = ctx.user ? ctx.user.nume : null;
+    const scoase = [];
+    for (const id of ids) {
+      const p = await db.prepare("SELECT id FROM ct_paleti WHERE id = ? AND data_iesire IS NULL").get(id);
+      if (!p) continue; // deja ieșit între timp — nu-l scoatem de două ori
+      await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
+      await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
+      await db
+        .prepare(
+          `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          destinatie,
+          comanda ? comanda.id : null,
+          comanda ? comanda.client : null,
+          comanda ? comanda.numar || "#" + comanda.id : null,
+          comanda ? String(comanda.data || "").slice(0, 10) : null,
+          (ha.get(Number(id)) || []).join(" + ") || null,
+          azi,
+          String(b.observatii || "").trim() || null,
+          cine
+        );
+      scoase.push(id);
+    }
+
+    if (!scoase.length) return inapoi("Paleții bifați ieșiseră deja din depozit.");
+    redirect(ctx.res, "/stocuri/ct-park/etichete?paleti=" + scoase.join(","));
   });
 
   // ---- Paleții din depozit -----------------------------------------------
@@ -1048,9 +1284,46 @@ function register(router) {
       ha.get(k).push(a.adresa);
     }
 
+    // Dacă paleta a ieșit, eticheta arată ALTCEVA: nu adresa din depozit (care
+    // nu mai există), ci unde se duce marfa. Pe comandă apar și clientul, și
+    // numărul comenzii, și data ei — astea sunt cerute pe eticheta de livrare.
+    const iesiri = await db
+      .prepare(`SELECT * FROM ct_iesiri WHERE palet_id IN (${ids.map(() => "?").join(",")}) ORDER BY id DESC`)
+      .all(...ids)
+      .catch(() => []);
+    const hi = new Map();
+    for (const i of iesiri || []) if (!hi.has(Number(i.palet_id))) hi.set(Number(i.palet_id), i);
+
     const etichete = paleti
       .map((p) => {
         const adr = ha.get(Number(p.id)) || [];
+        const ies = hi.get(Number(p.id));
+        if (ies) {
+          const peComanda = String(ies.destinatie) === "comanda";
+          return `<div class="et et-iesire">
+            <div class="et-sus">
+              <div class="et-firma">CASH MACHINE · IEȘIRE</div>
+              <div class="et-data">${esc(ies.data)}</div>
+            </div>
+            <div class="et-destinatie">${esc(etichetaDestinatie(ies.destinatie))}</div>
+            ${peComanda ? `<div class="et-client">${esc(ies.client || "—")}</div>` : ""}
+            ${
+              peComanda
+                ? `<div class="et-comanda">Comanda ${esc(ies.comanda_numar || "—")}${ies.comanda_data ? ` · ${esc(ies.comanda_data)}` : ""}</div>`
+                : ""
+            }
+            <div class="et-produs">${esc(p.produs || p.produs_text || "—")}</div>
+            <div class="et-cod">${esc(p.produs_cod || "")}</div>
+            <table class="et-tab">
+              <tr><td>Cantitate</td><td><strong>${nr(p.cantitate) ? nr(p.cantitate).toLocaleString("ro-RO") + " " + esc(p.um || "") : "—"}</strong></td></tr>
+              <tr><td>Lot</td><td>${esc(p.lot || "—")}</td></tr>
+              <tr><td>A plecat din</td><td>${esc(ies.adresa || "—")}</td></tr>
+              <tr><td>Scoasă de</td><td>${esc(ies.creat_de || "—")}</td></tr>
+            </table>
+            ${ies.observatii ? `<div class="et-obs">${esc(ies.observatii)}</div>` : ""}
+            <div class="et-jos">${esc(p.cod)}</div>
+          </div>`;
+        }
         return `<div class="et">
           <div class="et-sus">
             <div class="et-firma">CASH MACHINE · CT-PARK</div>
@@ -1088,13 +1361,20 @@ function register(router) {
         .et-tab { width:100%; margin-top:4mm; border-collapse:collapse; font-size:11pt; }
         .et-tab td { padding:1.5mm 0; border-bottom:.5pt solid #ddd; }
         .et-tab td:first-child { color:#555; width:38%; }
+        .et-iesire .et-sus { border-bottom-color:#b3261e; }
+        .et-destinatie { font-size:30pt; font-weight:800; text-align:center; margin:6mm 0 0; text-transform:uppercase; letter-spacing:.02em; }
+        .et-client { font-size:16pt; font-weight:700; text-align:center; margin-top:3mm; line-height:1.15; }
+        .et-comanda { font-size:12pt; text-align:center; color:#333; margin-top:1mm; font-family:"Consolas","DejaVu Sans Mono",monospace; }
+        .et-obs { font-size:10pt; color:#444; margin-top:3mm; }
         .et-jos { margin-top:auto; text-align:center; font-size:13pt; font-weight:700; letter-spacing:.08em;
                   font-family:"Consolas","DejaVu Sans Mono",monospace; border-top:1.5pt solid #000; padding-top:2mm; }
         .bara { text-align:center; padding:10px; background:#fff; border-bottom:1px solid #ccc; font-family:system-ui,sans-serif; }
         @media print { .bara { display:none; } .et { border:0; margin:0; } body { background:#fff; } }
       </style></head><body>
       <div class="bara">
-        <strong>${paleti.length} etichet${paleti.length === 1 ? "ă" : "e"}</strong> de 100 × 150 mm —
+        <strong>${paleti.length} etichet${paleti.length === 1 ? "ă" : "e"}</strong> de 100 × 150 mm${
+          [...hi.keys()].length ? " · ieșire" : ""
+        } —
         <button onclick="window.print()">Tipărește</button>
         <a href="/stocuri/ct-park">înapoi la depozit</a>
       </div>

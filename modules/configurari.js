@@ -75,9 +75,17 @@ function filtre(tip, q) {
       par.push(an);
     }
     if (cautare) {
-      unde.push("(p.nume LIKE ? OR f.serie LIKE ? OR CAST(f.numar AS TEXT) LIKE ? OR COALESCE(f.observatii,'') LIKE ?)");
+      // Omul caută ce vede scris pe factură: „CSHM3161". În bază, seria și
+      // numărul stau în două coloane, iar documentul importat din SmartBill
+      // are coloana lui. Căutăm în toate, și încă o dată pe seria lipită de
+      // număr, cu spațiile scoase — altfel „CSHM3161" n-ar găsi nimic și ar
+      // părea că filtrul se uită doar la pagina de pe ecran.
+      unde.push(
+        "(p.nume ILIKE ? OR f.serie ILIKE ? OR CAST(f.numar AS TEXT) ILIKE ? OR COALESCE(f.document_extern,'') ILIKE ? OR COALESCE(f.observatii,'') ILIKE ? OR REPLACE(COALESCE(f.serie,'') || COALESCE(CAST(f.numar AS TEXT),''), ' ', '') ILIKE ?)"
+      );
       const l = "%" + cautare + "%";
-      par.push(l, l, l, l);
+      const lipit = "%" + cautare.replace(/[\s-]/g, "") + "%";
+      par.push(l, l, l, l, l, lipit);
     }
     if (stare === "active") unde.push("f.activ = 1");
     if (stare === "inactive") unde.push("f.activ = 0");
@@ -87,9 +95,14 @@ function filtre(tip, q) {
       par.push(an);
     }
     if (cautare) {
-      unde.push("(p.nume LIKE ? OR COALESCE(pl.observatii,'') LIKE ? OR COALESCE(pl.metoda,'') LIKE ?)");
+      // Și aici se caută după documentul pe care se vede plata, nu doar după
+      // partener: „CSHM3161" trebuie să scoată încasările facturii ăleia.
+      unde.push(
+        "(p.nume ILIKE ? OR COALESCE(pl.observatii,'') ILIKE ? OR COALESCE(pl.metoda,'') ILIKE ? OR COALESCE(fc.document_extern,'') ILIKE ? OR REPLACE(COALESCE(fc.serie,'') || COALESCE(CAST(fc.numar AS TEXT),''), ' ', '') ILIKE ?)"
+      );
       const l = "%" + cautare + "%";
-      par.push(l, l, l);
+      const lipit = "%" + cautare.replace(/[\s-]/g, "") + "%";
+      par.push(l, l, l, l, lipit);
     }
     if (stare === "active") unde.push("pl.activ = 1");
     if (stare === "inactive") unde.push("pl.activ = 0");
@@ -100,7 +113,7 @@ function filtre(tip, q) {
 async function citesteFacturi(f, offset) {
   return db
     .prepare(
-      `SELECT f.id, f.serie, f.numar, f.data_emiterii, f.directie, f.status, f.sursa_import, f.activ,
+      `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, f.directie, f.status, f.sursa_import, f.activ,
               p.nume AS partener, COALESCE(t.total, 0) AS total
          FROM ${T_FACTURI} f
          JOIN parteneri p ON p.id = f.partener_id
@@ -116,7 +129,7 @@ async function citestePlati(f, offset) {
   return db
     .prepare(
       `SELECT pl.id, pl.data, pl.suma, pl.metoda, pl.observatii, pl.activ,
-              fc.serie, fc.numar, fc.directie, p.nume AS partener
+              fc.serie, fc.numar, fc.document_extern, fc.directie, p.nume AS partener
          FROM ${T_PLATI} pl
          JOIN ${T_FACTURI} fc ON fc.id = pl.factura_id
          JOIN parteneri p ON p.id = fc.partener_id
@@ -275,7 +288,7 @@ function register(router) {
             bifa(r.id, r.activ),
             Number(r.activ) ? "" : '<span style="color:var(--danger);font-size:12px">scoasă</span>',
             dataRo(r.data_emiterii),
-            esc((r.serie || "") + " " + (r.numar == null ? "" : r.numar)),
+            esc(r.document_extern || (r.serie || "") + (r.numar == null ? "" : r.numar)),
             esc(r.partener),
             r.directie === "achizitie" ? "achiziție" : "vânzare",
             money(r.total),
@@ -288,7 +301,7 @@ function register(router) {
             dataRo(r.data),
             money(r.suma),
             esc(r.metoda || ""),
-            esc((r.serie || "") + " " + (r.numar == null ? "" : r.numar)),
+            esc(r.document_extern || (r.serie || "") + (r.numar == null ? "" : r.numar)),
             esc(r.partener),
             esc(r.observatii || ""),
           ]);
@@ -321,7 +334,7 @@ function register(router) {
         ${tip === "facturi" ? selector("directie", q.directie, [["", "Toate direcțiile"], ["vanzare", "Vânzare"], ["achizitie", "Achiziție"]]) : ""}
         ${selector("an", f.an, [["", "Toți anii"]].concat(ani))}
         ${selector("stare", f.stare, [["toate", "Toate"], ["active", "Doar active"], ["inactive", "Doar scoase din calcule"]])}
-        <input type="search" name="q" value="${esc(f.cautare)}" placeholder="Caută partener, serie, observații">
+        <input type="search" name="q" value="${esc(f.cautare)}" placeholder="Caută după partener sau document (ex. CSHM3161)" style="min-width:280px">
         <button type="submit" class="btn">Filtrează</button>
       </form>
 
