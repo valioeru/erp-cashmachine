@@ -467,3 +467,14 @@ button.chip { font-family: inherit; cursor: pointer; }
   .titlu-rand { flex-direction: column; gap: 8px; }
   .ajutor-link { margin-top: 0; }
 }
+
+/* --- tabele largi (registrul de comenzi are 17 coloane) ------------------ */
+.tabel-lat { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
+.tabel-lat table { min-width: 1500px; }
+.tabel-lat td, .tabel-lat th { white-space: nowrap; }
+.cel-lung {
+  display: inline-block; max-width: 260px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+  font-size: 12px; color: var(--text-muted);
+}
+.tabel-lat td { padding-top: 7px; padding-bottom: 7px; }
