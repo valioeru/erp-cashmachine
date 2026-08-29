@@ -16,6 +16,7 @@ require("./modules/alocari").register(router);
 require("./modules/parteneri").register(router);
 require("./modules/produse").register(router);
 require("./modules/stocuri").register(router);
+require("./modules/ct-park").register(router);
 require("./modules/comenzi").register(router);
 require("./modules/facturi").register(router);
 require("./modules/crm").register(router);
