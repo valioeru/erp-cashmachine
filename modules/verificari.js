@@ -568,6 +568,182 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare prețuri de achiziție", active: "/admin/date", body }));
   });
 
+  // ---- Cantități și prețuri inversate pe linia de factură ----------------
+  //
+  // Pe facturile de rolă jumbo din martie 2026 (CSHM2768 si urmatoarele) linia
+  // arata „1720 buc x 1,00 lei" in loc de „1 buc x 1.720,00 lei". Totalul
+  // facturii e corect — doar impartirea e pe dos, fiindca importul a citit
+  // pretul unitar in coloana de cantitate si a pus 1 la pret.
+  //
+  // Se vede imediat dupa doua semne care trebuie sa apara IMPREUNA:
+  //   1. pretul unitar e exact 1 leu (sau -1, pe storno)
+  //   2. „cantitatea" seamana cu un pret, nu cu o cantitate: e in acelasi ordin
+  //      de marime cu pretul de vanzare sau cu cel de achizitie al produsului
+  // Fara al doilea semn n-am atinge nimic: exista marfa vanduta chiar cu 1 leu
+  // bucata, iar aia e o linie corecta.
+  //
+  // Reparatia pastreaza totalul liniei la banut. Daca produsul are pret de
+  // vanzare si „cantitatea" iese fix un multiplu al lui, se propune acel
+  // numar de bucati; altfel o bucata la pretul intreg. Ce nu se potriveste
+  // exact nu se atinge deloc — se listeaza separat, pentru mana de om.
+  async function cantitatiStrambe() {
+    const randuri = await db
+      .prepare(
+        `SELECT fl.id, fl.factura_id, fl.cantitate, fl.pret_unitar, fl.denumire AS linie,
+                f.serie, f.numar, f.data_emiterii, f.document_extern,
+                pr.id AS produs_id, pr.cod, pr.denumire AS produs, pr.pret_vanzare, pr.pret_achizitie
+           FROM facturi_linii fl
+           JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
+           JOIN produse pr ON pr.id = fl.produs_id
+          WHERE f.status NOT IN ('anulata','ciorna')
+            AND ABS(fl.pret_unitar) = 1
+            AND ABS(fl.cantitate) >= 50
+          ORDER BY f.data_emiterii, fl.id`
+      )
+      .all();
+
+    const reparabile = [];
+    const incerte = [];
+    for (const r of randuri) {
+      const cant = nr(r.cantitate);
+      const pret = nr(r.pret_unitar);
+      const total = cant * pret;
+      const pv = nr(r.pret_vanzare);
+      const pa = nr(r.pret_achizitie);
+      const marime = Math.abs(cant);
+
+      // Semnul al doilea: „cantitatea" e de marimea unui pret.
+      const caPretVanzare = pv > 0 && marime >= 0.5 * pv;
+      const caPretAchizitie = pa > 0 && marime >= 0.3 * pa && marime <= 4 * pa;
+      if (!caPretVanzare && !caPretAchizitie) continue;
+
+      let bucati = 1;
+      let pretNou = marime;
+      if (pv > 0) {
+        const n = Math.round(marime / pv);
+        if (n >= 1 && Math.abs(n * pv - marime) <= 0.01 * marime) {
+          bucati = n;
+          pretNou = marime / n;
+        }
+      }
+      const cantNoua = pret < 0 ? -bucati : bucati;
+      const totalNou = cantNoua * pretNou;
+      const rand = {
+        ...r,
+        cant,
+        pret,
+        total,
+        cantNoua,
+        pretNou,
+        totalNou,
+        costVechi: Math.abs(cant) * pa,
+        costNou: Math.abs(cantNoua) * pa,
+      };
+      if (Math.abs(totalNou - total) <= 0.01) reparabile.push(rand);
+      else incerte.push(rand);
+    }
+    const produse = new Set(reparabile.map((r) => r.produs_id));
+    const facturi = new Set(reparabile.map((r) => r.factura_id));
+    return {
+      reparabile,
+      incerte,
+      produse: produse.size,
+      facturi: facturi.size,
+      valoare: reparabile.reduce((a, r) => a + Math.abs(r.total), 0),
+      costVechi: reparabile.reduce((a, r) => a + r.costVechi, 0),
+      costNou: reparabile.reduce((a, r) => a + r.costNou, 0),
+    };
+  }
+
+  router.get("/admin/date/cantitati-strambe", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const d = await cantitatiStrambe();
+    const doc = (r) => esc(r.document_extern || String(r.serie || "") + String(r.numar || ""));
+
+    const body = `
+      <div class="toolbar"><a class="btn secondary" href="/admin/date">← Înapoi la verificări</a></div>
+      <h1 style="margin:6px 0 2px">Cantități și prețuri inversate pe linie</h1>
+      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:880px">
+        Linia scrie <strong>1.720 buc × 1,00 lei</strong> în loc de <strong>1 buc × 1.720,00 lei</strong>.
+        Totalul liniei e corect — de-aia nu s-a văzut la facturare. Ce strică e costul:
+        cantitatea umflată se înmulțește cu prețul de achiziție al produsului și scoate marja pe minus
+        cu milioane, iar stocul crede că s-au vândut mii de bucăți.
+        Reparația schimbă <strong>doar</strong> cantitatea și prețul unitar, păstrând totalul la bănuț.
+      </p>
+
+      <div class="cards">
+        <div class="card"><div class="label">Linii de reparat</div><div class="value">${d.reparabile.length}</div></div>
+        <div class="card"><div class="label">Produse atinse</div><div class="value">${d.produse}</div></div>
+        <div class="card"><div class="label">Facturi atinse</div><div class="value">${d.facturi}</div></div>
+        <div class="card"><div class="label">Cost fals scos din calcul</div>
+          <div class="value" style="color:var(--danger)">${money(d.costVechi - d.costNou)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">de la ${money(d.costVechi)} la ${money(d.costNou)}</div></div>
+      </div>
+
+      <h2>Ce se schimbă, linie cu linie</h2>
+      ${table(
+        ["Factură", "Data", "Produs", "Acum", "Devine", "Total linie", "Cost acum", "Cost după"],
+        d.reparabile.slice(0, 300).map((r) => [
+          `<a href="/facturi/${r.factura_id}">${doc(r)}</a>`,
+          esc(String(r.data_emiterii || "").slice(0, 10)),
+          `<a href="/produse/${r.produs_id}">${esc(r.produs)}</a>${r.cod ? ` <span style="color:var(--text-muted)">(${esc(r.cod)})</span>` : ""}`,
+          `<span style="color:var(--danger)">${nr(r.cant)} × ${money(r.pret)}</span>`,
+          `<strong style="color:var(--success)">${nr(r.cantNoua)} × ${money(r.pretNou)}</strong>`,
+          money(r.total),
+          `<span style="color:var(--danger)">${money(r.costVechi)}</span>`,
+          money(r.costNou),
+        ])
+      )}
+      ${d.reparabile.length > 300 ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele 300 din ${d.reparabile.length}.</p>` : ""}
+
+      ${
+        d.incerte.length
+          ? `<h2>Nu le ating — nu iese totalul la fix</h2>
+             <p style="margin:-6px 0 10px;color:var(--text-muted);font-size:13px;max-width:860px">
+               Aici corecția ar schimba totalul liniei, deci n-o fac automat. Se rezolvă de mână, din pagina facturii.
+             </p>
+             ${table(
+               ["Factură", "Data", "Produs", "Acum", "Total linie"],
+               d.incerte.slice(0, 100).map((r) => [
+                 `<a href="/facturi/${r.factura_id}">${doc(r)}</a>`,
+                 esc(String(r.data_emiterii || "").slice(0, 10)),
+                 `<a href="/produse/${r.produs_id}">${esc(r.produs)}</a>`,
+                 `${nr(r.cant)} × ${money(r.pret)}`,
+                 money(r.total),
+               ])
+             )}`
+          : ""
+      }
+
+      ${
+        d.reparabile.length
+          ? `<form method="post" action="/admin/date/repara-cantitati" style="margin-top:18px"
+                   onsubmit="return confirm('Se corectează ${d.reparabile.length} linii de factură. Totalul fiecărei linii rămâne neschimbat. Continui?')">
+               <button class="btn" type="submit">Repară cele ${d.reparabile.length} linii</button>
+             </form>`
+          : `<p style="color:var(--success)">Nu e nimic de reparat.</p>`
+      }`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Cantități inversate", active: "/admin/date", body }));
+  });
+
+  router.post("/admin/date/repara-cantitati", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const d = await cantitatiStrambe();
+    let n = 0;
+    for (const r of d.reparabile) {
+      await db.prepare("UPDATE facturi_linii SET cantitate = ?, pret_unitar = ? WHERE id = ?").run(r.cantNoua, r.pretNou, r.id);
+      n++;
+    }
+    const body = `
+      <h2>Reparat</h2>
+      <p>Am corectat <strong>${n}</strong> linii pe ${d.facturi} facturi, ${d.produse} produse.
+      Totalul fiecărei linii a rămas neschimbat — s-au mutat doar cifrele între cantitate și preț unitar.</p>
+      <p>Costul fals scos din calcul: <strong>${money(d.costVechi - d.costNou)}</strong>.</p>
+      ${d.incerte.length ? `<p style="color:var(--text-muted);font-size:13px">Au rămas ${d.incerte.length} linii pe care nu le-am atins, fiindcă acolo corecția ar fi schimbat totalul.</p>` : ""}
+      <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare cantități", active: "/admin/date", body }));
+  });
+
   // Curățarea încasărilor numărate de mai multe ori. Nu șterge: pune
   // „activ = 0". Plățile scoase rămân în baza de date și se văd (și se pot
   // aduce înapoi) din Configurări → Date. Pe bani de zeci de milioane, o
@@ -716,6 +892,7 @@ function register(router) {
 
     const curatare = await incasariDeCuratat();
     const curatareSuma = curatare.deScos.reduce((s2, r) => s2 + nr(r.suma), 0);
+    const strambe = await cantitatiStrambe();
     const costuriRele = await costuriDeReparat();
 
     const body = `
@@ -754,6 +931,22 @@ function register(router) {
                </form>
                <p style="font-size:12px;margin:10px 0 0;color:var(--text-muted)">
                  <a href="/admin/date/incasari-duble">Vezi exact ce plăți se scot, factură cu factură →</a>
+               </p>
+             </div>`
+          : ""
+      }
+      ${
+        strambe.reparabile.length
+          ? `<div class="card" style="border-left:4px solid var(--warn);margin-bottom:16px">
+               <div class="label">Cantități și prețuri inversate pe linie</div>
+               <div class="value">${strambe.reparabile.length} linii · ${strambe.produse} produse</div>
+               <p style="font-size:13px;margin:8px 0 10px;color:var(--text-muted)">
+                 Linia scrie „1.720 buc × 1,00 lei" în loc de „1 buc × 1.720,00 lei" — importul a citit prețul
+                 în coloana de cantitate. Totalul facturii e corect, dar costul liniei iese umflat cu
+                 ${money(strambe.costVechi - strambe.costNou)} și strică marja și stocul.
+               </p>
+               <p style="font-size:12px;margin:0;color:var(--text-muted)">
+                 <a href="/admin/date/cantitati-strambe">Vezi ce se schimbă pe fiecare linie →</a>
                </p>
              </div>`
           : ""
