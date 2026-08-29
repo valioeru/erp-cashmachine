@@ -383,8 +383,9 @@ function register(router) {
 
     const comenzi = await db
       .prepare(
-        `SELECT c.*, p.nume AS partener_nume FROM comenzi_productie c
+        `SELECT c.*, p.nume AS partener_nume, u.nume AS agent_nume FROM comenzi_productie c
          LEFT JOIN parteneri p ON p.id = c.partener_id
+         LEFT JOIN utilizatori u ON u.id = c.agent_id
          ${clauza}
          ORDER BY (c.data_solicitata IS NULL OR c.data_solicitata = ''), c.data_solicitata ASC, c.id DESC
          LIMIT 400`
