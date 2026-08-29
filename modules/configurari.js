@@ -21,6 +21,23 @@ const T_FACTURI = "facturi";
 const T_PLATI = "plati";
 const PE_PAGINA = 100;
 
+// Notele cu care importul scria, până acum, plăți născocite din statusul
+// facturii. O plată cu una dintre ele nu e o încasare adevărată.
+const RECONSTITUITE = [
+  "Plată reconstituită automat din statusul din SmartBill",
+  "Încasare adusă prin punte din SmartBill",
+];
+
+function subnav(activ) {
+  const linkuri = [
+    ["/configurari/date", "Date importate"],
+    ["/configurari/storno", "Facturi stornate"],
+  ];
+  return `<div class="subnav">${linkuri
+    .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
+    .join("")}</div>`;
+}
+
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
 
@@ -160,6 +177,74 @@ function selector(nume, valoare, optiuni) {
     .join("")}</select>`;
 }
 
+// --- Facturi stornate ------------------------------------------------------
+//
+// Regula, spusă de Vali: „dacă stornezi o factură cu aceeași valoare, faci
+// storno la factura inițială, iar cea inițială apare încasată — de aia nu vezi
+// încasarea". Adică SmartBill marchează factura originală ca „platită" fără să
+// existe vreun ban în extras. De aceea, după ce am oprit importul din a mai
+// născoci plăți din status, facturile astea au rămas fără nicio plată și au
+// ieșit la suprafață ca restanțe — deși nu mai are cine să le plătească.
+//
+// Nu există în SmartBill un câmp care să lege stornoul de factura lui, așa că
+// perechile se caută după singurul lucru sigur: același partener, aceeași
+// direcție, aceeași valoare cu semn schimbat. O factură inițială e folosită o
+// singură dată, iar când sunt mai multe candidate se ia cea mai apropiată în
+// timp înaintea stornoului. Ce nu se potrivește exact (storno parțial, factura
+// inițială dinaintea perioadei importate) rămâne pe listă separat, de mână.
+async function facturiPentruStorno() {
+  const semne = RECONSTITUITE.map(() => "?").join(", ");
+  return db
+    .prepare(
+      `SELECT f.id, f.serie, f.numar, f.data_emiterii, f.directie, f.partener_id, f.activ, f.status,
+              p.nume AS partener,
+              COALESCE(t.total, 0) AS total,
+              COALESCE(r.reale, 0) AS incasari_reale
+         FROM ${T_FACTURI} f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, COUNT(*) AS reale FROM ${T_PLATI}
+                     WHERE observatii IS NULL OR observatii NOT IN (${semne})
+                     GROUP BY factura_id) r ON r.factura_id = f.id`
+    )
+    .all(...RECONSTITUITE);
+}
+
+function cheiePereche(f) {
+  return `${f.partener_id}|${f.directie}|${Math.abs(Number(f.total)).toFixed(2)}`;
+}
+
+function perechiStorno(randuri) {
+  const dupaData = (a, b) => String(a.data_emiterii || "").localeCompare(String(b.data_emiterii || ""));
+  const negative = randuri.filter((f) => Number(f.total) < -0.5).sort(dupaData);
+  const pozitive = new Map();
+  for (const f of randuri) {
+    if (Number(f.total) <= 0.5) continue;
+    const k = cheiePereche(f);
+    if (!pozitive.has(k)) pozitive.set(k, []);
+    pozitive.get(k).push(f);
+  }
+  for (const lista of pozitive.values()) lista.sort(dupaData);
+
+  const folosite = new Set();
+  const perechi = [];
+  const orfane = [];
+  for (const s of negative) {
+    const lista = pozitive.get(cheiePereche(s)) || [];
+    const libere = lista.filter((f) => !folosite.has(f.id));
+    // Preferăm factura emisă înaintea stornoului, cea mai apropiată de el.
+    const inainte = libere.filter((f) => String(f.data_emiterii || "") <= String(s.data_emiterii || ""));
+    const aleasa = inainte.length ? inainte[inainte.length - 1] : libere.length ? libere[0] : null;
+    if (aleasa) {
+      folosite.add(aleasa.id);
+      perechi.push({ storno: s, initiala: aleasa });
+    } else {
+      orfane.push(s);
+    }
+  }
+  return { perechi, orfane };
+}
+
 function register(router) {
   router.get("/configurari", async (ctx) => redirect(ctx.res, "/configurari/date"));
 
@@ -212,7 +297,7 @@ function register(router) {
     const intoarcere = linkPagina(q, pagina);
 
     const body = `
-      <div class="subnav"><a href="/configurari/date" class="subnav-link activ">Date importate</a></div>
+      ${subnav("/configurari/date")}
 
       <div class="detail-box"><div class="detail-grid">
         <div><div class="k">Facturi în baza de date</div>${sumar.facturi.n.toLocaleString("ro-RO")}</div>
@@ -293,6 +378,159 @@ function register(router) {
   // într-un câmp ascuns pentru că un checkbox nebifat nu ajunge deloc în
   // formular — fără lista aia n-am ști dacă un rând a fost scos sau doar nu
   // era pe ecran.
+  router.get("/configurari/storno", async (ctx) => {
+    const randuri = await facturiPentruStorno();
+    const { perechi, orfane } = perechiStorno(randuri);
+
+    const active = perechi.filter((x) => Number(x.storno.activ) || Number(x.initiala.activ));
+    const faraIncasare = active.filter((x) => !Number(x.initiala.incasari_reale));
+    const cuIncasare = active.filter((x) => Number(x.initiala.incasari_reale));
+    const scoase = perechi.length - active.length;
+    const valoareFaraIncasare = faraIncasare.reduce((s, x) => s + Number(x.initiala.total), 0);
+
+    const doc = (f) => esc(`${f.serie || ""} ${f.numar == null ? "" : f.numar}`.trim());
+    const semn = (f) =>
+      Number(f.activ)
+        ? ""
+        : ' <span style="color:var(--danger);font-size:12px">(scoasă)</span>';
+
+    const rand = (x) => [
+      `<input type="checkbox" name="p_${x.storno.id}_${x.initiala.id}" value="1"${
+        Number(x.storno.activ) || Number(x.initiala.activ) ? " checked" : ""
+      } class="bifa-pereche">`,
+      esc(x.initiala.partener),
+      x.initiala.directie === "achizitie" ? "achiziție" : "vânzare",
+      doc(x.initiala) + " · " + dataRo(x.initiala.data_emiterii) + semn(x.initiala),
+      doc(x.storno) + " · " + dataRo(x.storno.data_emiterii) + semn(x.storno),
+      money(x.initiala.total),
+      Number(x.initiala.incasari_reale)
+        ? `<strong style="color:var(--warn)">da (${Number(x.initiala.incasari_reale)})</strong>`
+        : "nu",
+    ];
+
+    const capete = ['<input type="checkbox" id="bifa-toate">', "Partener", "Direcție", "Factura inițială", "Stornoul ei", "Valoare", "Are încasare reală?"];
+
+    const body = `
+      ${subnav("/configurari/storno")}
+
+      <div class="detail-box"><div class="detail-grid">
+        <div><div class="k">Facturi de storno găsite</div>${(perechi.length + orfane.length).toLocaleString("ro-RO")}</div>
+        <div><div class="k">Perechi identificate</div>${perechi.length.toLocaleString("ro-RO")}</div>
+        <div><div class="k">Perechi deja scoase din calcule</div>${scoase ? scoase.toLocaleString("ro-RO") : "niciuna"}</div>
+        <div><div class="k">Fără pereche, de verificat de mână</div>${orfane.length.toLocaleString("ro-RO")}</div>
+      </div></div>
+
+      <p style="color:var(--text-muted);font-size:13px;max-width:860px">
+        Când o factură e stornată cu aceeași valoare, SmartBill marchează factura inițială drept
+        „platită" fără să existe vreo încasare în bancă. De când importul nu mai născocește plăți din
+        status, facturile astea apar ca restanțe — deși nu mai are cine să le plătească. Scoase din
+        calcule, storno și inițială dispar amândouă: facturatul nu se schimbă (oricum se anulau
+        reciproc), dar nu mai atârnă la „de încasat" și nu mai intră în comision.
+      </p>
+
+      <h2>Perechi fără nicio încasare reală pe factura inițială — ${faraIncasare.length}</h2>
+      <p style="color:var(--text-muted);font-size:13px">
+        Astea sunt cazul curat: factura a fost stornată și banii n-au intrat niciodată.
+        Valoare totală: <strong>${money(valoareFaraIncasare)}</strong>.
+      </p>
+      <form method="post" action="/configurari/storno/aplica">
+        <input type="hidden" name="valoare" value="0">
+        <div class="inline-form" style="gap:12px;margin-bottom:10px">
+          <button type="submit" class="btn">Scoate din calcule perechile bifate</button>
+        </div>
+        ${table(capete, faraIncasare.map(rand))}
+        <div class="inline-form" style="gap:12px;margin-top:10px">
+          <button type="submit" class="btn">Scoate din calcule perechile bifate</button>
+        </div>
+      </form>
+
+      ${
+        cuIncasare.length
+          ? `<h2 style="margin-top:26px">Perechi unde factura inițială chiar a fost încasată — ${cuIncasare.length}</h2>
+             <p style="color:var(--text-muted);font-size:13px;max-width:860px">
+               Aici banii au intrat în bancă și abia apoi s-a emis stornoul. Nu le ating automat:
+               poate fi o returnare, o refacturare sau o corecție de dată. Uită-te la ele întâi.
+             </p>
+             <form method="post" action="/configurari/storno/aplica">
+               <input type="hidden" name="valoare" value="0">
+               ${table(capete, cuIncasare.map(rand))}
+               <div class="inline-form" style="gap:12px;margin-top:10px">
+                 <button type="submit" class="link-btn" style="color:var(--danger)">Scoate din calcule perechile bifate</button>
+               </div>
+             </form>`
+          : ""
+      }
+
+      ${
+        scoase
+          ? `<h2 style="margin-top:26px">Perechi scoase deja din calcule — ${scoase}</h2>
+             <form method="post" action="/configurari/storno/aplica">
+               <input type="hidden" name="valoare" value="1">
+               ${table(
+                 capete,
+                 perechi
+                   .filter((x) => !Number(x.storno.activ) && !Number(x.initiala.activ))
+                   .map((x) => {
+                     const r = rand(x);
+                     r[0] = `<input type="checkbox" name="p_${x.storno.id}_${x.initiala.id}" value="1" class="bifa-pereche">`;
+                     return r;
+                   })
+               )}
+               <div class="inline-form" style="gap:12px;margin-top:10px">
+                 <button type="submit" class="btn">Pune la loc în calcule perechile bifate</button>
+               </div>
+             </form>`
+          : ""
+      }
+
+      <h2 style="margin-top:26px">Facturi de storno fără pereche exactă — ${orfane.length}</h2>
+      <p style="color:var(--text-muted);font-size:13px;max-width:860px">
+        Storno parțial, factura inițială emisă înainte de perioada importată, sau valoarea diferă
+        cu câțiva bani. Nu le ating — le lași așa sau le scoți una câte una din „Date importate".
+      </p>
+      ${table(
+        ["Partener", "Direcție", "Document", "Data", "Valoare"],
+        orfane.map((f) => [
+          esc(f.partener),
+          f.directie === "achizitie" ? "achiziție" : "vânzare",
+          doc(f) + semn(f),
+          dataRo(f.data_emiterii),
+          money(f.total),
+        ])
+      )}
+
+      <script>
+      (function () {
+        var toate = document.getElementById("bifa-toate");
+        if (!toate) return;
+        toate.addEventListener("change", function () {
+          var b = document.querySelectorAll(".bifa-pereche");
+          for (var i = 0; i < b.length; i++) b[i].checked = toate.checked;
+        });
+      })();
+      </script>
+    `;
+
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Configurări · Facturi stornate", active: "/configurari/storno", body }));
+  });
+
+  // Bifele vin sub forma p_<idStorno>_<idInitiala>, ca să nu fie nevoie de o
+  // listă ascunsă cu perechile: fiecare bifă își cară singură ambele id-uri.
+  router.post("/configurari/storno/aplica", async (ctx) => {
+    const valoare = String(ctx.body.valoare) === "1" ? 1 : 0;
+    const ids = new Set();
+    for (const cheie of Object.keys(ctx.body || {})) {
+      const m = /^p_(\d+)_(\d+)$/.exec(cheie);
+      if (!m || !ctx.body[cheie]) continue;
+      ids.add(Number(m[1]));
+      ids.add(Number(m[2]));
+    }
+    for (const id of ids) {
+      await db.prepare(`UPDATE ${T_FACTURI} SET activ = ? WHERE id = ?`).run(valoare, id);
+    }
+    redirect(ctx.res, "/configurari/storno");
+  });
+
   router.post("/configurari/date/salveaza", async (ctx) => {
     const tip = ctx.body.tip === "incasari" ? "incasari" : "facturi";
     const tabel = tip === "incasari" ? T_PLATI : T_FACTURI;
