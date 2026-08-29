@@ -1066,12 +1066,17 @@ async function ingestIncasari(randuri) {
       // exact aceeași sumă, ea era doar un surogat pentru încasarea care
       // tocmai a sosit. O ștergem, altfel banul se numără de două ori — așa
       // s-au adunat milioanele de încasări fantomă din anii trecuți.
-      const surogate = await db
-        .prepare(
-          `SELECT id, data FROM plati
-            WHERE factura_id = ? AND ROUND(suma * 100) = ROUND(? * 100) AND observatii IN (${RECONSTITUITE.map(() => "?").join(", ")})`
-        )
-        .all(tinte[i], parte, ...RECONSTITUITE);
+      // Comparația pe bani se face în JS, nu în SQL: pe Postgres un `?` pus
+      // direct într-un ROUND() e ghicit ca întreg și cade cu „invalid input
+      // syntax for type integer" la prima sumă cu zecimale.
+      const surogate = (
+        await db
+          .prepare(
+            `SELECT id, data, suma FROM plati
+              WHERE factura_id = ? AND observatii IN (${RECONSTITUITE.map(() => "?").join(", ")})`
+          )
+          .all(tinte[i], ...RECONSTITUITE)
+      ).filter((v) => Math.round(Number(v.suma) * 100) === Math.round(parte * 100));
       for (const v of surogate) {
         await db.prepare("DELETE FROM plati WHERE id = ?").run(v.id);
         existente.delete(`${tinte[i]}|${String(v.data).slice(0, 10)}|${parte.toFixed(2)}`);
