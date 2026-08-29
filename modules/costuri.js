@@ -120,7 +120,7 @@ function register(router) {
     const incasari = await db
       .prepare(
         `SELECT p.agent_id AS agent, COALESCE(SUM(pl.suma),0) AS s
-         FROM plati pl JOIN facturi f ON f.id = pl.factura_id JOIN parteneri p ON p.id = f.partener_id
+         FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id JOIN parteneri p ON p.id = f.partener_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND SUBSTR(pl.data,1,7) IN (${luniInterval.map(() => "?").join(",")}) AND p.agent_id IS NOT NULL
          GROUP BY p.agent_id`

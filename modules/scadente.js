@@ -22,7 +22,7 @@ const { ALOC } = require("./alocari");
 
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
 
 // Praguri, într-un singur loc, ca să se schimbe ușor dacă se schimbă politica.
 const ZILE_GALBEN = 7; // peste atâtea zile de întârziere clientul devine roșu
@@ -126,7 +126,7 @@ async function facturiCuSold(agentId) {
               p.nume AS client, p.email AS email_client, p.notificari_oprite,
               COALESCE(t.total, 0) AS total, COALESCE(pl.platit, 0) AS platit,
               (SELECT MAX(n.trimis_la) FROM notificari_facturi n WHERE n.factura_id = f.id) AS ultima_notificare
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
@@ -182,7 +182,7 @@ async function stareClient(partenerId) {
     .prepare(
       `SELECT f.id, f.data_emiterii, f.data_scadenta,
               COALESCE(t.total,0) AS total, COALESCE(pl.platit,0) AS platit
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
         WHERE f.partener_id = ? AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
@@ -547,7 +547,7 @@ function register(router) {
   // Bifa de notificare automată pe o factură.
   router.post("/scadente/:id/auto", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
-    const f = await db.prepare("SELECT f.*, p.notificari_oprite FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?").get(ctx.params.id);
+    const f = await db.prepare("SELECT f.*, p.notificari_oprite FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?").get(ctx.params.id);
     if (!f) return redirect(ctx.res, "/scadente");
     const st = await stareClient(f.partener_id);
     // Agentul nu poate umbla la clienții intrați în regim obligatoriu.

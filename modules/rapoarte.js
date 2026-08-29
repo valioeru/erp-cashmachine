@@ -15,7 +15,7 @@ const { send, redirect } = require("../lib/router");
 // între rapoarte — dacă se schimbă formula, se schimbă într-un singur loc.
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
 
 const CATEGORII = [
   {
@@ -234,7 +234,7 @@ function register(router) {
                 COALESCE(l.total, 0) AS total,
                 COALESCE(pl.platit, 0) AS platit,
                 COALESCE(l.total, 0) - COALESCE(pl.platit, 0) AS restant
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
@@ -381,7 +381,7 @@ function register(router) {
     const f = await db
       .prepare(
         `SELECT f.id, f.data_scadenta, COALESCE(l.total,0) AS total, COALESCE(pl.platit,0) AS platit
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
          WHERE f.id = ?`
@@ -421,7 +421,7 @@ function register(router) {
         `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, f.data_scadenta,
                 p.id AS partener_id, p.nume AS partener_nume,
                 COALESCE(l.total,0) - COALESCE(pl.platit,0) AS restant
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
@@ -536,7 +536,7 @@ function register(router) {
     const randuri = await db
       .prepare(
         `SELECT f.directie, SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          WHERE f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?
          GROUP BY f.directie, SUBSTR(f.data_emiterii, 1, 7)`
@@ -614,7 +614,7 @@ function register(router) {
       const q = async (sql, ...args) => (await db.prepare(sql).get(...args)) || {};
       const vanzari = await q(
         `SELECT COALESCE(SUM(n.net),0) AS net, COALESCE(SUM(t.total),0) AS total, COUNT(*) AS nr
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
          JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruFirma.sql}`,
@@ -622,19 +622,19 @@ function register(router) {
       );
       const achizitii = await q(
         `SELECT COALESCE(SUM(n.net),0) AS net, COALESCE(SUM(t.total),0) AS total, COUNT(*) AS nr
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
          JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
          WHERE f.directie='achizitie' AND f.status NOT IN ('anulata','ciorna') AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruFirma.sql}`,
         deLa, panaLa, ...filtruFirma.args
       );
       const incasari = await q(
-        `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id=pl.factura_id
+        `SELECT COALESCE(SUM(pl.suma),0) AS s FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND pl.data >= ? AND pl.data <= ? ${filtruFirma.sql}`,
         deLa, panaLa, ...filtruFirma.args
       );
       const plati = await q(
-        `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id=pl.factura_id
+        `SELECT COALESCE(SUM(pl.suma),0) AS s FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id
          WHERE f.directie='achizitie' AND f.status NOT IN ('anulata','ciorna') AND pl.data >= ? AND pl.data <= ? ${filtruFirma.sql}`,
         deLa, panaLa, ...filtruFirma.args
       );
@@ -642,7 +642,7 @@ function register(router) {
       const solduri = await db
         .prepare(
           `SELECT f.directie, COALESCE(SUM(COALESCE(l.total,0)-COALESCE(pl.platit,0)),0) AS sold
-           FROM facturi f
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
            LEFT JOIN ${SUB_TOTAL} l ON l.factura_id=f.id
            LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id=f.id
            WHERE f.status NOT IN ('anulata','necunoscut') AND COALESCE(l.total,0)-COALESCE(pl.platit,0) > 0.5 ${filtruFirma.sql}
@@ -727,7 +727,7 @@ function register(router) {
         `SELECT f.id, f.directie, f.serie, f.numar, f.document_extern, f.data_scadenta, f.data_emiterii,
                 fi.nume AS firma_nume, p.id AS partener_id, p.nume AS partener_nume,
                 COALESCE(l.total,0) - COALESCE(pl.platit,0) AS rest
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN firme fi ON fi.id = f.firma_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
@@ -833,7 +833,7 @@ function register(router) {
                 COALESCE(SUM(t.total),0) AS facturat_total
          FROM utilizatori u
          LEFT JOIN parteneri p ON p.agent_id = u.id
-         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+         LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
               AND f.data_emiterii >= ? AND f.data_emiterii <= ?
          LEFT JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id=f.id
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id=f.id
@@ -847,7 +847,7 @@ function register(router) {
     const incasat = await db
       .prepare(
         `SELECT p.agent_id AS agent, COALESCE(SUM(pl.suma),0) AS s
-         FROM plati pl JOIN facturi f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
+         FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND pl.data >= ? AND pl.data <= ? AND p.agent_id IS NOT NULL
          GROUP BY p.agent_id`
       )
@@ -944,7 +944,7 @@ function register(router) {
       return await db
         .prepare(
           `SELECT p.id, p.nume, p.cui, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr, MAX(f.data_emiterii) AS ultima
-           FROM facturi f
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
            JOIN parteneri p ON p.id = f.partener_id
            JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
            WHERE f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.directie = ? AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruExcl}
@@ -1187,7 +1187,7 @@ function register(router) {
       await db
         .prepare(
           `SELECT COALESCE(SUM(n.net),0) AS net, COUNT(*) AS nr
-           FROM facturi f JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
+           FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
            WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
         )
         .get(directie, deLa, panaLa);
@@ -1201,7 +1201,7 @@ function register(router) {
         `SELECT f.directie,
                 COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS sold,
                 COALESCE(SUM(CASE WHEN f.data_scadenta <> '' AND f.data_scadenta < ? THEN COALESCE(l.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS depasit
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
          WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
@@ -1220,7 +1220,7 @@ function register(router) {
     // Concentrarea clienților — primul lucru la care se uită analistul de credit.
     const topClienti = await db
       .prepare(
-        `SELECT p.nume, COALESCE(SUM(n.net),0) AS net FROM facturi f
+        `SELECT p.nume, COALESCE(SUM(n.net),0) AS net FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
@@ -1439,7 +1439,7 @@ function register(router) {
       const vanzari = await db
         .prepare(
           `SELECT COALESCE(SUM(n.net),0) AS net, COALESCE(SUM(t.total),0) AS total, COUNT(*) AS nr, COUNT(DISTINCT f.partener_id) AS clienti
-           FROM facturi f
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
            JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
            JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
@@ -1447,13 +1447,13 @@ function register(router) {
         .get(deLa, panaLa);
       const achizitii = await db
         .prepare(
-          `SELECT COALESCE(SUM(t.total),0) AS total FROM facturi f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+          `SELECT COALESCE(SUM(t.total),0) AS total FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
            WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
         )
         .get(deLa, panaLa);
       const incasari = await db
         .prepare(
-          `SELECT COALESCE(SUM(pl.suma),0) AS s FROM plati pl JOIN facturi f ON f.id = pl.factura_id
+          `SELECT COALESCE(SUM(pl.suma),0) AS s FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND pl.data >= ? AND pl.data <= ?`
         )
         .get(deLa, panaLa);
@@ -1486,7 +1486,7 @@ function register(router) {
     const lunar = await db
       .prepare(
         `SELECT SUBSTR(f.data_emiterii,1,4) AS an, SUBSTR(f.data_emiterii,6,2) AS luna, COALESCE(SUM(t.total),0) AS v
-         FROM facturi f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
          GROUP BY SUBSTR(f.data_emiterii,1,4), SUBSTR(f.data_emiterii,6,2)`
       )
@@ -1560,7 +1560,7 @@ function register(router) {
                 COALESCE(SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)), 0) AS sold
          FROM utilizatori u
          LEFT JOIN parteneri p ON p.agent_id = u.id AND p.tip IN ('client','ambele')
-         LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
+         LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
          LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
          LEFT JOIN ${SUB_COST} c ON c.factura_id = f.id
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
@@ -1593,7 +1593,7 @@ function register(router) {
                   COALESCE(SUM(c.venit_cu_cost), 0) AS venit_cu_cost,
                   COALESCE(SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)), 0) AS sold
            FROM parteneri p
-           LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
+           LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
            LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
            LEFT JOIN ${SUB_COST} c ON c.factura_id = f.id
            LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
@@ -1705,7 +1705,7 @@ function register(router) {
         `SELECT al.utilizator_id AS agent, SUBSTR(f.data_emiterii, 1, 7) AS luna,
                 COALESCE(SUM(COALESCE(t.total,0) * al.procent / 100.0), 0) AS suma,
                 COUNT(DISTINCT f.id) AS nr
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
@@ -1719,8 +1719,8 @@ function register(router) {
         `SELECT al.utilizator_id AS agent, SUBSTR(pl.data, 1, 7) AS luna,
                 COALESCE(SUM(pl.suma * al.procent / 100.0), 0) AS suma,
                 COUNT(*) AS nr
-         FROM plati pl
-         JOIN facturi f ON f.id = pl.factura_id
+         FROM (SELECT * FROM plati WHERE activ = 1) pl
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
            AND pl.data >= ? AND pl.data <= ?
@@ -1891,7 +1891,7 @@ function register(router) {
     const istoric = await db
       .prepare(
         `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
          GROUP BY SUBSTR(f.data_emiterii, 1, 7)
@@ -2069,7 +2069,7 @@ function register(router) {
                 COUNT(DISTINCT f.id) AS facturi,
                 COUNT(DISTINCT f.partener_id) AS clienti
          FROM facturi_linii fl
-         JOIN facturi f ON f.id = fl.factura_id
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
          JOIN produse pr ON pr.id = fl.produs_id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}
@@ -2083,7 +2083,7 @@ function register(router) {
       .prepare(
         `SELECT COALESCE(SUM(CASE WHEN fl.produs_id IS NOT NULL THEN fl.cantitate * fl.pret_unitar ELSE 0 END), 0) AS cuProdus,
                 COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS total
-         FROM facturi_linii fl JOIN facturi f ON f.id = fl.factura_id JOIN parteneri p ON p.id = f.partener_id
+         FROM facturi_linii fl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id JOIN parteneri p ON p.id = f.partener_id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}`
       )
       .get(deLa, panaLa, ...argsAgent);
@@ -2150,7 +2150,7 @@ function register(router) {
       .prepare(
         `SELECT p.id, p.nume, COUNT(*) AS nr, COALESCE(SUM(l.total),0) AS valoare, MAX(f.data_emiterii) AS ultima
          FROM parteneri p
-         JOIN facturi f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          GROUP BY p.id, p.nume`
       )

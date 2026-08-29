@@ -29,11 +29,11 @@ function calcTotals(linii) {
 }
 
 async function recomputeStatus(facturaId) {
-  const factura = await db.prepare("SELECT * FROM facturi WHERE id = ?").get(facturaId);
+  const factura = await db.prepare("SELECT * FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE id = ?").get(facturaId);
   if (!factura || factura.status === "anulata") return;
   const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(facturaId);
   const { total } = calcTotals(linii);
-  const platit = (await db.prepare("SELECT COALESCE(SUM(suma),0) AS s FROM plati WHERE factura_id = ?").get(facturaId)).s;
+  const platit = (await db.prepare("SELECT COALESCE(SUM(suma),0) AS s FROM (SELECT * FROM plati WHERE activ = 1) plati WHERE factura_id = ?").get(facturaId)).s;
   let status = "emisa";
   if (platit >= total && total > 0) status = "platita";
   else if (platit > 0) status = "platita_partial";
@@ -97,7 +97,7 @@ function register(router) {
     const clauza = where.join(" AND ");
 
     const totalRanduri = (
-      await db.prepare(`SELECT COUNT(*) AS n FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE ${clauza}`).get(...args)
+      await db.prepare(`SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE ${clauza}`).get(...args)
     ).n;
     const nrPagini = Math.max(1, Math.ceil(totalRanduri / PE_PAGINA));
     const paginaCurenta = Math.min(pagina, nrPagini);
@@ -109,10 +109,10 @@ function register(router) {
                 p.nume AS partener_nume,
                 COALESCE(l.total, 0) AS total,
                 COALESCE(pl.platit, 0) AS platit
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
-         LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) pl ON pl.factura_id = f.id
          WHERE ${clauza}
          ORDER BY f.data_emiterii DESC, f.id DESC
          LIMIT ${PE_PAGINA} OFFSET ${offset}`
@@ -319,7 +319,7 @@ function register(router) {
     const preturi = asArray(ctx.body["pret_unitar[]"]);
     const cotele = asArray(ctx.body["cota_tva[]"]);
 
-    const maxNumar = (await db.prepare("SELECT COALESCE(MAX(numar),0) AS m FROM facturi WHERE directie = 'vanzare'").get()).m;
+    const maxNumar = (await db.prepare("SELECT COALESCE(MAX(numar),0) AS m FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").get()).m;
 
     const info = await db
       .prepare("INSERT INTO facturi (numar, partener_id, directie, data_scadenta, observatii, status) VALUES (?, ?, 'vanzare', ?, ?, 'emisa') RETURNING id")
@@ -347,13 +347,13 @@ function register(router) {
 
   router.get("/facturi/:id", async (ctx) => {
     const factura = await db
-      .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
+      .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
       .get(ctx.params.id);
     if (!factura) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/facturi", body: "<p>Factură inexistentă.</p>" }));
 
     const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
     const { subtotal, tva, total } = calcTotals(linii);
-    const plati = await db.prepare("SELECT * FROM plati WHERE factura_id = ? ORDER BY id DESC").all(factura.id);
+    const plati = await db.prepare("SELECT * FROM (SELECT * FROM plati WHERE activ = 1) plati WHERE factura_id = ? ORDER BY id DESC").all(factura.id);
     const platit = plati.reduce((s, p) => s + p.suma, 0);
     const restant = Math.max(0, total - platit);
     const eVanzare = factura.directie !== "achizitie";
@@ -556,7 +556,7 @@ function register(router) {
         })
       );
     }
-    const factura = await db.prepare("SELECT * FROM facturi WHERE id = ?").get(ctx.params.id);
+    const factura = await db.prepare("SELECT * FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE id = ?").get(ctx.params.id);
     if (!factura) return redirect(ctx.res, "/facturi");
     if (factura.status !== "ciorna") return redirect(ctx.res, `/facturi/${factura.id}`);
 
@@ -566,7 +566,7 @@ function register(router) {
     let numar = factura.numar;
     if (!numar) {
       const m = await db
-        .prepare("SELECT COALESCE(MAX(numar), 0) AS n FROM facturi WHERE directie = 'vanzare' AND COALESCE(serie,'') = ?")
+        .prepare("SELECT COALESCE(MAX(numar), 0) AS n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND COALESCE(serie,'') = ?")
         .get(factura.serie || "FCT");
       numar = Number((m && m.n) || 0) + 1;
     }
@@ -603,7 +603,7 @@ function register(router) {
     let mesajSmartbill = "";
     if (smartbill.isConfigured()) {
       try {
-        const proaspata = await db.prepare("SELECT * FROM facturi WHERE id = ?").get(factura.id);
+        const proaspata = await db.prepare("SELECT * FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE id = ?").get(factura.id);
         const rezultat = await smartbill.trimiteFactura(proaspata, linii);
         await db
           .prepare("UPDATE facturi SET smartbill_sync_la = ?, smartbill_serie = ?, smartbill_numar = ? WHERE id = ?")
@@ -625,7 +625,7 @@ function register(router) {
 
   router.post("/facturi/:id/smartbill", async (ctx) => {
     const factura = await db
-      .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
+      .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
       .get(ctx.params.id);
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
     const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);

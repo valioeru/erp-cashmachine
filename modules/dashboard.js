@@ -29,7 +29,7 @@ async function facturatIntre(directie, de, la) {
   const r = await db
     .prepare(
       `SELECT COALESCE(SUM(t.net), 0) AS net
-         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
         WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
     )
@@ -42,7 +42,7 @@ async function peLuni(directie, an) {
   const r = await db
     .prepare(
       `SELECT SUBSTR(f.data_emiterii, 6, 2) AS luna, COALESCE(SUM(t.net), 0) AS net
-         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
         WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
         GROUP BY SUBSTR(f.data_emiterii, 6, 2)`
@@ -219,7 +219,7 @@ async function cifraAfaceriIntre(de, la, listaTipare) {
   const linii = await db
     .prepare(
       `SELECT COALESCE(fl.denumire, p.denumire) AS denumire, SUM(fl.cantitate * fl.pret_unitar) AS net
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN facturi_linii fl ON fl.factura_id = f.id
          LEFT JOIN produse p ON p.id = fl.produs_id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
@@ -331,7 +331,7 @@ async function topClienti(de, la, deAnTrecut, laAnTrecut) {
   const acum = await db
     .prepare(
       `SELECT f.partener_id, p.nume, COALESCE(SUM(t.net), 0) AS net
-         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
          JOIN parteneri p ON p.id = f.partener_id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
@@ -341,7 +341,7 @@ async function topClienti(de, la, deAnTrecut, laAnTrecut) {
   const inainte = await db
     .prepare(
       `SELECT f.partener_id, COALESCE(SUM(t.net), 0) AS net
-         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
         GROUP BY f.partener_id`
@@ -360,12 +360,12 @@ async function clientiPierduti(de, la, deAnTrecut, laAnTrecut) {
   return await db
     .prepare(
       `SELECT p.id, p.nume, COALESCE(SUM(t.net), 0) AS net_an_trecut
-         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
          JOIN parteneri p ON p.id = f.partener_id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
           AND NOT EXISTS (
-            SELECT 1 FROM facturi f2 WHERE f2.partener_id = f.partener_id AND f2.directie = 'vanzare'
+            SELECT 1 FROM (SELECT * FROM facturi WHERE activ = 1) f2 WHERE f2.partener_id = f.partener_id AND f2.directie = 'vanzare'
               AND f2.status NOT IN ('anulata','ciorna') AND f2.data_emiterii >= ? AND f2.data_emiterii <= ?
           )
         GROUP BY p.id, p.nume ORDER BY net_an_trecut DESC LIMIT 10`
@@ -378,7 +378,7 @@ async function topFurnizori(de, la) {
   return await db
     .prepare(
       `SELECT p.id, p.nume, COALESCE(SUM(t.net), 0) AS net, COUNT(DISTINCT f.id) AS facturi
-         FROM facturi f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN ${SUB_TOTAL_NET} t ON t.factura_id = f.id
          JOIN parteneri p ON p.id = f.partener_id
         WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
@@ -395,7 +395,7 @@ async function topProduse(de, la) {
       `SELECT COALESCE(pr.denumire, fl.denumire) AS denumire,
               COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS net,
               COALESCE(SUM(fl.cantitate), 0) AS cant
-         FROM facturi f JOIN facturi_linii fl ON fl.factura_id = f.id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN facturi_linii fl ON fl.factura_id = f.id
          LEFT JOIN produse pr ON pr.id = fl.produs_id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
@@ -406,7 +406,7 @@ async function topProduse(de, la) {
     .prepare(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN EXISTS (SELECT 1 FROM facturi_linii fl WHERE fl.factura_id = f.id) THEN 1 ELSE 0 END) AS cu_linii
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
           AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
     )
@@ -425,8 +425,8 @@ async function deIncasat(aziStr) {
          FROM (
            SELECT f.data_scadenta,
                   COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
-                  - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS rest
-             FROM facturi f
+                  - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
             WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
          ) x
         WHERE x.rest > 1`

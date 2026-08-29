@@ -279,7 +279,7 @@ module.exports = function registerRute(router, deps) {
                 SUM(fl.cantitate * fl.pret_unitar) AS vanzari
            FROM facturi_linii fl
            JOIN produse p ON p.id = fl.produs_id
-           JOIN facturi f ON f.id = fl.factura_id
+           JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
             AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
             AND COALESCE(p.pret_achizitie, 0) <= 0
@@ -555,7 +555,7 @@ module.exports = function registerRute(router, deps) {
     const randuri = await db
       .prepare(
         `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii
-           FROM facturi f
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
             AND NOT EXISTS (
               SELECT 1 FROM facturi_linii fl
@@ -568,7 +568,7 @@ module.exports = function registerRute(router, deps) {
       .all(...(an ? [an] : []));
     const total = await db
       .prepare(
-        `SELECT COUNT(*) AS n FROM facturi f
+        `SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) f
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
             ${an ? "AND SUBSTR(f.data_emiterii, 1, 4) = ?" : ""}`
       )

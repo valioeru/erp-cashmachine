@@ -42,24 +42,24 @@ function register(router) {
     }
 
     const T = "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-    const P = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+    const P = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
     const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
 
     const randuri = await db
       .prepare(
         `SELECT p.id, p.nume, p.tip, p.stare, p.cui, p.email, p.telefon,
                 u.nume AS agent,
-                COALESCE((SELECT SUM(COALESCE(t.total,0)) FROM facturi f
+                COALESCE((SELECT SUM(COALESCE(t.total,0)) FROM (SELECT * FROM facturi WHERE activ = 1) f
                             LEFT JOIN ${T} t ON t.factura_id = f.id
                            WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')
                              AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?), 0) AS rulaj,
-                COALESCE((SELECT SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)) FROM facturi f
+                COALESCE((SELECT SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)) FROM (SELECT * FROM facturi WHERE activ = 1) f
                             LEFT JOIN ${T} t ON t.factura_id = f.id
                             LEFT JOIN ${P} pl ON pl.factura_id = f.id
                            WHERE f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
                              AND COALESCE(f.intercompany,0) = 0
                              AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5), 0) AS sold,
-                (SELECT MAX(f.data_emiterii) FROM facturi f WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')) AS ultima
+                (SELECT MAX(f.data_emiterii) FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')) AS ultima
            FROM parteneri p
            LEFT JOIN utilizatori u ON u.id = p.agent_id
           WHERE ${unde}
@@ -162,7 +162,7 @@ function register(router) {
     if (!partener) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/parteneri", body: "<p>Partener inexistent.</p>" }));
 
     const comenzi = await db.prepare("SELECT id, numar, status, data FROM comenzi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
-    const facturi = await db.prepare("SELECT id, serie, numar, directie, status, data_emiterii FROM facturi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
+    const facturi = await db.prepare("SELECT id, serie, numar, directie, status, data_emiterii FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const oportunitati = await db.prepare("SELECT * FROM oportunitati WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const taskuriPartener = await db.prepare(`${tsk.SELECT_TASK} WHERE t.partener_id = ? ORDER BY t.id DESC LIMIT 50`).all(partener.id);
     const emailuriPartener = await db.prepare("SELECT id, subiect, catre, status, trimis_la FROM emailuri WHERE partener_id = ? ORDER BY id DESC LIMIT 50").all(partener.id);

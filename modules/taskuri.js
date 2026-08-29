@@ -70,7 +70,7 @@ const SELECT_TASK = `
   LEFT JOIN parteneri p ON p.id = t.partener_id
   LEFT JOIN leaduri le ON le.id = t.lead_id
   LEFT JOIN oportunitati o ON o.id = t.oportunitate_id
-  LEFT JOIN facturi f ON f.id = t.factura_id
+  LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = t.factura_id
 `;
 
 function contextLink(t) {

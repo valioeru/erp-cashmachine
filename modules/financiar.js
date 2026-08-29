@@ -34,16 +34,16 @@ function register(router) {
       `SELECT COUNT(*) AS n, COALESCE(SUM(x.rest), 0) AS suma FROM (
          SELECT f.id,
                 COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
-                - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM facturi f WHERE f.directie = 'vanzare' AND f.status != 'anulata'
+                - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare' AND f.status != 'anulata'
        ) x WHERE x.rest > 1`
     );
     const restante = await unuSau(
       `SELECT COUNT(*) AS n, COALESCE(SUM(x.rest), 0) AS suma FROM (
          SELECT f.id, f.data_scadenta,
                 COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
-                - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM facturi f WHERE f.directie = 'vanzare' AND f.status != 'anulata'
+                - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare' AND f.status != 'anulata'
        ) x WHERE x.rest > 1 AND x.data_scadenta IS NOT NULL AND x.data_scadenta < ?`,
       zi
     );
@@ -51,8 +51,8 @@ function register(router) {
       `SELECT COUNT(*) AS n, COALESCE(SUM(x.rest), 0) AS suma FROM (
          SELECT f.id,
                 COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
-                - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM facturi f WHERE f.directie = 'achizitie' AND f.status != 'anulata'
+                - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'achizitie' AND f.status != 'anulata'
        ) x WHERE x.rest > 1`
     );
     const banca = await unuSau(
@@ -74,7 +74,7 @@ function register(router) {
         `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna,
                 COALESCE(SUM(CASE WHEN f.directie = 'vanzare' THEN l.valoare ELSE 0 END), 0) AS vanzari,
                 COALESCE(SUM(CASE WHEN f.directie = 'achizitie' THEN l.valoare ELSE 0 END), 0) AS achizitii
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS valoare FROM facturi_linii GROUP BY factura_id) l
            ON l.factura_id = f.id
          WHERE f.status != 'anulata' AND SUBSTR(f.data_emiterii, 1, 4) = ?

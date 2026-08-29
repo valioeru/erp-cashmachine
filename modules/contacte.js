@@ -74,7 +74,7 @@ async function genereazaTaskuriContact(agentId) {
       `SELECT p.id, p.nume,
               (SELECT MAX(i.data) FROM interactiuni i WHERE i.partener_id = p.id) AS ultima,
               (SELECT COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0)
-                 FROM facturi f JOIN facturi_linii fl ON fl.factura_id = f.id
+                 FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN facturi_linii fl ON fl.factura_id = f.id
                 WHERE f.partener_id = p.id AND f.directie = 'vanzare'
                   AND f.data_emiterii >= ?) AS cifra
          FROM parteneri p
@@ -135,7 +135,7 @@ async function genereazaSugestii() {
       `DELETE FROM leaduri
         WHERE sursa = 'sugestie' AND atribuit_lui IS NULL AND partener_id IS NOT NULL
           AND EXISTS (SELECT 1 FROM ${ALOC} a WHERE a.partener_id = leaduri.partener_id AND a.procent > 0)
-          AND EXISTS (SELECT 1 FROM facturi f WHERE f.partener_id = leaduri.partener_id AND f.directie = 'vanzare' AND f.data_emiterii >= ?)
+          AND EXISTS (SELECT 1 FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.partener_id = leaduri.partener_id AND f.directie = 'vanzare' AND f.data_emiterii >= ?)
           AND NOT EXISTS (SELECT 1 FROM taskuri t WHERE t.lead_id = leaduri.id)`
     )
     .run(peste(-270));
@@ -154,9 +154,9 @@ async function genereazaSugestii() {
   const candidati = await db
     .prepare(
       `SELECT p.id, p.nume, p.email, p.telefon,
-              (SELECT MAX(f.data_emiterii) FROM facturi f WHERE f.partener_id = p.id AND f.directie = 'vanzare') AS ultima_factura,
+              (SELECT MAX(f.data_emiterii) FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.partener_id = p.id AND f.directie = 'vanzare') AS ultima_factura,
               (SELECT COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0)
-                 FROM facturi f JOIN facturi_linii fl ON fl.factura_id = f.id
+                 FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN facturi_linii fl ON fl.factura_id = f.id
                 WHERE f.partener_id = p.id AND f.directie = 'vanzare') AS total_istoric,
               (SELECT COUNT(*) FROM ${ALOC} a WHERE a.partener_id = p.id AND a.procent > 0) AS alocat
          FROM parteneri p

@@ -240,8 +240,8 @@ function register(router) {
     const firmeGrup = await grup.listaFirmeOperationale();
     const stats = {
       parteneri: (await db.prepare("SELECT COUNT(*) n FROM parteneri").get()).n,
-      facturiVanzare: (await db.prepare("SELECT COUNT(*) n FROM facturi WHERE directie='vanzare'").get()).n,
-      facturiAchizitie: (await db.prepare("SELECT COUNT(*) n FROM facturi WHERE directie='achizitie'").get()).n,
+      facturiVanzare: (await db.prepare("SELECT COUNT(*) n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie='vanzare'").get()).n,
+      facturiAchizitie: (await db.prepare("SELECT COUNT(*) n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie='achizitie'").get()).n,
       produse: (await db.prepare("SELECT COUNT(*) n FROM produse").get()).n,
       miscariStoc: (await db.prepare("SELECT COUNT(*) n FROM miscari_stoc").get()).n,
       reteteComponente: (await db.prepare("SELECT COUNT(*) n FROM retete_componente").get()).n,
@@ -686,7 +686,7 @@ function register(router) {
     // La vânzări (numerotarea noastră, unică) data nu intră în cheie.
     const cuData = directie === "achizitie";
     const existenteRanduri = await db
-      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM facturi WHERE directie = ? AND firma_id = ?")
+      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = ? AND firma_id = ?")
       .all(directie, firmaId);
     const existente = new Set();
     const cheiPentru = (serie, numar, partenerId, docExtern, data) => {
@@ -1101,7 +1101,7 @@ function register(router) {
 
     // Indexăm facturile de vânzare după serie+număr, ca să potrivim rapid.
     const facturi = await db
-      .prepare("SELECT id, serie, numar FROM facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
+      .prepare("SELECT id, serie, numar FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
       .all();
     const dupaCheie = new Map();
     for (const f of facturi) {
@@ -1122,9 +1122,9 @@ function register(router) {
         await db
           .prepare(
             `SELECT f.id, COALESCE(l.total,0) - COALESCE(pl.platit,0) AS sold
-               FROM facturi f
+               FROM (SELECT * FROM facturi WHERE activ = 1) f
                LEFT JOIN (SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
-               LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+               LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) pl ON pl.factura_id = f.id
               WHERE f.directie='vanzare'`
           )
           .all()
@@ -1187,8 +1187,8 @@ function register(router) {
       UPDATE facturi SET status = 'platita'
        WHERE directie = 'vanzare' AND status NOT IN ('anulata')
          AND id IN (
-           SELECT f.id FROM facturi f
-           JOIN (SELECT factura_id, SUM(suma) s FROM plati GROUP BY factura_id) p ON p.factura_id = f.id
+           SELECT f.id FROM (SELECT * FROM facturi WHERE activ = 1) f
+           JOIN (SELECT factura_id, SUM(suma) s FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) p ON p.factura_id = f.id
            JOIN (SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) t FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
            WHERE p.s >= l.t - 0.5)
     `);
@@ -1196,8 +1196,8 @@ function register(router) {
       UPDATE facturi SET status = 'platita_partial'
        WHERE directie = 'vanzare' AND status NOT IN ('anulata')
          AND id IN (
-           SELECT f.id FROM facturi f
-           JOIN (SELECT factura_id, SUM(suma) s FROM plati GROUP BY factura_id) p ON p.factura_id = f.id
+           SELECT f.id FROM (SELECT * FROM facturi WHERE activ = 1) f
+           JOIN (SELECT factura_id, SUM(suma) s FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) p ON p.factura_id = f.id
            JOIN (SELECT factura_id, SUM(cantitate*pret_unitar*(1+COALESCE(cota_tva,0)/100.0)) t FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
            WHERE p.s > 0.5 AND p.s < l.t - 0.5)
     `);

@@ -23,11 +23,11 @@ function inceputAn() {
 // de facturi+plăți+salarii e un proxy suficient și ieftin.
 async function regenereazaDacaENevoie() {
   const contor =
-    Number((await db.prepare("SELECT COUNT(*) AS n FROM facturi WHERE status NOT IN ('anulata','ciorna')").get()).n) * 1000000 +
+    Number((await db.prepare("SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE status NOT IN ('anulata','ciorna')").get()).n) * 1000000 +
     Number((await db.prepare("SELECT COUNT(*) AS n FROM plati").get()).n) * 1000 +
     Number((await db.prepare("SELECT COUNT(*) AS n FROM salarii").get()).n);
   const ultima = await db.prepare("SELECT documente FROM contabilitate_rulari ORDER BY id DESC LIMIT 1").get();
-  const contorFacturi = Number((await db.prepare("SELECT COUNT(*) AS n FROM facturi WHERE status NOT IN ('anulata','ciorna')").get()).n);
+  const contorFacturi = Number((await db.prepare("SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE status NOT IN ('anulata','ciorna')").get()).n);
   const contorPlati = Number((await db.prepare("SELECT COUNT(*) AS n FROM plati").get()).n);
   const contorSalarii = Number((await db.prepare("SELECT COUNT(*) AS n FROM salarii").get()).n);
   const documenteAcum = contorFacturi + contorPlati + contorSalarii;
@@ -320,7 +320,7 @@ function register(router) {
       )
       .all();
 
-    const areAchizitii = Number((await db.prepare("SELECT COUNT(*) AS n FROM facturi WHERE directie = 'achizitie' AND status NOT IN ('anulata','ciorna')").get()).n) > 0;
+    const areAchizitii = Number((await db.prepare("SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'achizitie' AND status NOT IN ('anulata','ciorna')").get()).n) > 0;
 
     const body = `
       <div class="subnav">

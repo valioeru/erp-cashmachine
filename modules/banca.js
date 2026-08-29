@@ -28,7 +28,7 @@ const { parseFisier, normalizeHeader, parseNumar, parseData } = require("../lib/
 
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
 
 function azi() {
   return new Date().toISOString().slice(0, 10);
@@ -61,7 +61,7 @@ async function facturiDeschise() {
               p.id AS partener_id, p.nume AS partener_nume,
               COALESCE(l.total,0) AS total, COALESCE(pl.platit,0) AS platit,
               COALESCE(l.total,0) - COALESCE(pl.platit,0) AS rest
-       FROM facturi f
+       FROM (SELECT * FROM facturi WHERE activ = 1) f
        JOIN parteneri p ON p.id = f.partener_id
        LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
        LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
@@ -111,7 +111,7 @@ function register(router) {
       .prepare(
         `SELECT t.*, f.document_extern, f.serie, f.numar, p.nume AS partener_nume
          FROM tranzactii_banca t
-         LEFT JOIN facturi f ON f.id = t.factura_id
+         LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = t.factura_id
          LEFT JOIN parteneri p ON p.id = f.partener_id
          ${where}
          ORDER BY t.data DESC, t.id DESC LIMIT 300`
@@ -309,7 +309,7 @@ function register(router) {
     // actualizăm statusul facturii
     const f = await db
       .prepare(
-        `SELECT COALESCE(l.total,0) AS total, COALESCE(pl.platit,0) AS platit FROM facturi f
+        `SELECT COALESCE(l.total,0) AS total, COALESCE(pl.platit,0) AS platit FROM (SELECT * FROM facturi WHERE activ = 1) f
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id WHERE f.id = ?`
       )

@@ -335,7 +335,7 @@ function register(router) {
       .all(comanda.id);
     const total = linii.reduce((s, l) => s + l.cantitate * l.pret_unitar, 0);
     const facturi = await db
-      .prepare("SELECT id, serie, numar, status FROM facturi WHERE comanda_id = ? ORDER BY id")
+      .prepare("SELECT id, serie, numar, status FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE comanda_id = ? ORDER BY id")
       .all(comanda.id);
     const factura = facturi[0] || null;
 

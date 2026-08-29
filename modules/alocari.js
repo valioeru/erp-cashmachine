@@ -35,17 +35,17 @@ const ALOC = `(
 // recalculare le pune pe administrator, ca să nu rămână nimic „orfan".
 const ALOC_FACTURA = `(
   SELECT f.id AS factura_id, f.agent_id AS utilizator_id, 100 AS procent
-    FROM facturi f
+    FROM (SELECT * FROM facturi WHERE activ = 1) f
    WHERE f.agent_id IS NOT NULL
   UNION ALL
   SELECT f.id, a.utilizator_id, a.procent
-    FROM facturi f
+    FROM (SELECT * FROM facturi WHERE activ = 1) f
     JOIN alocari_clienti a ON a.partener_id = f.partener_id
    WHERE f.agent_id IS NULL
      AND (a.valabil_de_la IS NULL OR a.valabil_de_la <= f.data_emiterii)
   UNION ALL
   SELECT f.id, p.agent_id, 100
-    FROM facturi f
+    FROM (SELECT * FROM facturi WHERE activ = 1) f
     JOIN parteneri p ON p.id = f.partener_id
    WHERE f.agent_id IS NULL
      AND p.agent_id IS NOT NULL
@@ -91,7 +91,7 @@ async function recalculeazaAgentiFacturi() {
   if (admin) {
     await db.prepare("UPDATE facturi SET agent_id = ? WHERE directie = 'vanzare' AND agent_manual = 0 AND agent_id IS NULL").run(admin.id);
   }
-  const n = await db.prepare("SELECT COUNT(*) AS n FROM facturi WHERE directie = 'vanzare' AND agent_id IS NOT NULL").get();
+  const n = await db.prepare("SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND agent_id IS NOT NULL").get();
   return n ? Number(n.n) : 0;
 }
 
@@ -394,7 +394,7 @@ function register(router) {
     const agentId = parseInt(ctx.body.agent_id, 10);
     const domeniu = String(ctx.body.domeniu || "factura");
     const deLa = String(ctx.body.de_la || "").trim();
-    const f = await db.prepare("SELECT id, partener_id, data_emiterii FROM facturi WHERE id = ?").get(facturaId);
+    const f = await db.prepare("SELECT id, partener_id, data_emiterii FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE id = ?").get(facturaId);
     if (!f) return redirect(ctx.res, "/facturi");
     const agentValid = Number.isFinite(agentId) && agentId > 0 ? agentId : null;
 
@@ -422,7 +422,7 @@ function register(router) {
     const n = await recalculeazaAgentiFacturi();
     const peAgent = await db
       .prepare(
-        `SELECT u.nume, COUNT(*) AS nr FROM facturi f JOIN utilizatori u ON u.id = f.agent_id
+        `SELECT u.nume, COUNT(*) AS nr FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN utilizatori u ON u.id = f.agent_id
           WHERE f.directie = 'vanzare' GROUP BY u.nume ORDER BY nr DESC`
       )
       .all();
@@ -476,7 +476,7 @@ function register(router) {
                 MAX(f.data_emiterii) AS ultima
            FROM parteneri p
            LEFT JOIN utilizatori ua ON ua.id = p.agent_id
-           LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND f.data_emiterii >= ?
+           LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND f.data_emiterii >= ?
            LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
           WHERE ${where}
           GROUP BY p.id, p.nume, p.cui, p.agent_id, ua.nume, ua.rol
@@ -491,7 +491,7 @@ function register(router) {
     for (const r of await db
       .prepare(
         `SELECT f.partener_id, fi.nume
-           FROM facturi f JOIN firme fi ON fi.id = f.firma_id
+           FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN firme fi ON fi.id = f.firma_id
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','necunoscut')
           GROUP BY f.partener_id, fi.nume`
       )
@@ -655,8 +655,8 @@ function register(router) {
         `SELECT p.id, p.nume, p.cui,
                 COALESCE(SUM(pl.suma), 0) AS incasat12
            FROM parteneri p
-           LEFT JOIN facturi f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
-           LEFT JOIN plati pl ON pl.factura_id = f.id AND pl.data >= ?
+           LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+           LEFT JOIN (SELECT * FROM plati WHERE activ = 1) pl ON pl.factura_id = f.id AND pl.data >= ?
           WHERE ${where}
           GROUP BY p.id, p.nume, p.cui
           ORDER BY incasat12 DESC, p.nume

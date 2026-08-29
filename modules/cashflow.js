@@ -18,7 +18,7 @@ const { send, redirect } = require("../lib/router");
 
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM plati GROUP BY factura_id)";
+const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
 const CONTURI_CASH = ["5121", "5124", "5125", "5311", "5314", "541", "542"];
 
 function azi() {
@@ -62,7 +62,7 @@ function register(router) {
         `SELECT SUBSTR(pl.data, 1, 7) AS luna,
                 SUM(CASE WHEN f.directie = 'vanzare' THEN pl.suma ELSE 0 END) AS intrari,
                 SUM(CASE WHEN f.directie = 'achizitie' THEN pl.suma ELSE 0 END) AS iesiri
-         FROM plati pl JOIN facturi f ON f.id = pl.factura_id
+         FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
          WHERE f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
          GROUP BY SUBSTR(pl.data, 1, 7)
          ORDER BY luna DESC LIMIT 12`
@@ -74,7 +74,7 @@ function register(router) {
       .prepare(
         `SELECT f.directie, f.data_scadenta, f.document_extern, f.serie, f.numar,
                 p.nume AS partener_nume, COALESCE(l.total,0) - COALESCE(pl.platit,0) AS rest
-         FROM facturi f
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id

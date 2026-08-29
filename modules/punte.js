@@ -317,12 +317,12 @@ async function ingestFacturiLinii(randuri) {
     let f = null;
     if (serie && Number.isFinite(numar)) {
       f = await db
-        .prepare("SELECT id FROM facturi WHERE directie = 'vanzare' AND UPPER(COALESCE(serie,'')) = ? AND numar = ? ORDER BY id LIMIT 1")
+        .prepare("SELECT id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND UPPER(COALESCE(serie,'')) = ? AND numar = ? ORDER BY id LIMIT 1")
         .get(serie, numar);
     }
     if (!f) {
       f = await db
-        .prepare("SELECT id FROM facturi WHERE directie = 'vanzare' AND REPLACE(UPPER(COALESCE(document_extern,'')), ' ', '') = ? ORDER BY id LIMIT 1")
+        .prepare("SELECT id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND REPLACE(UPPER(COALESCE(document_extern,'')), ' ', '') = ? ORDER BY id LIMIT 1")
         .get(String(cheie).toUpperCase().replace(/\s/g, ""));
     }
     if (!f) {
@@ -462,7 +462,7 @@ async function ingestFacturi(randuri) {
 
   // cheile facturilor deja existente, ca reimportul aceluiași raport să nu dubleze
   const existente = new Set();
-  for (const f of await db.prepare("SELECT serie, numar, firma_id FROM facturi WHERE directie = 'vanzare'").all()) {
+  for (const f of await db.prepare("SELECT serie, numar, firma_id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
     existente.add(`${String(f.serie || "").toUpperCase()}|${f.numar}|${f.firma_id || ""}`);
   }
 
@@ -749,7 +749,7 @@ async function ingestPlatiFurnizori(randuri) {
 
     const gasite = await db
       .prepare(
-        `SELECT f.id, f.status, p.cui AS cui FROM facturi f
+        `SELECT f.id, f.status, p.cui AS cui FROM (SELECT * FROM facturi WHERE activ = 1) f
            LEFT JOIN parteneri p ON p.id = f.partener_id
           WHERE f.directie = 'achizitie'
             AND REPLACE(UPPER(COALESCE(f.document_extern, '')), ' ', '') = ?`
@@ -772,7 +772,7 @@ async function ingestPlatiFurnizori(randuri) {
     const total = Math.round(nr(r.total) * 100) / 100;
 
     await db.prepare("DELETE FROM plati WHERE factura_id = ? AND observatii = ?").run(f.id, NOTA_RECONCILIERE);
-    const alte = await db.prepare("SELECT COALESCE(SUM(suma), 0) AS s FROM plati WHERE factura_id = ?").get(f.id);
+    const alte = await db.prepare("SELECT COALESCE(SUM(suma), 0) AS s FROM (SELECT * FROM plati WHERE activ = 1) plati WHERE factura_id = ?").get(f.id);
     const lipsa = Math.round((platit - Number(alte.s || 0)) * 100) / 100;
     if (lipsa > 0.009) {
       const data = String(r.data || "").slice(0, 10) || null;
@@ -987,7 +987,7 @@ const RECONSTITUITE = ["Plată reconstituită automat din statusul din SmartBill
 
 async function ingestIncasari(randuri) {
   const facturi = await db
-    .prepare("SELECT id, serie, numar, document_extern FROM facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
+    .prepare("SELECT id, serie, numar, document_extern FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
     .all();
   const dupaCheie = new Map();
   const pune = (cheie, id) => {
@@ -1012,8 +1012,8 @@ async function ingestIncasari(randuri) {
         .prepare(
           `SELECT f.id,
                   COALESCE((SELECT SUM(l.cantitate * l.pret_unitar) FROM facturi_linii l WHERE l.factura_id = f.id), 0)
-                  - COALESCE((SELECT SUM(pl.suma) FROM plati pl WHERE pl.factura_id = f.id), 0) AS sold
-             FROM facturi f WHERE f.directie = 'vanzare'`
+                  - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS sold
+             FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare'`
         )
         .all()
     ).map((x) => [x.id, Number(x.sold) || 0])
@@ -1072,7 +1072,7 @@ async function ingestIncasari(randuri) {
       const surogate = (
         await db
           .prepare(
-            `SELECT id, data, suma FROM plati
+            `SELECT id, data, suma FROM (SELECT * FROM plati WHERE activ = 1) plati
               WHERE factura_id = ? AND observatii IN (${RECONSTITUITE.map(() => "?").join(", ")})`
           )
           .all(tinte[i], ...RECONSTITUITE)

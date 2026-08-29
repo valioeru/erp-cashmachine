@@ -100,8 +100,8 @@ async function incasariPeAgent(luna) {
               COALESCE(n.net, 0) AS net,
               COALESCE(b.brut, 0) AS brut,
               COALESCE(c.cost, 0) AS cost_marfa
-         FROM plati pl
-         JOIN facturi f ON f.id = pl.factura_id
+         FROM (SELECT * FROM plati WHERE activ = 1) pl
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n
               ON n.factura_id = f.id
@@ -177,7 +177,7 @@ async function facturatPeAgent(luna) {
   const randuri = await db
     .prepare(
       `SELECT p.agent_id AS agent_id, COALESCE(SUM(n.net), 0) AS net
-         FROM facturi f JOIN parteneri p ON p.id = f.partener_id
+         FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n
               ON n.factura_id = f.id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
