@@ -761,10 +761,15 @@ function register(router) {
         const pretLinie = f.faraTva !== 0 ? f.faraTva : f.total;
         liniiPh.push("(?, ?, ?, ?, ?)");
         liniiArgs.push(facturaId, `Conform document ${f.documentExtern} (import SmartBill, fără detaliu pe produse)`, 1, pretLinie, cotaTva);
-        if (f.status === "platita") {
-          platiPh.push("(?, ?, ?, 'import', ?)");
-          platiArgs.push(facturaId, f.total, f.dataEmiterii || "", "Plată reconstituită automat din statusul din SmartBill");
-        }
+        // ATENȚIE: aici NU se mai naște nicio plată din statusul facturii.
+        // Se făcea până acum: dacă exportul zicea „platită", se scria o plată
+        // cu suma întreagă, pusă pe DATA FACTURII — o dată inventată, fiindcă
+        // exportul de facturi nu spune când s-a plătit. Din asta au ieșit două
+        // pagube: încasările cădeau în luna greșită (și comisioanele odată cu
+        // ele), iar când sosea și încasarea adevărată din raportul de încasări
+        // același ban se număra de două ori.
+        // Statusul „platita" se păstrează pe factură — informația nu se pierde
+        // — dar banii intră doar din raportul de încasări, cu data lor reală.
         create++;
       }
       if (liniiPh.length) {
