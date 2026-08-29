@@ -97,6 +97,8 @@ function register(router) {
       <label class="field"><span>Cost mașină pe lună (lei)</span><input type="number" step="0.01" name="cost_masina_lunar" value="0"></label>
       <label class="field"><span>Mașina (detalii)</span><input name="masina_detalii" value="" placeholder="ex. leasing Dacia Jogger"></label>
       <label class="field"><span>Card carburant OMV (nr. card / rezervă)</span><input name="card_carburant" value="" placeholder="ex. 003"></label>
+      <label class="field"><span>Cod în registrul de comenzi</span><input name="cod_agent" value="" maxlength="6" placeholder="ex. IR"></label>
+      <p class="ajutor">Codul cu care apare omul în registrul de comenzi (IR, VO, GT…). Dacă e gol, se ghicește din inițiale — dar inițialele se ciocnesc, deci acolo unde sunt doi cu aceleași, scrie-l aici.</p>
 
       <div class="form-actions">
         <button type="submit" class="btn">Creează utilizator</button>
@@ -112,7 +114,7 @@ function register(router) {
       // Parola implicită pentru orice cont nou; la prima logare e obligat s-o schimbe.
       const { hash, salt } = auth.hashParola(parola || "cashmachine");
       await db
-        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, sectiuni, comision_procent, cost_masina_lunar, masina_detalii, card_carburant, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
+        .prepare("INSERT INTO utilizatori (nume, email, parola_hash, parola_salt, rol, sectiuni, comision_procent, cost_masina_lunar, masina_detalii, card_carburant, cod_agent, parola_temporara) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)")
         .run(
           nume,
           (email || "").toLowerCase().trim(),
@@ -123,7 +125,8 @@ function register(router) {
           Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0,
           Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
           String(ctx.body.masina_detalii || "").trim() || null,
-          String(ctx.body.card_carburant || "").trim() || null
+          String(ctx.body.card_carburant || "").trim() || null,
+          String(ctx.body.cod_agent || "").trim().toUpperCase() || null
         );
       redirect(ctx.res, "/admin/utilizatori");
     } catch (e) {
@@ -152,6 +155,8 @@ function register(router) {
       <label class="field"><span>Cost mașină pe lună (lei)</span><input type="number" step="0.01" name="cost_masina_lunar" value="${Number(u.cost_masina_lunar ?? 0)}"></label>
       <label class="field"><span>Mașina (detalii)</span><input name="masina_detalii" value="${esc(u.masina_detalii || "")}" placeholder="ex. leasing Dacia Jogger"></label>
       <label class="field"><span>Card carburant OMV (nr. card / rezervă)</span><input name="card_carburant" value="${esc(u.card_carburant || "")}" placeholder="ex. 003"></label>
+      <label class="field"><span>Cod în registrul de comenzi</span><input name="cod_agent" value="${esc(u.cod_agent || "")}" maxlength="6" placeholder="ex. IR"></label>
+      <p class="ajutor">Codul cu care apare omul în registrul de comenzi (IR, VO, GT…). Dacă e gol, se ghicește din inițiale — dar inițialele se ciocnesc, deci acolo unde sunt doi cu aceleași, scrie-l aici.</p>
 
       ${bifeSectiuni(u)}
 
@@ -169,7 +174,7 @@ function register(router) {
     const comision = Number(String(ctx.body.comision_procent ?? 2).replace(",", ".")) || 0;
     if (parola && parola.length >= 6) {
       const { hash, salt } = auth.hashParola(parola);
-      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, sectiuni = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
+      await db.prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, sectiuni = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ?, cod_agent = ?, parola_hash = ?, parola_salt = ?, parola_temporara = 1 WHERE id = ?").run(
         nume,
         (email || "").toLowerCase().trim(),
         rol,
@@ -178,13 +183,14 @@ function register(router) {
         Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
         String(ctx.body.masina_detalii || "").trim() || null,
         String(ctx.body.card_carburant || "").trim() || null,
+        String(ctx.body.cod_agent || "").trim().toUpperCase() || null,
         hash,
         salt,
         ctx.params.id
       );
     } else {
       await db
-        .prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, sectiuni = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ? WHERE id = ?")
+        .prepare("UPDATE utilizatori SET nume = ?, email = ?, rol = ?, sectiuni = ?, comision_procent = ?, cost_masina_lunar = ?, masina_detalii = ?, card_carburant = ?, cod_agent = ? WHERE id = ?")
         .run(
           nume,
           (email || "").toLowerCase().trim(),
@@ -194,6 +200,7 @@ function register(router) {
           Number(String(ctx.body.cost_masina_lunar ?? 0).replace(",", ".")) || 0,
           String(ctx.body.masina_detalii || "").trim() || null,
           String(ctx.body.card_carburant || "").trim() || null,
+          String(ctx.body.cod_agent || "").trim().toUpperCase() || null,
           ctx.params.id
         );
     }

@@ -91,7 +91,10 @@ const CULORI_PALNIE = [
 // comenzi. Dacă cineva ține și oportunități, ele se adaugă peste treapta
 // potrivită — dar pâlnia nu mai depinde de ele ca să existe.
 async function trepteleP(filtruAgent) {
-  const undeAgent = filtruAgent ? " AND (l.atribuit_lui = ? OR l.atribuit_lui IS NULL)" : "";
+  // Când te uiți la pâlnia unui om, vezi ce e al lui. Lead-urile fără stăpân
+  // apăreau până acum în pâlnia fiecăruia, ceea ce făcea ca toți să aibă
+  // aceleași 31 de lead-uri și ca procentul de conversie să nu însemne nimic.
+  const undeAgent = filtruAgent ? " AND l.atribuit_lui = ?" : "";
   const argAgent = filtruAgent ? [filtruAgent] : [];
 
   const leaduri = await db
@@ -122,6 +125,15 @@ async function trepteleP(filtruAgent) {
     .get(...argAgent)
     .catch(() => ({ n: 0, valoare: 0 }));
 
+  // Comenzile din registrul de producție intră în aceeași treaptă. Sunt
+  // comenzi reale de client, doar că se scriu în Producție, nu în CRM — omul
+  // de vânzări trebuie să le vadă în pâlnia lui, altfel pâlnia îl minte.
+  const undeProd = filtruAgent ? " AND cp.agent_id = ?" : "";
+  const comenziProd = await db
+    .prepare(`SELECT COUNT(*) AS n FROM comenzi_productie cp WHERE cp.status != 'anulata'${undeProd}`)
+    .get(...argAgent)
+    .catch(() => ({ n: 0 }));
+
   const oportunitati = await db
     .prepare(
       `SELECT stadiu, COUNT(*) AS n, COALESCE(SUM(valoare_estimata), 0) AS valoare FROM oportunitati o
@@ -137,7 +149,7 @@ async function trepteleP(filtruAgent) {
     { label: "Calificate", unitate: "calificate", unitate1: "calificat", n: (peStadiu.get("calificat") || 0) + op("calificat").n, valoare: op("calificat").valoare },
     { label: "Oferte trimise", unitate: "oferte", unitate1: "ofertă", n: of("trimisa").n + op("oferta").n, valoare: of("trimisa").valoare + op("oferta").valoare },
     { label: "În negociere", unitate: "oferte", unitate1: "ofertă", n: of("negociere").n + op("negociere").n, valoare: of("negociere").valoare + op("negociere").valoare },
-    { label: "Comenzi", unitate: "comenzi", unitate1: "comandă", n: (Number(comenzi && comenzi.n) || 0) + op("castigat").n, valoare: (Number(comenzi && comenzi.valoare) || 0) + op("castigat").valoare },
+    { label: "Comenzi", unitate: "comenzi", unitate1: "comandă", n: (Number(comenzi && comenzi.n) || 0) + op("castigat").n + (Number(comenziProd && comenziProd.n) || 0), valoare: (Number(comenzi && comenzi.valoare) || 0) + op("castigat").valoare },
   ].map((t, i) => ({ ...t, ...CULORI_PALNIE[i] }));
 
   const pierdute = {

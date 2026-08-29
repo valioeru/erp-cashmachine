@@ -100,6 +100,107 @@ function daNu(v) {
   return /^da$/i.test(String(v || "").trim()) ? 1 : 0;
 }
 
+// --- Cine e agentul din spatele codului din registru ----------------------
+//
+// În registru scrie „IR", „GT", „MM" — inițialele omului. Le traducem o
+// singură dată, la intrarea comenzii, și de aici încolo comanda ține id-ul
+// utilizatorului, nu două litere. Așa apare numele lui peste tot și comanda
+// intră în pâlnia lui.
+//
+// Codul se ține explicit pe fișa omului (`utilizatori.cod_agent`), fiindcă
+// inițialele se ciocnesc: Mihai Moinescu și Mihai Moșneanu dau amândoi „MM".
+// Când codul nu e scris pe nimeni, ghicim din nume; dacă ghicitul dă mai
+// mulți, câștigă agentul de vânzări. Ce nu se potrivește cu nimeni merge la
+// administrator — mai bine la un om anume decât nicăieri.
+function initialeNume(nume) {
+  return String(nume || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase())
+    .join("");
+}
+
+let _agenti = null;
+async function listaAgenti() {
+  if (_agenti) return _agenti;
+  _agenti = await db.prepare("SELECT id, nume, rol, cod_agent, activ FROM utilizatori ORDER BY id").all();
+  return _agenti;
+}
+function uitaAgentii() {
+  _agenti = null;
+}
+
+async function agentDinCod(cod) {
+  const c = String(cod || "").trim().toUpperCase();
+  const toti = await listaAgenti();
+  const activi = toti.filter((u) => u.activ === undefined || Number(u.activ) !== 0);
+  if (c) {
+    const explicit = activi.filter((u) => String(u.cod_agent || "").trim().toUpperCase() === c);
+    if (explicit.length === 1) return explicit[0].id;
+    const dupaNume = activi.filter((u) => initialeNume(u.nume) === c);
+    if (dupaNume.length === 1) return dupaNume[0].id;
+    if (dupaNume.length > 1) {
+      const vanzatori = dupaNume.filter((u) => u.rol === "vanzari");
+      if (vanzatori.length === 1) return vanzatori[0].id;
+    }
+  }
+  const admin = activi.find((u) => u.rol === "admin");
+  return admin ? admin.id : (activi[0] ? activi[0].id : null);
+}
+
+// Clientul comenzii aparține agentului ei. Dacă n-avea alocare, o primește
+// acum — altfel comanda ar intra în pâlnia unui om care nu știe de ea.
+async function alocaClientul(partenerId, agentId) {
+  if (!partenerId || !agentId) return;
+  const are = await db.prepare("SELECT id FROM alocari_clienti WHERE partener_id = ? LIMIT 1").get(partenerId);
+  if (!are) {
+    await db
+      .prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, observatii) VALUES (?, ?, 100, ?)")
+      .run(partenerId, agentId, "din registrul de comenzi");
+  }
+  const p = await db.prepare("SELECT agent_id FROM parteneri WHERE id = ?").get(partenerId);
+  if (p && !p.agent_id) await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agentId, partenerId);
+}
+
+// Clientul din registru: dacă îl avem, îl legăm; dacă nu, îl facem. Un client
+// nou nu apare din senin — se naște cu un lead deja convertit în spate, ca să
+// se vadă de unde a venit și cine l-a adus.
+async function partenerSauCreeaza(nume, agentId, cache) {
+  const cheie = String(nume || "").trim().toLowerCase();
+  if (!cheie) return null;
+  if (cache.has(cheie)) return cache.get(cheie);
+
+  let p = await db.prepare("SELECT id FROM parteneri WHERE LOWER(nume) = ? OR LOWER(nume) LIKE ?").get(cheie, cheie + " %");
+  if (!p) {
+    const creat = await db
+      .prepare(
+        `INSERT INTO parteneri (tip, nume, sursa, stare, agent_id)
+         VALUES ('client', ?, 'registru comenzi', 'client_activ', ?) RETURNING id`
+      )
+      .run(String(nume).trim(), agentId || null);
+    const id = creat.lastInsertRowid;
+    await db
+      .prepare(
+        `INSERT INTO leaduri (nume, companie, sursa, stadiu, atribuit_lui, partener_id, observatii, ultima_activitate)
+         VALUES (?, ?, 'manual', 'convertit', ?, ?, ?, ?)`
+      )
+      .run(
+        String(nume).trim(),
+        String(nume).trim(),
+        agentId || null,
+        id,
+        "Client apărut direct cu o comandă în registru — lead-ul e trecut convertit, ca istoricul să înceapă de undeva.",
+        azi()
+      );
+    p = { id };
+  }
+  await alocaClientul(p.id, agentId);
+  cache.set(cheie, p.id);
+  return p.id;
+}
+
 // Excel ține datele ca număr de zile de la 30.12.1899. Când registrul vine
 // prin browser (nu ca fișier), celulele de dată sosesc exact așa — un număr.
 function dinSerialExcel(v) {
@@ -151,15 +252,19 @@ async function scrieRandRegistru(v, cacheP, existente) {
   if (livrare.text) bucati.push("Data livrare, scrisă în registru: " + livrare.text);
   const observatii = bucati.filter(Boolean).join(" · ") || null;
 
+  const agentId = await agentDinCod(v.reprezentant);
+  const partenerId = await partenerSauCreeaza(client, agentId, cacheP);
+
   await db
     .prepare(
-      `INSERT INTO comenzi_productie (numar, reprezentant, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, observatii, reteta, sursa)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_registru')`
+      `INSERT INTO comenzi_productie (numar, reprezentant, agent_id, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, observatii, reteta, sursa)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_registru')`
     )
     .run(
       numar,
       String(v.reprezentant || "").trim() || null,
-      await partenerDupaNume(client, cacheP),
+      agentId,
+      partenerId,
       client,
       String(v.produs || "").trim() || null,
       String(v.caracteristici || "").trim() || null,
@@ -329,7 +434,7 @@ function register(router) {
           `<input type="checkbox" class="sel-cmd" name="ids" value="${c.id}">`,
           `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
           c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—"),
-          esc(c.reprezentant || "—"),
+          esc(c.agent_nume || c.reprezentant || "—"),
           esc(c.tip_produs || "—"),
           `<span class="cel-lung">${esc(c.caracteristici || "")}</span>`,
           esc(c.cantitate || ""),
@@ -588,79 +693,128 @@ function register(router) {
   // ---- Creare -------------------------------------------------------------
   router.get("/productie/noua", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 3000").all();
+    const utilizatori = await db.prepare("SELECT id, nume, cod_agent FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const nrNou = await numarComandaNou();
+    const alesImplicit = ctx.user ? ctx.user.id : null;
+    const daNuSelect = (nume) =>
+      `<select name="${nume}"><option value=""></option><option value="DA">DA</option><option value="NU">NU</option><option value="NA">NA</option></select>`;
+
     const body = `
-      <form class="form" method="post" action="/productie" style="max-width:680px">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <form class="form" method="post" action="/productie" style="max-width:860px">
+        <div style="display:grid;grid-template-columns:200px 1fr;gap:14px">
           <label class="field">Nr. comandă<input name="numar" value="${esc(nrNou)}" required></label>
           <label class="field">Client
-            <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
+            <input name="client_nou" list="lista-clienti" placeholder="Scrie numele clientului" autocomplete="off">
+            <datalist id="lista-clienti">${parteneri.map((p) => `<option value="${esc(p.nume)}">`).join("")}</datalist>
           </label>
         </div>
+        <p class="ajutor">Dacă clientul nu e încă în ERP, îl scrii aici și se creează singur: partener nou, cu un lead convertit în spate, alocat agentului de mai jos.</p>
+
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <label class="field">Reprezentant vânzări
+            <select name="agent_id" required>
+              ${utilizatori
+                .map(
+                  (u) =>
+                    `<option value="${u.id}"${u.id === alesImplicit ? " selected" : ""}>${esc(u.nume)}${u.cod_agent ? ` (${esc(u.cod_agent)})` : ""}</option>`
+                )
+                .join("")}
+            </select>
+          </label>
           <label class="field">Produs comandat<input name="tip_produs" required placeholder="Ex: Folie Stretch, Pungi Curier, Bandă adezivă"></label>
-          <label class="field">Caracteristici (dimensiuni, microni…)<input name="caracteristici" placeholder="Ex: 23 microni reciclat, 1.5 kg net"></label>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 100px 1fr;gap:14px">
-          <label class="field">Cantitate<input name="cantitate" required placeholder="Ex: 15000"></label>
+
+        <label class="field">Caracteristici produs (dimensiuni, microni…)<input name="caracteristici" placeholder="Ex: 23 microni reciclat, 1.5 kg net"></label>
+
+        <div style="display:grid;grid-template-columns:1fr 110px 1fr;gap:14px">
+          <label class="field">Cantitate comandată<input name="cantitate" required placeholder="Ex: 15000"></label>
           <label class="field">UM<input name="um" value="buc"></label>
           <label class="field">Tip ambalare<input name="tip_ambalare" placeholder="Ex: 6 role/pack, 500/cutie"></label>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-          <label class="field">Data livrare promisă<input type="date" name="data_livrare"></label>
-          <label class="field">Reprezentant vânzări<input name="reprezentant" value="${esc(ctx.user ? initiale(ctx.user.nume) : "")}" placeholder="Ex: GT, IR, MM"></label>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+          <label class="field">Data plasare comandă<input type="date" name="data_initiere" value="${esc(azi())}"></label>
+          <label class="field">Data livrare comandă<input type="date" name="data_livrare"></label>
+          <label class="field">Stare comandă
+            <select name="status">${STATUSURI.map(([v, t]) => `<option value="${v}"${v === "noua" ? " selected" : ""}>${esc(t)}</option>`).join("")}</select>
+          </label>
         </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+          <label class="field">DoC emisă${daNuSelect("doc")}</label>
+          <label class="field">Fișă tehnică emisă${daNuSelect("fisa")}</label>
+          <label class="field">Facturat
+            <select name="facturat"><option value=""></option><option value="Da">Da</option><option value="Nu">Nu</option></select>
+          </label>
+        </div>
+
         <label class="field">Rețetă / consum estimat<textarea name="reteta" rows="2" placeholder="Ex: 190 kg, LDPE-23, LLDPE-80, MB 4, Tape 15 role"></textarea></label>
         <label class="field">Observații<textarea name="observatii" rows="2"></textarea></label>
         <div class="form-actions"><button class="btn" type="submit">Înregistrează comanda</button> <a class="btn secondary" href="/productie">Renunță</a></div>
       </form>
-      <p style="font-size:12px;color:var(--text-muted)">Numărul urmează formatul registrului (ziua + contor). DoC, fișa tehnică și facturarea se bifează din pagina comenzii, pe măsură ce se emit.</p>
+      <p style="font-size:12px;color:var(--text-muted)">Sunt exact coloanele din registru. Numărul urmează formatul lui: ziua plus un contor.</p>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă în producție", active: "/productie", body }));
   });
 
   router.post("/productie", async (ctx) => {
     const b = ctx.body;
-    const partenerId = parseInt(b.partener_id, 10) || null;
+    const agentId = parseInt(b.agent_id, 10) || (ctx.user ? ctx.user.id : null);
+    // Clientul: fie ales din listă, fie scris de mână. Dacă e scris și nu-l
+    // avem, se creează — cu lead-ul lui, ca să nu apară un partener din senin.
+    const numeClient = String(b.client_nou || "").trim();
+    const cache = new Map();
+    let partenerId = parseInt(b.partener_id, 10) || null;
+    if (!partenerId && numeClient) partenerId = await partenerSauCreeaza(numeClient, agentId, cache);
+    else if (partenerId) await alocaClientul(partenerId, agentId);
+
     const p = partenerId ? await db.prepare("SELECT nume FROM parteneri WHERE id = ?").get(partenerId) : null;
+    const agent = agentId ? await db.prepare("SELECT nume, cod_agent FROM utilizatori WHERE id = ?").get(agentId) : null;
     const numar = String(b.numar || "").trim() || (await numarComandaNou());
+    const livrare = String(b.data_livrare || "") || null;
+    const stare = String(b.status || "noua").trim() || "noua";
+
     const ins = await db
       .prepare(
-        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, status, observatii, reteta, sursa)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', ?, ?, 'manual') RETURNING id`
+        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, agent_id, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, observatii, reteta, sursa)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual') RETURNING id`
       )
       .run(
         numar,
         ctx.user ? ctx.user.nume : null,
         ctx.user ? ctx.user.id : null,
-        String(b.reprezentant || "").trim() || null,
+        agent ? String(agent.cod_agent || "").trim() || initialeNume(agent.nume) : null,
+        agentId,
         partenerId,
-        p ? p.nume : null,
+        p ? p.nume : numeClient || null,
         String(b.tip_produs || "").trim(),
         String(b.caracteristici || "").trim() || null,
         String(b.cantitate || "").trim(),
         String(b.um || "buc").trim(),
         String(b.tip_ambalare || "").trim() || null,
-        azi(),
-        String(b.data_livrare || "") || null,
-        String(b.data_livrare || "") || null,
+        String(b.data_initiere || "") || azi(),
+        livrare,
+        livrare,
+        ["finalizata", "facturata"].includes(stare) ? livrare : null,
+        stare,
+        daNu(b.doc),
+        daNu(b.fisa),
+        String(b.doc || "").trim() || null,
+        String(b.fisa || "").trim() || null,
+        String(b.facturat || "").trim() || null,
         String(b.observatii || "").trim() || null,
         String(b.reteta || "").trim() || null
       );
     redirect(ctx.res, `/productie/${ins.lastInsertRowid}`);
   });
 
-  // ---- Detaliu + actualizare ----------------------------------------------
-  // ---- Comanda de dat în producție, gata de printat ----------------------
-  // Hârtia care ajunge pe utilaj. Are pe ea tot ce trebuie să știe omul care
-  // o execută — ce, cât, din ce, până când, pe ce mașină și cu cine — și
-  // nimic din ce nu-l privește (preț, client-bani, comision). Se deschide
-  // într-o filă nouă și se scoate cu Ctrl+P → „Salvează ca PDF".
   router.get("/productie/:id/pdf", async (ctx) => {
     const c = await db
       .prepare(
-        `SELECT c.*, p.nume AS partener_nume, p.cui AS partener_cui
-           FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id
+        `SELECT c.*, p.nume AS partener_nume, p.cui AS partener_cui, u.nume AS agent_nume
+           FROM comenzi_productie c
+           LEFT JOIN parteneri p ON p.id = c.partener_id
+           LEFT JOIN utilizatori u ON u.id = c.agent_id
           WHERE c.id = ?`
       )
       .get(ctx.params.id);
@@ -765,7 +919,7 @@ function register(router) {
   <h2>Pentru cine și până când</h2>
   <table class="cp-date">
     ${rand("Client", c.partener_nume || c.client_text)}
-    ${rand("Reprezentant vânzări", c.reprezentant)}
+    ${rand("Reprezentant vânzări", c.agent_nume || c.reprezentant)}
     ${rand("Data plasării", c.data_initiere)}
     ${rand("Data livrării", c.data_livrare)}
     ${rand("DoC emisă", c.doc_emisa_txt || (c.doc_emisa ? "DA" : ""))}
