@@ -409,7 +409,13 @@ function register(router) {
         <a href="/productie/noua" class="btn">+ Comandă nouă în producție</a>
         <a href="/productie/planificare" class="btn secondary">Planificare</a>
         <a href="/import" class="btn secondary">Import din Excel</a>
+        ${ctx.user && ctx.user.rol === "admin"
+          ? `<form method="post" action="/productie/leaga-agenti" class="inline-form"><button class="btn secondary" type="submit" title="Pune agentul pe comenzile care n-au unul și creează clienții care lipsesc">Leagă agenții și clienții</button></form>`
+          : ""}
       </div>
+      ${ctx.query && ctx.query.legat !== undefined
+        ? `<div class="flash">Legate de agent: <b>${esc(String(ctx.query.legat))}</b> comenzi. Clienți creați sau legați: <b>${esc(String(ctx.query.clienti || 0))}</b>. Aveau deja agent: ${esc(String(ctx.query.aveau || 0))}.</div>`
+        : ""}
       <div class="cards">
         ${STATUSURI.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div></div>`).join("")}
         <div class="card"><div class="label">Cu termenul depășit</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
@@ -691,6 +697,44 @@ function register(router) {
   });
 
   // ---- Creare -------------------------------------------------------------
+  // Leagă de agenți comenzile intrate înainte ca legătura să existe, și
+  // comenzile ale căror clienți nu erau încă în ERP. Se poate apăsa oricând:
+  // atinge doar ce n-are încă legătură, deci a doua oară nu mai face nimic.
+  // Util și după ce schimbi codul unui om — comenzile lui vechi rămân la
+  // cine erau, dar cele nelegate se prind acum.
+  router.post("/productie/leaga-agenti", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/productie");
+    uitaAgentii();
+    const fara = await db
+      .prepare("SELECT id, reprezentant, client_text, partener_id, agent_id FROM comenzi_productie ORDER BY id")
+      .all();
+    const cache = new Map();
+    let agenti = 0;
+    let clienti = 0;
+    let deja = 0;
+    for (const c of fara) {
+      let agentId = c.agent_id;
+      if (!agentId) {
+        agentId = await agentDinCod(c.reprezentant);
+        if (agentId) {
+          await db.prepare("UPDATE comenzi_productie SET agent_id = ? WHERE id = ?").run(agentId, c.id);
+          agenti++;
+        }
+      } else deja++;
+      if (!agentId) continue;
+      if (c.partener_id) {
+        await alocaClientul(c.partener_id, agentId);
+      } else if (c.client_text) {
+        const pid = await partenerSauCreeaza(c.client_text, agentId, cache);
+        if (pid) {
+          await db.prepare("UPDATE comenzi_productie SET partener_id = ? WHERE id = ?").run(pid, c.id);
+          clienti++;
+        }
+      }
+    }
+    redirect(ctx.res, `/productie?legat=${agenti}&clienti=${clienti}&aveau=${deja}`);
+  });
+
   router.get("/productie/noua", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 3000").all();
     const utilizatori = await db.prepare("SELECT id, nume, cod_agent FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
