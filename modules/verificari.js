@@ -230,6 +230,98 @@ const VERIFICARI = [
     },
   },
   {
+    cheie: "cost-aberant",
+    titlu: "Linii de factură cu cost de marfă aberant",
+    de_ce:
+      "Costul liniei (cantitate × prețul de achiziție al produsului) sare de câteva ori peste cât s-a vândut linia. De obicei prețul de achiziție al produsului e greșit — luat în altă unitate de măsură, sau calculat dintr-o intrare cu cantitate aproape zero. Un singur produs stricat aici poate scoate marja firmei pe minus cu zeci de milioane.",
+    gravitate: "rosu",
+    async ruleaza() {
+      const randuri = await db
+        .prepare(
+          `SELECT f.id AS factura_id, f.serie, f.numar, f.data_emiterii,
+                  pr.id AS produs_id, pr.denumire, pr.cod, pr.unitate_masura, pr.pret_achizitie,
+                  fl.cantitate, fl.pret_unitar,
+                  fl.cantitate * COALESCE(pr.pret_achizitie, 0) AS cost,
+                  fl.cantitate * fl.pret_unitar AS venit
+             FROM facturi_linii fl
+             JOIN facturi f ON f.id = fl.factura_id
+             JOIN produse pr ON pr.id = fl.produs_id
+            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+              AND COALESCE(pr.pret_achizitie, 0) > 0
+              AND fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100
+            ORDER BY fl.cantitate * COALESCE(pr.pret_achizitie, 0) DESC`
+        )
+        .all();
+      const cost = randuri.reduce((s, r) => s + nr(r.cost), 0);
+      const venit = randuri.reduce((s, r) => s + nr(r.venit), 0);
+      const produse = new Set(randuri.map((r) => r.produs_id));
+      return {
+        n: randuri.length,
+        sumar: `${randuri.length} linii, pe ${produse.size} produse: cost ${money(cost)} pentru marfă vândută cu ${money(venit)}`,
+        antet: ["Factură", "Data", "Produs", "Cantitate", "Preț vânzare", "Preț achiziție", "Cost linie", "Venit linie"],
+        randuri: randuri.slice(0, LIMITA).map((r) => [
+          `<a href="/facturi/${r.factura_id}">${esc(String(r.serie || "") + String(r.numar || ""))}</a>`,
+          esc(String(r.data_emiterii || "").slice(0, 10)),
+          `<a href="/produse/${r.produs_id}">${esc(r.denumire)}</a>${r.cod ? ` <span style="color:var(--text-muted)">(${esc(r.cod)})</span>` : ""}`,
+          `${nr(r.cantitate)} ${esc(r.unitate_masura || "")}`,
+          money(r.pret_unitar),
+          `<strong style="color:var(--danger)">${money(r.pret_achizitie)}</strong>`,
+          `<strong style="color:var(--danger)">${money(r.cost)}</strong>`,
+          money(r.venit),
+        ]),
+      };
+    },
+  },
+  {
+    cheie: "achizitii-duplicate",
+    titlu: "Facturi de achiziție cu același număr de document",
+    de_ce:
+      "Aceeași factură de furnizor înregistrată de două ori dublează datoria. E prima suspectă când „de plătit” din ERP nu seamănă cu soldul din balanță.",
+    gravitate: "rosu",
+    async ruleaza() {
+      const grupuri = await db
+        .prepare(
+          `SELECT f.document_extern AS doc, f.partener_id, COUNT(*) AS n
+             FROM facturi f
+            WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata')
+              AND f.document_extern IS NOT NULL AND f.document_extern <> ''
+            GROUP BY f.document_extern, f.partener_id
+           HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC`
+        )
+        .all();
+      const detalii = [];
+      let inPlus = 0;
+      for (const g of grupuri) {
+        const f = await db
+          .prepare(
+            `SELECT f.id, p.nume AS partener,
+                    COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva,0)/100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
+               FROM facturi f LEFT JOIN parteneri p ON p.id = f.partener_id
+              WHERE f.directie = 'achizitie' AND f.document_extern = ? AND f.partener_id ${g.partener_id === null ? "IS NULL" : "= ?"}
+              ORDER BY f.id`
+          )
+          .all(...(g.partener_id === null ? [g.doc] : [g.doc, g.partener_id]));
+        const sume = f.map((x) => nr(x.total));
+        inPlus += sume.slice(1).reduce((a, b) => a + b, 0);
+        if (detalii.length < LIMITA) {
+          detalii.push([
+            `<strong>${esc(g.doc)}</strong>`,
+            esc((f[0] && f[0].partener) || "—"),
+            g.n,
+            f.map((x) => `<a href="/facturi/${x.id}">#${x.id}</a> ${money(x.total)}`).join("<br>"),
+          ]);
+        }
+      }
+      return {
+        n: grupuri.length,
+        sumar: `${grupuri.length} documente înregistrate de mai multe ori, ${money(inPlus)} datorie în plus`,
+        antet: ["Document", "Furnizor", "De câte ori", "Facturile"],
+        randuri: detalii,
+      };
+    },
+  },
+  {
     cheie: "facturi-fara-agent",
     titlu: "Facturi de vânzare fără agent",
     de_ce: "Fără agent, factura nu intră în comision și nu apare în raportul pe agenți. Recalcularea din Alocări le pune pe administrator.",
