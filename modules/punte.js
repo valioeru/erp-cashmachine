@@ -978,6 +978,12 @@ async function ingestSugestii(randuri) {
 // incasat. Dublurile se evita dupa (factura, data, suma), deci se poate rula
 // de trei ori pe zi fara sa se adune plati fantoma.
 const NOTA_INCASARE = "încasare SmartBill";
+// Plăți născocite din statusul facturii, nu din extras: importul vechi le
+// scria pe data facturii, cu suma întreagă, doar pentru că SmartBill zicea
+// „platită". Când vine încasarea adevărată, cu data ei reală, cele două
+// înseamnă același ban de două ori. Aici le recunoaștem ca să le dăm la o
+// parte în locul în care apare încasarea adevărată.
+const RECONSTITUITE = ["Plată reconstituită automat din statusul din SmartBill", "Încasare adusă prin punte din SmartBill"];
 
 async function ingestIncasari(randuri) {
   const facturi = await db
@@ -1014,6 +1020,7 @@ async function ingestIncasari(randuri) {
   );
 
   let scrise = 0;
+  let surogateSterse = 0;
   let dubluri = 0;
   let negasite = 0;
   const exemple = [];
@@ -1055,6 +1062,21 @@ async function ingestIncasari(randuri) {
         dubluri++;
         continue;
       }
+      // Dacă pe factura asta stă deja o plată reconstituită din status, de
+      // exact aceeași sumă, ea era doar un surogat pentru încasarea care
+      // tocmai a sosit. O ștergem, altfel banul se numără de două ori — așa
+      // s-au adunat milioanele de încasări fantomă din anii trecuți.
+      const surogate = await db
+        .prepare(
+          `SELECT id, data FROM plati
+            WHERE factura_id = ? AND ROUND(suma * 100) = ROUND(? * 100) AND observatii IN (${RECONSTITUITE.map(() => "?").join(", ")})`
+        )
+        .all(tinte[i], parte, ...RECONSTITUITE);
+      for (const v of surogate) {
+        await db.prepare("DELETE FROM plati WHERE id = ?").run(v.id);
+        existente.delete(`${tinte[i]}|${String(v.data).slice(0, 10)}|${parte.toFixed(2)}`);
+        surogateSterse++;
+      }
       await db
         .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES (?, ?, ?, ?, ?)")
         .run(tinte[i], parte, zi, curat(r.metoda) || "transfer bancar", NOTA_INCASARE);
@@ -1064,7 +1086,7 @@ async function ingestIncasari(randuri) {
     }
   }
 
-  return { incasari_scrise: scrise, dubluri_sarite: dubluri, facturi_negasite: negasite, exemple_negasite: exemple.slice(0, 10) };
+  return { incasari_scrise: scrise, dubluri_sarite: dubluri, surogate_sterse: surogateSterse, facturi_negasite: negasite, exemple_negasite: exemple.slice(0, 10) };
 }
 
 const HANDLERE = {
