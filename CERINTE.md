@@ -102,13 +102,35 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
 - [x] **Filtrul din Configurări → Date importate** caută în tot setul, nu doar
       în pagina afișată, și după numărul documentului (CSHM3157, cu sau fără
       spațiu, indiferent de majuscule).
-- [x] **Ghidul de utilizare**: PDF de 47 de pagini cu capturi, plus același
+- [x] **Ghidul de utilizare**: PDF cu capturi, plus același
       text în aplicație (`/ghid`, pe capitole). Fiecare pagină are sus-dreapta
       „? Cum se folosește", care duce în capitolul secțiunii ei. Fiecare om
       vede doar capitolele secțiunilor pe care le are bifate.
 - [x] **Registrul de comenzi în Producție** (29.08.2026): lista arată exact ca
       Excelul (16 coloane), fiecare rând are buton **„Comandă PDF"** — o foaie
       A4 fără prețuri, cu alocarea pe utilaj și trei rubrici de semnătură.
+- [x] **Reprezentantul vânzări, ales din coloană** (29.08.2026): celula e o
+      listă derulantă cu utilizatorii; se salvează pe loc, rămâi pe filtrul tău.
+      Când pui agentul, clientul i se alocă lui dacă nu era deja al altcuiva.
+      La comandă nouă, clientul care nu există se creează singur, cu un lead
+      „convertit" în spate.
+- [x] **Valoare estimată pe comandă** (29.08.2026): registrul n-are prețuri, așa
+      că din câmpul ăsta iese comisionul potențial. Unde nu e completat, se ia
+      media facturilor clientului pe ultimul an; unde nici asta nu se poate,
+      comanda se numără dar nu se pune la lei. Coloana „De unde e valoarea"
+      spune pe fiecare rând care variantă s-a folosit.
+- [x] **Comisionul potențial și pâlnia iau doar comenzile „În producție"**
+      (29.08.2026): cele finalizate și cele facturate rămân în listă, dar ies
+      din potențial — comisionul lor se vede la facturi, unde e deja real.
+- [x] **Sortarea tabelelor, reparată** (29.08.2026): scriptul din layout stătea
+      într-un template literal, așa că `\d` și `\s` din regexuri se pierdeau la
+      construirea paginii. Datele și sumele se sortau alfabetic („1, 100000,
+      160…"). Acum sortează ca numere și ca date, în toată aplicația, iar o
+      celulă cu listă derulantă se sortează după ce e ales, nu după toate
+      opțiunile.
+- [x] **Ghidul, refăcut** (29.08.2026): 52 de pagini, capturi noi din registrul
+      de comenzi, capitole noi pentru reprezentant, comandă nouă, comisionul din
+      comenzile în producție și codul de agent din fișa utilizatorului.
 
 ## De făcut
 
