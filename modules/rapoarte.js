@@ -26,6 +26,13 @@ const { send, redirect } = require("../lib/router");
 // Subinterogări refolosite: totalul fiecărei facturi (calculat din liniile ei)
 // și cât s-a încasat/plătit pe ea. Scrise o singură dată ca să nu divergă
 // între rapoarte — dacă se schimbă formula, se schimbă într-un singur loc.
+// Netul facturii — fără TVA. Perechea lui, SUB_TOTAL, e cu TVA. Amândouă sunt
+// nevoie: banii care intră în cont sunt cu TVA, iar ca să-i arăți fără trebuie
+// să-i împarți la raportul net/brut al facturii pe care s-au încasat. O cotă
+// fixă de 19% ar minți pe facturile cu cote amestecate sau cu 0%.
+const SUB_NET =
+  "(SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id)";
+
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
 const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
@@ -134,10 +141,10 @@ function lunileUltimele(n) {
 // Interval de raportare cu preseturi: ultimele N luni, anul curent, anul
 // trecut sau o perioadă custom aleasă de om. Folosit de rapoartele cu filtru
 // de perioadă, ca toate să se comporte la fel.
-function intervalDinQuery(ctx, implicitLuni = 12) {
+function intervalDinQuery(ctx, implicitLuni = 12, presetImplicit = null) {
   const aziStr = azi();
   const an = Number(aziStr.slice(0, 4));
-  const preset = String(ctx.query.perioada || `${implicitLuni}luni`);
+  const preset = String(ctx.query.perioada || presetImplicit || `${implicitLuni}luni`);
   let deLa;
   let panaLa = aziStr;
   const luna = Number(aziStr.slice(5, 7));
@@ -1689,7 +1696,9 @@ function register(router) {
   // 60/40. Altfel raportul ăsta ar arăta alte cifre decât cele pe care le vede
   // agentul la el, iar oamenii s-ar certa pe care e „adevărat".
   router.get("/rapoarte/agenti-lunar", async (ctx) => {
-    const interval = intervalDinQuery(ctx, 12);
+    // Implicit se deschide pe luna în curs: ăsta e intervalul pe care se uită
+    // omul de zece ori pe zi. Restul se aleg din selector.
+    const interval = intervalDinQuery(ctx, 12, "luna_curenta");
     const { deLa, panaLa } = interval;
     const arata = ["ambele", "facturat", "incasat"].includes(String(ctx.query.arata)) ? String(ctx.query.arata) : "ambele";
 
@@ -1715,11 +1724,11 @@ function register(router) {
     const facturat = await db
       .prepare(
         `SELECT al.utilizator_id AS agent, SUBSTR(f.data_emiterii, 1, 7) AS luna,
-                COALESCE(SUM(COALESCE(t.total,0) * al.procent / 100.0), 0) AS suma,
+                COALESCE(SUM(COALESCE(n.net,0) * al.procent / 100.0), 0) AS suma,
                 COUNT(DISTINCT f.id) AS nr
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
-         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+         LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
            AND f.data_emiterii >= ? AND f.data_emiterii <= ?
          GROUP BY al.utilizator_id, SUBSTR(f.data_emiterii, 1, 7)`
@@ -1729,11 +1738,14 @@ function register(router) {
     const incasat = await db
       .prepare(
         `SELECT al.utilizator_id AS agent, SUBSTR(pl.data, 1, 7) AS luna,
-                COALESCE(SUM(pl.suma * al.procent / 100.0), 0) AS suma,
+                COALESCE(SUM(pl.suma * al.procent / 100.0
+                             * CASE WHEN COALESCE(t.total,0) > 0 THEN COALESCE(n.net,0) / t.total ELSE 1 END), 0) AS suma,
                 COUNT(*) AS nr
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
+         LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
            AND pl.data >= ? AND pl.data <= ?
          GROUP BY al.utilizator_id, SUBSTR(pl.data, 1, 7)`
@@ -1857,7 +1869,8 @@ function register(router) {
       ${table(antet, corp, { total: randTotal })}
       <p style="font-size:12px;color:var(--text-muted)">
         ${arata === "ambele" ? "În fiecare celulă: sus <strong>facturat</strong> (după data facturii), jos, cu verde, <strong>încasat</strong> (după data plății). " : ""}
-        Facturatul e cu TVA. Încasarea se pune pe luna în care au intrat banii, nu pe luna facturii — de aceea liniile nu se
+        Toate sumele sunt <strong>fără TVA</strong>. Încasările intră în cont cu TVA, așa că fiecare e împărțită la
+        raportul net/brut al facturii pe care s-a încasat. Încasarea se pune pe luna în care au intrat banii, nu pe luna facturii — de aceea liniile nu se
         potrivesc una peste alta, iar diferența e chiar creditul pe care îl dai clienților.
         ${peAni ? "Perioada aleasă depășește 24 de luni, așa că tabelul e grupat pe ani; alege un interval mai scurt pentru detaliu lunar." : ""}
       </p>
