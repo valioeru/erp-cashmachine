@@ -349,7 +349,56 @@ const VERIFICARI = [
   },
 ];
 
+// Plățile născocite din statusul facturii, nu din extras. Vezi comentariul
+// din modules/import.js: importul vechi le scria pe data facturii, cu suma
+// întreagă, doar pentru că SmartBill zicea „platită".
+const RECONSTITUITE = [
+  "Plată reconstituită automat din statusul din SmartBill",
+  "Încasare adusă prin punte din SmartBill",
+];
+
+// Câte plăți născocite mai stau pe facturi care au și încasări adevărate.
+// Pe alea trebuie să le ștergem: adevărul e ce scrie în raportul de încasări.
+async function surogateDeSters() {
+  const semne = RECONSTITUITE.map(() => "?").join(", ");
+  return db
+    .prepare(
+      `SELECT pl.id, pl.factura_id, pl.suma, pl.data
+         FROM plati pl
+         JOIN facturi f ON f.id = pl.factura_id
+        WHERE f.directie = 'vanzare'
+          AND pl.observatii IN (${semne})
+          AND EXISTS (
+            SELECT 1 FROM plati x
+             WHERE x.factura_id = pl.factura_id AND x.observatii NOT IN (${semne})
+          )`
+    )
+    .all(...RECONSTITUITE, ...RECONSTITUITE);
+}
+
 function register(router) {
+  // Curățarea plăților născocite. Se șterg DOAR cele de pe facturi care au
+  // deja o încasare adevărată, adusă din raportul de încasări — deci nu se
+  // pierde informația „a fost plătită", ea rămâne în încasarea reală, cu data
+  // ei corectă. Facturile care n-au nicio încasare reală rămân neatinse.
+  router.post("/admin/date/curata-surogate", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const deSters = await surogateDeSters();
+    let sterse = 0;
+    let suma = 0;
+    for (const r of deSters) {
+      await db.prepare("DELETE FROM plati WHERE id = ?").run(r.id);
+      sterse++;
+      suma += nr(r.suma);
+    }
+    const body = `
+      <h2>Curățare făcută</h2>
+      <p>S-au șters <strong>${sterse}</strong> plăți născocite din statusul facturii, în valoare de <strong>${money(suma)}</strong>.
+      Toate erau pe facturi care au și încasarea adevărată, cu data ei reală — deci nu s-a pierdut nimic, doar s-a oprit numărarea de două ori.</p>
+      <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Curățare plăți", active: "/admin/date", body }));
+  });
+
   router.get("/admin/date", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
 
@@ -399,7 +448,25 @@ function register(router) {
       })
       .join("");
 
+    const surogate = await surogateDeSters();
+    const surogateSuma = surogate.reduce((s2, r) => s2 + nr(r.suma), 0);
+
     const body = `
+      ${
+        surogate.length
+          ? `<div class="card" style="border-left:4px solid var(--danger);margin-bottom:16px">
+               <div class="label">Plăți născocite din statusul facturii, pe facturi care au și încasarea adevărată</div>
+               <div class="value">${surogate.length} plăți · ${money(surogateSuma)}</div>
+               <p style="font-size:13px;margin:8px 0 10px;color:var(--text-muted)">
+                 Astea sunt banii numărați de două ori. Se pot șterge fără pierdere: încasarea adevărată,
+                 cu data ei reală, rămâne pe factură. Facturile care n-au nicio încasare adevărată nu se ating.
+               </p>
+               <form method="post" action="/admin/date/curata-surogate" onsubmit="return confirm('Se șterg ${surogate.length} plăți născocite. Încasările adevărate rămân. Continui?')">
+                 <button class="btn" type="submit">Șterge cele ${surogate.length} plăți născocite</button>
+               </form>
+             </div>`
+          : ""
+      }
       <p style="color:var(--text-muted);font-size:13px;margin-top:0">
         Pagina doar citește: caută greșelile tăcute adunate din importuri și arată exact ce rânduri sunt de vină.
         Nu șterge și nu repară nimic singură — te uiți întâi, apoi decizi.
