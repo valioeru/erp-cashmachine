@@ -42,6 +42,7 @@ require("./modules/financiar").register(router);
 require("./modules/calculator").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
+require("./modules/configurari").register(router);
 
 router.get("/healthz", (ctx) => {
   ctx.res.writeHead(200, { "Content-Type": "text/plain" });
