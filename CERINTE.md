@@ -96,14 +96,30 @@ Lista asta e ordinea în care se construiește. Ce e bifat e în producție.
 ## De făcut
 
 ### 1. Restul detaliului pe produse din facturi
-Din cele 594 de facturi de vânzare pe 2026, 204 au detaliu real pe produse;
-**390 mai au doar linia de rezumat** pusă de importul inițial („Conform
-document CSHM…"). Puntea își ia coada singură din `/api/facturi-fara-linii`
-(CORS deschis doar pentru originile SmartBill, doar cu sesiunea adminului),
-iar scriptul stă în `punte/facturi-linii.js`.
+La 29.08.2026 mai sunt **113 facturi din 2026** (și 823 din 2025) cu doar linia
+de rezumat („Conform document CSHM…"). Puntea își ia coada din
+`/api/facturi-fara-linii` (CORS deschis doar pentru originile SmartBill, doar cu
+sesiunea adminului), iar scriptul stă în `punte/facturi-linii.js`.
 
-**Blocat**: sesiunea din `cloud.smartbill.ro` a expirat. Vali se loghează o
-dată acolo și pot rula restul singur — la ~5 facturi/minut, vreo 80 de minute.
+**Nu era blocat pe sesiune, cum am crezut o rundă întreagă.** Puntea punea
+id-ul de ERP direct în adresa SmartBill (`/raport/factura/{id}/`), dar acolo
+merge id-ul lui SmartBill — nouă cifre. Primea 404 la fiecare factură și
+raporta liniștit „incomplet" la toate. Rezolvat: puntea își culege singură
+harta *număr document → id SmartBill* din grila raportului
+(`await __punte.culegeHarta()`), cu perioada pusă pe anul dorit.
+
+Mersul de lucru, cu tab-ul SmartBill pe `/raport/facturi/`:
+
+```
+await __punte.culegeHarta()          // umblă singură prin paginile grilei
+__punte.incarcaCoada(lista.facturi)  // lista din /api/facturi-fara-linii
+__punte.porneste()
+```
+
+**De ținut minte**: după vreo 80–85 de facturi, tab-ul SmartBill îngheață —
+prea multe pagini Angular deschise una după alta. Se lucrează în tranșe de
+~30, cu tab proaspăt între ele. Ce e deja trimis stă în siguranță în loturi;
+ce e în tampon la momentul înghețării se pierde, dar facturile rămân în listă.
 
 ### 2. Ce mai lipsește la cost company
 - **Carburantul OMV** — singurul lucru care lipsește. Cere login-ul lui Vali
@@ -129,6 +145,18 @@ Formulele implicite (folie stretch, bandă adezivă) sunt puse cu bun-simț, nu 
 cifrele din fabrică. Se schimbă din `/calculator/categorii` — Vali dă cifrele
 lui și le înlocuim.
 
+## Butoane construite, neapăsate
+
+Toate patru arată întâi, rând cu rând, ce s-ar schimba; niciunul n-a fost
+apăsat de mine. Stau în Configurări → Verificări date.
+
+| Buton | Ce face | Cât, la 29.08.2026 |
+|---|---|---|
+| Curățare storno | scoate din calcul stornourile dublate | construit mai demult |
+| Curățare încasări duble | pune `activ = 0` pe plățile numărate de mai multe ori (nu șterge) | 367 plăți · 41,8 mil. lei |
+| Cantități inversate | schimbă cantitatea cu prețul pe linie, totalul rămâne identic | 32 linii · 35,4 mil. lei cost fals |
+| Unități de măsură | pune o unitate reală în loc de denumirea produsului | 3.000 produse |
+
 ## Blocaje care țin de altcineva
 
 - **OMV**: nu introduc parole. Vali se loghează el și dă permisiune
@@ -142,3 +170,11 @@ lui și le înlocuim.
   cu motivul scris pe ele.
 - **Balanțele din Conta**: al treilea tabel de pe dashboard (profitul contabil)
   se completează singur când sunt încărcate balanțele în `/balanta`.
+- **Fișa contului Warehouse All din Conta**: îmi trebuie o sesiune deschisă în
+  Conta, în browserul lui Vali. În Drive e doar un PDF din iulie 2024.
+- **Statele de plată**: nu sunt în Drive-ul contului `cashmachine.ro`. De aflat
+  unde stau (alt cont, alt folder, atașate pe email).
+- **Cardurile REZERVA de carburant → persoană**: regula s-a pierdut și nu e
+  nicăieri în baza de date (`utilizatori.card_carburant` și `masina_detalii`
+  sunt goale). REZERVA 2 e diferit între Cash Machine și Warehouse — Vali
+  trebuie să o spună din nou.
