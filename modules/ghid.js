@@ -87,7 +87,8 @@ const GHID = [
 "t":"Pipeline — pâlnia de vânzări",
 "p":[
 "Pâlnia arată unde se pierd vânzările. Sus intră lead-urile (nume de firme cu care n-am vorbit încă serios), jos ies comenzile. Fiecare treaptă e mai îngustă decât cea de deasupra — asta e normal, nu toate discuțiile se transformă în comandă.",
-"Sub fiecare treaptă scrie și cât la sută a trecut din treapta de dinainte. Dacă între „Oferte trimise” și „În negociere” cade brusc, acolo e problema."
+"Sub fiecare treaptă scrie și cât la sută a trecut din treapta de dinainte. Dacă între „Oferte trimise” și „În negociere” cade brusc, acolo e problema.",
+"În treapta <b>„Comenzi”</b> intră și comenzile din <b>Producție → Comenzi</b>, nu doar cele scrise în CRM. Comanda ajunge în pâlnia agentului pe care îl are trecut la <b>Reprezentant vânzări</b>. Dar intră doar comenzile cu starea <b>„În producție”</b>: cele finalizate și cele facturate au ieșit din pâlnie, ele se văd la facturi. Altfel pâlnia ar crește la nesfârșit și n-ar mai spune nimic despre ce ai acum în lucru."
 ],
 "pasi":[],
 "sfat":"Din dreapta sus poți alege un singur agent, ca să vezi pâlnia lui, nu pe a firmei."
@@ -181,10 +182,26 @@ const GHID = [
 "t":"Comisionul meu",
 "p":[
 "Pentru agenți: cât ai de încasat ca și comision, calculat din <b>încasările</b> reale, nu din facturi. Adică din banii intrați efectiv în cont.",
-"Poți cere și mai puțin decât ai — diferența nu se pierde, se reportează în luna următoare."
+"Poți cere și mai puțin decât ai — diferența nu se pierde, se reportează în luna următoare.",
+"Sus sunt patru cifre, în ordinea în care banii se apropie de tine. <b>De încasat acum</b> — bani câștigați, îi poți cere. <b>Comision viitor</b> — facturi emise, dar neîncasate; devin ai tăi când plătește clientul. <b>Comision potențial</b> — comenzile în producție plus lead-urile deschise; e o promisiune, nu un drept. <b>Încasat luna asta</b> — baza din care iese comisionul lunii."
 ],
 "pasi":[],
-"sfat":null
+"sfat":"Procentul tău e trecut în fișa ta de utilizator. Dacă e 0%, toate cifrele ies 0 — nu e o defecțiune."
+},
+{
+"t":"Comisionul din comenzile aflate în producție",
+"p":[
+"Sub tabelele de facturi e o listă cu <b>comenzile tale cu starea „În producție”</b>: clientul a comandat, dar banii n-au intrat, deci comisionul din ele e încă o promisiune.",
+"Comenzile <b>finalizate</b> și cele <b>facturate</b> nu apar aici. Ele rămân în Producție → Comenzi, dar comisionul lor nu mai e potențial: se vede la facturi, unde e deja real. Așa nu numeri de două ori aceiași bani.",
+"Registrul de comenzi vine dintr-un Excel <b>fără prețuri</b>, așa că valoarea unei comenzi se ia în ordinea asta: <b>1.</b> cât ai scris tu la „Valoare estimată” pe comandă; <b>2.</b> dacă n-ai scris nimic, <b>media facturilor clientului</b> din ultimul an; <b>3.</b> dacă nici asta nu se poate (client nou, fără facturi), comanda apare în listă cu „scrie o valoare”, se numără, dar nu se pune la lei.",
+"Coloana <b>„De unde e valoarea”</b> îți spune pe fiecare rând care din cele trei a fost folosită. Nicio cifră nu cade din cer."
+],
+"pasi":[
+"Intri pe comandă din <b>Producție → Comenzi</b>, pe numărul ei.",
+"Completezi <b>„Valoare estimată (lei)”</b> cu cât crezi că va ieși factura.",
+"Salvezi. Cifra apare imediat la comision, la tine și în raportul de comisioane."
+],
+"sfat":"Estimarea nu obligă pe nimeni la nimic — nu ajunge în nicio factură. E doar ca să știi cât valorează munca pe care o ai în mână."
 }
 ]
 },
@@ -317,6 +334,37 @@ const GHID = [
 ],
 "pasi":[],
 "sfat":"Data livrării scrisă cu roșu înseamnă că a trecut termenul și comanda e încă deschisă."
+},
+{
+"t":"Reprezentantul vânzări, schimbat din listă",
+"p":[
+"În Excel, la reprezentant scriau <b>inițiale</b> — „IR”, „GT”, „MM”. Aici, coloana <b>Reprezentant</b> e o listă derulantă cu <b>oamenii din firmă</b>. Deschizi lista pe rândul comenzii, alegi omul, și se salvează pe loc — nu intri în comandă, nu apeși „Salvează”, rămâi exact pe filtrul și pe locul unde erai.",
+"Când pui un reprezentant pe o comandă se întâmplă și altceva: <b>clientul acelei comenzi i se alocă lui</b>, dacă nu era deja al altcuiva. Așa comanda intră în pâlnia lui și în comisionul lui potențial. Un client care are deja un agent nu i se ia — alocarea veche rămâne.",
+"La comenzile vechi, aduse din Excel, inițialele au fost traduse automat în oameni: IR → Isabela Radu, GT → Gabriela Tecuceanu, MM → Mihai Moinescu, CG → Cătălin Georgescu, VO → Valentin Oeru. Ce n-a putut fi recunoscut a rămas pe administrator, ca să nu se piardă."
+],
+"pasi":[
+"Găsești rândul comenzii în listă.",
+"Deschizi lista din coloana <b>Reprezentant</b>.",
+"Alegi omul. Se salvează singur."
+],
+"sfat":"Dacă un om nu apare în listă, înseamnă că nu are cont activ în aplicație. Contul se face din Utilizatori."
+},
+{
+"t":"Comandă nouă",
+"p":[
+"Butonul <b>„+ Comandă nouă în producție”</b>, sus. Formularul are aceleași câmpuri ca și coloanele din registru, ca să nu fie două adevăruri diferite.",
+"La <b>client</b> scrii numele. Dacă firma există deja, ți-o sugerează pe măsură ce scrii. <b>Dacă nu există, se creează singură</b> — partener nou, plus un lead marcat „convertit”, fiindcă a ajuns direct la comandă. Nu mai ai de introdus clientul separat.",
+"La <b>reprezentant</b> alegi din lista de utilizatori, la fel ca în tabel.",
+"<b>Valoare estimată (lei)</b> e opțională și nu apare pe hârtia din hală. E singurul loc din care comanda își știe valoarea, fiindcă registrul de comenzi n-are prețuri. Din ea iese comisionul potențial al agentului."
+],
+"pasi":[
+"Apeși <b>„+ Comandă nouă în producție”</b>.",
+"Completezi clientul, produsul, cantitatea și data livrării.",
+"Alegi reprezentantul din listă.",
+"Dacă știi cam cât iese, scrii valoarea estimată.",
+"Salvezi. Comanda apare în registru și în pâlnia agentului."
+],
+"sfat":"Numărul comenzii se face singur, după data de azi (de forma 20260829-001). Nu-l scrii tu."
 },
 {
 "t":"Comanda PDF — hârtia care ajunge în hală",
@@ -530,6 +578,16 @@ const GHID = [
 "sfat":"„Configurări” și „Utilizatori” sunt marcate <b>sensibil</b> — dă-le cu cap, acolo se văd toate datele firmei."
 },
 {
+"t":"Comisionul și codul din registrul de comenzi",
+"p":[
+"Tot în fișa omului sunt două câmpuri care contează pentru vânzări. <b>Comision (%)</b> — procentul din care i se calculează comisionul. Dacă e 0, toate cifrele lui de la „Comisionul meu” ies zero; nu e o defecțiune, e ce scrie în fișă.",
+"<b>Cod în registrul de comenzi</b> — inițialele cu care apărea omul în Excelul de comenzi („GT”, „IR”, „MM”). E folosit o singură dată: când se importă comenzi vechi, ca aplicația să știe pe cine să pună comanda. Dacă îl lași gol, se încearcă potrivirea după inițialele numelui, iar ce nu se recunoaște rămâne pe administrator.",
+"Un om care pleacă din firmă se <b>dezactivează</b>, nu se șterge. Dispare din listele de reprezentant, dar rămâne pe comenzile și facturile lui vechi."
+],
+"pasi":[],
+"sfat":"Codul se scrie o dată și se uită. Pentru comenzile noi nu mai contează — acolo alegi omul din listă."
+},
+{
 "t":"Verificări date",
 "p":[
 "Aplicația se verifică singură și îți spune unde datele nu se leagă: facturi încasate peste valoarea lor, plăți identice pe aceeași factură, facturi fără linii, plăți pe facturi anulate.",
@@ -606,6 +664,46 @@ const GHID = [
 "t":"Pot strica ceva dacă apăs?",
 "p":[
 "Butoanele care șterg sau modifică definitiv cer confirmare. Restul doar afișează. Umblă liniștit prin aplicație — se învață uitându-te."
+],
+"pasi":[],
+"sfat":null
+},
+{
+"t":"Am schimbat reprezentantul pe o comandă, dar clientul a rămas la vechiul agent.",
+"p":[
+"Așa e gândit: un client care are deja un agent nu i se ia automat altuia. Alocarea clientului se schimbă din CRM → Alocare."
+],
+"pasi":[],
+"sfat":null
+},
+{
+"t":"De ce comisionul meu potențial e 0, deși am comenzi în producție?",
+"p":[
+"Ori procentul tău de comision e 0 în fișa de utilizator, ori comenzile n-au valoare: nu ai scris „Valoare estimată” și clientul n-are facturi în ultimul an. Scrie valoarea pe comandă și cifra apare."
+],
+"pasi":[],
+"sfat":null
+},
+{
+"t":"O comandă finalizată nu mai apare la comisionul potențial. S-a pierdut?",
+"p":[
+"Nu. Rămâne în Producție → Comenzi. Doar că nu mai e potențial: odată facturată, comisionul din ea se vede la facturi, unde e real. La potențial stau doar comenzile „În producție”, ca să nu numeri de două ori aceiași bani."
+],
+"pasi":[],
+"sfat":null
+},
+{
+"t":"Am scris un client care nu există la comandă nouă.",
+"p":[
+"Se creează singur: partener nou plus un lead marcat „convertit”. Nu trebuie să-l introduci separat înainte."
+],
+"pasi":[],
+"sfat":null
+},
+{
+"t":"Ce e „Valoare estimată” și ajunge pe factură?",
+"p":[
+"Nu ajunge nicăieri în afară de calculul comisionului potențial și de rapoarte. Registrul de comenzi n-are prețuri, iar asta e singurul loc din care comanda își știe valoarea. Pe hârtia care merge în hală nu apare."
 ],
 "pasi":[],
 "sfat":null
