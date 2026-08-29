@@ -78,13 +78,19 @@
         `Raportul ${cale} nu s-a încărcat.`,
         30000
       );
-      const buton = await asteapta(() => declanseaza(cadru.contentDocument), `Nu am găsit butonul de reîmprospătare în ${cale}.`, 30000);
+      const actiune = await asteapta(() => declanseaza(cadru.contentDocument, w), `Nu am găsit cum să reîmprospătez raportul ${cale}.`, 30000);
 
       let raspuns = null;
       const os = w.XMLHttpRequest.prototype.send;
       const oo = w.XMLHttpRequest.prototype.open;
       w.XMLHttpRequest.prototype.open = function (m, u) {
-        this.__u = u;
+        // unele rapoarte cer o cale relativă ("ajax/"), altele una absolută;
+        // o aducem la aceeași formă, altfel filtrul nu recunoaște cererea
+        try {
+          this.__u = new URL(u, w.location.href).pathname;
+        } catch (e) {
+          this.__u = String(u || "");
+        }
         return oo.apply(this, arguments);
       };
       w.XMLHttpRequest.prototype.send = function (b) {
@@ -103,7 +109,8 @@
         return os.call(this, b);
       };
 
-      buton.click();
+      if (typeof actiune === "function") actiune();
+      else actiune.click();
       await asteapta(() => raspuns, `Raportul ${cale} n-a răspuns în timp util.`, 45000);
       return JSON.parse(raspuns);
     } finally {
@@ -128,9 +135,24 @@
     return log(`${tip}: trimis`, { randuri: randuri.length, lot, raspuns: lot ? undefined : t.slice(0, 200) });
   }
 
-  const apasa = (text) => (doc) =>
-    doc.querySelector("#change_iDisplayLength") ||
-    [...doc.querySelectorAll("a,button")].find((e) => (e.innerText || "").trim() === (text || "Aplica"));
+  // Cum îi cerem raportului să se reîncarce: dacă tabelul e un DataTables cu
+  // date luate de pe server, îi cerem chiar lui să deseneze din nou — e mai
+  // sigur decât să căutăm un buton care se poate redenumi oricând. Dacă nu
+  // găsim tabelul, apăsăm butonul, ca înainte.
+  const reincarca = (idTabel, text) => (doc, win) => {
+    try {
+      const $ = win.jQuery;
+      const t = idTabel ? doc.getElementById(idTabel) : null;
+      if ($ && t && typeof $(t).dataTable === "function") return () => $(t).dataTable().fnDraw();
+    } catch (e) {
+      /* pagina n-are jQuery: mergem pe buton */
+    }
+    return (
+      doc.querySelector("#change_iDisplayLength") ||
+      [...doc.querySelectorAll("a,button")].find((e) => (e.innerText || "").trim() === (text || "Aplica")) ||
+      null
+    );
+  };
 
   // ---- facturi emise ------------------------------------------------------
   S.facturi = async function (zile) {
@@ -138,7 +160,7 @@
       "/raport/facturi/",
       /\/raport\/facturi\/ajax/,
       { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "2000" },
-      apasa()
+      reincarca("invoices_datatable")
     );
     const firma = S.firma();
     const randuri = (j.aaData || []).map((r) => ({
@@ -163,7 +185,7 @@
       "/raport/incasari/",
       /\/raport\/incasari\/ajax/,
       { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "2000" },
-      apasa()
+      reincarca("payments_datatable")
     );
     const firma = S.firma();
     const randuri = [];
@@ -195,7 +217,7 @@
           page: 1, results_per_page: 3000,
         }),
       },
-      apasa()
+      reincarca(null)
     );
     const randuri = [];
     for (const w of j.warehouses || []) {
@@ -214,24 +236,19 @@
   };
 
   // ---- producție (rețete) -------------------------------------------------
-  // Raportul de mișcări ne dă, document cu document, ce a intrat și ce a ieșit
-  // din gestiune. Un raport de producție are ambele: produsul finit intră,
-  // componentele ies. Din raportul lunii se reconstruiește rețeta — de aceea
-  // se trimite tot ce s-a mișcat, iar ERP-ul calculează cât intră pe bucată.
+  // La Cash Machine o producție se scrie în două hârtii: bonul de consum ia
+  // materialele din depozit, iar bonul de predare bagă produsul finit. Ele
+  // sunt legate: bonul de consum are `rpIdForBC` = documentul de predare. Deci
+  // luăm cantitățile din raportul de mișcări (care le dă pe document) și le
+  // împerechem după legătura asta. Așa iese rețeta exactă, nu una ghicită
+  // după zi.
   const CSRF = () =>
     (document.querySelector("input[name=csrfmiddlewaretoken]") || {}).value ||
     (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] ||
     "";
 
-  async function miscari(de, la, pagina) {
-    const s = {
-      product_list: [], product_name: "", product_code: "", warehouse: "-1",
-      from: de, to: la, measuring_unit: -1, document_types: [], document_series: [],
-      show_unit_price: true, show_product_totals: false,
-      hide_no_stock_and_transactions: true, hide_no_transactions: true, hide_no_stock: false,
-      page: pagina, results_per_page: 200,
-    };
-    const r = await fetch("/gestiune/raport/miscari_stocuri/ajax/", {
+  async function cere(cale, cautare) {
+    const r = await fetch(cale, {
       method: "POST",
       credentials: "include",
       headers: {
@@ -239,26 +256,27 @@
         "X-Requested-With": "XMLHttpRequest",
         "X-CSRFToken": CSRF(),
       },
-      body: "sSearch=" + encodeURIComponent(JSON.stringify(s)),
+      body: "sSearch=" + encodeURIComponent(JSON.stringify(cautare)),
     });
-    return r.json();
+    const j = await r.json();
+    if (j && j.csrf_fails) throw new Error(`SmartBill a refuzat cererea către ${cale}. Reîncarcă pagina și încearcă din nou.`);
+    return j;
   }
 
-  // documente care sigur nu sunt producție, chiar dacă au și intrări și ieșiri
-  const NU_E_PRODUCTIE = /transfer|inventar|recep|aviz|factur|retur|dezmembr|stoc initial|stoc inițial/i;
-  const E_PRODUCTIE = /produc|predare/i;
-
-  S.productie = async function (zile) {
-    const de = acumMinus(zile);
-    const la = aziText();
-    const documente = new Map();
+  // ce s-a mișcat pe fiecare document, produs cu produs
+  async function miscariPeDocument(de, la) {
+    const perDoc = new Map();
     let total = Infinity;
     let vazute = 0;
     for (let pagina = 1; pagina <= 30 && vazute < total; pagina++) {
-      const j = await miscari(de, la, pagina);
-      if (j && j.csrf_fails) throw new Error("SmartBill a refuzat cererea (CSRF). Reîncarcă pagina și încearcă din nou.");
-      const info = String((j && j.info) || "");
-      const m = info.match(/din\s+(\d+)/);
+      const j = await cere("/gestiune/raport/miscari_stocuri/ajax/", {
+        product_list: [], product_name: "", product_code: "", warehouse: "-1",
+        from: de, to: la, measuring_unit: -1, document_types: [], document_series: [],
+        show_unit_price: false, show_product_totals: false,
+        hide_no_stock_and_transactions: true, hide_no_transactions: true, hide_no_stock: false,
+        page: pagina, results_per_page: 200,
+      });
+      const m = String((j && j.info) || "").match(/din\s+(\d+)/);
       if (m) total = Number(m[1]);
       let peAceastaPagina = 0;
       for (const w of (j && j.warehouses) || []) {
@@ -266,35 +284,90 @@
           peAceastaPagina++;
           const denumire = String(p.productName || "").replace(/^\s*\d+\s*-\s*/, "").trim();
           const cod = p.productCode || "";
-          const um = p.measuringUnit || p.productMeasuringUnit || "";
+          const um = p.measuringUnit || p.productMeasuringUnit || p.mu || "";
           if (!denumire) continue;
           for (const o of p.operations || []) {
-            const numar = o.documentNumber || o.stockDocumentId || "";
-            if (!numar) continue;
-            const tip = String(o.documentType || o.documentSymbol || "");
-            const cheie = `${tip}|${o.documentSeries || ""}|${numar}`;
-            let doc = documente.get(cheie);
+            const id = o.stockDocumentId;
+            if (!id) continue;
+            let doc = perDoc.get(id);
             if (!doc) {
-              doc = { document: cheie, tip, data: doarZi(o.operationDate), finite: [], consum: [] };
-              documente.set(cheie, doc);
+              doc = {
+                id,
+                tip: String(o.documentType || o.documentSymbol || ""),
+                nume: `${o.documentSeries || ""}${o.documentNumber || ""}`,
+                data: doarZi(o.operationDate),
+                intrari: [],
+                iesiri: [],
+              };
+              perDoc.set(id, doc);
             }
             const intra = Number(o.quantityIn) || 0;
             const iese = Number(o.quantityOut) || 0;
-            if (intra > 0) doc.finite.push({ produs: denumire, cod, um, cantitate: intra });
-            else if (iese > 0) doc.consum.push({ produs: denumire, cod, um, cantitate: iese });
+            if (intra > 0) doc.intrari.push({ produs: denumire, cod, um, cantitate: intra });
+            else if (iese > 0) doc.iesiri.push({ produs: denumire, cod, um, cantitate: iese });
           }
         }
       }
       if (!peAceastaPagina) break;
       vazute += peAceastaPagina;
     }
+    return perDoc;
+  }
 
-    const randuri = [...documente.values()].filter(
-      (d) =>
-        d.finite.length &&
-        d.consum.length &&
-        (E_PRODUCTIE.test(d.tip) || !NU_E_PRODUCTIE.test(d.tip))
-    );
+  // legătura bon de consum → bon de predare
+  async function legaturiConsum(de, la) {
+    const legaturi = new Map();
+    let total = Infinity;
+    for (let pagina = 1; pagina <= 30 && legaturi.size < total; pagina++) {
+      const j = await cere("/gestiune/raport/bonuri-cosum/ajax/", { from: de, to: la, page: pagina, results_per_page: 100 });
+      if (typeof j.documentsCount === "number") total = j.documentsCount;
+      const d = j.documents || [];
+      if (!d.length) break;
+      for (const x of d) {
+        if (x.isAnulled || x.isDraft) continue;
+        if (x.rpIdForBC && x.rpIdForBC > 0) legaturi.set(x.documentId, x.rpIdForBC);
+      }
+      if (d.length < 100) break;
+    }
+    return legaturi;
+  }
+
+  // documente care sigur nu sunt producție, chiar dacă au și intrări și ieșiri
+  const NU_E_PRODUCTIE = /transfer|inventar|recep|aviz|factur|retur|dezmembr|ajustare/i;
+  const E_PRODUCTIE = /produc|predare/i;
+
+  S.productie = async function (zile) {
+    const de = acumMinus(zile);
+    const la = aziText();
+    const perDoc = await miscariPeDocument(de, la);
+    const legaturi = await legaturiConsum(de, la);
+
+    const randuri = [];
+    const folosite = new Set();
+    for (const [idConsum, idPredare] of legaturi) {
+      const bc = perDoc.get(idConsum);
+      const bp = perDoc.get(idPredare);
+      if (!bc || !bp || !bc.iesiri.length || !bp.intrari.length) continue;
+      randuri.push({
+        document: `${bp.nume} ← ${bc.nume}`,
+        tip: "productie",
+        data: bp.data || bc.data,
+        finite: bp.intrari,
+        consum: bc.iesiri,
+      });
+      folosite.add(idConsum);
+      folosite.add(idPredare);
+    }
+
+    // hârtii care au și intrare și ieșire în același document (raport de
+    // producție clasic), dacă mai există așa ceva
+    for (const [id, d] of perDoc) {
+      if (folosite.has(id)) continue;
+      if (!d.intrari.length || !d.iesiri.length) continue;
+      if (!E_PRODUCTIE.test(d.tip) && NU_E_PRODUCTIE.test(d.tip)) continue;
+      randuri.push({ document: d.nume, tip: d.tip, data: d.data, finite: d.intrari, consum: d.iesiri });
+    }
+
     await trimite("productie", randuri, `sincronizare ${S.firma()} — producție ${zile} zile`);
     return randuri.length;
   };
