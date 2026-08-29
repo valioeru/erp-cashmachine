@@ -8,6 +8,7 @@ const db = require("../lib/db");
 const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
+const { comenziSpreAlocare, ore } = require("./utilaje");
 
 const STATUSURI = [
   ["noua", "Nouă (solicitată)", "gri"],
@@ -99,6 +100,64 @@ function daNu(v) {
   return /^da$/i.test(String(v || "").trim()) ? 1 : 0;
 }
 
+// Tabelul „Comenzi spre alocare". Pentru fiecare comanda deschisa si
+// nealocata arata utilajele care o pot face si in cate ore — ca decizia „pe
+// ce o punem" sa se ia din pagina asta, nu din cap.
+function sectiuneSpreAlocare(spre) {
+  if (!spre.utilaje) {
+    return `<div class="detail-box" style="border-left:4px solid var(--warning,#d99b00)">
+      <strong>Nu e definit niciun utilaj.</strong> Pana nu stim pe ce masini se lucreaza si cine le poate lucra,
+      comenzile nu se pot aloca, iar ERP-ul nu poate spune cat tine o comanda.
+      <a href="/productie/utilaje">Adauga utilajele</a> si apoi <a href="/productie/resurse">oamenii</a>.
+    </div>`;
+  }
+  if (!spre.comenzi.length) {
+    return `<div class="detail-box" style="border-left:4px solid var(--success,#1c6b3c)">
+      Toate comenzile deschise sunt alocate pe utilaje. <a href="/productie/planificare">Vezi planificarea</a>.
+    </div>`;
+  }
+  const randuri = spre.comenzi.map((c) => {
+    const variante = spre.estimari.get(Number(c.id)) || [];
+    const prima = variante[0];
+    return [
+      `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
+      esc(c.partener_nume || c.client_text || "—"),
+      esc(c.tip_produs || "—"),
+      esc([c.cantitate, c.um].filter(Boolean).join(" ") || "—"),
+      c.data_livrare
+        ? c.data_livrare < azi()
+          ? `<span class="badge rosu">${esc(c.data_livrare)}</span>`
+          : esc(c.data_livrare)
+        : "—",
+      variante.length
+        ? variante
+            .slice(0, 3)
+            .map((v) => `<a href="/productie/utilaje/${v.utilaj_id}" class="badge gri" style="text-decoration:none">${esc(v.utilaj)}</a>`)
+            .join(" ")
+        : '<span class="badge rosu">niciun utilaj potrivit</span>',
+      prima && prima.estimat ? `<strong>${ore(prima.ore)} h</strong>` : '<span style="color:var(--text-muted)">—</span>',
+      prima ? `${prima.operatori_necesari} ${prima.operatori_necesari === 1 ? "om" : "oameni"}` : "—",
+      `<a class="btn small" href="/productie/aloca/${c.id}">Alocă</a>`,
+    ];
+  });
+  const totalOre = spre.comenzi.reduce((s, c) => {
+    const v = (spre.estimari.get(Number(c.id)) || [])[0];
+    return s + (v && v.estimat ? v.ore : 0);
+  }, 0);
+  return `
+    <h2 style="margin-bottom:4px">Comenzi spre alocare (${spre.comenzi.length})</h2>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:0">
+      Comenzi deschise care inca n-au fost puse pe nicio masina. Estimarea in ore vine din capacitatea scrisa pe utilaj
+      (cantitate pe ora), nu din facturi. Total estimat: <strong>${ore(totalOre)} h</strong> de utilaj,
+      ${spre.oameni} ${spre.oameni === 1 ? "om disponibil" : "oameni disponibili"} in productie.
+    </p>
+    ${table(
+      ["#", "Client", "Produs", "Cant.", "Livrare", "Poate fi facuta pe", "Ore est.", "Operatori", ""],
+      randuri
+    )}
+  `;
+}
+
 function register(router) {
   // ---- Listă -------------------------------------------------------------
   router.get("/productie", async (ctx) => {
@@ -135,11 +194,18 @@ function register(router) {
     const ACTIVE = ["noua", "in_productie"];
     const intarziate = comenzi.filter((c) => ACTIVE.includes(c.status) && c.data_solicitata && c.data_solicitata < aziStr);
 
+    // „Comenzi spre alocare": ce e deschis si n-a fost inca pus pe o masina.
+    // Sta DEASUPRA comenzilor in lucru fiindca asta e intrebarea de dimineata
+    // — nu „ce lucram", ci „ce n-are inca cine si pe ce sa lucreze".
+    const spre = await comenziSpreAlocare(30);
+
     const body = `
       <div class="toolbar">
         <a href="/productie/noua" class="btn">+ Comandă nouă în producție</a>
+        <a href="/productie/planificare" class="btn secondary">Planificare</a>
         <a href="/import" class="btn secondary">Import din Excel</a>
       </div>
+      ${sectiuneSpreAlocare(spre)}
       <div class="cards">
         ${STATUSURI.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div></div>`).join("")}
         <div class="card"><div class="label">Cu termenul depășit</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
@@ -478,6 +544,30 @@ function register(router) {
       .get(ctx.params.id);
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
 
+    // Alocarile: pe ce masina si cu cine sta comanda asta. Fara ele, pagina
+    // spune ce e de facut, dar nu si cine o face.
+    const alocari = await db
+      .prepare(
+        `SELECT a.*, u.denumire AS utilaj FROM alocari_productie a
+           LEFT JOIN utilaje u ON u.id = a.utilaj_id
+          WHERE a.comanda_productie_id = ? AND a.status <> 'anulata' ORDER BY a.data, a.ora_start`
+      )
+      .all(c.id);
+    const oameniAlocati = new Map();
+    if (alocari.length) {
+      const legaturi = await db
+        .prepare(
+          `SELECT ar.alocare_id, r.nume FROM alocari_resurse ar JOIN resurse r ON r.id = ar.resursa_id
+            WHERE ar.alocare_id IN (SELECT id FROM alocari_productie WHERE comanda_productie_id = ?)`
+        )
+        .all(c.id);
+      for (const l of legaturi) {
+        const k = Number(l.alocare_id);
+        if (!oameniAlocati.has(k)) oameniAlocati.set(k, []);
+        oameniAlocati.get(k).push(l.nume);
+      }
+    }
+
     const body = `
       <div class="detail-box">
         <h1 style="margin-top:0">Comanda ${esc(c.numar || c.id)} ${badge(c.status)}
@@ -498,6 +588,27 @@ function register(router) {
         ${c.observatii ? `<p style="margin-top:12px;white-space:pre-wrap"><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
         ${c.reteta ? `<p style="white-space:pre-wrap"><strong>Rețetă / consum:</strong> ${esc(c.reteta)}</p>` : ""}
       </div>
+
+      <h2 style="margin-bottom:4px">Pe ce se lucrează</h2>
+      <div class="toolbar" style="margin-top:0"><a class="btn" href="/productie/aloca/${c.id}">+ Alocă pe un utilaj</a>
+        <a class="btn secondary" href="/productie/planificare">Vezi planificarea</a></div>
+      ${
+        alocari.length
+          ? table(
+              ["Data", "Ora", "Ore", "Utilaj", "Oameni", "Cant.", "Stare", ""],
+              alocari.map((a) => [
+                esc(a.data),
+                `${esc(String(Number(a.ora_start) || 0))}:00`,
+                esc(String(Number(a.ore) || 0)),
+                a.utilaj_id ? `<a href="/productie/utilaje/${a.utilaj_id}">${esc(a.utilaj || "—")}</a>` : '<span class="badge gri">fără utilaj</span>',
+                (oameniAlocati.get(Number(a.id)) || []).map((n) => esc(n)).join(", ") || '<span class="badge rosu">niciun om</span>',
+                a.cantitate ? esc(String(a.cantitate)) : "—",
+                esc(a.status),
+                `<form method="post" action="/productie/alocari/${a.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi alocarea?')"><button class="link-btn danger" type="submit">Șterge</button></form>`,
+              ])
+            )
+          : `<p style="color:var(--text-muted)">Comanda nu e încă pusă pe nicio mașină.</p>`
+      }
 
       <form class="form" method="post" action="/productie/${c.id}/actualizeaza" style="max-width:680px">
         <h2 style="margin-top:0">Actualizare</h2>
