@@ -100,15 +100,15 @@ function daNu(v) {
   return /^da$/i.test(String(v || "").trim()) ? 1 : 0;
 }
 
-// Tabelul „Comenzi spre alocare". Pentru fiecare comanda deschisa si
-// nealocata arata utilajele care o pot face si in cate ore — ca decizia „pe
-// ce o punem" sa se ia din pagina asta, nu din cap.
+// Tabelul „Comenzi spre alocare". Pentru fiecare comandă deschisă și
+// nealocată arată utilajele care o pot face și în câte ore — ca decizia „pe
+// ce o punem" să se ia din pagina asta, nu din cap.
 function sectiuneSpreAlocare(spre) {
   if (!spre.utilaje) {
     return `<div class="detail-box" style="border-left:4px solid var(--warning,#d99b00)">
-      <strong>Nu e definit niciun utilaj.</strong> Pana nu stim pe ce masini se lucreaza si cine le poate lucra,
-      comenzile nu se pot aloca, iar ERP-ul nu poate spune cat tine o comanda.
-      <a href="/productie/utilaje">Adauga utilajele</a> si apoi <a href="/productie/resurse">oamenii</a>.
+      <strong>Nu e definit niciun utilaj.</strong> Până nu știm pe ce mașini se lucrează și cine le poate lucra,
+      comenzile nu se pot aloca, iar ERP-ul nu poate spune cât ține o comandă.
+      <a href="/productie/utilaje">Adaugă utilajele</a> și apoi <a href="/productie/resurse">oamenii</a>.
     </div>`;
   }
   if (!spre.comenzi.length) {
@@ -147,12 +147,12 @@ function sectiuneSpreAlocare(spre) {
   return `
     <h2 style="margin-bottom:4px">Comenzi spre alocare (${spre.comenzi.length})</h2>
     <p style="font-size:12px;color:var(--text-muted);margin-top:0">
-      Comenzi deschise care inca n-au fost puse pe nicio masina. Estimarea in ore vine din capacitatea scrisa pe utilaj
-      (cantitate pe ora), nu din facturi. Total estimat: <strong>${ore(totalOre)} h</strong> de utilaj,
-      ${spre.oameni} ${spre.oameni === 1 ? "om disponibil" : "oameni disponibili"} in productie.
+      Comenzi deschise care încă n-au fost puse pe nicio mașină. Estimarea în ore vine din capacitatea scrisă pe utilaj
+      (cantitate pe oră), nu din facturi. Total estimat: <strong>${ore(totalOre)} h</strong> de utilaj,
+      ${spre.oameni} ${spre.oameni === 1 ? "om disponibil" : "oameni disponibili"} în producție.
     </p>
     ${table(
-      ["#", "Client", "Produs", "Cant.", "Livrare", "Poate fi facuta pe", "Ore est.", "Operatori", ""],
+      ["#", "Client", "Produs", "Cant.", "Livrare", "Poate fi făcută pe", "Ore est.", "Operatori", ""],
       randuri
     )}
   `;
@@ -194,9 +194,9 @@ function register(router) {
     const ACTIVE = ["noua", "in_productie"];
     const intarziate = comenzi.filter((c) => ACTIVE.includes(c.status) && c.data_solicitata && c.data_solicitata < aziStr);
 
-    // „Comenzi spre alocare": ce e deschis si n-a fost inca pus pe o masina.
-    // Sta DEASUPRA comenzilor in lucru fiindca asta e intrebarea de dimineata
-    // — nu „ce lucram", ci „ce n-are inca cine si pe ce sa lucreze".
+    // „Comenzi spre alocare": ce e deschis și n-a fost încă pus pe o mașină.
+    // Stă DEASUPRA comenzilor în lucru fiindcă asta e întrebarea de dimineață
+    // — nu „ce lucrăm", ci „ce n-are încă cine și pe ce să lucreze".
     const spre = await comenziSpreAlocare(30);
 
     const body = `
@@ -544,8 +544,8 @@ function register(router) {
       .get(ctx.params.id);
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
 
-    // Alocarile: pe ce masina si cu cine sta comanda asta. Fara ele, pagina
-    // spune ce e de facut, dar nu si cine o face.
+    // Alocările: pe ce mașină și cu cine stă comanda asta. Fără ele, pagina
+    // spune ce e de făcut, dar nu și cine o face.
     const alocari = await db
       .prepare(
         `SELECT a.*, u.denumire AS utilaj FROM alocari_productie a
