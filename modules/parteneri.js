@@ -45,23 +45,37 @@ function register(router) {
     const P = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
     const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
 
+    // Rulajul, soldul si ultima factura se calculeaza o singura data, grupat pe
+    // partener, nu cate trei subinterogari corelate pentru fiecare rand din
+    // lista. Varianta veche recitea tot facturi_linii si toate platile pentru
+    // fiecare partener in parte — pagina statea 25 de secunde la 1.000 de
+    // parteneri. Conditiile raman exact aceleasi, doar ca s-au mutat din WHERE
+    // in CASE-urile de mai jos: „ultima" nu tine cont de intercompany, iar
+    // rulajul si soldul da.
     const randuri = await db
       .prepare(
-        `SELECT p.id, p.nume, p.tip, p.stare, p.cui, p.email, p.telefon,
+        `WITH agregat AS (
+           SELECT f.partener_id,
+                  COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
+                                    THEN COALESCE(t.total,0) ELSE 0 END), 0) AS rulaj,
+                  COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.directie = 'vanzare'
+                                     AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5
+                                    THEN COALESCE(t.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS sold,
+                  MAX(f.data_emiterii) AS ultima
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
+             LEFT JOIN ${T} t ON t.factura_id = f.id
+             LEFT JOIN ${P} pl ON pl.factura_id = f.id
+            WHERE f.status NOT IN ('anulata','ciorna')
+            GROUP BY f.partener_id
+         )
+         SELECT p.id, p.nume, p.tip, p.stare, p.cui, p.email, p.telefon,
                 u.nume AS agent,
-                COALESCE((SELECT SUM(COALESCE(t.total,0)) FROM (SELECT * FROM facturi WHERE activ = 1) f
-                            LEFT JOIN ${T} t ON t.factura_id = f.id
-                           WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')
-                             AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?), 0) AS rulaj,
-                COALESCE((SELECT SUM(COALESCE(t.total,0) - COALESCE(pl.platit,0)) FROM (SELECT * FROM facturi WHERE activ = 1) f
-                            LEFT JOIN ${T} t ON t.factura_id = f.id
-                            LEFT JOIN ${P} pl ON pl.factura_id = f.id
-                           WHERE f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
-                             AND COALESCE(f.intercompany,0) = 0
-                             AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5), 0) AS sold,
-                (SELECT MAX(f.data_emiterii) FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.partener_id = p.id AND f.status NOT IN ('anulata','ciorna')) AS ultima
+                COALESCE(a.rulaj, 0) AS rulaj,
+                COALESCE(a.sold, 0) AS sold,
+                a.ultima AS ultima
            FROM parteneri p
            LEFT JOIN utilizatori u ON u.id = p.agent_id
+           LEFT JOIN agregat a ON a.partener_id = p.id
           WHERE ${unde}
           ORDER BY rulaj DESC, sold DESC, p.nume`
       )
