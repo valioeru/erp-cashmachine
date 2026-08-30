@@ -7,17 +7,11 @@
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
 
-// Costul unei linii se ia în calcul doar dacă e credibil. O linie cu preț de
-// achiziție de peste cinci ori mai mare decât ce s-a încasat pe ea (plus 100
-// de lei, ca să nu se agațe de fleacuri) nu e marjă proastă, e o greșeală de
-// date: fie prețul produsului e luat în altă unitate, fie cantitatea de pe
-// factură a fost importată strâmb — 1.720 bucăți la 1 leu în loc de o rolă la
-// 1.720 de lei. Astfel de linii se numără la „fără cost", exact ca cele fără
-// produs identificat, iar rapoartele spun pe față că marja e o estimare în
-// plus. Praguri identice cu verificarea „cost de marfă aberant" din
-// modules/verificari.js, ca cele două să arate aceleași rânduri.
-const COST_LINIE =
-  "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
+// Costul mărfii vândute stă într-un singur loc, în lib/cost.js: rata reală a
+// produsului din raportul de contabilitate, altfel prețul de achiziție de pe
+// produs, altfel rata firmei. Înainte formula era copiată aici și liniile fără
+// produs sau fără preț ieșeau cu cost zero, adică marjă 100%.
+const cost = require("../lib/cost");
 const { ALOC, ALOC_FACTURA } = require("./alocari");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { chipuriPerioada } = require("../lib/perioada");
@@ -740,10 +734,11 @@ function register(router) {
       .all(agentId, de, la);
 
     // ---- Marjă, top produse, top clienți -----------------------------------
-    // Marja se poate calcula doar acolo unde linia de factură are produs
-    // identificat ȘI produsul are preț de achiziție. Facturile importate din
-    // SmartBill n-au detaliu pe produse, deci acoperirea e parțială — o
-    // spunem explicit, ca cifra să nu fie citită greșit.
+    // Costul vine din lib/cost.js: rata reală a produsului din raportul de
+    // contabilitate, altfel prețul de achiziție, altfel rata firmei. Nicio
+    // linie nu mai intră cu cost zero. Cât din venit are cost măsurat, nu
+    // estimat, se spune pe pagină — cifra rămâne citită corect.
+    const COST_LINIE = cost.costLinie(await cost.rataFirma());
     const SUM_VENIT = "SUM(fl.cantitate * fl.pret_unitar)";
     const SUM_COST = `SUM(${COST_LINIE})`;
 
@@ -751,7 +746,7 @@ function register(router) {
       .prepare(
         `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client,
                 ${SUM_VENIT} AS venit, ${SUM_COST} AS cost,
-                SUM(CASE WHEN pr.id IS NULL OR COALESCE(pr.pret_achizitie,0) = 0 OR fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 1 ELSE 0 END) AS linii_fara_cost,
+                SUM(${cost.LINII_ESTIMATE}) AS linii_fara_cost,
                 COUNT(fl.id) AS linii
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN parteneri p ON p.id = f.partener_id
@@ -1081,6 +1076,8 @@ function register(router) {
       return linii ? Math.round(((linii - fara) / linii) * 100) : 0;
     })();
     const pct = (x, total) => (total > 0 ? `${((x / total) * 100).toFixed(1)}%` : "—");
+    const rataF = await cost.rataFirma();
+    const rataFirmaPct = rataF > 0 ? (rataF * 100).toFixed(1) + "%" : "";
 
     const topProduseTotal = topProdusePerioada.reduce((s2, r) => s2 + Number(r.venit), 0);
     const topClienti = clientiPerioada.slice().sort((a, b) => b.facturat - a.facturat).slice(0, 15);
@@ -1097,9 +1094,12 @@ function register(router) {
       </div>
       ${
         acoperire < 100
-          ? `<p style="font-size:12px;color:var(--warn);margin-top:-6px">
-               Marja e calculată pe ${acoperire}% din liniile de factură — restul n-au produs identificat sau preț de achiziție.
-               Cifra e o estimare în minus a costului, deci marja reală e mai mică sau egală cu cea de mai sus.
+          ? `<p style="font-size:12px;color:var(--text-muted);margin-top:-6px">
+               Pe ${acoperire}% din liniile de factură costul e <strong>măsurat</strong> — ori rata reală a produsului din
+               raportul de contabilitate, ori prețul lui de achiziție. Restul de ${100 - acoperire}% e
+               <strong>estimat cu rata de cost a firmei</strong>${rataFirmaPct ? ` (${rataFirmaPct} din fiecare leu vândut)` : ""},
+               fiindcă liniile alea n-au produs identificat. Estimarea poate fi în plus sau în minus, dar nu mai lasă
+               nicio vânzare cu marjă 100%, cum se întâmpla înainte.
              </p>`
           : ""
       }
@@ -1176,17 +1176,28 @@ function register(router) {
       ${
         marjaFacturi.length
           ? table(
-              ["Factura", "Client", "Data", "Vânzare", "Cost", "Marjă", "Marjă %"],
+              ["Factura", "Client", "Data", "Vânzare", "Cost", "De unde e costul", "Marjă", "Marjă %"],
               marjaFacturi.slice(0, 100).map((f) => {
                 const v = Number(f.venit), c = Number(f.cost), m = v - c;
+                // Câte linii au cost măsurat și câte sunt estimate cu rata firmei.
+                // Facturile importate din SmartBill n-au detaliu pe produse, deci
+                // sunt estimate cap-coadă — se vede pe rând, nu într-o notă de subsol.
+                const est = Number(f.linii_fara_cost), tot = Number(f.linii);
+                const temei =
+                  est === 0
+                    ? `<span style="color:var(--text-muted)">măsurat</span>`
+                    : est === tot
+                      ? `<span style="color:var(--warn)">estimat</span>`
+                      : `<span style="color:var(--text-muted)">${tot - est} din ${tot} măsurate</span>`;
                 return [
                   `<a href="/facturi/${f.id}">${esc([f.serie, f.numar].filter(Boolean).join(" "))}</a>`,
                   esc(f.client),
                   f.data_emiterii ? esc(String(f.data_emiterii).slice(0, 10)) : "—",
                   money(v),
-                  Number(f.linii_fara_cost) === Number(f.linii) ? `<span style="color:var(--text-muted)">necunoscut</span>` : money(c),
-                  Number(f.linii_fara_cost) === Number(f.linii) ? "—" : `<strong style="color:${m >= 0 ? "var(--success)" : "var(--danger)"}">${money(m)}</strong>`,
-                  Number(f.linii_fara_cost) === Number(f.linii) || v <= 0 ? "—" : ((m / v) * 100).toFixed(1) + "%",
+                  money(c),
+                  temei,
+                  `<strong style="color:${m >= 0 ? "var(--success)" : "var(--danger)"}">${money(m)}</strong>`,
+                  v > 0 ? ((m / v) * 100).toFixed(1) + "%" : "—",
                 ];
               }),
               {
@@ -1194,7 +1205,7 @@ function register(router) {
                   const afisate = marjaFacturi.slice(0, 100);
                   const v = afisate.reduce((s2, f) => s2 + Number(f.venit), 0);
                   const c = afisate.reduce((s2, f) => s2 + Number(f.cost), 0);
-                  return ["TOTAL afișat", "", "", money(v), money(c), money(v - c), v > 0 ? (((v - c) / v) * 100).toFixed(1) + "%" : "—"];
+                  return ["TOTAL afișat", "", "", money(v), money(c), "", money(v - c), v > 0 ? (((v - c) / v) * 100).toFixed(1) + "%" : "—"];
                 })(),
               }
             )

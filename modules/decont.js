@@ -35,8 +35,7 @@ const db = require("../lib/db");
 // produs identificat, iar rapoartele spun pe față că marja e o estimare în
 // plus. Praguri identice cu verificarea „cost de marfă aberant" din
 // modules/verificari.js, ca cele două să arate aceleași rânduri.
-const COST_LINIE =
-  "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
+const cost = require("../lib/cost");
 const { esc, money, layout, table, subnavFinanciar } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const costuri = require("./costuri");
@@ -102,6 +101,7 @@ function luniIntre(de, pana) {
 async function incasariPeAgent(luna) {
   const de = `${luna}-01`;
   const pana = sfarsitLuna(luna);
+  const COST_LINIE = cost.costLinie(await cost.rataFirma());
   const randuri = await db
     .prepare(
       `SELECT p.agent_id AS agent_id,
@@ -111,7 +111,8 @@ async function incasariPeAgent(luna) {
               COALESCE(pl.suma, 0) AS platit,
               COALESCE(n.net, 0) AS net,
               COALESCE(b.brut, 0) AS brut,
-              COALESCE(c.cost, 0) AS cost_marfa
+              COALESCE(c.cost, 0) AS cost_marfa,
+              COALESCE(c.venit_cu_cost, 0) AS venit_cu_cost
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
          JOIN parteneri p ON p.id = f.partener_id
@@ -119,7 +120,8 @@ async function incasariPeAgent(luna) {
               ON n.factura_id = f.id
          LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS brut FROM facturi_linii GROUP BY factura_id) b
               ON b.factura_id = f.id
-         LEFT JOIN (SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost
+         LEFT JOIN (SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost,
+                            SUM(${cost.VENIT_CU_COST_REAL}) AS venit_cu_cost
                       FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id
                      GROUP BY fl.factura_id) c
               ON c.factura_id = f.id
@@ -167,7 +169,11 @@ async function incasariPeAgent(luna) {
     a.incasat_net += incasatNet;
     a.cost_marfa += costMarfa;
     a.facturi.add(r.factura_id);
-    if (!Number(r.cost_marfa)) a.fara_cost += incasatNet;
+    // „Fără cost" înseamnă acum „cost estimat cu rata firmei", nu „cost zero" —
+    // de când costul nu mai rămâne niciodată gol, singura întrebare onestă e cât
+    // din el e măsurat. Partea neacoperită de venit_cu_cost e cea estimată.
+    const netCuCost = Math.min(net, Number(r.venit_cu_cost) || 0);
+    a.fara_cost += Math.max(0, (net - netCuCost) * parte);
     peAgent.set(r.agent_id, a);
   }
   peAgent.pierduteTermen = pierduteTermen;
@@ -331,12 +337,13 @@ function register(router) {
 
       ${
         acoperireTotala !== null && acoperireTotala < 95
-          ? `<div class="detail-box" style="border-left:4px solid #b3261e;margin-bottom:14px">
-               <strong>Marja de mai jos nu e încă marjă adevărată.</strong>
-               ${money(faraCost)} din ${money(totalIncasat)} încasați vin de pe facturi la care nu știm costul mărfii
-               (acoperire ${acoperireTotala.toFixed(0)}%), așa că acolo marja iese egală cu încasarea, iar comisionul
-               calculat pe ea e prea mare. Se îndreaptă singur pe măsură ce intră costurile de achiziție —
-               vezi <a href="/rapoarte/produse-fara-cost">produsele fără cost</a>.
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn);margin-bottom:14px">
+               <strong>O parte din costul de mai jos e estimat, nu măsurat.</strong>
+               ${money(faraCost)} din ${money(totalIncasat)} încasați vin de pe facturi fără detaliu pe produse
+               (cost măsurat pe ${acoperireTotala.toFixed(0)}% din încasări). Pentru ele costul se ia cu rata de cost a
+               firmei, deci marja poate ieși cu câteva puncte peste sau sub realitate — dar nu mai iese egală cu
+               încasarea, cum se întâmpla când costul lipsea de tot. Se îmbunătățește pe măsură ce facturile capătă
+               detaliu pe produse — vezi <a href="/rapoarte/produse-fara-cost">produsele fără cost</a>.
              </div>`
           : ""
       }
@@ -352,7 +359,7 @@ function register(router) {
       }
       <div class="cards">
         <div class="card"><div class="label">Marjă adusă în ${esc(luna)}</div><div class="value">${money(totalMarja)}</div>
-          ${acoperireTotala !== null && acoperireTotala < 95 ? `<div style="font-size:12px;color:#b3261e">estimare — cost marfă cunoscut pe ${acoperireTotala.toFixed(0)}% din încasări</div>` : ""}</div>
+          ${acoperireTotala !== null && acoperireTotala < 95 ? `<div style="font-size:12px;color:var(--text-muted)">cost măsurat pe ${acoperireTotala.toFixed(0)}% din încasări, restul estimat cu rata firmei</div>` : ""}</div>
         <div class="card"><div class="label">Cost cu agenții</div><div class="value">${money(totalCost)}</div>
           <div style="font-size:12px;color:var(--text-muted)">brut + CAM + mașină + carburant</div></div>
         <div class="card"><div class="label">Rămâne firmei</div>
@@ -369,7 +376,7 @@ function register(router) {
           `${money(r.incasat_net)}<br><span style="font-size:12px;color:var(--text-muted)">${r.nr_facturi} facturi</span>`,
           `${money(r.cost_marfa)}${
             r.acoperire !== null && r.acoperire < 95
-              ? `<br><span style="font-size:12px;color:#b3261e">cunoscut pe ${r.acoperire.toFixed(0)}%</span>`
+              ? `<br><span style="font-size:12px;color:var(--text-muted)">măsurat pe ${r.acoperire.toFixed(0)}%</span>`
               : ""
           }`,
           `<strong>${money(r.marja)}</strong>${r.acoperire !== null && r.acoperire < 95 ? '<br><span style="font-size:12px;color:#b3261e">estimare</span>' : ""}`,

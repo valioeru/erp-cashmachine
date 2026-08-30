@@ -5,6 +5,7 @@ module.exports = function registerRute(router, deps) {
   const { db, esc, layout, table, send, redirect, HANDLERE, acum, MAX_OCTETI, MAX_RANDURI, MAX_LOTURI_PASTRATE } = deps;
   // punte.js nu pasează money în deps, iar rapoartele de aici au nevoie de el
   const { money } = require("../lib/render");
+  const cost = require("../lib/cost");
 
   const TIPURI_ETICHETE = {
     produse: "Produse / servicii",
@@ -34,6 +35,8 @@ module.exports = function registerRute(router, deps) {
       );
     }
     const bani = (v) => Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+    const acop = await cost.acoperire();
+    const rataAcum = await cost.rataFirma();
     const totalNet = randuri.reduce((s, r) => s + Number(r.vanzari_nete), 0);
     const totalCost = randuri.reduce((s, r) => s + Number(r.cost), 0);
     const totalProfit = totalNet - totalCost;
@@ -79,9 +82,65 @@ module.exports = function registerRute(router, deps) {
         Cifrele vin din SmartBill Gestiune, cu costul real al bunurilor vândute — nu sunt estimate de noi.
         Acoperă produsele ținute pe gestiune; serviciile și refacturările nu apar aici.
       </p>
+
+      <h2>Costul ăsta stă la baza marjei din tot ERP-ul</h2>
+      <p class="explic" style="max-width:820px">
+        Din raportul de mai sus iese, pentru fiecare produs, <strong>rata lui de cost</strong>: cât din fiecare leu
+        vândut a fost marfă. Rata e mai bună decât un preț de achiziție scris de mână, fiindcă nu depinde de unitatea
+        de măsură și nici de prețul la care s-a vândut unui client sau altuia. Unde produsul nu apare în raport se
+        folosește prețul lui de achiziție; unde nu există nici acela, se estimează cu <strong>rata firmei</strong>
+        (${rataAcum ? (rataAcum * 100).toFixed(1) + "%" : "necalculată încă"}) — ca să nu mai intre nicio vânzare în
+        calcul cu marjă 100%, cum se întâmpla înainte.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">Produse cu cost real</div><div class="value">${acop.cu_rata}</div>
+          <div class="mic">din ${acop.total} produse din catalog</div></div>
+        <div class="card"><div class="label">Produse cu preț de achiziție</div><div class="value">${acop.cu_pret}</div>
+          <div class="mic">treapta a doua, când lipsește costul real</div></div>
+        <div class="card"><div class="label">Rata de cost a firmei</div><div class="value">${rataAcum ? (rataAcum * 100).toFixed(1) + "%" : "—"}</div>
+          <div class="mic">ultima plasă de siguranță</div></div>
+      </div>
+      ${
+        ctx.user.rol === "admin"
+          ? `<div class="toolbar" style="margin-top:10px">
+               <form method="post" action="/rapoarte/profit-produs/recalculeaza" class="inline-form">
+                 <button class="btn" type="submit">Recalculează costurile din raportul ăsta</button>
+               </form>
+               <form method="post" action="/rapoarte/profit-produs/sterge-rate" class="inline-form"
+                     onsubmit="return confirm('Șterge ratele de cost? Marja se întoarce la prețurile de achiziție, iar liniile fără preț ies din nou cu marjă 100%.')">
+                 <button class="link-btn danger" type="submit">Renunță la costurile astea</button>
+               </form>
+             </div>
+             <p style="font-size:12px;color:var(--text-muted);max-width:820px">
+               Recalculul se face singur la fiecare import al raportului. Butonul e aici ca să-l poți da din nou,
+               fără reimport, și ca să știi că se poate da înapoi dintr-un click — nu se atinge nimic altceva din date.
+             </p>`
+          : ""
+      }
+      ${ctx.query.recalculat !== undefined ? `<div class="flash">Costuri recalculate: <b>${esc(String(ctx.query.produse || 0))}</b> produse au acum rată reală, rata firmei e <b>${esc(String(ctx.query.rata || "—"))}</b>.</div>` : ""}
+      ${ctx.query.sterse !== undefined ? `<div class="flash">Ratele de cost au fost șterse de pe <b>${esc(String(ctx.query.sterse))}</b> produse. Marja s-a întors la prețurile de achiziție.</div>` : ""}
       <a class="btn secondary" href="/rapoarte">Înapoi la rapoarte</a>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Profit pe produs", active: "/rapoarte", body }));
+  });
+
+  // Recalculul ratelor de cost, la cerere. Se face oricum automat la fiecare
+  // import al raportului — butonul e pentru cazul în care vrei să-l dai din
+  // nou peste un catalog de produse schimbat între timp.
+  router.post("/rapoarte/profit-produs/recalculeaza", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const r = await cost.recalculeazaRate();
+    return redirect(
+      ctx.res,
+      "/rapoarte/profit-produs?" +
+        new URLSearchParams({ recalculat: "1", produse: String(r.produse), rata: r.rata_firma ? (r.rata_firma * 100).toFixed(1) + "%" : "—" }).toString()
+    );
+  });
+
+  router.post("/rapoarte/profit-produs/sterge-rate", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const r = await cost.stergeRate();
+    return redirect(ctx.res, "/rapoarte/profit-produs?sterse=" + encodeURIComponent(String(r.sterse)));
   });
 
   // Cutia poștală: ce a sosit din browser și așteaptă aprobarea ta.
@@ -257,8 +316,10 @@ module.exports = function registerRute(router, deps) {
   // apare în raport, ca să știi cât din marjă e încă necunoscut.
   // Costul produselor, luat din evaluarea stocului SmartBill.
   //
-  // Marja pe factură are nevoie de un preț de achiziție pe produs. Nu-l
-  // inventăm: raportul „Stoc la zi" din SmartBill dă valoarea stocului, iar
+  // Marja pe factură vrea un cost cât mai aproape de realitate. Prima sursă e
+  // raportul „Profit pe produs" (vezi lib/cost.js); a doua, prețul de achiziție
+  // de pe produs. Pe ăsta nu-l inventăm:
+  // raportul „Stoc la zi" din SmartBill dă valoarea stocului, iar
   // valoare/cantitate e chiar costul unitar cu care e evaluată marfa. E cea
   // mai bună sursă pe care o avem și e a lor, nu a noastră.
   //
@@ -283,7 +344,7 @@ module.exports = function registerRute(router, deps) {
            JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
             AND COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
-            AND COALESCE(p.pret_achizitie, 0) <= 0
+            AND COALESCE(p.pret_achizitie, 0) <= 0 AND COALESCE(p.cost_rata, 0) <= 0
           GROUP BY p.id, p.cod, p.denumire, p.pret_vanzare
           ORDER BY vanzari DESC
           LIMIT 100`
@@ -293,15 +354,17 @@ module.exports = function registerRute(router, deps) {
     const totalFaraCost = randuri.reduce((s, r) => s + Number(r.vanzari || 0), 0);
 
     const body = `
-      <h1>Produse care se vând, dar n-au cost</h1>
-      <p style="max-width:760px;color:var(--text-muted)">
-        Pentru produsele astea marja iese 100%, ceea ce e fals. N-au primit cost automat pentru că nu apar în
-        evaluarea stocului din SmartBill și n-au rețetă. Pune prețul de achiziție pe primele câteva — de obicei
-        cinci-șase produse acoperă aproape toată cifra — și marja devine reală peste tot unde apar.
+      <h1>Produse care se vând, dar n-au cost măsurat</h1>
+      <p style="max-width:820px;color:var(--text-muted)">
+        Produsele astea n-au nici cost real în raportul „Profit pe produs" al contabilității, nici preț de achiziție
+        scris pe ele. Marja lor nu mai iese 100%, ca înainte — se <strong>estimează cu rata de cost a firmei</strong> —
+        dar o estimare rămâne o estimare. Pune prețul de achiziție pe primele câteva; de obicei cinci-șase produse
+        acoperă aproape toată cifra, și marja devine măsurată peste tot unde apar.
       </p>
       <div class="cards">
-        <div class="card"><div class="label">Produse fără cost, cu vânzări</div><div class="value">${randuri.length}</div></div>
-        <div class="card"><div class="label">Vânzări pe care nu se poate calcula marja</div><div class="value">${money(totalFaraCost)}</div></div>
+        <div class="card"><div class="label">Produse fără cost măsurat, cu vânzări</div><div class="value">${randuri.length}</div></div>
+        <div class="card"><div class="label">Vânzări cu marja estimată</div><div class="value">${money(totalFaraCost)}</div>
+          <div class="mic">costul lor se ia cu rata firmei, nu din gestiune</div></div>
       </div>
       ${
         randuri.length

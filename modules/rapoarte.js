@@ -15,8 +15,7 @@ const { SUB_STOC, SUB_STOC_PRODUS } = require("../lib/stoc");
 // produs identificat, iar rapoartele spun pe față că marja e o estimare în
 // plus. Praguri identice cu verificarea „cost de marfă aberant" din
 // modules/verificari.js, ca cele două să arate aceleași rânduri.
-const COST_LINIE =
-  "CASE WHEN fl.cantitate * COALESCE(pr.pret_achizitie, 0) > 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN 0 ELSE fl.cantitate * COALESCE(pr.pret_achizitie, 0) END";
+const cost = require("../lib/cost");
 const grup = require("../lib/grup");
 const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
@@ -1585,8 +1584,9 @@ function register(router) {
     const deLa = luni[0] + "-01";
     const agentAles = parseInt(ctx.query.agent, 10) || null;
 
+    const COST_LINIE = cost.costLinie(await cost.rataFirma());
     const SUB_COST =
-      `(SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost, SUM(CASE WHEN fl.produs_id IS NOT NULL AND COALESCE(pr.pret_achizitie,0) > 0 AND fl.cantitate * COALESCE(pr.pret_achizitie, 0) <= 5 * (fl.cantitate * fl.pret_unitar) + 100 THEN fl.cantitate * fl.pret_unitar ELSE 0 END) AS venit_cu_cost FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id GROUP BY fl.factura_id)`;
+      `(SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost, SUM(${cost.VENIT_CU_COST_REAL}) AS venit_cu_cost FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id GROUP BY fl.factura_id)`;
     const SUB_NET = "(SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id)";
 
     const peAgent = await db
@@ -1646,15 +1646,15 @@ function register(router) {
       detaliuClienti = `
         <h2>Clienții lui ${esc(agent ? agent.nume : "?")} — profitabilitate pe client</h2>
         ${table(
-          ["Client", "Facturi", "Venit net", "Marjă (unde există cost)", "% venit cu cost cunoscut", "Sold de încasat"],
+          ["Client", "Facturi", "Venit net", "Marjă", "% din venit cu cost măsurat", "Sold de încasat"],
           clienti.map((c) => {
-            const marja = Number(c.venit_cu_cost) - Number(c.cost);
+            const marja = Number(c.venit) - Number(c.cost);
             const acoperire = Number(c.venit) > 0 ? (Number(c.venit_cu_cost) / Number(c.venit)) * 100 : 0;
             return [
               `<a href="/parteneri/${c.id}">${esc(c.nume)}</a>`,
               c.facturi,
               money(c.venit),
-              Number(c.venit_cu_cost) > 0 ? `${money(marja)} (${((marja / Number(c.venit_cu_cost)) * 100).toFixed(1)}%)` : "—",
+              Number(c.venit) > 0 ? `${money(marja)} (${((marja / Number(c.venit)) * 100).toFixed(1)}%)` : "—",
               `${acoperire.toFixed(0)}%`,
               money(Math.max(0, c.sold)),
             ];
@@ -1677,16 +1677,16 @@ function register(router) {
 
       <h2>Profitabilitate pe agent</h2>
       ${table(
-        ["Agent", "Clienți", "Facturi", "Venit net", "Marjă (unde există cost)", "% venit cu cost cunoscut", "Pipeline deschis", "Sold de încasat", ""],
+        ["Agent", "Clienți", "Facturi", "Venit net", "Marjă", "% din venit cu cost măsurat", "Pipeline deschis", "Sold de încasat", ""],
         peAgent.map((a) => {
-          const marja = Number(a.venit_cu_cost) - Number(a.cost);
+          const marja = Number(a.venit) - Number(a.cost);
           const acoperire = Number(a.venit) > 0 ? (Number(a.venit_cu_cost) / Number(a.venit)) * 100 : 0;
           return [
             esc(a.nume),
             a.clienti,
             a.facturi,
             money(a.venit),
-            Number(a.venit_cu_cost) > 0 ? `${money(marja)} (${((marja / Number(a.venit_cu_cost)) * 100).toFixed(1)}%)` : "—",
+            Number(a.venit) > 0 ? `${money(marja)} (${((marja / Number(a.venit)) * 100).toFixed(1)}%)` : "—",
             `${acoperire.toFixed(0)}%`,
             money(pipelineMap[a.id] || 0),
             money(Math.max(0, a.sold)),
@@ -1695,9 +1695,9 @@ function register(router) {
         })
       )}
       <p style="font-size:12px;color:var(--text-muted)">
-        Marja se calculează DOAR pe liniile de factură care au produs cu preț de achiziție completat — facturile importate din
-        SmartBill n-au detaliu pe produse, deci pentru ele se arată venitul, nu marja. Coloana „% venit cu cost cunoscut" spune
-        cât de acoperit e calculul: la 0% marja lipsește complet, nu e zero.
+        Marja e pe tot venitul. Costul se ia în trei trepte: rata reală a produsului din raportul de contabilitate, altfel
+        prețul lui de achiziție, altfel rata de cost a firmei. Coloana „% din venit cu cost măsurat" spune cât din calcul
+        stă pe cifre luate din gestiune și cât e estimat cu rata firmei — la 0% marja e o estimare cap-coadă, nu o măsurătoare.
       </p>
       ${detaliuClienti}
     `;
@@ -2115,6 +2115,7 @@ function register(router) {
 
     const filtruAgent = agentAles ? "AND p.agent_id = ?" : "";
     const argsAgent = agentAles ? [agentAles] : [];
+    const COST_LINIE = cost.costLinie(await cost.rataFirma());
 
     const produse = await db
       .prepare(

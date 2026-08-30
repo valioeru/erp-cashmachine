@@ -280,7 +280,12 @@ async function ingestProfitProdus(randuri) {
       .run(pid, den, curat(r.cod) || null, curat(r.gestiune) || null, nr(r.vanzari_brute), nr(r.discount), nr(r.vanzari_nete), nr(r.cost), nr(r.profit), nr(r.marja_pct), curat(r.perioada) || null);
     scrise++;
   }
-  return { scrise, legate_de_produse: legate };
+  // Raportul ăsta e singura sursă de cost REAL al mărfii vândute. Cum a intrat,
+  // recalculăm ratele de cost pe produse și rata firmei — altfel marja din ERP
+  // ar rămâne pe prețuri de achiziție statice, iar liniile fără produs ar ieși
+  // în continuare cu marjă 100%. Vezi lib/cost.js.
+  const rate = await require("../lib/cost").recalculeazaRate();
+  return { scrise, legate_de_produse: legate, produse_cu_cost_real: rate.produse, rata_firma: rate.rata_firma };
 }
 
 // --- liniile facturilor ----------------------------------------------------
