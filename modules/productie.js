@@ -5,7 +5,7 @@
 // pentru că le stabilesc oameni diferiți — exact ce era ținut până acum în
 // Excelul "Comenzi_in_lucru.xlsx".
 const db = require("../lib/db");
-const { esc, layout, table, dateleInText } = require("../lib/render");
+const { esc, money, layout, table, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
 const { comenziSpreAlocare, ore } = require("./utilaje");
@@ -1030,6 +1030,27 @@ function register(router) {
 
     const utilizatoriComanda = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
 
+    // Costul comenzii, din rețeta produsului. Registrul de comenzi n-are
+    // prețuri, dar rețeta știe din ce e făcut produsul — deci costul comenzii
+    // se poate ști din prima zi, nu după ce se închide luna. Când produsul de
+    // pe comandă nu e legat de unul din catalog, încercăm o potrivire după
+    // denumire; dacă nici aia nu iese, spunem pe față că nu se poate calcula.
+    let produsComanda = null;
+    if (c.produs_id) {
+      produsComanda = await db
+        .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa FROM produse WHERE id = ?")
+        .get(c.produs_id)
+        .catch(() => null);
+    }
+    if (!produsComanda && c.tip_produs) {
+      produsComanda = await db
+        .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa FROM produse WHERE LOWER(TRIM(denumire)) = LOWER(TRIM(?)) LIMIT 1")
+        .get(String(c.tip_produs))
+        .catch(() => null);
+    }
+    const costPeBucata = produsComanda ? Number(produsComanda.cost_reteta) || 0 : 0;
+    const costComanda = costPeBucata * (Number(String(c.cantitate || "").replace(/[^\d.,-]/g, "").replace(",", ".")) || 0);
+
     // Alocările: pe ce mașină și cu cine stă comanda asta. Fără ele, pagina
     // spune ce e de făcut, dar nu și cine o face.
     const alocari = await db
@@ -1073,6 +1094,25 @@ function register(router) {
         </div>
         ${c.observatii ? `<p style="margin-top:12px;white-space:pre-wrap"><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
         ${c.reteta ? `<p style="white-space:pre-wrap"><strong>Rețetă / consum:</strong> ${esc(c.reteta)}</p>` : ""}
+        ${
+          costPeBucata > 0
+            ? `<p style="margin-top:12px">
+                 <strong>Cost din rețetă:</strong>
+                 ${money(costPeBucata)} pe bucată${costComanda > 0 ? ` · <strong>${money(costComanda)}</strong> pe toată comanda` : ""}
+                 ${Number(produsComanda.cost_reteta_lipsa) > 0 ? `<span style="color:var(--warn);font-size:12px"> — ${produsComanda.cost_reteta_lipsa} ${Number(produsComanda.cost_reteta_lipsa) === 1 ? "componentă n-are" : "componente n-au"} cost, deci e o limită de jos</span>` : ""}
+                 <a class="link-btn" href="/productie/retete/${produsComanda.id}" style="margin-left:8px">vezi rețeta →</a>
+               </p>`
+            : produsComanda
+              ? `<p style="margin-top:12px;color:var(--text-muted)">
+                   <strong>Cost din rețetă:</strong> nu se poate calcula — produsul
+                   <a href="/productie/retete/${produsComanda.id}">${esc(produsComanda.denumire)}</a> n-are rețetă definită.
+                   <a class="btn small" href="/productie/retete/${produsComanda.id}" style="margin-left:8px">Scrie rețeta</a>
+                 </p>`
+              : `<p style="margin-top:12px;color:var(--text-muted)">
+                   <strong>Cost din rețetă:</strong> comanda nu e legată de un produs din catalog, așa că n-are de unde
+                   să-și ia rețeta. Leagă produsul din <a href="/productie/${c.id}/editare">editarea comenzii</a>.
+                 </p>`
+        }
       </div>
 
       <h2 style="margin-bottom:4px">Pe ce se lucrează</h2>

@@ -842,7 +842,7 @@ function register(router) {
       <p class="explic" style="max-width:820px">
         Lista e pusă în ordinea <strong>FIFO — primul intrat, primul ieșit</strong>: pe fiecare marfă, cea mai veche
         paletă e prima, cu semnul <span class="badge verde">prima la rând</span>. Regula e aceeași pentru materie primă,
-        consumabile și marfă de vânzare. Poți sări peste una mai veche — depozitul are motive reale, o paletă blocată în
+        consumabile, marfă de vânzare <strong>și produs finit</strong> — orice iese din depozit. Poți sări peste una mai veche — depozitul are motive reale, o paletă blocată în
         spate sau un lot cerut de client — dar atunci scrii de ce, iar motivul rămâne scris pe ieșire. Costul care pleacă
         din depozit se ia cu prețul paletei ăsteia, nu cu o medie.
       </p>
