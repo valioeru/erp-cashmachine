@@ -686,6 +686,10 @@ function register(router) {
           WHERE o.palet_id = ? ORDER BY l.camp, l.pozitie`
       )
       .all(p.id);
+    const iesire = await db
+      .prepare("SELECT * FROM ct_iesiri WHERE palet_id = ? ORDER BY id DESC LIMIT 1")
+      .get(p.id)
+      .catch(() => null);
 
     const body = `
       ${subtabs("/stocuri/ct-park")}
@@ -704,12 +708,33 @@ function register(router) {
           <div><div class="k">Intrată la</div>${esc(p.data_intrare)}</div>
           <div><div class="k">Scoasă la</div>${esc(p.data_iesire || "—")}</div>
           <div><div class="k">Pusă de</div>${esc(p.creat_de || "—")}</div>
+          <div><div class="k">Preț la intrare</div>${
+            nr(p.pret_unitar)
+              ? `${nr(p.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} lei / ${esc(p.um || p.unitate_masura || "UM")}<br><span style="color:var(--text-muted);font-size:11px">${esc(p.pret_sursa || "")}</span>`
+              : "—"
+          }</div>
+          <div><div class="k">Valoarea paletei</div>${
+            nr(p.pret_unitar) && nr(p.cantitate)
+              ? `${(nr(p.cantitate) * nr(p.pret_unitar)).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei`
+              : "—"
+          }</div>
         </div>
         <p style="margin-top:12px"><strong>Adresa:</strong>
           ${locuri.map((l) => `<a href="/stocuri/ct-park/rand/${l.rand_id}" class="badge gri" style="text-decoration:none">${esc(l.adresa)}</a>`).join(" ")}
           ${locuri.length > 1 ? `<span style="color:var(--text-muted);font-size:12px"> — marfă lată, ține ${locuri.length} locuri</span>` : ""}
         </p>
         ${p.observatii ? `<p style="white-space:pre-wrap"><strong>Observații:</strong> ${esc(p.observatii)}</p>` : ""}
+        ${
+          iesire
+            ? `<p style="margin-top:10px"><strong>Ieșire:</strong> ${esc(String(iesire.data || "").slice(0, 10))} → ${esc(etichetaDestinatie(iesire.destinatie))}${
+                iesire.comanda_numar ? " · " + esc(iesire.comanda_numar) + (iesire.client ? " · " + esc(iesire.client) : "") : ""
+              }${
+                nr(iesire.cost)
+                  ? ` · cost ieșit <strong>${nr(iesire.cost).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</strong> <span style="color:var(--text-muted);font-size:12px">(${esc(iesire.cost_temei || "")})</span>`
+                  : ""
+              }${iesire.peste_rand ? `<br><span style="color:var(--warn);font-size:12px">Peste rând: ${esc(iesire.peste_rand)}</span>` : ""}</p>`
+            : ""
+        }
       </div>
       ${
         p.data_iesire
@@ -766,15 +791,30 @@ function register(router) {
       : "";
     const argCauta = cauta ? [`%${cauta}%`, `%${cauta}%`, `%${cauta}%`] : [];
 
+    // FIFO: primul intrat, primul ieșit. Lista se ordonează pe marfă, iar în
+    // interiorul fiecărei mărfi de la cea mai veche paletă la cea mai nouă —
+    // nu de la ultima introdusă, cum era înainte. Așa, ce trebuie scos e
+    // mereu primul rând al grupului lui, nu ceva de căutat prin listă.
     const paleti = await db
       .prepare(
         `SELECT p.id, p.cod, p.cantitate, p.um, p.lot, p.categorie, p.data_intrare,
+                p.pret_unitar, p.pret_sursa,
                 COALESCE(pr.denumire, p.produs_text) AS marfa
            FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
           WHERE p.data_iesire IS NULL${undeCauta}
-          ORDER BY p.id DESC LIMIT 200`
+          ORDER BY COALESCE(pr.denumire, p.produs_text, ''), p.data_intrare ASC, p.id ASC
+          LIMIT 400`
       )
       .all(...argCauta);
+
+    // Care e „la rând" pentru fiecare marfă: cea mai veche paletă neieșită.
+    // Marfa scrisă liber se compară după text, fiindcă n-are produs în catalog.
+    const cheieMarfa = (x) => String(x.marfa || "—").trim().toLowerCase();
+    const laRand = new Map();
+    for (const x of paleti) {
+      const k = cheieMarfa(x);
+      if (!laRand.has(k)) laRand.set(k, Number(x.id));
+    }
 
     const adrese = await db
       .prepare(
@@ -798,6 +838,13 @@ function register(router) {
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
         Bifezi paleții care pleacă și spui <strong>unde se duc</strong> — fără destinație nu iese nimic din depozit.
         Locurile se eliberează pe loc, iar la final primești etichetele de ieșire, tot 100 × 150 mm.
+      </p>
+      <p class="explic" style="max-width:820px">
+        Lista e pusă în ordinea <strong>FIFO — primul intrat, primul ieșit</strong>: pe fiecare marfă, cea mai veche
+        paletă e prima, cu semnul <span class="badge verde">prima la rând</span>. Regula e aceeași pentru materie primă,
+        consumabile și marfă de vânzare. Poți sări peste una mai veche — depozitul are motive reale, o paletă blocată în
+        spate sau un lot cerut de client — dar atunci scrii de ce, iar motivul rămâne scris pe ieșire. Costul care pleacă
+        din depozit se ia cu prețul paletei ăsteia, nu cu o medie.
       </p>
 
       <form class="filtre" method="get" action="/stocuri/ct-park/iesire">
@@ -840,22 +887,36 @@ function register(router) {
         ${
           paleti.length
             ? table(
-                ['<input type="checkbox" id="bifa-toti">', "Paletă", "Marfă", "Cantitate", "Lot", "Adresă", "Intrată la"],
+                ['<input type="checkbox" id="bifa-toti">', "Paletă", "Marfă", "Cantitate", "Lot", "Adresă", "Intrată la", "Cost", "Rând"],
                 paleti.map((p) => {
                   const adr = ha.get(Number(p.id)) || [];
+                  const prima = laRand.get(cheieMarfa(p)) === Number(p.id);
+                  const val = nr(p.cantitate) * nr(p.pret_unitar);
                   return [
-                    `<input type="checkbox" class="bifa-palet" name="paleti" value="${p.id}"${preselectat === Number(p.id) ? " checked" : ""}>`,
+                    `<input type="checkbox" class="bifa-palet" name="paleti" value="${p.id}"
+                            data-marfa="${esc(cheieMarfa(p))}" data-data="${esc(String(p.data_intrare || ""))}"
+                            data-cod="${esc(p.cod)}"${preselectat === Number(p.id) ? " checked" : ""}>`,
                     `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a>`,
                     esc(p.marfa || "—"),
                     nr(p.cantitate) ? `${nr(p.cantitate).toLocaleString("ro-RO")} ${esc(p.um || "")}` : "—",
                     esc(p.lot || "—"),
                     adr.length ? `<code>${adr.map((a) => esc(a)).join(" + ")}</code>` : "—",
                     esc(String(p.data_intrare || "").slice(0, 10)),
+                    nr(p.pret_unitar)
+                      ? `${val.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei<br><span style="color:var(--text-muted);font-size:11px">${nr(p.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} / ${esc(p.um || "UM")}</span>`
+                      : `<span style="color:var(--text-muted)">fără preț</span>`,
+                    prima ? `<span class="badge verde">prima la rând</span>` : `<span style="color:var(--text-muted);font-size:12px">după</span>`,
                   ];
                 })
               )
             : `<p style="color:var(--text-muted)">${cauta ? "Niciun palet care să semene cu „" + esc(cauta) + "”." : "Nu e nimic în depozit."}</p>`
         }
+
+        <label class="field" id="camp-peste-rand" style="display:none;border-left:3px solid var(--warn);padding-left:10px">
+          <span>De ce scoți peste rând</span>
+          <input name="peste_rand" placeholder="ex. paleta veche e blocată în spate, clientul cere lotul ăsta">
+          <span class="ajutor">Ai bifat o paletă deși există una mai veche din aceeași marfă. Scrie motivul — rămâne pe ieșire.</span>
+        </label>
 
         <div class="form-actions">
           <button class="btn" type="submit"${paleti.length ? "" : " disabled"}>Scoate paleții și tipărește etichetele →</button>
@@ -869,7 +930,48 @@ function register(router) {
         if (toti) toti.addEventListener("change", function () {
           var b = document.querySelectorAll(".bifa-palet");
           for (var i = 0; i < b.length; i++) b[i].checked = toti.checked;
+          peste();
         });
+
+        // FIFO, verificat în pagină înainte de trimitere: dacă bifezi o paletă
+        // și rămâne nebifată una mai veche din aceeași marfă, apare câmpul de
+        // motiv. Nu blocăm — depozitul are motive reale să sară peste (paleta
+        // din spate, lotul cerut de client) — dar motivul se scrie și rămâne.
+        var campPeste = document.getElementById("camp-peste-rand");
+        function sarite() {
+          var b = document.querySelectorAll(".bifa-palet");
+          var bifate = {}, lista = [];
+          for (var i = 0; i < b.length; i++) if (b[i].checked) bifate[b[i].dataset.marfa] = true;
+          for (var i = 0; i < b.length; i++) {
+            var x = b[i];
+            if (x.checked || !bifate[x.dataset.marfa]) continue;
+            // paleta asta e mai veche decât cel puțin una bifată din marfa ei?
+            for (var j = 0; j < b.length; j++) {
+              var y = b[j];
+              if (!y.checked || y.dataset.marfa !== x.dataset.marfa) continue;
+              if (x.dataset.data < y.dataset.data || (x.dataset.data === y.dataset.data && Number(x.value) < Number(y.value))) {
+                lista.push(x.dataset.cod);
+                break;
+              }
+            }
+          }
+          return lista;
+        }
+        function peste() {
+          if (!campPeste) return;
+          var l = sarite();
+          campPeste.style.display = l.length ? "" : "none";
+          var inp = campPeste.querySelector("input");
+          if (inp) inp.required = l.length > 0;
+          var aj = campPeste.querySelector(".ajutor");
+          if (aj && l.length) {
+            aj.textContent = "Rămân în depozit palete mai vechi din aceeași marfă: " + l.slice(0, 6).join(", ") +
+              (l.length > 6 ? " și încă " + (l.length - 6) : "") + ". Scrie de ce le sari — motivul rămâne pe ieșire.";
+          }
+        }
+        var bifePalet = document.querySelectorAll(".bifa-palet");
+        for (var i = 0; i < bifePalet.length; i++) bifePalet[i].addEventListener("change", peste);
+        peste();
         // Câmpul comenzii apare doar când destinația e „Comandă" — altfel e
         // o cutie goală care încurcă.
         var camp = document.getElementById("camp-comanda");
@@ -927,16 +1029,44 @@ function register(router) {
 
     const azi = aziStr();
     const cine = ctx.user ? ctx.user.nume : null;
+    const motivPeste = String(b.peste_rand || "").trim() || null;
     const scoase = [];
     for (const id of ids) {
-      const p = await db.prepare("SELECT id FROM ct_paleti WHERE id = ? AND data_iesire IS NULL").get(id);
+      const p = await db
+        .prepare(
+          `SELECT p.id, p.cantitate, p.um, p.produs_id, p.produs_text, p.data_intrare,
+                  p.pret_unitar, p.pret_sursa, COALESCE(pr.denumire, p.produs_text) AS marfa
+             FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
+            WHERE p.id = ? AND p.data_iesire IS NULL`
+        )
+        .get(id);
       if (!p) continue; // deja ieșit între timp — nu-l scoatem de două ori
+
+      // FIFO, verificat și pe server: câte palete mai vechi din aceeași marfă
+      // rămân în depozit după ieșirea asta. Verificarea din pagină e o
+      // comoditate; asta e cea care ajunge în date.
+      const maiVechi = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM ct_paleti x LEFT JOIN produse xr ON xr.id = x.produs_id
+            WHERE x.data_iesire IS NULL AND x.id <> ?
+              AND LOWER(COALESCE(xr.denumire, x.produs_text, '')) = LOWER(COALESCE(?, ''))
+              AND (x.data_intrare < ? OR (x.data_intrare = ? AND x.id < ?))
+              AND x.id NOT IN (${ids.map(() => "?").join(",")})`
+        )
+        .get(id, p.marfa, p.data_intrare, p.data_intrare, id, ...ids)
+        .catch(() => ({ n: 0 }));
+      const sarite = Number((maiVechi && maiVechi.n) || 0);
+
+      // Costul care iese efectiv din depozit, cu prețul paletei ăsteia.
+      const cost = nr(p.cantitate) * nr(p.pret_unitar);
+      const temei = nr(p.pret_unitar) ? p.pret_sursa || "preț pe paletă" : "fără preț la intrare";
+
       await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
       await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
       await db
         .prepare(
-          `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -948,7 +1078,10 @@ function register(router) {
           (ha.get(Number(id)) || []).join(" + ") || null,
           azi,
           String(b.observatii || "").trim() || null,
-          cine
+          cine,
+          cost > 0 ? Math.round(cost * 100) / 100 : null,
+          temei,
+          sarite ? `${sarite} ${sarite === 1 ? "paletă mai veche rămasă" : "palete mai vechi rămase"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
         );
       scoase.push(id);
     }
@@ -981,11 +1114,24 @@ function register(router) {
       ha.get(k).push(a.adresa);
     }
 
+    // Valoarea stocului: din prețul cu care a intrat fiecare paletă, nu dintr-o
+    // medie pe produs. Spunem și câți paleți n-au preț, ca să se vadă cât din
+    // cifră lipsește.
+    const inDepozit = paleti.filter((p) => !p.data_iesire);
+    const valoare = inDepozit.reduce((s2, p) => s2 + nr(p.cantitate) * nr(p.pret_unitar), 0);
+    const faraPret = inDepozit.filter((p) => !nr(p.pret_unitar)).length;
+
     const body = `
       ${subtabs("/stocuri/ct-park/paleti")}
       <div class="toolbar"><a class="btn" href="/stocuri/ct-park/intrare">+ Intrare marfă</a></div>
+      <div class="cards">
+        <div class="card"><div class="label">Paleți în depozit</div><div class="value">${inDepozit.length}</div></div>
+        <div class="card"><div class="label">Valoarea stocului</div>
+          <div class="value">${valoare.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</div>
+          <div class="mic">${faraPret ? `${faraPret} ${faraPret === 1 ? "paletă n-are" : "paleți n-au"} preț la intrare, deci nu ${faraPret === 1 ? "e" : "sunt"} la socoteală` : "toți paleții au preț la intrare"}</div></div>
+      </div>
       ${table(
-        ["Cod", "Marfă", "Cantitate", "Lot", "Categorie", "Adresă", "Intrată", "Stare", ""],
+        ["Cod", "Marfă", "Cantitate", "Lot", "Categorie", "Adresă", "Intrată", "Valoare", "Stare", ""],
         paleti.map((p) => [
           `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a>`,
           p.produs_id ? `<a href="/produse/${p.produs_id}">${esc(p.produs || "—")}</a>` : esc(p.produs_text || "—"),
@@ -994,6 +1140,9 @@ function register(router) {
           pastila(p.categorie) || "—",
           (ha.get(Number(p.id)) || []).map((a) => esc(a)).join(" ") || '<span class="badge gri">fără loc</span>',
           esc(p.data_intrare),
+          nr(p.pret_unitar)
+            ? (nr(p.cantitate) * nr(p.pret_unitar)).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei"
+            : `<span style="color:var(--text-muted)">fără preț</span>`,
           p.data_iesire ? `<span class="badge gri">scoasă ${esc(p.data_iesire)}</span>` : '<span class="badge verde">în depozit</span>',
           `<a class="btn small secondary" href="/stocuri/ct-park/etichete?paleti=${p.id}" target="_blank">Etichetă</a>`,
         ])
@@ -1053,11 +1202,17 @@ function register(router) {
               ? `<p style="color:var(--text-muted)">Niciun produs care să semene cu „${esc(cauta)}". Scrie denumirea liber mai jos.</p>`
               : ""
         }
-        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px">
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:14px">
           <label class="field">…sau denumirea scrisă liber<input name="produs_text" placeholder="folie stretch 23µ reciclat"></label>
           <label class="field">Cantitate totală<input type="number" name="cantitate" min="0" step="0.01"></label>
           <label class="field">UM<input name="um" placeholder="kg"></label>
+          <label class="field">Preț de achiziție (lei / UM)<input type="number" name="pret_unitar" min="0" step="0.0001" placeholder="ex. 7,35"></label>
         </div>
+        <p class="explic" style="margin-top:-6px">
+          Prețul rămâne lipit de paleta asta. Când marfa iese, se scoate cu costul cu care a intrat — ăsta e
+          rostul lui FIFO. Dacă îl lași gol, se ia prețul de achiziție de pe produs, iar pe paletă scrie
+          că e luat de acolo, nu de pe factura ei.
+        </p>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px">
           <label class="field">Lot<input name="lot"></label>
           <label class="field">Categorie
@@ -1156,6 +1311,7 @@ function register(router) {
       <input type="hidden" name="produs_id" value="${produs ? produs.id : ""}">
       <input type="hidden" name="produs_text" value="${esc(String(b.produs_text || ""))}">
       <input type="hidden" name="um" value="${esc(String(b.um || (produs ? produs.unitate_masura : "") || ""))}">
+      <input type="hidden" name="pret_unitar" value="${esc(String(b.pret_unitar || ""))}">
       <input type="hidden" name="lot" value="${esc(String(b.lot || ""))}">
       <input type="hidden" name="categorie" value="${esc(categorie || "")}">
       <input type="hidden" name="observatii" value="${esc(String(b.observatii || ""))}">`;
@@ -1214,6 +1370,22 @@ function register(router) {
     if (!grupuri.length) return redirect(ctx.res, "/stocuri/ct-park/intrare");
 
     const data = aziStr();
+
+    // Costul cu care intră paleta. Prima variantă e ce a scris omul pe
+    // formularul de intrare — ăla vine de pe factura furnizorului. Dacă n-a
+    // scris nimic, împrumutăm prețul de achiziție de pe produs și spunem pe
+    // paletă de unde e luat, ca nimeni să nu creadă că e prețul ei real.
+    let pretPaleta = nr(b.pret_unitar) || null;
+    let pretSursa = pretPaleta ? "scris la intrare" : null;
+    if (!pretPaleta && nr(b.produs_id)) {
+      const pr = await db.prepare("SELECT pret_achizitie FROM produse WHERE id = ?").get(nr(b.produs_id)).catch(() => null);
+      const p2 = pr ? nr(pr.pret_achizitie) : 0;
+      if (p2 > 0) {
+        pretPaleta = p2;
+        pretSursa = "preț de achiziție de pe produs";
+      }
+    }
+
     const idPaleti = [];
     for (const locuri of grupuri) {
       // Verificăm din nou că locurile sunt libere: între propunere și
@@ -1231,8 +1403,8 @@ function register(router) {
 
       const r = await db
         .prepare(
-          `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de)
-           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+          `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa)
+           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
         )
         .run(
           nr(b.produs_id) || null,
@@ -1243,7 +1415,9 @@ function register(router) {
           CATEGORII.includes(String(b.categorie || "")) ? String(b.categorie) : null,
           data,
           String(b.observatii || "").trim() || null,
-          ctx.user ? ctx.user.nume : null
+          ctx.user ? ctx.user.nume : null,
+          pretPaleta,
+          pretSursa
         );
       const id = r.lastInsertRowid;
       if (!id) continue;
