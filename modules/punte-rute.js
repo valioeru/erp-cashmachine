@@ -47,7 +47,9 @@ module.exports = function registerRute(router, deps) {
         <div class="card"><div class="label">Vânzări nete</div><div class="value">${bani(totalNet)}</div></div>
         <div class="card"><div class="label">Costul bunurilor vândute</div><div class="value">${bani(totalCost)}</div></div>
         <div class="card"><div class="label">Profit</div><div class="value" style="color:${totalProfit >= 0 ? "var(--success)" : "var(--danger)"}">${bani(totalProfit)}</div></div>
-        <div class="card"><div class="label">Marjă medie</div><div class="value">${totalNet > 0 ? ((totalProfit / totalNet) * 100).toFixed(1) + "%" : "—"}</div></div>
+        <div class="card"><div class="label">Marjă medie</div>
+          <div class="value">${totalNet > 0 ? ((totalProfit / totalNet) * 100).toFixed(1) + "%" : "—"}</div>
+          <div class="mic">${totalNet > 0 ? `${bani(totalProfit)} din ${bani(totalNet)}` : ""}</div></div>
         <div class="card"><div class="label">Produse în pierdere</div><div class="value" style="color:${inPierdere.length ? "var(--danger)" : "inherit"}">${inPierdere.length}</div></div>
       </div>
       ${

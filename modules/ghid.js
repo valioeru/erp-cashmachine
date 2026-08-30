@@ -382,6 +382,55 @@ const GHID = [
 "sfat":null
 },
 {
+"t":"Rețete — costul produsului, știut din prima zi",
+"p":[
+"O rețetă spune din ce e făcut un produs: ce materii prime intră și în ce cantitate, <b>pe o bucată</b>. Are un rost simplu — dacă știm rețeta, știm cât costă marfa de pe o comandă <b>în ziua în care intră comanda</b>, nu abia după ce se închide luna în contabilitate.",
+"Lista de rețete e la <b>Producție → Rețete</b>. Fiecare rând e un produs din catalog: din ce e făcut, cât costă componentele lui, și dacă rețeta pare în regulă. Cele suspecte sunt puse primele, cu o notă: <b>„pare pe lot, nu pe bucată”</b> înseamnă că iese de câteva ori mai scump decât se vinde produsul — aproape sigur cantitățile sunt scrise pentru o șarjă întreagă, nu pentru o bucată. <b>„pare incompletă”</b> înseamnă invers: iese sub 5% din prețul de vânzare, deci lipsesc componente.",
+"Costul unei rețete se calculează pe componente, iar componentele pot avea la rândul lor rețete — un produs semifabricat intră cu costul lui, nu cu prețul de listă. Dacă vreo componentă n-are cost deloc, ERP-ul o spune pe față: cifra e o <b>limită de jos</b>, nu costul adevărat.",
+"Butonul <b>„Recalculează rețetele”</b> reface toate costurile după ce ai modificat componente sau prețuri de achiziție. Se poate apăsa oricând, nu strică nimic — doar rescrie cifrele."
+],
+"pasi":[
+"Intri în <b>Producție → Rețete</b>.",
+"Deschizi produsul căruia vrei să-i scrii rețeta.",
+"Adaugi componentele, una câte una, cu cantitatea <b>pe o bucată de produs finit</b>.",
+"Apeși „Recalculează rețetele” ca să se așeze costurile."
+],
+"sfat":"Cantitatea se scrie întotdeauna pe o bucată. Dacă ai rețeta pe o șarjă de 500 kg, împarte la câte bucăți ies din șarjă."
+},
+{
+"t":"Comanda își știe costul: leagă produsul de catalog",
+"p":[
+"O comandă de producție își ia costul din rețeta produsului. Ca s-o poată face, comanda trebuie <b>legată de un produs din catalog</b> — pentru că rețeta stă pe produs, nu pe comandă.",
+"În pagina comenzii, sub datele ei, e caseta <b>„Leagă comanda de un produs din catalog”</b>. Caută singură după denumirea produsului scris pe comandă; dacă îl găsește, îl alegi și apeși „Leagă produsul”. Lângă fiecare rezultat scrie dacă produsul are deja rețetă și cât costă pe bucată — așa vezi din listă pe care merită să-l alegi.",
+"Dacă produsul <b>nu există încă în catalog</b> — comandă de produs nou — apeși butonul <b>„Creează … în catalog și leagă-l”</b>. Îl face cu denumirea de pe comandă, îl leagă, și te duce direct în pagina rețetei ca să scrii componentele pe loc. Dacă un produs cu aceeași denumire exista deja, îl refolosește: nu se fac dubluri în catalog.",
+"După ce comanda are produs cu rețetă, în capul paginii apare <b>„Cost din rețetă: X lei pe bucată · Y lei pe toată comanda”</b>. Iar în lista de comenzi, sus, două cifre spun cât din registru își știe costul: <b>„Comenzi cu cost cunoscut”</b> (câte din cele deschise) și <b>„Cost marfă, comenzi deschise”</b>.",
+"Legătura se poate schimba oricând — caseta rămâne acolo, cu titlul „Schimbă produsul din catalog”. Nu se pierde nimic din comandă când o schimbi."
+],
+"pasi":[
+"Deschizi comanda din <b>Producție → lista de comenzi</b>.",
+"În caseta de jos cauți produsul în catalog și îl alegi, sau apeși „Creează … în catalog și leagă-l”.",
+"Îi scrii rețeta în pagina care se deschide.",
+"Te întorci în comandă — costul apare acolo."
+],
+"sfat":"Ținta e ca fiecare comandă deschisă să aibă produs legat cu rețetă. Cardul „Comenzi cu cost cunoscut” din capul listei îți arată cât mai ai de recuperat."
+},
+{
+"t":"Necesarul de materie primă al unei comenzi",
+"p":[
+"Rețeta spune ce intră într-o bucată, comanda spune câte bucăți. Din înmulțirea lor iese <b>lista de cules din depozit</b>. O deschizi din pagina comenzii, cu butonul <b>„Necesar de materie primă”</b> — apare doar la comenzile care au produs legat și rețetă scrisă.",
+"Pentru fiecare componentă vezi: cât intră pe bucată, <b>cât e nevoie pe toată comanda</b>, cât e în depozit, dacă se acoperă sau nu, și <b>ce paleți se iau</b> — cei mai vechi întâi, în ordinea FIFO. La ultimul palet scrie și cât rămâne din el, pentru că paleții se scot întregi.",
+"Sus, trei cifre: câte componente are rețeta, <b>câte nu se acoperă din stoc</b> și cât costă materia primă a comenzii. Dacă vreo componentă n-are cost, ERP-ul o spune — cifra e o limită de jos, nu costul adevărat.",
+"<b>Pagina nu scoate nimic din depozit.</b> E o hârtie de cules, atât. Scoaterea se face ca întotdeauna din <b>Depozit → Ieșire marfă</b>, cu destinația <b>producție</b>, bifând paleții din listă."
+],
+"pasi":[
+"Deschizi comanda din <b>Producție</b>.",
+"Apeși <b>„Necesar de materie primă”</b>.",
+"Te uiți la coloana <b>Acoperire</b>: ce e roșu trebuie comandat, nu se ia din depozit.",
+"Duci lista în depozit și scoți paleții din <b>Depozit → Ieșire marfă</b>, destinația producție."
+],
+"sfat":"Dacă o componentă apare cu „lipsesc”, verifică întâi dacă marfa chiar nu e în depozit sau doar n-a fost înregistrată la intrare."
+},
+{
 "t":"Planificare",
 "p":[
 "Calendarul producției: ce utilaj e ocupat când, cine lucrează, ce e planificat în perioada asta.",
@@ -508,6 +557,23 @@ const GHID = [
 ],
 "pasi":[],
 "sfat":null
+},
+{
+"t":"Facturări și încasări pe agent, lunar — cu marjă",
+"p":[
+"Raportul <b>Agenți, lunar</b> pune fiecare agent pe un rând și fiecare lună pe o coloană. Comutatorul de sus alege ce se vede în celule: <b>facturat</b>, <b>încasat</b> sau <b>marjă</b>.",
+"Marja e <b>venitul net minus costul mărfii</b> — nu comisionul și nu profitul firmei, care mai are peste ele salarii, chirii și utilități. Coloana <b>Cost marfă</b> spune cât a costat marfa vândută de agentul acela, iar sub ea scrie <b>pe cât din venit costul e măsurat</b>, restul fiind estimat.",
+"Costul se ia în patru trepte, în ordinea asta: rata de cost a produsului adusă din contabilitate; rețeta produsului; prețul lui de achiziție, dacă e plauzibil; iar la urmă rata medie a firmei. Primele trei sunt <b>măsurate</b>, ultima e o <b>estimare</b> — de aceea raportul spune de fiecare dată pe cât la sută din venit costul e real.",
+"Un lucru de reținut: comutatorul <b>cu TVA / fără TVA</b> schimbă cifrele de facturat și încasat, dar <b>marja rămâne pe net</b>. TVA-ul nu e nici venit, nici cost — e bani ai statului care trec prin firmă.",
+"Exportul CSV duce tot: facturat și încasat pe fiecare lună, marja lunii, plus totalurile — vânzări nete, cost marfă, marjă în lei, marjă în procente și cât la sută din cost e măsurat."
+],
+"pasi":[
+"Deschizi <b>Rapoarte → Agenți, lunar</b>.",
+"Alegi perioada sus.",
+"Comuți pe <b>Marjă</b> dacă vrei cifrele de marjă în celule.",
+"Te uiți la „măsurat pe X%” înainte să tragi concluzii — sub 60% cifra e mai mult o estimare."
+],
+"sfat":"Marja mică la un agent nu înseamnă neapărat că vinde prost. Uită-te întâi la „măsurat pe X%”: dacă e jos, costul e estimat cu rata firmei și nu spune mare lucru despre el."
 },
 {
 "t":"Clienți și Produse top",

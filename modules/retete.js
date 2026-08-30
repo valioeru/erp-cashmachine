@@ -265,7 +265,11 @@ function register(router) {
           <div><div class="k">Unitate de măsură</div>${esc(um(p) || "—")}</div>
           <div><div class="k">Cost din rețetă, pe bucată</div>${d.total > 0 ? `<strong>${bani4(d.total)}</strong>` : "—"}</div>
           <div><div class="k">Preț de referință</div>${pretReper > 0 ? money(pretReper) : "—"}<br><span style="color:var(--text-muted);font-size:11px">${r && r.mediu > 0 ? `media a ${r.linii} linii facturate` : "preț de catalog"}</span></div>
-          <div><div class="k">Marjă la prețul ăsta</div>${marja === null ? "—" : `<strong style="color:${marja >= 0 ? "var(--success)" : "var(--danger)"}">${marja.toFixed(1)}%</strong>`}</div>
+          <div><div class="k">Marjă la prețul ăsta</div>${
+            marja === null
+              ? "—"
+              : `<strong style="color:${marja >= 0 ? "var(--success)" : "var(--danger)"}">${bani4(pretReper - d.total)}</strong> <span style="color:var(--text-muted);font-size:11px">${marja.toFixed(1)}%</span>`
+          }</div>
           <div><div class="k">Stare</div><span class="badge ${v.clasa}">${esc(v.text)}</span></div>
           <div><div class="k">Preț de achiziție scris pe produs</div>${Number(p.pret_achizitie) > 0 ? money(p.pret_achizitie) : "—"}</div>
           <div><div class="k">Cost real din contabilitate</div>${Number(p.cost_rata) > 0 && pretReper > 0 ? `${money(Number(p.cost_rata) * pretReper)}<br><span style="color:var(--text-muted);font-size:11px">${(Number(p.cost_rata) * 100).toFixed(1)}% din preț</span>` : "—"}</div>
@@ -357,6 +361,136 @@ function register(router) {
     // în marjă de la următoarea pagină, nu de la următorul import.
     await cost.recalculeazaRetete();
     return inapoi("");
+  });
+
+  // ---- Necesarul de materie primă al unei comenzi -------------------------
+  // Rețeta spune ce intră într-o bucată; comanda spune câte bucăți. Din
+  // înmulțirea lor iese lista de cules din depozit. Pagina asta NU scoate
+  // nimic — arată doar ce trebuie luat, de pe care paleți (cei mai vechi
+  // întâi, ca la FIFO) și ce lipsește. Scoaterea rămâne unde a fost mereu:
+  // în ecranul de ieșire marfă, apăsată de omul din depozit.
+  router.get("/productie/:id/necesar", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const c = await db
+      .prepare(
+        `SELECT c.*, pr.denumire AS produs_denumire, pr.unitate_masura AS produs_um, p.nume AS partener_nume
+           FROM comenzi_productie c
+           LEFT JOIN produse pr ON pr.id = c.produs_id
+           LEFT JOIN parteneri p ON p.id = c.partener_id
+          WHERE c.id = ?`
+      )
+      .get(ctx.params.id);
+    if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
+
+    const cant = Number(String(c.cantitate || "").replace(/[^\d.,-]/g, "").replace(",", ".")) || 0;
+    const capTabel = `
+      <div class="toolbar">
+        <a class="btn secondary" href="/productie/${c.id}">← Înapoi la comandă</a>
+        ${c.produs_id ? `<a class="btn secondary" href="/productie/retete/${c.produs_id}">Rețeta produsului</a>` : ""}
+        <a class="btn secondary" href="/stocuri/ct-park/iesire">Ieșire marfă din depozit</a>
+      </div>
+      <h1 style="margin:6px 0 2px">Necesar de materie primă — comanda ${esc(c.numar || c.id)}</h1>
+      <p class="mic" style="margin:0 0 14px">
+        ${esc(c.produs_denumire || c.tip_produs || "produs nespecificat")} ·
+        ${cant ? esc(String(cant)) : "?"} ${esc(c.um || c.produs_um || "buc")}
+        ${c.partener_nume || c.client_text ? ` · pentru ${esc(c.partener_nume || c.client_text)}` : ""}
+      </p>`;
+
+    const gol = (mesaj) =>
+      send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: `Necesar comanda ${c.numar || c.id}`,
+          active: "/productie",
+          body: `${capTabel}<div class="card"><p style="margin:0">${mesaj}</p></div>`,
+        })
+      );
+
+    if (!c.produs_id) return gol('Comanda nu e legată de un produs din catalog, deci n-are rețetă. Leag-o din <a href="/productie/' + c.id + '">pagina comenzii</a>.');
+    if (!cant) return gol("Comanda n-are o cantitate din care să se poată calcula necesarul.");
+
+    const d = await cost.detaliuReteta(c.produs_id);
+    if (!d.linii.length) return gol(`Produsul <a href="/productie/retete/${c.produs_id}">${esc(c.produs_denumire || "")}</a> n-are încă rețetă. Scrie-o și necesarul apare singur.`);
+
+    // Ce e în depozit din fiecare componentă, paletă cu paletă, cele mai vechi
+    // întâi — exact ordinea în care ar trebui scoase.
+    const compIds = d.linii.map((l) => Number(l.componenta_id)).filter(Boolean);
+    const paleti = compIds.length
+      ? await db
+          .prepare(
+            `SELECT p.id, p.produs_id, p.cantitate, p.um, p.data_intrare, p.pret_unitar,
+                    COALESCE(pr.denumire, p.produs_text) AS marfa
+               FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
+              WHERE p.data_iesire IS NULL AND p.produs_id IN (${compIds.map(() => "?").join(",")})
+              ORDER BY p.produs_id, p.data_intrare ASC, p.id ASC`
+          )
+          .all(...compIds)
+          .catch(() => [])
+      : [];
+    const peProdus = new Map();
+    for (const p of paleti) {
+      const k = Number(p.produs_id);
+      if (!peProdus.has(k)) peProdus.set(k, []);
+      peProdus.get(k).push(p);
+    }
+
+    let totalCost = 0;
+    let lipsuri = 0;
+    const randuri = d.linii.map((l) => {
+      const nevoie = Number(l.cantitate) * cant;
+      const stoc = peProdus.get(Number(l.componenta_id)) || [];
+      // Paletele de luat: cele mai vechi, până se acoperă nevoia. Paletul se ia
+      // întreg — depozitul nu ține fracțiuni de paletă — deci ultimul depășește
+      // de obicei nevoia, și spunem cât rămâne.
+      let strans = 0;
+      const luate = [];
+      for (const p of stoc) {
+        if (strans >= nevoie) break;
+        luate.push(p);
+        strans += Number(p.cantitate) || 0;
+      }
+      const inStoc = stoc.reduce((s2, p) => s2 + (Number(p.cantitate) || 0), 0);
+      const lipsa = Math.max(0, nevoie - inStoc);
+      if (lipsa > 0) lipsuri++;
+      totalCost += nevoie * Number(l.cost_unitar || 0);
+      const nrf = (x) => (Math.round(x * 1000) / 1000).toLocaleString("ro-RO");
+      return [
+        `<a href="/productie/retete/${l.componenta_id}">${esc(l.denumire)}</a>`,
+        `${nrf(Number(l.cantitate))} ${esc(l.um || "")}`,
+        `<b>${nrf(nevoie)}</b> ${esc(l.um || "")}`,
+        `${nrf(inStoc)} ${esc(l.um || "")}<br><span class="mic">${stoc.length} ${stoc.length === 1 ? "paletă" : "palete"}</span>`,
+        lipsa > 0
+          ? `<span class="badge rosu">lipsesc ${nrf(lipsa)} ${esc(l.um || "")}</span>`
+          : `<span class="badge verde">acoperit</span>`,
+        luate.length
+          ? `${luate.map((p) => `<a href="/stocuri/ct-park/paleti?q=${p.id}">#${p.id}</a><span class="mic"> · ${nrf(Number(p.cantitate) || 0)} · ${esc(String(p.data_intrare || "").slice(0, 10))}</span>`).join("<br>")}
+             ${strans > nevoie ? `<br><span class="mic">rămân ${nrf(strans - nevoie)} ${esc(l.um || "")}</span>` : ""}`
+          : '<span class="mic">nimic în depozit</span>',
+        Number(l.cost_unitar) > 0 ? money(nevoie * Number(l.cost_unitar)) : '<span class="mic">fără cost</span>',
+      ];
+    });
+
+    const body = `
+      ${capTabel}
+      <div class="cards">
+        <div class="card"><div class="label">Componente în rețetă</div><div class="value">${d.linii.length}</div></div>
+        <div class="card"><div class="label">Nu se acoperă din depozit</div>
+          <div class="value" style="color:${lipsuri ? "var(--danger)" : "inherit"}">${lipsuri}</div></div>
+        <div class="card"><div class="label">Cost materie primă</div><div class="value">${money(totalCost)}</div>
+          <div class="mic">${d.lipsa ? `${d.lipsa} ${d.lipsa === 1 ? "componentă n-are" : "componente n-au"} cost — e o limită de jos` : "toate componentele au cost"}</div></div>
+      </div>
+      ${table(
+        ["Componentă", "Pe bucată", "Necesar", "În depozit", "Acoperire", "Palete de luat, FIFO", "Cost"],
+        randuri
+      )}
+      <p class="explic">
+        Lista asta <b>nu scoate nimic</b> din depozit — doar spune ce trebuie luat. Scoaterea se face din
+        <a href="/stocuri/ct-park/iesire">Depozit → Ieșire marfă</a>, cu destinația <b>producție</b>, bifând paletele de mai sus.
+        Paletele se scot întregi, așa că la ultima paletă rămâne de obicei o diferență — e scrisă pe rândul ei.
+      </p>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Necesar comanda ${c.numar || c.id}`, active: "/productie", body }));
   });
 
   router.post("/productie/retete/:id/sterge", async (ctx) => {

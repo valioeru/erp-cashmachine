@@ -1721,7 +1721,7 @@ function register(router) {
     // omul de zece ori pe zi. Restul se aleg din selector.
     const interval = intervalDinQuery(ctx, 12, "luna_curenta");
     const { deLa, panaLa } = interval;
-    const arata = ["ambele", "facturat", "incasat"].includes(String(ctx.query.arata)) ? String(ctx.query.arata) : "ambele";
+    const arata = ["ambele", "facturat", "incasat", "marja"].includes(String(ctx.query.arata)) ? String(ctx.query.arata) : "ambele";
     // Cu sau fara TVA. Contabilitatea vorbeste in net, banca in brut — raportul
     // le da pe amandoua, dar spune mereu, sus si mare, pe care o arata acum.
     const cuTva = String(ctx.query.tva || "fara") === "cu";
@@ -1778,17 +1778,48 @@ function register(router) {
       )
       .all(deLa, panaLa);
 
+    // Marja pe facturile emise în lună. Costul vine din lib/cost.js — rata reală
+    // din contabilitate, altfel rețeta produsului, altfel prețul de achiziție,
+    // altfel rata firmei. Se calculează ÎNTOTDEAUNA pe net, chiar dacă butonul
+    // de sus e pe „cu TVA": un cost fără TVA scăzut dintr-o vânzare cu TVA ar
+    // da o marjă falsă, mai mare cu vreo nouăsprezece procente.
+    const COST_LINIE_LUNAR = cost.costLinie(await cost.rataFirma());
+    const SUB_COST_LUNAR = `(SELECT fl.factura_id, SUM(${COST_LINIE_LUNAR}) AS cost,
+                                    SUM(${cost.VENIT_CU_COST_REAL}) AS venit_masurat
+                               FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id
+                              GROUP BY fl.factura_id)`;
+    const costuri = await db
+      .prepare(
+        `SELECT al.utilizator_id AS agent, SUBSTR(f.data_emiterii, 1, 7) AS luna,
+                COALESCE(SUM(COALESCE(c.cost,0) * al.procent / 100.0), 0) AS cost,
+                COALESCE(SUM(COALESCE(c.venit_masurat,0) * al.procent / 100.0), 0) AS masurat,
+                COALESCE(SUM(COALESCE(n.net,0) * al.procent / 100.0), 0) AS net
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         LEFT JOIN ${SUB_NET} n ON n.factura_id = f.id
+         LEFT JOIN ${SUB_COST_LUNAR} c ON c.factura_id = f.id
+         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+           AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+         GROUP BY al.utilizator_id, SUBSTR(f.data_emiterii, 1, 7)`
+      )
+      .all(deLa, panaLa)
+      .catch(() => []);
+
     const utilizatori = await db.prepare("SELECT id, nume, rol, activ FROM utilizatori").all();
     const numeAgent = new Map(utilizatori.map((u) => [u.id, u.nume]));
 
-    // agent -> { luna -> {f, i}, totalF, totalI, nrF, nrI }
+    // agent -> { luna -> {f, i, cost, net, masurat}, totaluri }
     const date = new Map();
     const linie = (id) => {
-      if (!date.has(id)) date.set(id, { id, nume: numeAgent.get(id) || "Fără agent", pe: new Map(), totalF: 0, totalI: 0, nrF: 0, nrI: 0 });
+      if (!date.has(id))
+        date.set(id, {
+          id, nume: numeAgent.get(id) || "Fără agent", pe: new Map(),
+          totalF: 0, totalI: 0, nrF: 0, nrI: 0, totalCost: 0, totalNet: 0, totalMasurat: 0,
+        });
       return date.get(id);
     };
     const celula = (r, k) => {
-      if (!r.pe.has(k)) r.pe.set(k, { f: 0, i: 0 });
+      if (!r.pe.has(k)) r.pe.set(k, { f: 0, i: 0, cost: 0, net: 0, masurat: 0 });
       return r.pe.get(k);
     };
     for (const r of facturat) {
@@ -1807,32 +1838,84 @@ function register(router) {
       x.totalI += Number(r.suma) || 0;
       x.nrI += Number(r.nr) || 0;
     }
+    for (const r of costuri) {
+      const k = cheia(String(r.luna || ""));
+      if (!coloane.includes(k)) continue;
+      const x = linie(r.agent);
+      const c = celula(x, k);
+      c.cost += Number(r.cost) || 0;
+      c.net += Number(r.net) || 0;
+      c.masurat += Number(r.masurat) || 0;
+      x.totalCost += Number(r.cost) || 0;
+      x.totalNet += Number(r.net) || 0;
+      x.totalMasurat += Number(r.masurat) || 0;
+    }
 
     const randuri = [...date.values()].filter((r) => r.totalF > 0 || r.totalI > 0).sort((a, b) => b.totalF - a.totalF || b.totalI - a.totalI);
     const totalPeColoana = coloane.map((k) => ({
       k,
       f: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).f : 0), 0),
       i: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).i : 0), 0),
+      cost: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).cost : 0), 0),
+      net: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).net : 0), 0),
+      masurat: randuri.reduce((s, r) => s + (r.pe.get(k) ? r.pe.get(k).masurat : 0), 0),
     }));
     const totalF = randuri.reduce((s, r) => s + r.totalF, 0);
     const totalI = randuri.reduce((s, r) => s + r.totalI, 0);
+    const totalCost = randuri.reduce((s, r) => s + r.totalCost, 0);
+    const totalNet = randuri.reduce((s, r) => s + r.totalNet, 0);
+    const totalMasurat = randuri.reduce((s, r) => s + r.totalMasurat, 0);
+    const totalMarja = totalNet - totalCost;
+    const acoperireMarja = totalNet > 0 ? (totalMasurat / totalNet) * 100 : 0;
+    // Marja se scrie în procente doar când există venit — altfel „0%" ar fi o
+    // afirmație despre ceva ce nu s-a vândut.
+    const proc = (marja, net) => (net > 0 ? `${((marja / net) * 100).toFixed(1)}%` : "—");
 
     // Export CSV: aceleași cifre, pentru cine vrea să le ducă în Excel.
     if (String(ctx.query.format) === "csv") {
       const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
       const n2 = (v) => Number(v || 0).toFixed(2).replace(".", ",");
       const et = cuTva ? "cu TVA" : "fara TVA";
-      const cap = ["Agent", ...coloane.flatMap((k) => [`${k} facturat (${et})`, `${k} incasat (${et})`]), `Total facturat (${et})`, `Total incasat (${et})`];
-      const linii = randuri.map((r) => [
-        q(r.nume),
-        ...coloane.flatMap((k) => {
-          const c = r.pe.get(k) || { f: 0, i: 0 };
-          return [n2(c.f), n2(c.i)];
-        }),
-        n2(r.totalF),
-        n2(r.totalI),
-      ]);
-      const totalLinie = ["TOTAL", ...totalPeColoana.flatMap((c) => [n2(c.f), n2(c.i)]), n2(totalF), n2(totalI)];
+      const cap = [
+        "Agent",
+        ...coloane.flatMap((k) => [`${k} facturat (${et})`, `${k} incasat (${et})`, `${k} marja (net)`]),
+        `Total facturat (${et})`,
+        `Total incasat (${et})`,
+        "Vanzari nete",
+        "Cost marfa",
+        "Marja",
+        "Marja %",
+        "Cost masurat %",
+      ];
+      const linii = randuri.map((r) => {
+        const marja = r.totalNet - r.totalCost;
+        const acop = r.totalNet > 0 ? (r.totalMasurat / r.totalNet) * 100 : 0;
+        return [
+          q(r.nume),
+          ...coloane.flatMap((k) => {
+            const c = r.pe.get(k) || { f: 0, i: 0, cost: 0, net: 0 };
+            return [n2(c.f), n2(c.i), n2(c.net - c.cost)];
+          }),
+          n2(r.totalF),
+          n2(r.totalI),
+          n2(r.totalNet),
+          n2(r.totalCost),
+          n2(marja),
+          r.totalNet > 0 ? n2((marja / r.totalNet) * 100) : "",
+          r.totalNet > 0 ? n2(acop) : "",
+        ];
+      });
+      const totalLinie = [
+        "TOTAL",
+        ...totalPeColoana.flatMap((c) => [n2(c.f), n2(c.i), n2(c.net - c.cost)]),
+        n2(totalF),
+        n2(totalI),
+        n2(totalNet),
+        n2(totalCost),
+        n2(totalMarja),
+        totalNet > 0 ? n2((totalMarja / totalNet) * 100) : "",
+        totalNet > 0 ? n2(acoperireMarja) : "",
+      ];
       const csv = "﻿" + [cap.map(q).join(";"), ...linii.map((l) => l.join(";")), totalLinie.join(";")].join("\r\n");
       return send(ctx.res, 200, csv, {
         "Content-Type": "text/csv; charset=utf-8",
@@ -1845,24 +1928,53 @@ function register(router) {
     const celulaHtml = (c) => {
       const f = c ? c.f : 0;
       const i = c ? c.i : 0;
-      if (!f && !i) return '<span style="color:var(--text-muted)">—</span>';
+      const net = c ? c.net : 0;
+      const marja = net - (c ? c.cost : 0);
+      if (!f && !i && !net) return '<span style="color:var(--text-muted)">—</span>';
       if (arata === "facturat") return money(f);
       if (arata === "incasat") return money(i);
-      return `${money(f)}<br><span style="font-size:11px;color:var(--success)">${money(i)}</span>`;
+      if (arata === "marja")
+        return net > 0
+          ? `${money(marja)}<br><span style="font-size:11px;color:var(--text-muted)">${proc(marja, net)}</span>`
+          : '<span style="color:var(--text-muted)">—</span>';
+      return `${money(f)}<br><span style="font-size:11px;color:var(--success)">${money(i)}</span>${
+        net > 0
+          ? `<br><span style="font-size:11px;color:var(--primary)">marjă ${money(marja)} · ${proc(marja, net)}</span>`
+          : ""
+      }`;
     };
 
-    const antet = ["Agent", ...coloane.map((k) => (peAni ? k : k.slice(5) + "." + k.slice(2, 4))), "Total facturat", "Total încasat"];
-    const corp = randuri.map((r) => [
-      `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
-      ...coloane.map((k) => celulaHtml(r.pe.get(k))),
-      `<strong>${money(r.totalF)}</strong>`,
-      `<span style="color:var(--success)">${money(r.totalI)}</span>`,
-    ]);
+    const antet = [
+      "Agent",
+      ...coloane.map((k) => (peAni ? k : k.slice(5) + "." + k.slice(2, 4))),
+      "Total facturat",
+      "Total încasat",
+      "Cost marfă",
+      "Marjă",
+    ];
+    const corp = randuri.map((r) => {
+      const marja = r.totalNet - r.totalCost;
+      const acop = r.totalNet > 0 ? (r.totalMasurat / r.totalNet) * 100 : 0;
+      return [
+        `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
+        ...coloane.map((k) => celulaHtml(r.pe.get(k))),
+        `<strong>${money(r.totalF)}</strong>`,
+        `<span style="color:var(--success)">${money(r.totalI)}</span>`,
+        r.totalNet > 0
+          ? `${money(r.totalCost)}<br><span style="font-size:11px;color:var(--text-muted)">măsurat pe ${acop.toFixed(0)}%</span>`
+          : "—",
+        r.totalNet > 0
+          ? `<strong style="color:${marja >= 0 ? "var(--success)" : "var(--danger)"}">${money(marja)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${proc(marja, r.totalNet)}</span>`
+          : "—",
+      ];
+    });
     const randTotal = [
       "<strong>TOTAL</strong>",
       ...totalPeColoana.map((c) => celulaHtml(c)),
       `<strong>${money(totalF)}</strong>`,
       `<span style="color:var(--success)">${money(totalI)}</span>`,
+      `<strong>${money(totalCost)}</strong>`,
+      `<strong style="color:${totalMarja >= 0 ? "var(--success)" : "var(--danger)"}">${money(totalMarja)}</strong> <span style="font-size:11px;color:var(--text-muted)">${proc(totalMarja, totalNet)}</span>`,
     ];
 
     // Evoluția totală pe lună, ca să se vadă dintr-o privire dacă încasările
@@ -1877,6 +1989,7 @@ function register(router) {
            <option value="ambele"${arata === "ambele" ? " selected" : ""}>facturat + încasat</option>
            <option value="facturat"${arata === "facturat" ? " selected" : ""}>doar facturat</option>
            <option value="incasat"${arata === "incasat" ? " selected" : ""}>doar încasat</option>
+           <option value="marja"${arata === "marja" ? " selected" : ""}>doar marja</option>
          </select>
          <button type="submit" name="tva" value="fara" class="chip${cuTva ? "" : " activ"}">fără TVA</button>
          <button type="submit" name="tva" value="cu" class="chip${cuTva ? " activ" : ""}">cu TVA</button>
@@ -1895,15 +2008,30 @@ function register(router) {
         <div class="card"><div class="label">Facturat, ${eticheta}</div><div class="value">${money(totalF)}</div></div>
         <div class="card"><div class="label">Încasat, ${eticheta}</div><div class="value" style="color:var(--success)">${money(totalI)}</div></div>
         <div class="card"><div class="label">Diferență (facturat − încasat)</div><div class="value" style="color:${totalF - totalI >= 0 ? "inherit" : "var(--warn)"}">${money(totalF - totalI)}</div></div>
+        <div class="card"><div class="label">Cost marfă (pe facturat)</div><div class="value">${money(totalCost)}</div>
+          <div class="mic">măsurat pe ${acoperireMarja.toFixed(0)}% din venit, restul estimat</div></div>
+        <div class="card"><div class="label">Marjă din facturat</div>
+          <div class="value" style="color:${totalMarja >= 0 ? "var(--success)" : "var(--danger)"}">${money(totalMarja)}</div>
+          <div class="mic">${proc(totalMarja, totalNet)} din ${money(totalNet)} vânzări nete</div></div>
       </div>
 
       <h2>Pe agent și ${peAni ? "an" : "lună"}</h2>
       ${table(antet, corp, { total: randTotal })}
       <p style="font-size:12px;color:var(--text-muted)">
-        ${arata === "ambele" ? "În fiecare celulă: sus <strong>facturat</strong> (după data facturii), jos, cu verde, <strong>încasat</strong> (după data plății). " : ""}
+        ${arata === "ambele" ? "În fiecare celulă: sus <strong>facturat</strong> (după data facturii), la mijloc, cu verde, <strong>încasat</strong> (după data plății), jos <strong>marja</strong> lunii, în lei și în procente. " : ""}
+        ${arata === "marja" ? "În fiecare celulă: <strong>marja lunii</strong> în lei și în procente din vânzările nete ale lunii. " : ""}
         Încasarea se pune pe luna în care au intrat banii, nu pe luna facturii — de aceea liniile nu se
         potrivesc una peste alta, iar diferența e chiar creditul pe care îl dai clienților.
         ${peAni ? "Perioada aleasă depășește 24 de luni, așa că tabelul e grupat pe ani; alege un interval mai scurt pentru detaliu lunar." : ""}
+      </p>
+      <p style="font-size:12px;color:var(--text-muted);max-width:900px">
+        <strong>Marja e pe facturat, nu pe încasat</strong>, și se calculează <strong>întotdeauna pe net</strong>,
+        chiar dacă butonul de sus e pe „cu TVA" — un cost fără TVA scăzut dintr-o vânzare cu TVA ar arăta o marjă
+        mai bună decât e. Costul mărfii se ia în patru trepte: rata reală a produsului din raportul de contabilitate,
+        apoi <a href="/productie/retete">costul din rețeta lui</a>, apoi prețul de achiziție, iar pentru liniile fără
+        produs identificat se estimează cu rata firmei. Coloana „Cost marfă" spune, pe fiecare agent, cât din venitul
+        lui are cost <strong>măsurat</strong> și cât e estimat — la un procent mic, marja lui e o aproximare, nu o
+        măsurătoare.
       </p>
 
       <h2>Total ${peAni ? "pe an" : "pe lună"} — facturat vs. încasat</h2>
@@ -1916,7 +2044,7 @@ function register(router) {
                 ${bar((c.f / maxLuna) * 100, "albastru")}
                 ${bar((c.i / maxLuna) * 100, "verde")}
               </div>
-              <div class="chart-values">${money(c.f)} / ${money(c.i)}</div>
+              <div class="chart-values">${money(c.f)} / ${money(c.i)}${c.net > 0 ? ` · marjă ${money(c.net - c.cost)} (${proc(c.net - c.cost, c.net)})` : ""}</div>
             </div>`
           )
           .join("")}

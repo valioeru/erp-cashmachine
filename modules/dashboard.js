@@ -694,7 +694,7 @@ function register(router) {
             <div class="hero-nr" style="color:${profitLaZi >= 0 ? "var(--success)" : "var(--danger)"}">${money(profitLaZi)}</div>
             <div class="hero-sub">
               ${money(vanzariLaZi)} vânzări − ${money(achizitiiLaZi)} achiziții${salariiLaZi > 0 ? ` − ${money(salariiLaZi)} cost cu oamenii` : ""}
-              ${marjaProc === null ? "" : ` · marjă ${marjaProc.toFixed(1)}%`}
+              ${marjaProc === null ? "" : ` · marjă ${money(profitLaZi)} (${marjaProc.toFixed(1)}%)`}
             </div>
           </div>
         </div>

@@ -410,6 +410,27 @@ function register(router) {
     // — nu „ce lucrăm", ci „ce n-are încă cine și pe ce să lucreze".
     const spre = await comenziSpreAlocare(30);
 
+    // Cât din registrul de comenzi deschise își știe costul. E măsura
+    // progresului spre „fiecare produs vine cu rețeta lui": câte comenzi sunt
+    // legate de un produs care are rețetă, și cât costă marfa de pe ele.
+    const acoperireCost = await db
+      .prepare(
+        `SELECT COUNT(*) AS deschise,
+                SUM(CASE WHEN COALESCE(pr.cost_reteta, 0) > 0 THEN 1 ELSE 0 END) AS cu_reteta,
+                SUM(CASE WHEN COALESCE(pr.cost_reteta, 0) > 0
+                         THEN COALESCE(pr.cost_reteta, 0) *
+                              COALESCE(CAST(NULLIF(REPLACE(REPLACE(c.cantitate, ' ', ''), ',', '.'), '') AS REAL), 0)
+                         ELSE 0 END) AS cost
+           FROM comenzi_productie c
+           LEFT JOIN produse pr ON pr.id = c.produs_id
+          WHERE c.status IN ('${DESCHISE.join("','")}')`
+      )
+      .get()
+      .catch(() => null);
+    const deschiseN = acoperireCost ? Number(acoperireCost.deschise) || 0 : 0;
+    const cuRetetaN = acoperireCost ? Number(acoperireCost.cu_reteta) || 0 : 0;
+    const costDeschise = acoperireCost ? Number(acoperireCost.cost) || 0 : 0;
+
     const body = `
       <div class="toolbar">
         <a href="/productie/noua" class="btn">+ Comandă nouă în producție</a>
@@ -425,6 +446,12 @@ function register(router) {
       <div class="cards">
         ${STATUSURI.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div></div>`).join("")}
         <div class="card"><div class="label">Cu termenul depășit</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
+        <div class="card"><div class="label">Comenzi cu cost cunoscut</div>
+          <div class="value">${cuRetetaN}<span class="mic"> din ${deschiseN} deschise</span></div>
+          <div class="mic">restul n-au produs legat sau produsul n-are rețetă</div></div>
+        <div class="card"><div class="label">Cost marfă, comenzi deschise</div>
+          <div class="value">${money(costDeschise)}</div>
+          <div class="mic">din rețete, doar pentru comenzile de mai sus</div></div>
       </div>
       <form class="filtre" method="get" action="/productie">
         <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după client, produs, inițiator…">
@@ -1049,7 +1076,67 @@ function register(router) {
         .catch(() => null);
     }
     const costPeBucata = produsComanda ? Number(produsComanda.cost_reteta) || 0 : 0;
-    const costComanda = costPeBucata * (Number(String(c.cantitate || "").replace(/[^\d.,-]/g, "").replace(",", ".")) || 0);
+    const cantComanda = Number(String(c.cantitate || "").replace(/[^\d.,-]/g, "").replace(",", ".")) || 0;
+    const costComanda = costPeBucata * cantComanda;
+
+    // Legarea comenzii de un produs din catalog. Fără ea, comanda n-are de
+    // unde să-și ia rețeta, deci nici costul. Căutăm cu ce scrie omul în
+    // caseta de căutare, iar dacă n-a scris nimic pornim de la denumirea
+    // produsului de pe comandă — de cele mai multe ori aia e și căutarea bună.
+    const cautaProdus = String(ctx.query.produs || "").trim() || String(c.tip_produs || "").trim();
+    let candidati = [];
+    if (cautaProdus) {
+      candidati = await db
+        .prepare(
+          `SELECT id, cod, denumire, cost_reteta FROM produse
+            WHERE denumire ILIKE ? OR cod ILIKE ?
+            ORDER BY CASE WHEN LOWER(TRIM(denumire)) = LOWER(TRIM(?)) THEN 0
+                          WHEN denumire ILIKE ? THEN 1 ELSE 2 END,
+                     CASE WHEN COALESCE(cost_reteta, 0) > 0 THEN 0 ELSE 1 END,
+                     LENGTH(denumire), denumire
+            LIMIT 25`
+        )
+        .all(`%${cautaProdus}%`, `%${cautaProdus}%`, cautaProdus, `${cautaProdus}%`)
+        .catch(() => []);
+    }
+    const legatDeja = Boolean(c.produs_id);
+    const alegeProdus = `
+      <details class="lega-produs"${legatDeja ? "" : " open"} style="margin-top:12px;border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+        <summary style="cursor:pointer;font-weight:600">${legatDeja ? "Schimbă produsul din catalog" : "Leagă comanda de un produs din catalog"}</summary>
+        <p class="mic" style="margin:8px 0 10px">
+          Produsul din catalog e cel care ține rețeta. Odată legat, costul comenzii se știe din prima zi,
+          nu după ce se închide luna.
+        </p>
+        <form method="get" action="/productie/${c.id}" class="filtre" style="margin:0 0 10px">
+          <input type="search" name="produs" value="${esc(cautaProdus)}" placeholder="Caută în catalog…" style="min-width:260px">
+          <button class="btn small" type="submit">Caută</button>
+        </form>
+        ${
+          candidati.length
+            ? `<form method="post" action="/productie/${c.id}/leaga-produs">
+                 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px;max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
+                   ${candidati
+                     .map(
+                       (p) => `<label style="display:flex;gap:8px;align-items:flex-start;margin:0;font-size:13px">
+                         <input type="radio" name="produs_id" value="${p.id}"${Number(p.id) === Number(c.produs_id) ? " checked" : ""}>
+                         <span>${esc(p.denumire)}<br><span class="mic">${esc(p.cod || "fără cod")}${Number(p.cost_reteta) > 0 ? ` · are rețetă, ${money(Number(p.cost_reteta))}/buc` : " · fără rețetă"}</span></span>
+                       </label>`
+                     )
+                     .join("")}
+                 </div>
+                 <div class="form-actions" style="margin-top:10px"><button class="btn" type="submit">Leagă produsul</button></div>
+               </form>`
+            : `<p class="mic">Nimic în catalog pentru „${esc(cautaProdus || "—")}".</p>`
+        }
+        ${
+          String(c.tip_produs || "").trim()
+            ? `<form method="post" action="/productie/${c.id}/creeaza-produs" style="margin-top:6px">
+                 <button class="btn secondary small" type="submit">Creează „${esc(String(c.tip_produs).slice(0, 60))}" în catalog și leagă-l</button>
+                 <span class="mic"> — apoi îi scrii rețeta.</span>
+               </form>`
+            : ""
+        }
+      </details>`;
 
     // Alocările: pe ce mașină și cu cine stă comanda asta. Fără ele, pagina
     // spune ce e de făcut, dar nu și cine o face.
@@ -1101,6 +1188,7 @@ function register(router) {
                  ${money(costPeBucata)} pe bucată${costComanda > 0 ? ` · <strong>${money(costComanda)}</strong> pe toată comanda` : ""}
                  ${Number(produsComanda.cost_reteta_lipsa) > 0 ? `<span style="color:var(--warn);font-size:12px"> — ${produsComanda.cost_reteta_lipsa} ${Number(produsComanda.cost_reteta_lipsa) === 1 ? "componentă n-are" : "componente n-au"} cost, deci e o limită de jos</span>` : ""}
                  <a class="link-btn" href="/productie/retete/${produsComanda.id}" style="margin-left:8px">vezi rețeta →</a>
+                 <a class="btn small" href="/productie/${c.id}/necesar" style="margin-left:8px">Necesar de materie primă</a>
                </p>`
             : produsComanda
               ? `<p style="margin-top:12px;color:var(--text-muted)">
@@ -1110,9 +1198,10 @@ function register(router) {
                  </p>`
               : `<p style="margin-top:12px;color:var(--text-muted)">
                    <strong>Cost din rețetă:</strong> comanda nu e legată de un produs din catalog, așa că n-are de unde
-                   să-și ia rețeta. Leagă produsul din <a href="/productie/${c.id}/editare">editarea comenzii</a>.
+                   să-și ia rețeta. Alege-l mai jos.
                  </p>`
         }
+        ${alegeProdus}
       </div>
 
       <h2 style="margin-bottom:4px">Pe ce se lucrează</h2>
@@ -1164,6 +1253,39 @@ function register(router) {
       </form>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Comanda ${c.numar || c.id}`, active: "/productie", body }));
+  });
+
+  // Leagă comanda de un produs din catalog. Doar atât — nu atinge nimic
+  // altceva din comandă, ca să se poată da înapoi punând alt produs.
+  router.post("/productie/:id/leaga-produs", async (ctx) => {
+    const produsId = parseInt(ctx.body.produs_id, 10) || null;
+    if (produsId) await db.prepare("UPDATE comenzi_productie SET produs_id = ? WHERE id = ?").run(produsId, ctx.params.id);
+    return redirect(ctx.res, `/productie/${ctx.params.id}`);
+  });
+
+  // Creează în catalog produsul scris pe comandă și îl leagă. E scurtătura
+  // pentru comenzile de produs nou: intri o dată, ai produsul, apoi îi scrii
+  // rețeta și de-atunci comanda își știe costul singură. Dacă produsul
+  // există deja cu aceeași denumire, îl refolosim în loc să facem dublură.
+  router.post("/productie/:id/creeaza-produs", async (ctx) => {
+    const c = await db.prepare("SELECT id, tip_produs, um FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
+    const denumire = c ? String(c.tip_produs || "").trim() : "";
+    if (!denumire) return redirect(ctx.res, `/productie/${ctx.params.id}`);
+    let p = await db
+      .prepare("SELECT id FROM produse WHERE LOWER(TRIM(denumire)) = LOWER(TRIM(?)) LIMIT 1")
+      .get(denumire)
+      .catch(() => null);
+    if (!p) {
+      const ins = await db
+        .prepare("INSERT INTO produse (denumire, unitate_masura) VALUES (?, ?) RETURNING id")
+        .run(denumire, String(c.um || "buc").trim() || "buc");
+      p = { id: ins.lastInsertRowid };
+    }
+    if (p && p.id) {
+      await db.prepare("UPDATE comenzi_productie SET produs_id = ? WHERE id = ?").run(p.id, ctx.params.id);
+      return redirect(ctx.res, `/productie/retete/${p.id}`);
+    }
+    return redirect(ctx.res, `/productie/${ctx.params.id}`);
   });
 
   router.post("/productie/:id/actualizeaza", async (ctx) => {
