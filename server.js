@@ -21,6 +21,7 @@ require("./modules/verificari").register(router);
 require("./modules/comenzi").register(router);
 require("./modules/facturi").register(router);
 require("./modules/crm").register(router);
+require("./modules/sugestii").register(router);
 require("./modules/oferte").register(router);
 require("./modules/contacte").register(router);
 require("./modules/scadente").register(router);
@@ -177,6 +178,7 @@ async function start() {
   await creeazaAdminInitialDacaLipseste();
   await require("./lib/grup").asiguraFirme();
   await require("./modules/sincronizare").incarcaTot();
+  await require("./modules/sincronizare").incarcaSugestii();
   await require("./modules/calculator").seed();
   require("./modules/warehouse").porneste();
   await auth.curataSesiuni();
