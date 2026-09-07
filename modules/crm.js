@@ -310,9 +310,13 @@ function register(router) {
     const aziStr = azi();
     const deContactat = await db
       .prepare(
-        `SELECT i.*, p.nume AS partener_nume, p.id AS partener_id
-         FROM interactiuni i JOIN parteneri p ON p.id = i.partener_id
+        `SELECT i.*, p.nume AS partener_nume, p.id AS partener_id,
+                l.id AS lead_id, l.nume AS lead_nume, l.companie AS lead_companie
+         FROM interactiuni i
+         LEFT JOIN parteneri p ON p.id = i.partener_id
+         LEFT JOIN leaduri l ON l.id = i.lead_id
          WHERE i.data_urmatoare_actiune IS NOT NULL AND i.data_urmatoare_actiune != '' AND i.data_urmatoare_actiune <= ?
+           AND (p.id IS NOT NULL OR l.id IS NOT NULL)
          ORDER BY i.data_urmatoare_actiune ASC LIMIT 100`
       )
       .all(aziStr);
@@ -385,12 +389,16 @@ function register(router) {
       ${
         deContactat.length
           ? table(
-              ["Partener", "Subiect", "Data programată", "Acțiune"],
+              ["Cine", "Subiect", "Data programată", "Acțiune"],
               deContactat.map((i) => [
-                `<a href="/parteneri/${i.partener_id}">${esc(i.partener_nume)}</a>`,
+                i.partener_id
+                  ? `<a href="/parteneri/${i.partener_id}">${esc(i.partener_nume)}</a>`
+                  : `<a href="/crm/leaduri/${i.lead_id}">${esc(i.lead_companie || i.lead_nume)}</a> <span class="badge gri">lead</span>`,
                 esc(i.subiect) || "—",
                 `${esc(i.data_urmatoare_actiune)}${i.data_urmatoare_actiune < aziStr ? ' <span class="badge rosu">întârziat</span>' : ""}`,
-                `<a class="link-btn" href="/crm/email/nou?partener_id=${i.partener_id}">Trimite email</a>`,
+                i.partener_id
+                  ? `<a class="link-btn" href="/crm/email/nou?partener_id=${i.partener_id}">Trimite email</a>`
+                  : `<a class="link-btn" href="/crm/email/nou?lead_id=${i.lead_id}">Trimite email</a>`,
               ])
             )
           : "<p>Nimic programat pentru azi.</p>"
