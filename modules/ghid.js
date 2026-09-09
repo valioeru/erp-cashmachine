@@ -161,6 +161,25 @@ const GHID = [
 "sfat":null
 },
 {
+"t":"Calculator AWB — C3 / C4 / C5 / C6",
+"p":[
+"Calculatorul pentru plicurile AWB, pe cele patru formate. E modelul din fișierul Excel al firmei, mutat în ERP: aceleași formule, dar cu asumpțiile ținute o singură dată, în aplicație. Așa toți agenții dau același preț, iar când se schimbă cursul sau prețul unei materii prime se schimbă într-un singur loc, nu în fișierul fiecăruia.",
+"Sus e ce te interesează când dai un preț: <b>costul</b> cu rebut și <b>prețul de vânzare</b> pe fiecare format, în lei/1000 și în lei/bucată. Sub el, defalcarea: cât e material, cât manoperă și energie, cât ambalare, cât laminare.",
+"Modelul pornește de la prețul cunoscut al C5 (46 lei/1000): din el se scad manopera, energia și ambalarea, iar ce rămâne e folia. Costul foliei se scalează apoi pe celelalte formate după <b>suprafața de folie consumată</b> — inclusiv fâșia care se pierde pe lățime când plicurile nu acoperă toți cei 525 mm ai foliei. Lățimea foliei e fixă, e o limitare a mașinii.",
+"Două lucruri NU erau în cei 46 lei și sunt adăugate aici: <b>laminarea</b> (adezivul hot melt între liner și CPE 25, care se face pe altă mașină) și <b>rebutul</b> de 1,5% — costul s-a cheltuit și pe bucățile care ies defecte, deci o bucată bună costă mai mult.",
+"Sub tabelul principal e o <b>verificare</b>: același cost, calculat invers, din prețurile și gramajele celor patru straturi, fără să treacă prin cei 46 lei. Dacă cele două metode dau aproape la fel (acum ~3% diferență), modelul e sănătos. Dacă se depărtează mult, ceva s-a schimbat și nu se mai leagă.",
+"Mai jos sunt două calculatoare practice: <b>din stocul de materie primă</b> (scrii câte kg ai din fiecare material și îți spune câte bucăți ies, ce material se termină primul și în câte zile), și <b>necesarul</b> (scrii câte bucăți îți trebuie și îți dă kilogramele de comandat și costul).",
+"La final, <b>asumpțiile</b>. Le poți modifica și apăsa Recalculează — vezi rezultatul fără să salvezi, iar adresa paginii ține scenariul, deci îl poți trimite unui coleg. Doar administratorul poate apăsa <b>Salvează pentru toată firma</b>, care face din acele cifre baza pentru toți."
+],
+"pasi":[
+"Deschizi <b>CRM → Calculator AWB</b>.",
+"Te uiți în primul tabel la <b>PREȚ</b> pe formatul cerut de client.",
+"Dacă vrei altă marjă, o schimbi la secțiunea 11 din asumpții și apeși Recalculează.",
+"Pentru o comandă concretă, scrii cantitatea la „Din câte AWB îmi trebuie” și iei costul total de acolo."
+],
+"sfat":"Prețul e calculat cu marjă ca ADAOS peste cost (preț = cost × (1 + marjă)), nu ca procent din prețul de vânzare. La 20% adaos, marja reală din preț e 16,7%."
+},
+{
 "t":"Scadențe",
 "p":[
 "Cine ne datorează bani și de când. Sortat pe vechime: ce e de plătit azi, ce a trecut de 30 de zile, ce a trecut de 90.",
