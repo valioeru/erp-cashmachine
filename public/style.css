@@ -482,3 +482,9 @@ button.chip { font-family: inherit; cursor: pointer; }
   font-size: 12px; color: var(--text-muted);
 }
 .tabel-lat td { padding-top: 7px; padding-bottom: 7px; }
+
+/* Calculatorul AWB: grila de asumptii si marcarea campurilor de scenariu. */
+.awb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-bottom: 4px; }
+.awb-sect { font-size: 14px; margin: 18px 0 6px; color: var(--text-muted); font-weight: 600; }
+.awb-schimbat input { border-color: var(--primary); background: rgba(37, 99, 235, .06); }
+.awb-schimbat > span { color: var(--primary); font-weight: 600; }
