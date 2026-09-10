@@ -85,6 +85,40 @@ const ASUMPTII = [
   ["marja_c6", "Marjă C6", 20, "%"],
 ];
 
+// Valorile CALCULATE din foaia "Asumptii" — in Excel sunt scrise cu negru si
+// nu se ating. Le aratam si noi, in aceleasi locuri, dar blocate: omul trebuie
+// sa poata verifica pasii intermediari fara sa-i poata strica.
+// Cheia e sectiunea dupa care apar; functia primeste rezultatul calculat.
+const CALCULATE = {
+  "4. Curs valutar": [],
+  "3. Formate standard ISO 216 (hârtie „pură”, fără adaos)": [
+    ["Adaos pe lățime (C5 real − C5 ISO)", (r) => r.adaosLatime, "mm", "presupus FIX, aplicat și la C3/C4/C6"],
+    ["Adaos pe lungime (C5 real − C5 ISO)", (r) => r.adaosLungime, "mm", "presupus FIX, aplicat și la C3/C4/C6"],
+  ],
+  "5. Manoperă, electricitate, ambalare (linia principală)": [
+    ["Timp implicit per 1000 buc (verificare)", (r, a) => (Number(a.salariu_zi) && Number(a.minute_zi) ? Number(a.salariu_1000) / (Number(a.salariu_zi) / Number(a.minute_zi)) : 0), "min", "diferă de timpul de mașină calculat din viteză — păstrat ca atare, per datele date"],
+    ["Salariu oameni / 1000 buc — folosit în calcul", (r) => r.salariuOameni, "lei/1000", "salariu 1 persoană × număr oameni"],
+    ["Material (folie), rezidual", (r) => r.materialRezidual, "lei/1000", "preț C5 − salariu − electricitate − cutie − pungi"],
+  ],
+  "6. Structura plicului — 4 straturi": [
+    ["Gramaj CPE 25 (densitate × grosime)", (r) => r.gramaje.cpe25, "g/m²", ""],
+    ["Gramaj CPE 30 (densitate × grosime)", (r) => r.gramaje.cpe30, "g/m²", ""],
+  ],
+  "9. Capacitate de producție planificată": [
+    ["Durata unui schimb", (r, a) => Number(a.schimb_ore) * 60 + Number(a.schimb_min), "min/schimb", ""],
+    ["Timp de producție disponibil / zi", (r) => r.timpDisponibil, "min/zi", "folosit doar la „zile până la epuizarea stocului”"],
+  ],
+  "10. Prețuri materii prime (USD / kg)": [
+    ["CPE 25 — preț în lei", (r) => r.preturiRon.cpe25, "lei/kg", "preț USD × curs"],
+    ["CPE 30 — preț în lei", (r) => r.preturiRon.cpe30, "lei/kg", "preț USD × curs"],
+    ["Hot melt — preț în lei", (r) => r.preturiRon.hm, "lei/kg", "preț USD × curs"],
+    ["Liner — preț în lei", (r) => r.preturiRon.liner, "lei/kg", "preț USD × curs"],
+  ],
+  "1. Produsul de referință — C5 (date reale)": [
+    ["Viteza de avans a foliei", (r) => r.vitezaAvans, "mm/min", "constantă pe toate formatele"],
+  ],
+};
+
 const CAMPURI = ASUMPTII.filter((a) => a[0] !== "sect");
 const IMPLICITE = Object.fromEntries(CAMPURI.map((c) => [c[0], c[2]]));
 
@@ -325,6 +359,12 @@ const nr = (v, z) => {
 };
 const lei = (v, z) => nr(v, z) + " lei";
 const proc = (v) => (Number(v) >= 0 ? "+" : "") + nr(v, 1) + "%";
+// Pentru valorile calculate: pana la 4 zecimale, fara zerouri inutile la coada,
+// ca 27,6 sa nu apara ca 27,6000.
+const taieZerouri = (v) => {
+  const t = nr(v, 4);
+  return t.includes(",") ? t.replace(/0+$/, "").replace(/,$/, "") : t;
+};
 
 function register(router) {
   router.get("/calculator/awb", async (ctx) => {
@@ -470,14 +510,37 @@ function register(router) {
     ]);
 
     // ---- Formularul de asumptii -------------------------------------------
+    // Formularul respecta conventia din Excel: galben = se scrie de mana,
+    // gri = se calculeaza singur si nu se atinge. Randurile calculate apar
+    // dupa campurile sectiunii lor, ca in foaia "Asumptii".
+    const calculateHtml = (titluSectiune) => {
+      const lista = CALCULATE[titluSectiune] || [];
+      if (!lista.length) return "";
+      return `<div class="awb-calc">${lista
+        .map(
+          ([eticheta, fn, um, nota]) => `<div class="awb-calc-rand">
+            <span class="awb-calc-et">${esc(eticheta)}</span>
+            <span class="awb-calc-val">${esc(taieZerouri(fn(r, a)))} <span class="mic">${esc(um || "")}</span></span>
+            ${nota ? `<span class="mic awb-calc-nota">${esc(nota)}</span>` : ""}
+          </div>`
+        )
+        .join("")}</div>`;
+    };
+
     let campuriHtml = "";
+    let sectiuneCurenta = null;
     for (const c of ASUMPTII) {
-      if (c[0] === "sect") { campuriHtml += `</div><h3 class="awb-sect">${esc(c[1])}</h3><div class="awb-grid">`; continue; }
+      if (c[0] === "sect") {
+        campuriHtml += `</div>${calculateHtml(sectiuneCurenta)}<h3 class="awb-sect">${esc(c[1])}</h3><div class="awb-grid">`;
+        sectiuneCurenta = c[1];
+        continue;
+      }
       const schimbat = a[c[0]] !== baza[c[0]];
-      campuriHtml += `<label class="field${schimbat ? " awb-schimbat" : ""}"><span>${esc(c[1])} <span class="mic">${esc(c[3] || "")}</span></span>
+      campuriHtml += `<label class="field awb-galben${schimbat ? " awb-schimbat" : ""}"><span>${esc(c[1])} <span class="mic">${esc(c[3] || "")}</span></span>
         <input type="number" step="any" name="${esc(c[0])}" value="${esc(String(a[c[0]]))}"></label>`;
     }
-    campuriHtml = ("<div class=\"awb-grid\">" + campuriHtml + "</div>").replace("<div class=\"awb-grid\"></div>", "");
+    campuriHtml += `</div>${calculateHtml(sectiuneCurenta)}`;
+    campuriHtml = ("<div class=\"awb-grid\">" + campuriHtml).replace("<div class=\"awb-grid\"></div>", "");
 
     const body = `
       ${subnavCrm("/calculator/awb", ctx.user)}
@@ -566,6 +629,10 @@ function register(router) {
         De aici se schimbă tot ce e mai sus. Apeși <b>Recalculează</b> și vezi rezultatul fără să salvezi —
         adresa paginii ține scenariul, deci îl poți trimite mai departe.
         ${eAdmin ? "Butonul <b>Salvează pentru toată firma</b> face din aceste cifre baza pe care o văd toți agenții." : "Doar administratorul poate salva cifrele pentru toată firma."}
+      </p>
+      <p class="mic awb-legenda">
+        <span class="awb-pastila awb-pastila-galben"></span> <b>galben</b> — se scrie de mână, exact cele ${CAMPURI.length} de celule galbene din Excel &nbsp;·&nbsp;
+        <span class="awb-pastila awb-pastila-gri"></span> <b>gri</b> — se calculează singur din cele galbene și nu se poate edita
       </p>
       <form class="form" method="get" action="/calculator/awb#asumptii" style="max-width:1100px">
         <input type="hidden" name="stoc_cpe25" value="${esc(String(stoc.cpe25))}">
