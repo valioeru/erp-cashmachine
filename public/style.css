@@ -488,3 +488,21 @@ button.chip { font-family: inherit; cursor: pointer; }
 .awb-sect { font-size: 14px; margin: 18px 0 6px; color: var(--text-muted); font-weight: 600; }
 .awb-schimbat input { border-color: var(--primary); background: rgba(37, 99, 235, .06); }
 .awb-schimbat > span { color: var(--primary); font-weight: 600; }
+
+/* Calculatorul AWB: conventia de culoare din Excel — galben = se scrie de mana,
+   gri = se calculeaza singur. Randurile gri nu au deloc <input>, deci nu sunt
+   doar dezactivate vizual: n-au ce trimite inapoi la server. */
+.awb-galben input { background: #fffbea; border-color: #e6d27a; }
+.awb-galben input:focus { border-color: var(--primary); background: #fff; }
+.awb-calc { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px 16px; margin: 2px 0 6px; padding: 10px 12px;
+  background: var(--bg-subtle, #f6f7f9); border: 1px solid var(--border); border-radius: 6px; }
+.awb-calc-rand { display: flex; flex-direction: column; gap: 1px; }
+.awb-calc-et { font-size: 12px; color: var(--text-muted); }
+.awb-calc-val { font-size: 14px; font-weight: 600; color: var(--text); }
+.awb-calc-nota { font-style: italic; }
+.awb-legenda { margin: -6px 0 12px; }
+.awb-pastila { display: inline-block; width: 11px; height: 11px; border-radius: 3px;
+  vertical-align: -1px; border: 1px solid var(--border); }
+.awb-pastila-galben { background: #fffbea; border-color: #e6d27a; }
+.awb-pastila-gri { background: var(--bg-subtle, #f6f7f9); }
