@@ -506,3 +506,32 @@ button.chip { font-family: inherit; cursor: pointer; }
   vertical-align: -1px; border: 1px solid var(--border); }
 .awb-pastila-galben { background: #fffbea; border-color: #e6d27a; }
 .awb-pastila-gri { background: var(--bg-subtle, #f6f7f9); }
+
+/* --- tabele care doar depasesc latimea, fara sa fie de 1500px ------------ */
+.tabel-scroll { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
+.tabel-scroll td, .tabel-scroll th { white-space: nowrap; }
+
+/* Selectorul celor trei calculatoare (pret / AWB / pungi curier): stau sub o
+   singura intrare de meniu, iar aici se alege care se deschide. */
+.calc-selector { margin: 4px 0 10px; }
+
+/* Calculatorul de pungi: pe langa galben (confirmat) si gri (calculat), acest
+   fisier are si BEJ = presupunere neconfirmata. Bej-ul e tot un camp de intrare
+   — fisierul-sursa cere explicit sa fie corectat — deci are <input>, doar culoarea
+   difera, ca sa se vada dintr-o privire ce e inca de confirmat. */
+.awb-bej input { background: #fdefd6; border-color: #d9a441; }
+.awb-bej input:focus { border-color: var(--primary); background: #fff; }
+.awb-pastila-bej { background: #fdefd6; border-color: #d9a441; }
+.pungi-dc { color: var(--warn); font-style: italic; }
+.pungi-ro { padding: 7px 0 0; font-weight: 600; }
+
+/* Tabelele editabile (retete si formate): input-uri in celule, inguste cat sa
+   incapa numarul, ca tabelul sa ramana citibil. */
+.pungi-in { width: 92px; padding: 4px 6px; font-size: 13px; }
+.pungi-text { width: 150px; }
+.pungi-rapid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.pungi-rezultat { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch;
+  margin: 0 0 10px; padding: 12px 14px; background: var(--bg-subtle, #f6f7f9);
+  border: 1px solid var(--border); border-radius: 8px; }
+.pungi-mare { display: flex; flex-direction: column; gap: 2px; min-width: 190px; }
+.pungi-mare strong { font-size: 22px; line-height: 1.1; }
