@@ -172,12 +172,31 @@ const GHID = [
 "La final, <b>asumpțiile</b>. Le poți modifica și apăsa Recalculează — vezi rezultatul fără să salvezi, iar adresa paginii ține scenariul, deci îl poți trimite unui coleg. Doar administratorul poate apăsa <b>Salvează pentru toată firma</b>, care face din acele cifre baza pentru toți."
 ],
 "pasi":[
-"Deschizi <b>CRM → Calculator AWB</b>.",
+"Deschizi <b>CRM → Calculator preț</b> și alegi din lista derulantă de sus <b>Plicuri AWB</b>.",
 "Te uiți în primul tabel la <b>PREȚ</b> pe formatul cerut de client.",
 "Dacă vrei altă marjă, o schimbi la secțiunea 11 din asumpții și apeși Recalculează.",
 "Pentru o comandă concretă, scrii cantitatea la „Din câte AWB îmi trebuie” și iei costul total de acolo."
 ],
 "sfat":"Prețul e calculat cu marjă ca ADAOS peste cost (preț = cost × (1 + marjă)), nu ca procent din prețul de vânzare. La 20% adaos, marja reală din preț e 16,7%."
+},
+{
+"t":"Calculator pungi curier",
+"p":[
+"Al treilea calculator de sub <b>Calculator preț</b>. Îți dă costul complet al unei pungi de curierat, de la granulă la cutia livrată. E modelul din fișierul Excel al firmei, mutat în ERP: aceleași formule, dar cu asumpțiile ținute o singură dată, în aplicație.",
+"Costul se construiește pe patru etape, fiecare în unitatea ei naturală: <b>extrudarea</b> în lei/kg de folie (granulă + energie + manoperă), <b>printarea</b> în lei/m² printat (cerneală + energie + manoperă), <b>debitarea</b> în lei/1000 bucăți (manoperă + energie, corectat cu rebutul) și <b>ambalarea</b> (banda de închidere + cutia de carton).",
+"Peste ele se adaugă <b>costul de schimbare a tipului de folie</b>, amortizat pe cantitatea comenzii. O schimbare costă energia celor 30 de minute plus cele ~45 kg de material pierdut — cam 340 de lei, fix, o dată per comandă. De-aia <b>prețul pe bucată scade cu cantitatea</b>: aceiași 340 de lei împărțiți la 100.000 de bucăți înseamnă altceva decât împărțiți la 10.000.",
+"Sus e <b>calculul rapid</b>: scrii dimensiunile cerute de client, grosimea, cantitatea și dacă are print, alegi rețeta de folie și îți dă pe loc costul pe bucată, prețul cu marja pusă de tine și valoarea comenzii. Nu se salvează nimic, iar adresa paginii ține tot calculul — deci linkul se poate trimite unui coleg.",
+"Sub el sunt <b>formatele salvate</b> ale firmei, cu prețul fiecăruia și defalcarea pe etape, apoi <b>necesarul de materie primă</b> pentru cantitățile din tabel: câte kg din fiecare granulă, câtă cerneală, câți m² de bandă și câte cutii.",
+"<b>Rețetele de folie</b> sunt una per client sau produs — procentele din fiecare granulă. Prețul mediu al amestecului se calculează singur din prețurile granulelor și din curs. Mai multe formate pot folosi aceeași rețetă, fără să fie duplicată.",
+"La final, <b>asumpțiile</b>. Culorile sunt cele din fișierul original: <b>galben</b> = dată confirmată de firmă, <b>bej</b> = presupunere neconfirmată (densitatea foliei, pierderea de 45 kg la schimbare, consumul generic de cerneală, viteza de debitare la pungi mari, rebutul sub 100.000 de bucăți și prețul cutiei), <b>gri</b> = calculat automat, nu se scrie. Galbenul și bejul se pot edita — bejul tocmai pentru că e de corectat; gri-ul nu are unde fi scris, nu e doar dezactivat."
+],
+"pasi":[
+"Deschizi <b>CRM → Calculator preț</b> și alegi din lista derulantă <b>Pungi curier</b>.",
+"Pentru o cerere nouă: completezi calculul rapid de sus și iei prețul de acolo.",
+"Pentru un format pe care îl faci des: îl adaugi în tabelul <b>Formate</b> (rândul gol de la final) și rămâne acolo, cu preț la zi.",
+"Dacă clientul are alt amestec de granule, îi faci întâi o rețetă în tabelul <b>Rețete de folie</b>."
+],
+"sfat":"Pornirea rece a liniei (120 kW × 3 ore = 360 lei) NU e inclusă în preț: e un start de linie, nu un eveniment per comandă. Apare doar ca referință. Se presupune o singură schimbare de tip folie per comandă — dacă în realitate sunt mai multe, costul e subestimat."
 },
 {
 "t":"Scadențe",

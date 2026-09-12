@@ -10,7 +10,7 @@
 // numere, numele câmpurilor, + - * / ( ) și funcțiile min/max/rotund. Ce nu
 // recunoaște, refuză — o formulă e o formulă, nu un loc de rulat cod.
 const db = require("../lib/db");
-const { esc, money, layout, table, subnavCrm } = require("../lib/render");
+const { esc, money, layout, table, subnavCrm, selectorCalculator } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // --- evaluator de formule -------------------------------------------------
@@ -243,6 +243,7 @@ function register(router) {
 
     const body = `
       ${subnavCrm("/calculator", ctx.user)}
+      ${selectorCalculator("/calculator")}
       <form method="get" action="/calculator" class="form" style="max-width:820px">
         <label class="field"><span>Categorie de produs</span>${selectCat}</label>
         ${cat && cat.descriere ? `<p style="color:var(--text-muted);margin-top:-6px">${esc(cat.descriere)}</p>` : ""}
@@ -329,6 +330,7 @@ function register(router) {
     const categorii = await db.prepare("SELECT * FROM calculator_categorii ORDER BY nume").all();
     const body = `
       ${subnavCrm("/calculator", ctx.user)}
+      ${selectorCalculator("/calculator")}
       <p style="max-width:760px;color:var(--text-muted)">
         Câmpurile sunt o listă JSON: <code>[{"cheie":"greutate_neta","eticheta":"Greutate netă","unitate":"kg","implicit":1.5}]</code>.
         Formula le folosește după <code>cheie</code> și acceptă <code>+ - * / ( )</code> plus <code>min()</code>, <code>max()</code>,
@@ -384,6 +386,7 @@ function register(router) {
     if (!c) return redirect(ctx.res, "/calculator/categorii");
     const body = `
       ${subnavCrm("/calculator", ctx.user)}
+      ${selectorCalculator("/calculator")}
       <form method="post" action="/calculator/categorii/${c.id}" class="form" style="max-width:820px">
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px">
           <label class="field"><span>Nume</span><input name="nume" value="${esc(c.nume)}" required></label>

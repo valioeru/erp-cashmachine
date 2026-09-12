@@ -23,7 +23,7 @@
 // alta masina) si rebutul, care NU erau in cei 46 lei declarati initial.
 
 const db = require("../lib/db");
-const { esc, layout, table, subnavCrm } = require("../lib/render");
+const { esc, layout, table, subnavCrm, selectorCalculator } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // Datele de intrare, cu valorile din fisierul primit de la Cash Machine.
@@ -543,7 +543,8 @@ function register(router) {
     campuriHtml = ("<div class=\"awb-grid\">" + campuriHtml).replace("<div class=\"awb-grid\"></div>", "");
 
     const body = `
-      ${subnavCrm("/calculator/awb", ctx.user)}
+      ${subnavCrm("/calculator", ctx.user)}
+      ${selectorCalculator("/calculator/awb")}
       <h1 style="margin:6px 0 2px">Calculator AWB — C3 / C4 / C5 / C6</h1>
       <p class="mic" style="margin:0 0 14px;max-width:900px">
         Costul și prețul plicurilor AWB, pe cele patru formate. Modelul pornește de la prețul cunoscut al C5
