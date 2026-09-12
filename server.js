@@ -48,6 +48,7 @@ require("./modules/warehouse").register(router);
 require("./modules/financiar").register(router);
 require("./modules/calculator").register(router);
 require("./modules/awb").register(router);
+require("./modules/pungi").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
