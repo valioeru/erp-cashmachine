@@ -7,6 +7,14 @@ module.exports = function registerRute(router, deps) {
   const { money } = require("../lib/render");
   const cost = require("../lib/cost");
 
+  const STARI_SYNC = {
+    ok: '<span class="badge verde">a importat</span>',
+    "nimic-nou": '<span class="badge gri">nimic nou</span>',
+    partial: '<span class="badge galben">parțial</span>',
+    "sesiune-expirata": '<span class="badge galben">sesiune SmartBill expirată</span>',
+    eroare: '<span class="badge rosu">eroare</span>',
+  };
+
   const TIPURI_ETICHETE = {
     produse: "Produse / servicii",
     stoc: "Stoc la zi",
@@ -146,11 +154,42 @@ module.exports = function registerRute(router, deps) {
   });
 
   // Cutia poștală: ce a sosit din browser și așteaptă aprobarea ta.
+  // Jurnalul rulărilor automate de noapte. Sincronizarea nu poate rula din cloud
+  // (SmartBill n-are API care să listeze documente pe perioadă), deci rulează în
+  // browserul lui Vali, noaptea. Până acum, o rulare care n-a găsit nimic arăta
+  // în loguri exact ca una care a picat pentru că expirase sesiunea SmartBill.
+  // De-aia fiecare rulare scrie aici o linie, chiar și când nu are ce importa.
+  router.post("/import/punte/raport", async (ctx) => {
+    const raspunde = (cod, obj) => {
+      ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8" });
+      ctx.res.end(JSON.stringify(obj));
+    };
+    if (!ctx.user || ctx.user.rol !== "admin") return raspunde(403, { ok: false, eroare: "doar administrator" });
+    const b = ctx.body || {};
+    const stariOk = ["ok", "nimic-nou", "sesiune-expirata", "eroare", "partial"];
+    const stare = stariOk.includes(String(b.stare)) ? String(b.stare) : "eroare";
+    const gasit = Math.max(0, Math.min(1000000, parseInt(b.gasit, 10) || 0));
+    const importat = Math.max(0, Math.min(1000000, parseInt(b.importat, 10) || 0));
+    const nota = String(b.nota || "").slice(0, 600) || null;
+    const sursa = String(b.sursa || "sincronizare-noapte").slice(0, 80);
+    const ins = await db
+      .prepare("INSERT INTO sync_rulari (stare, sursa, gasit, importat, nota) VALUES (?, ?, ?, ?, ?) RETURNING id")
+      .run(stare, sursa, gasit, importat, nota);
+    // păstrăm jurnalul mic — ne interesează ultimele luni, nu tot istoricul
+    await db.prepare("DELETE FROM sync_rulari WHERE id NOT IN (SELECT id FROM sync_rulari ORDER BY id DESC LIMIT 200)").run();
+    raspunde(200, { ok: true, rulare: ins.lastInsertRowid, stare });
+  });
+
   router.get("/import/punte", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
     const loturi = await db
       .prepare("SELECT id, tip, randuri, octeti, sursa, primit_la, aplicat_la, rezultat FROM punte_staging ORDER BY id DESC LIMIT 60")
       .all();
+
+    const rulari = await db
+      .prepare("SELECT id, pornit_la, stare, sursa, gasit, importat, nota FROM sync_rulari ORDER BY id DESC LIMIT 20")
+      .all()
+      .catch(() => []);
 
     const inAsteptare = loturi.filter((l) => !l.aplicat_la);
     const randuriTabel = (lista) =>
@@ -169,6 +208,22 @@ module.exports = function registerRute(router, deps) {
                <form method="post" action="/import/punte/${l.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi lotul?')"><button class="link-btn danger" type="submit">șterge</button></form>
              </div>`,
       ]);
+
+    // Dacă ultima rulare e mai veche de 36 de ore, ceva s-a oprit — poate
+    // calculatorul a fost închis peste noapte, poate task-ul a picat.
+    let avertismentSync = "";
+    const ultima = rulari[0];
+    if (ultima) {
+      const t = Date.parse(String(ultima.pornit_la).replace(" ", "T") + "Z");
+      const ore = isFinite(t) ? (Date.now() - t) / 3600000 : 0;
+      if (ore > 36) {
+        avertismentSync = `<div class="flash warn">Ultima sincronizare raportată a fost acum ${Math.round(ore / 24)} zile.
+          Ori calculatorul a fost închis, ori task-ul de noapte nu mai pornește.</div>`;
+      } else if (ultima.stare === "sesiune-expirata") {
+        avertismentSync = `<div class="flash warn">Ultima rulare n-a putut intra în SmartBill — sesiunea expirase.
+          Deschide o dată SmartBill și lasă fila logată peste noapte.</div>`;
+      }
+    }
 
     const body = `
       <div class="detail-box">
@@ -195,6 +250,29 @@ module.exports = function registerRute(router, deps) {
 
       <h2>Istoric</h2>
       ${table(["#", "Tip", "Rânduri", "Mărime", "Primit", "Stare", "Acțiuni"], randuriTabel(loturi.filter((l) => l.aplicat_la)))}
+
+      <h2>Sincronizarea automată de noapte</h2>
+      <p class="mic" style="margin:0 0 8px;max-width:900px">
+        Rulează la 02:30, în browserul de pe calculatorul care rămâne pornit. SmartBill nu are un API
+        care să listeze documentele pe o perioadă, deci sincronizarea nu poate rula din cloud — are
+        nevoie de sesiunea ta deschisă. Fiecare rulare scrie o linie aici, <b>chiar și când n-are ce importa</b>,
+        ca să se vadă diferența dintre „n-a fost nimic nou” și „n-a mers”.
+      </p>
+      ${avertismentSync}
+      ${
+        rulari.length
+          ? table(
+              ["Când", "Stare", "Documente găsite", "Importate", "Notă"],
+              rulari.map((r) => [
+                esc(String(r.pornit_la || "").slice(0, 16)),
+                STARI_SYNC[r.stare] || esc(String(r.stare)),
+                Number(r.gasit).toLocaleString("ro-RO"),
+                Number(r.importat).toLocaleString("ro-RO"),
+                `<span class="cel-lung" title="${esc(String(r.nota || ""))}">${esc(String(r.nota || "—"))}</span>`,
+              ])
+            )
+          : `<p style="color:var(--text-muted)">Nicio rulare raportată încă.</p>`
+      }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Punte de import din browser", active: "/import", body }));
   });
