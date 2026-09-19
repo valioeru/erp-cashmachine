@@ -416,6 +416,10 @@ async function topProduse(de, la) {
 }
 
 // Banii de luat: cât, din care restant, și de când stă cea mai veche.
+// Fără facturile dintre firmele grupului — la nivel de grup banul doar se mută
+// dintr-un buzunar în altul, iar toate celelalte rapoarte le scot. Fără linia
+// asta, dashboardul arăta 3.488.291 acolo unde Financiar și scadențarul
+// arătau 1.564.897, și părea că unul dintre ele minte.
 async function deIncasat(aziStr) {
   return await db
     .prepare(
@@ -428,7 +432,7 @@ async function deIncasat(aziStr) {
                   COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
                   - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
              FROM (SELECT * FROM facturi WHERE activ = 1) f
-            WHERE f.directie = 'vanzare' AND ${deschisa("f")}
+            WHERE f.directie = 'vanzare' AND ${deschisa("f")} AND COALESCE(f.intercompany,0) = 0
          ) x
         WHERE x.rest > 1`
     )
