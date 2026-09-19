@@ -52,7 +52,7 @@ function register(router) {
          SELECT f.id,
                 COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
                 - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'achizitie' AND f.status != 'anulata'
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','platita')
        ) x WHERE x.rest > 1`
     );
     const banca = await unuSau(

@@ -37,6 +37,27 @@ const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
 const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
 
+// DE CE toate listele de „ce mai am de plătit / de încasat" exclud statusul
+// „platita", nu doar compară totalul cu plățile:
+//
+// La import, o factură marcată achitată în SmartBill primește status
+// „platita", dar NU i se mai naște o plată (vezi comentariul lung din
+// modules/import.js — plata inventată pe data facturii strica luna încasării
+// și se dubla cu încasarea reală). Banii intră separat, din raportul de
+// încasări. Raportul acela există însă doar pentru VÂNZĂRI: la achiziții nu
+// avem de unde lua plățile, deci tabelul „plati" e gol pentru ele.
+//
+// Rezultatul: fiecare factură de furnizor achitată vreodată apărea la
+// „de plătit" cu suma întreagă, iar totalul creștea an de an. Pe 19.09.2026
+// scadențarul de grup arăta 56,5 milioane de plătit, cu furnizori de 6,5
+// milioane în balanță.
+//
+// Regula, de aici încolo: statusul „platita" înseamnă achitat, indiferent ce
+// scrie în tabelul de plăți. Plățile rămân sursa pentru CÂND și CU CÂT s-a
+// plătit (cash flow, comisioane); statusul e sursa pentru DACĂ s-a plătit.
+// Pentru vânzări cele două spun oricum același lucru, fiindcă acolo statusul
+// se recalculează din plăți.
+
 const CATEGORII = [
   {
     titlu: "Financiare",
@@ -262,7 +283,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
+         WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna','platita') AND f.intercompany = 0
            AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
            AND (f.data_scadenta <= ? OR f.data_scadenta = '' OR f.data_scadenta IS NULL)
          ORDER BY f.data_scadenta ASC, f.id ASC`
@@ -449,7 +470,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.directie = ? AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         WHERE f.directie = ? AND f.status NOT IN ('anulata','necunoscut','platita') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
          ORDER BY f.data_scadenta ASC`
       )
       .all(directie);
@@ -669,7 +690,7 @@ function register(router) {
            FROM (SELECT * FROM facturi WHERE activ = 1) f
            LEFT JOIN ${SUB_TOTAL} l ON l.factura_id=f.id
            LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id=f.id
-           WHERE f.status NOT IN ('anulata','necunoscut') AND COALESCE(l.total,0)-COALESCE(pl.platit,0) > 0.5 ${filtruFirma.sql}
+           WHERE f.status NOT IN ('anulata','necunoscut','platita') AND COALESCE(l.total,0)-COALESCE(pl.platit,0) > 0.5 ${filtruFirma.sql}
            GROUP BY f.directie`
         )
         .all(...filtruFirma.args);
@@ -756,7 +777,7 @@ function register(router) {
          LEFT JOIN firme fi ON fi.id = f.firma_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         WHERE f.status NOT IN ('anulata','necunoscut','platita') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
          ORDER BY (f.data_scadenta IS NULL OR f.data_scadenta = ''), f.data_scadenta ASC`
       )
       .all();
@@ -1243,7 +1264,7 @@ function register(router) {
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+         WHERE f.status NOT IN ('anulata','necunoscut','platita') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
          GROUP BY f.directie`
       )
       .all(aziStr);

@@ -185,7 +185,7 @@ async function stareClient(partenerId) {
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-        WHERE f.partener_id = ? AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+        WHERE f.partener_id = ? AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna','platita')
           AND COALESCE(f.intercompany,0) = 0
           AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5`
     )

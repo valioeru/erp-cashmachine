@@ -78,7 +78,7 @@ function register(router) {
          JOIN parteneri p ON p.id = f.partener_id
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-         WHERE f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5`
+         WHERE f.status NOT IN ('anulata','necunoscut','platita') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5`
       )
       .all();
 
