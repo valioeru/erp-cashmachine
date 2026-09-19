@@ -484,6 +484,28 @@ async function locuriRand(randId) {
 // stă aici, nu în desen — se vede în cifrele de pe pagina de configurare.
 const GRINDA = 140;
 
+// O coloană adăugată ulterior poate să nu existe încă: fișierul cu migrarea
+// se urcă separat de cel cu codul, iar între cele două deploy-uri baza e mai
+// veche decât aplicația. O pagină n-are voie să cadă cu 500 din cauza asta —
+// deci întrebăm baza ce coloane are și ne purtăm după. Răspunsul se ține minte
+// pe toată viața procesului: schema nu se schimbă sub noi fără o repornire.
+const coloaneStiute = new Map();
+async function areColoana(tabel, coloana) {
+  const cheie = tabel + "." + coloana;
+  if (coloaneStiute.has(cheie)) return coloaneStiute.get(cheie);
+  let are = false;
+  try {
+    const r = await db
+      .prepare("SELECT 1 AS x FROM information_schema.columns WHERE table_name = ? AND column_name = ?")
+      .get(tabel, coloana);
+    are = Boolean(r);
+  } catch (e) {
+    are = false;
+  }
+  coloaneStiute.set(cheie, are);
+  return are;
+}
+
 // ---- Planul halei, ținut în baza de date -----------------------------------
 // Cheia „ct_plan" din setari_app. Dacă lipsește sau e stricată, rămân cifrele
 // din planul de montaj de mai sus — depozitul nu trebuie să se strice din
@@ -851,15 +873,18 @@ function register(router) {
     // Paleții din depozit. Locurile se aduc separat și se lipesc în JS: o
     // paletă lată stă pe două-trei locuri, iar un JOIN ar multiplica rândul
     // și ar strica totalurile de cantitate și valoare.
+    // Furnizorul scris pe paletă există doar după ce a rulat migrarea. Până
+    // atunci pagina merge oricum, cu furnizorul dedus din facturi.
+    const cuFurnizor = await areColoana("ct_paleti", "furnizor_id");
     const paleti = await db
       .prepare(
         `SELECT p.id, p.cod, p.produs_id, p.produs_text, p.cantitate, p.um, p.lot, p.categorie,
-                p.data_intrare, p.pret_unitar, p.pret_sursa, p.furnizor_id, p.furnizor_text,
-                pr.denumire AS produs, pr.cod AS produs_cod, pr.unitate_masura,
-                f.nume AS furnizor_nume
+                p.data_intrare, p.pret_unitar, p.pret_sursa,
+                ${cuFurnizor ? "p.furnizor_id, p.furnizor_text, f.nume AS furnizor_nume" : "NULL AS furnizor_id, NULL AS furnizor_text, NULL AS furnizor_nume"},
+                pr.denumire AS produs, pr.cod AS produs_cod, pr.unitate_masura
            FROM ct_paleti p
            LEFT JOIN produse pr ON pr.id = p.produs_id
-           LEFT JOIN parteneri f ON f.id = p.furnizor_id
+           ${cuFurnizor ? "LEFT JOIN parteneri f ON f.id = p.furnizor_id" : ""}
           WHERE p.data_iesire IS NULL
           ORDER BY p.data_intrare DESC, p.id DESC`
       )
@@ -994,6 +1019,16 @@ function register(router) {
         și pe ce raft stă. Căutarea merge în denumire, cod, lot, furnizor, categorie și adresă — deci poți căuta
         și „R3-05" ca să vezi ce e pe un anume loc.
       </p>
+
+      ${
+        cuFurnizor
+          ? ""
+          : `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:880px">
+              Baza de date n-a primit încă migrarea pentru furnizorul scris pe paletă, deci toți furnizorii de mai jos
+              sunt <strong>deduși din facturile de achiziție</strong>. Se rezolvă singur la următoarea pornire a aplicației,
+              după ce ajunge pe server versiunea nouă a fișierului <code>lib/db.js</code>.
+            </div>`
+      }
 
       <form method="get" action="/stocuri/ct-park/stoc" class="toolbar">
         <input type="search" name="q" value="${esc(cauta)}" placeholder="caută marfă, lot, furnizor, adresă…" style="min-width:320px">
@@ -1769,6 +1804,7 @@ function register(router) {
   router.post("/stocuri/ct-park/intrare", async (ctx) => {
     const b = ctx.body;
     const catePaleti = Math.min(60, Math.max(1, Math.round(nr(b.paleti) || 1)));
+    const cuFurnizorLaIntrare = await areColoana("ct_paleti", "furnizor_id");
     const cateLocuri = Math.min(3, Math.max(1, Math.round(nr(b.locuri) || 1)));
     const categorie = CATEGORII.includes(String(b.categorie || "")) ? String(b.categorie) : null;
     const randId = nr(b.rand_id) || null;
@@ -1924,8 +1960,8 @@ function register(router) {
 
       const r = await db
         .prepare(
-          `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa, furnizor_id, furnizor_text)
-           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+          `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa${cuFurnizorLaIntrare ? ", furnizor_id, furnizor_text" : ""})
+           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${cuFurnizorLaIntrare ? ", ?, ?" : ""}) RETURNING id`
         )
         .run(
           nr(b.produs_id) || null,
@@ -1939,8 +1975,7 @@ function register(router) {
           ctx.user ? ctx.user.nume : null,
           pretPaleta,
           pretSursa,
-          nr(b.furnizor_id) || null,
-          String(b.furnizor_text || "").trim() || null
+          ...(cuFurnizorLaIntrare ? [nr(b.furnizor_id) || null, String(b.furnizor_text || "").trim() || null] : [])
         );
       const id = r.lastInsertRowid;
       if (!id) continue;
