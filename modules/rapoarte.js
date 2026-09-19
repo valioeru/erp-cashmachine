@@ -326,6 +326,21 @@ const VECHIMI = [
   ["tot", "tot istoricul (inclusiv facturi vechi, probabil deja plătite)"],
 ];
 
+// Odata ce istoricul vechi a fost inchis, filtrul pe vechime nu mai are ce
+// filtra: tot ce a ramas deschis e de dupa prag. Daca ar ramane pe 12 luni,
+// scadentarul ar taia inca o data peste taietura deja facuta si ar arata alta
+// cifra decat Financiar sau Consolidat — exact confuzia pe care o reparam.
+// Deci: cat timp exista o inchidere activa, implicitul e „tot istoricul"; daca
+// inchiderea se anuleaza, filtrul isi reia rolul de la sine.
+async function existaInchidereActiva() {
+  try {
+    const r = await db.prepare("SELECT 1 AS x FROM inchideri_istoric WHERE anulata_la IS NULL LIMIT 1").get();
+    return Boolean(r);
+  } catch (e) {
+    return false;
+  }
+}
+
 function pragVechime(cheie) {
   if (cheie === "tot") return null;
   const luni = parseInt(cheie, 10);
@@ -388,7 +403,7 @@ function register(router) {
     const { deLa, panaLa } = calculeazaInterval(cheieInterval, ctx.query);
     // Explicit „1"/„0", ca alegerea să nu depindă de un parametru lipsă.
     const includeVechi = String(ctx.query.vechi ?? "1") !== "0";
-    const cheieVechime = VECHIMI.some(([k]) => k === ctx.query.vechime) ? ctx.query.vechime : "12";
+    const cheieVechime = VECHIMI.some(([k]) => k === ctx.query.vechime) ? ctx.query.vechime : (await existaInchidereActiva()) ? "tot" : "12";
     const prag = pragVechime(cheieVechime);
     const sortare = ["zi", "suma"].includes(ctx.query.sort) ? ctx.query.sort : "zi";
     const vedere = ctx.query.vedere === "lista" ? "lista" : "zile";
@@ -929,7 +944,7 @@ function register(router) {
     const aziStr = azi();
     const cheieInterval = INTERVALE.some(([k]) => k === ctx.query.interval) ? ctx.query.interval : "zile_30";
     const { deLa, panaLa } = calculeazaInterval(cheieInterval, ctx.query);
-    const cheieVechime = VECHIMI.some(([k]) => k === ctx.query.vechime) ? ctx.query.vechime : "12";
+    const cheieVechime = VECHIMI.some(([k]) => k === ctx.query.vechime) ? ctx.query.vechime : (await existaInchidereActiva()) ? "tot" : "12";
     const prag = pragVechime(cheieVechime);
 
     const randuri = await db
@@ -1117,9 +1132,14 @@ function register(router) {
             AND COALESCE(f.data_emiterii, f.data_scadenta) < CAST(? AS TEXT)`
       )
       .get(directie, prag);
+    // „Rămâne" se arată și fără facturile dintre firmele grupului, fiindcă TOATE
+    // rapoartele le elimină (la nivel de grup banul doar se mută dintr-un
+    // buzunar în altul). Fără despărțirea asta, pagina spunea 3.488.291, iar
+    // scadențarul 1.564.897, și părea că una dintre ele minte.
     const ramane = await db
       .prepare(
-        `SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS suma
+        `SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS suma,
+                COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 1 THEN COALESCE(l.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS intern
            FROM (SELECT * FROM facturi WHERE activ = 1) f
            LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
            LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
@@ -1158,6 +1178,11 @@ function register(router) {
         <div class="value" style="color:var(--danger)">${money(s.seInchid.suma)}</div>
         <div style="font-size:12px;color:var(--text-muted)">${s.seInchid.n} documente se închid</div>
         <div style="margin-top:8px;font-size:13px">rămâne <strong>${money(s.ramane.suma)}</strong> pe ${s.ramane.n} documente</div>
+        ${
+          Number(s.ramane.intern) > 0.5
+            ? `<div style="font-size:12px;color:var(--text-muted)">din care ${money(s.ramane.intern)} între firmele grupului — rapoartele le scot, deci acolo vezi ${money(Number(s.ramane.suma) - Number(s.ramane.intern))}</div>`
+            : ""
+        }
       </div>`
       )
       .join("");
@@ -2719,13 +2744,15 @@ function register(router) {
 
     const acoperire = await db
       .prepare(
-        `SELECT COALESCE(SUM(CASE WHEN fl.produs_id IS NOT NULL THEN fl.cantitate * fl.pret_unitar ELSE 0 END), 0) AS cuProdus,
+        `SELECT COALESCE(SUM(CASE WHEN fl.produs_id IS NOT NULL THEN fl.cantitate * fl.pret_unitar ELSE 0 END), 0) AS cu_produs,
                 COALESCE(SUM(fl.cantitate * fl.pret_unitar), 0) AS total
          FROM facturi_linii fl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id JOIN parteneri p ON p.id = f.partener_id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ? ${filtruAgent}`
       )
       .get(deLa, panaLa, ...argsAgent);
-    const pctAcoperire = Number(acoperire.total) > 0 ? (Number(acoperire.cuProdus) / Number(acoperire.total)) * 100 : 0;
+    // Aliasul e cu underscore, nu camelCase: Postgres intoarce `cuProdus` drept
+    // `cuprodus`, iar citirea gresita dadea NaN in card.
+    const pctAcoperire = Number(acoperire.total) > 0 ? (Number(acoperire.cu_produs) / Number(acoperire.total)) * 100 : 0;
 
     const totalVenit = produse.reduce((s, p) => s + Number(p.venit), 0);
     const totalMarja = produse.reduce((s, p) => s + (Number(p.venit) - Number(p.cost)), 0);
