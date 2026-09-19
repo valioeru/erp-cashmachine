@@ -11,6 +11,7 @@
 // fiecare an. Altfel ai compara 8 luni din 2026 cu 12 luni din 2025 și ai
 // crede în fiecare august că firma s-a prăbușit.
 const db = require("../lib/db");
+const { deschisa } = require("../lib/solduri");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -427,7 +428,7 @@ async function deIncasat(aziStr) {
                   COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
                   - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
              FROM (SELECT * FROM facturi WHERE activ = 1) f
-            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+            WHERE f.directie = 'vanzare' AND ${deschisa("f")}
          ) x
         WHERE x.rest > 1`
     )

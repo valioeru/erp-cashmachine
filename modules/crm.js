@@ -6,6 +6,7 @@
 //   2. Oportunități: pipeline-ul de vânzare pe stadii.
 //   3. Activitate: task-uri, interacțiuni și emailuri trimise din aplicație.
 const db = require("../lib/db");
+const { deschisa } = require("../lib/solduri");
 
 // Costul mărfii vândute stă într-un singur loc, în lib/cost.js: rata reală a
 // produsului din raportul de contabilitate, altfel prețul de achiziție de pe
@@ -700,7 +701,7 @@ function register(router) {
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
-         WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
+         WHERE f.directie='vanzare' AND ${deschisa("f")} AND f.intercompany = 0
            AND al.utilizator_id = ?
          GROUP BY p.id`
       )
@@ -989,7 +990,7 @@ function register(router) {
       .prepare(
         `SELECT p.id, p.nume, p.email, p.telefon, p.data_nastere,
                 COALESCE(SUM(CASE WHEN f.data_emiterii >= ? THEN l.total ELSE 0 END), 0) AS vanzari12,
-                COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS sold,
+                COALESCE(SUM(CASE WHEN ${deschisa("f")} THEN COALESCE(l.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS sold,
                 MAX(f.data_emiterii) AS ultima
          FROM parteneri p
          LEFT JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.partener_id = p.id AND f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0

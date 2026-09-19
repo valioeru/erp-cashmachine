@@ -1,5 +1,6 @@
 "use strict";
 const db = require("../lib/db");
+const { deschisa } = require("../lib/solduri");
 const alocari = require("./alocari");
 const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table } = require("../lib/render");
@@ -59,6 +60,7 @@ function register(router) {
                   COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
                                     THEN COALESCE(t.total,0) ELSE 0 END), 0) AS rulaj,
                   COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.directie = 'vanzare'
+                                     AND ${deschisa("f")}
                                      AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5
                                     THEN COALESCE(t.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS sold,
                   MAX(f.data_emiterii) AS ultima
