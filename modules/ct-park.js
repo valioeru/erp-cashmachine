@@ -13,9 +13,15 @@ const { SUB_STOC } = require("../lib/stoc");
 const { esc, layout, table, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
-const ADANCIME = 1100; // adâncimea unui rând de raft, văzută în secțiune
-const SPATE = 200; // jocul dintre două rânduri așezate spate în spate
-const CULOAR = 3200; // culoarul de lucru dintre grupuri
+// Planul halei. Erau constante scrise în sursă — acum sunt DATE: se pot
+// schimba din „Planul halei", fără să umble cineva prin cod. Valorile de aici
+// rămân cele din planul de montaj și se folosesc cât timp nu s-a salvat
+// altceva. Sunt stare de aplicație, nu de cerere: se citesc o dată la pornire
+// și se rescriu după fiecare salvare, de-aia stau în modul și nu se cară prin
+// toate funcțiile de desen.
+let ADANCIME = 1100; // adâncimea unui rând de raft, văzută în secțiune
+let SPATE = 200; // jocul dintre două rânduri așezate spate în spate
+let CULOAR = 3200; // culoarul de lucru dintre grupuri
 const CONSOLA = 50; // cât iese structura de sus în afara cadrului, pe fiecare parte
 const MONTANT = 100; // lățimea profilului montantului
 
@@ -33,7 +39,9 @@ const NIVEL_SUS = 8150;
 // Rândurile, în ordinea în care stau în hală de la stânga la dreapta.
 // Grupate cum sunt și în realitate: două rânduri lipite spate în spate fac
 // un grup, între grupuri rămâne culoarul.
-const GRUPURI = [[8], [7, 6], [5, 4], [3, 2], [1]];
+let GRUPURI = [[8], [7, 6], [5, 4], [3, 2], [1]];
+
+const PLAN_IMPLICIT = { grupuri: GRUPURI, adancime: ADANCIME, spate: SPATE, culoar: CULOAR };
 
 const MARGINE_X = 900;
 const MARGINE_SUS = 1500;
@@ -372,6 +380,12 @@ const CULORI_CATEGORII = {
 };
 
 const nr = (v) => Number(v || 0);
+// „1 palet", nu „1 paleți". Mărunt, dar se citește de zeci de ori pe zi.
+const plural = (n, unu, multi) => `${nr(n)} ${nr(n) === 1 ? unu : multi}`;
+const procent = (v, z = 1) =>
+  Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: z, maximumFractionDigits: z }) + "%";
+const lei = (v) =>
+  Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
 
 function aziStr() {
   return new Date().toISOString().slice(0, 10);
@@ -403,8 +417,10 @@ function subtabs(activ) {
     ["/stocuri/ct-park", "Harta depozitului"],
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
     ["/stocuri/ct-park/iesire", "Ieșire marfă"],
+    ["/stocuri/ct-park/stoc", "Stoc la zi"],
     ["/stocuri/ct-park/paleti", "Paleți în depozit"],
     ["/stocuri/ct-park/configurare", "Configurare rânduri"],
+    ["/stocuri/ct-park/plan", "Planul halei"],
   ];
   if (ARATA_SECTIUNEA_TEHNICA) linkuri.push(["/stocuri/ct-park/sectiune", "Secțiune tehnică"]);
   return `<div class="subnav" style="margin-top:-6px">${linkuri
@@ -417,6 +433,32 @@ function pastila(categorie) {
   if (!c) return "";
   const culoare = CULORI_CATEGORII[c] || "#5a6472";
   return `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:${culoare}1a;color:${culoare};border:1px solid ${culoare}55">${esc(c)}</span>`;
+}
+
+// Mesajul de după o salvare: verde pentru "gata", roșu pentru "nu merge".
+// Textul vine din adresa paginii, deci se scapă întotdeauna.
+function mesaje(q) {
+  const ok = String((q && q.ok) || "");
+  const er = String((q && q.eroare) || "");
+  return (
+    (er ? `<div class="detail-box" style="border-left:4px solid var(--danger);max-width:860px">${esc(er)}</div>` : "") +
+    (ok ? `<div class="detail-box" style="border-left:4px solid #2f7d4f;max-width:860px">${esc(ok)}</div>` : "")
+  );
+}
+
+// Perechea de butoane care adaugă sau scoate un nivel. Stă în două formulare
+// separate fiindcă fiecare e un POST de sine stătător — fără JavaScript, deci
+// merge și pe telefonul din hală.
+function butoaneNivel(r, inapoi) {
+  const f = (spre, semn, titlu, dezactivat) => `<form method="post" action="/stocuri/ct-park/configurare/${r.id}/nivel" style="display:inline">
+      <input type="hidden" name="spre" value="${spre}"><input type="hidden" name="inapoi" value="${inapoi || ""}">
+      <button class="ct-mic" type="submit" title="${esc(titlu)}"${dezactivat ? " disabled" : ""}>${semn}</button>
+    </form>`;
+  return `<span class="ct-niv-ctrl">
+      ${f("scoate", "−", "Scoate nivelul de sus", nr(r.niveluri) <= 1)}
+      <strong>${nr(r.niveluri)}</strong>
+      ${f("adauga", "+", "Adaugă un nivel deasupra", nr(r.niveluri) >= 12)}
+    </span>`;
 }
 
 // Toate locurile unui rând, cu paleta de pe ele (dacă e vreuna). O paletă pe
@@ -435,6 +477,127 @@ async function locuriRand(randId) {
         ORDER BY l.nivel DESC, l.camp, l.pozitie`
     )
     .all(randId);
+}
+
+
+// Grosimea grinzii de sub un nivel. Intră în înălțimea totală a rândului, deci
+// stă aici, nu în desen — se vede în cifrele de pe pagina de configurare.
+const GRINDA = 140;
+
+// ---- Planul halei, ținut în baza de date -----------------------------------
+// Cheia „ct_plan" din setari_app. Dacă lipsește sau e stricată, rămân cifrele
+// din planul de montaj de mai sus — depozitul nu trebuie să se strice din
+// cauza unui JSON greșit.
+const CHEIE_PLAN = "ct_plan";
+
+function curataPlan(o) {
+  if (!o || typeof o !== "object") return null;
+  const grupuri = (Array.isArray(o.grupuri) ? o.grupuri : [])
+    .map((g) => (Array.isArray(g) ? g.map((x) => Math.round(nr(x))).filter((x) => x >= 1 && x <= 99) : []))
+    .filter((g) => g.length);
+  if (!grupuri.length) return null;
+  return {
+    grupuri,
+    adancime: Math.min(4000, Math.max(200, Math.round(nr(o.adancime)) || PLAN_IMPLICIT.adancime)),
+    spate: Math.min(2000, Math.max(0, Math.round(nr(o.spate)))),
+    culoar: Math.min(20000, Math.max(500, Math.round(nr(o.culoar)) || PLAN_IMPLICIT.culoar)),
+  };
+}
+
+function aplicaPlan(p) {
+  const c = curataPlan(p) || PLAN_IMPLICIT;
+  GRUPURI = c.grupuri;
+  ADANCIME = c.adancime;
+  SPATE = c.spate;
+  CULOAR = c.culoar;
+  return c;
+}
+
+function planCurent() {
+  return { grupuri: GRUPURI, adancime: ADANCIME, spate: SPATE, culoar: CULOAR };
+}
+
+async function incarcaPlan() {
+  try {
+    const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = ?").get(CHEIE_PLAN);
+    if (r && r.valoare) return aplicaPlan(JSON.parse(r.valoare));
+  } catch (e) {
+    /* o bază fără setari_app sau un JSON stricat: rămân cifrele din cod */
+  }
+  return aplicaPlan(PLAN_IMPLICIT);
+}
+
+async function salveazaPlan(p) {
+  const c = aplicaPlan(p);
+  const acum = new Date().toISOString();
+  const j = JSON.stringify(c);
+  const exista = await db.prepare("SELECT cheie FROM setari_app WHERE cheie = ?").get(CHEIE_PLAN).catch(() => null);
+  if (exista) await db.prepare("UPDATE setari_app SET valoare = ?, actualizat_la = ? WHERE cheie = ?").run(j, acum, CHEIE_PLAN);
+  else await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?)").run(CHEIE_PLAN, j, acum);
+  return c;
+}
+
+// Grupurile scrise ca text: un grup pe linie, numerele rândurilor despărțite
+// prin spațiu sau virgulă. „7 6" pe o linie = două rânduri spate în spate.
+// E cea mai simplă unealtă de proiectare care nu cere JavaScript: adaugi o
+// linie, ai un grup nou; scoți un număr, ai un rând în minus.
+function grupuriCaText(grupuri) {
+  return grupuri.map((g) => g.join(" ")).join("\n");
+}
+function grupuriDinText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((linie) => linie.split(/[\s,;]+/).map((x) => Math.round(nr(x))).filter((x) => x >= 1 && x <= 99))
+    .filter((g) => g.length);
+}
+
+// ---- Nivelurile unui rând --------------------------------------------------
+// Tabelul ct_niveluri ține doar abaterile de la cifrele rândului: un nivel
+// care nu are rând acolo moștenește înălțimea și numărul de paleți ale
+// rândului. Funcția asta le pune la un loc, ca restul codului să nu mai știe
+// că sunt două surse. De-aia un depozit configurat înainte merge mai departe
+// fără nicio migrare.
+async function niveluriRand(r) {
+  let salvate = [];
+  try {
+    salvate = await db.prepare("SELECT * FROM ct_niveluri WHERE rand_id = ? ORDER BY nivel").all(r.id);
+  } catch (e) {
+    salvate = [];
+  }
+  const h = new Map((salvate || []).map((x) => [nr(x.nivel), x]));
+  const out = [];
+  for (let i = 1; i <= nr(r.niveluri); i++) {
+    const s = h.get(i) || {};
+    out.push({
+      nivel: i,
+      inaltime: nr(s.inaltime) || nr(r.inaltime_nivel) || 1800,
+      eticheta: s.eticheta || null,
+      locuri: Math.max(1, nr(s.locuri_pe_camp) || nr(r.locuri_pe_camp) || 1),
+      propriu: Boolean(nr(s.inaltime) || s.eticheta || nr(s.locuri_pe_camp)),
+    });
+  }
+  return out;
+}
+
+// Înălțimea totală a rândului: nivelurile plus grinda de sub fiecare.
+function inaltimeRand(niveluri) {
+  return niveluri.reduce((s, n) => s + n.inaltime + GRINDA, 0);
+}
+
+// Locurile pe care stă marfă și care ar rămâne pe dinafară la o configurație
+// nouă. Aceeași verificare se face și când se salvează rândul, și când se
+// scoate un nivel — de-aia stă într-un singur loc.
+async function locuriInAfara(randId, campuri, niveluri, locuriPeNivel) {
+  const ocupate = await db
+    .prepare(
+      `SELECT l.adresa, l.nivel, l.camp, l.pozitie FROM ct_locuri l
+         JOIN ct_ocupari o ON o.loc_id = l.id JOIN ct_paleti p ON p.id = o.palet_id AND p.data_iesire IS NULL
+        WHERE l.rand_id = ? ORDER BY l.nivel DESC, l.camp`
+    )
+    .all(randId);
+  return ocupate.filter(
+    (l) => nr(l.camp) > campuri || nr(l.nivel) > niveluri || nr(l.pozitie) > locuriPeNivel(nr(l.nivel))
+  );
 }
 
 async function sumarRanduri() {
@@ -464,6 +627,10 @@ async function sumarRanduri() {
 }
 
 function register(router) {
+  // Planul halei se citește o dată, la pornire. Dacă baza nu răspunde încă,
+  // rămân cifrele din planul de montaj și se reîncarcă la prima salvare.
+  incarcaPlan().catch(() => {});
+
   router.get("/stocuri/ct-park/sectiune", paginaSectiune);
 
   // ---- Harta: rândurile, cu gradul de umplere ----------------------------
@@ -472,6 +639,22 @@ function register(router) {
     const totalLocuri = randuri.reduce((s, r) => s + r.locuri, 0);
     const totalOcupate = randuri.reduce((s, r) => s + r.ocupate, 0);
     const paleti = nr((await db.prepare("SELECT COUNT(*) AS n FROM ct_paleti WHERE data_iesire IS NULL").get()).n);
+    const libere = Math.max(0, totalLocuri - totalOcupate);
+    const gradOcupare = totalLocuri ? (totalOcupate / totalLocuri) * 100 : 0;
+
+    // Valoarea mărfii, la prețul cu care a intrat. Paleții fără preț se
+    // numără separat: e mai cinstit să spui „lipsesc N paleți din sumă" decât
+    // să dai o cifră care pare întreagă și nu e.
+    const v = await db
+      .prepare(
+        `SELECT COALESCE(SUM(COALESCE(cantitate, 0) * COALESCE(pret_unitar, 0)), 0) AS valoare,
+                COUNT(*) FILTER (WHERE pret_unitar IS NULL OR pret_unitar = 0) AS fara_pret
+           FROM ct_paleti WHERE data_iesire IS NULL`
+      )
+      .get()
+      .catch(() => null);
+    const valoare = nr(v && v.valoare);
+    const faraPret = nr(v && v.fara_pret);
 
     if (!randuri.length) {
       const body = `
@@ -495,13 +678,24 @@ function register(router) {
         <a class="btn secondary" href="/stocuri/ct-park/paleti">Paleți în depozit</a>
       </div>
       <div class="cards">
-        <div class="card"><div class="label">Rânduri</div><div class="value">${randuri.length}</div></div>
-        <div class="card"><div class="label">Locuri de palet</div><div class="value">${totalLocuri}</div></div>
-        <div class="card"><div class="label">Ocupate</div><div class="value">${totalOcupate}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${totalLocuri ? Math.round((totalOcupate / totalLocuri) * 100) : 0}% din depozit</div></div>
-        <div class="card"><div class="label">Paleți în depozit</div><div class="value">${paleti}</div>
-          <div style="font-size:12px;color:var(--text-muted)">unii ocupă 2–3 locuri</div></div>
+        <div class="card"><div class="label">Paleți reali în stoc</div><div class="value">${paleti}</div>
+          <div class="ct-sub">ocupă ${plural(totalOcupate, "loc", "locuri")}${paleti ? ` · ${(totalOcupate / paleti).toFixed(2)} locuri/palet` : ""}</div></div>
+        <div class="card"><div class="label">Grad de ocupare</div><div class="value">${procent(gradOcupare)}</div>
+          <div class="ct-sub">${totalOcupate} din ${totalLocuri} locuri — se numără locurile, nu paleții</div></div>
+        <div class="card"><div class="label">Spații libere</div><div class="value">${libere}</div>
+          <div class="ct-sub">locuri de palet, în ${plural(randuri.length, "rând", "rânduri")}</div></div>
+        <div class="card"><div class="label">Valoarea mărfii</div><div class="value">${lei(valoare)}</div>
+          <div class="ct-sub">la preț de intrare${faraPret ? ` · <strong>${plural(faraPret, "palet fără preț", "paleți fără preț")}</strong>, nu intră în sumă` : ""}</div></div>
       </div>
+      ${
+        faraPret
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:820px;margin-bottom:12px">
+              <strong>${plural(faraPret, "palet a intrat", "paleți au intrat")} fără preț</strong>, deci valoarea de mai sus e incompletă.
+              Prețul se scrie la recepție, pe formularul de intrare — iar pentru cei deja intrați se poate completa
+              din <a href="/stocuri/ct-park/paleti">lista de paleți</a>, pe fiecare palet.
+            </div>`
+          : ""
+      }
 
       <p style="font-size:13px;color:var(--text-muted);max-width:820px">
         Click pe un rând ca să-i vezi fața: câmpurile pe orizontală, nivelurile pe verticală, câte trei locuri de palet
@@ -518,7 +712,7 @@ function register(router) {
               <div style="margin:4px 0 8px">${pastila(r.eticheta) || '<span style="font-size:11px;color:var(--text-muted)">fără categorie</span>'}</div>
               <div class="ct-bara"><span style="width:${p}%;background:${culoare}"></span></div>
               <div class="ct-rand-cifre">${r.ocupate} / ${r.locuri} locuri · ${p}%</div>
-              <div style="font-size:11px;color:var(--text-muted)">${r.campuri} câmpuri × ${r.niveluri} niveluri × ${r.locuri_pe_camp} paleți</div>
+              <div style="font-size:11px;color:var(--text-muted)">${r.campuri} câmpuri × ${plural(r.niveluri, "nivel", "niveluri")}</div>
             </a>`;
           })
           .join("")}
@@ -537,11 +731,297 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Depozit CT-Park", active: "/stocuri/ct-park", body }));
   });
 
+  // ---- Planul halei ------------------------------------------------------
+  // Câte rânduri are hala, care stau spate în spate, cât de late sunt
+  // culoarele. De aici se nasc și rândurile create „din planul de montaj",
+  // și desenul secțiunii. Nu atinge locurile deja configurate: un rând scos
+  // din plan rămâne în depozit până îl scoți tu din „Configurare rânduri".
+  router.get("/stocuri/ct-park/plan", async (ctx) => {
+    await incarcaPlan();
+    const p = planCurent();
+    const poz = pozitii();
+    const latime = poz.length ? poz[poz.length - 1].x + ADANCIME : 0;
+    const configurate = new Set(
+      (await db.prepare("SELECT numar FROM ct_randuri").all().catch(() => [])).map((r) => nr(r.numar))
+    );
+    const inPlan = p.grupuri.flat();
+    const lipsa = inPlan.filter((n) => !configurate.has(n));
+    const inPlus = [...configurate].filter((n) => !inPlan.includes(n)).sort((a, b) => a - b);
+
+    const body = `
+      ${subtabs("/stocuri/ct-park/plan")}
+      ${mesaje(ctx.query)}
+      <h1 style="margin:6px 0 2px">Planul halei</h1>
+      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:880px">
+        Aici se desenează hala, nu raftul: câte rânduri sunt, care stau lipite spate în spate și cât de late
+        sunt culoarele dintre ele. Până acum cifrele astea erau scrise în cod — acum se schimbă de aici.
+        <strong>Un grup pe linie</strong>, numerele rândurilor despărțite prin spațiu. O linie cu două numere
+        înseamnă două rânduri spate în spate, iar între linii rămâne un culoar.
+      </p>
+
+      <div class="cards">
+        <div class="card"><div class="label">Rânduri în plan</div><div class="value">${inPlan.length}</div>
+          <div class="ct-sub">în ${plural(p.grupuri.length, "grup", "grupuri")}</div></div>
+        <div class="card"><div class="label">Culoare de lucru</div><div class="value">${Math.max(0, p.grupuri.length - 1)}</div>
+          <div class="ct-sub">câte ${(p.culoar / 1000).toFixed(2)} m</div></div>
+        <div class="card"><div class="label">Lățime ocupată</div><div class="value">${(latime / 1000).toFixed(2)} m</div>
+          <div class="ct-sub">de la primul la ultimul raft</div></div>
+        <div class="card"><div class="label">Adâncime raft</div><div class="value">${(p.adancime / 1000).toFixed(2)} m</div>
+          <div class="ct-sub">un rând, văzut în secțiune</div></div>
+      </div>
+
+      <form class="form" method="post" action="/stocuri/ct-park/plan" style="max-width:900px">
+        <label class="field">Grupurile de rânduri, de la stânga la dreapta
+          <textarea name="grupuri" rows="${Math.max(5, p.grupuri.length + 1)}" style="font-family:ui-monospace,monospace;font-size:14px;line-height:1.7">${esc(grupuriCaText(p.grupuri))}</textarea>
+        </label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;max-width:640px">
+          <label class="field">Adâncime raft (mm)<input type="number" name="adancime" min="200" max="4000" value="${p.adancime}" required></label>
+          <label class="field">Joc spate în spate (mm)<input type="number" name="spate" min="0" max="2000" value="${p.spate}" required></label>
+          <label class="field">Culoar de lucru (mm)<input type="number" name="culoar" min="500" max="20000" value="${p.culoar}" required></label>
+        </div>
+        <div class="form-actions">
+          <button class="btn" type="submit">Salvează planul</button>
+          <button class="btn secondary" type="submit" name="implicit" value="1">Înapoi la planul de montaj</button>
+        </div>
+      </form>
+
+      <h2 style="margin-top:22px">Așezarea rezultată</h2>
+      <div class="tabel-scroll">${table(
+        ["Grup", "Rânduri", "Fel", "De la (m)", "Până la (m)"],
+        p.grupuri.map((g, i) => {
+          const ale = poz.filter((r) => r.grup === i);
+          return [
+            String(i + 1),
+            g.join(" · "),
+            g.length > 1 ? "spate în spate" : "rând simplu",
+            ale.length ? (ale[0].x / 1000).toFixed(2) : "—",
+            ale.length ? ((ale[ale.length - 1].x + ADANCIME) / 1000).toFixed(2) : "—",
+          ];
+        })
+      )}</div>
+
+      ${
+        lipsa.length || inPlus.length
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:880px;margin-top:14px">
+              ${lipsa.length ? `<div><strong>În plan, dar neconfigurate:</strong> rândurile ${lipsa.join(", ")}. Le creezi din <a href="/stocuri/ct-park/configurare">Configurare rânduri</a>.</div>` : ""}
+              ${inPlus.length ? `<div style="margin-top:6px"><strong>Configurate, dar nu mai sunt în plan:</strong> rândurile ${inPlus.join(", ")}. Rămân în depozit cu marfa pe ele — planul nu le șterge, tu decizi.</div>` : ""}
+            </div>`
+          : ""
+      }
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Planul halei · CT-Park", active: "/stocuri/ct-park", body }));
+  });
+
+  router.post("/stocuri/ct-park/plan", async (ctx) => {
+    const b = ctx.body || {};
+    if (String(b.implicit || "") === "1") {
+      await salveazaPlan(PLAN_IMPLICIT);
+      return redirect(ctx.res, `/stocuri/ct-park/plan?ok=${encodeURIComponent("S-a revenit la planul de montaj.")}`);
+    }
+    const grupuri = grupuriDinText(b.grupuri);
+    if (!grupuri.length) {
+      return redirect(
+        ctx.res,
+        `/stocuri/ct-park/plan?eroare=${encodeURIComponent("Planul n-are niciun rând. Scrie măcar o linie cu un număr de rând.")}`
+      );
+    }
+    const toate = grupuri.flat();
+    const duplicate = toate.filter((n, i) => toate.indexOf(n) !== i);
+    if (duplicate.length) {
+      return redirect(
+        ctx.res,
+        `/stocuri/ct-park/plan?eroare=${encodeURIComponent("Rândul " + [...new Set(duplicate)].join(", ") + " apare de două ori în plan. Un rând stă într-un singur loc în hală.")}`
+      );
+    }
+    await salveazaPlan({ grupuri, adancime: b.adancime, spate: b.spate, culoar: b.culoar });
+    redirect(
+      ctx.res,
+      `/stocuri/ct-park/plan?ok=${encodeURIComponent(toate.length + " rânduri în " + grupuri.length + " grupuri. Planul a fost salvat.")}`
+    );
+  });
+
+  // ---- Stoc la zi --------------------------------------------------------
+  // Ce e ACUM în depozit, grupat pe categorii, cu de unde a venit, când a
+  // intrat și pe ce raft stă. E lista pe care o ceri când sună cineva și
+  // întreabă „mai avem din aia?" — de-aia are căutare, și de-aia caută în tot
+  // (produs, cod, lot, furnizor, adresă), nu doar în denumire.
+  router.get("/stocuri/ct-park/stoc", async (ctx) => {
+    const cauta = String((ctx.query && ctx.query.q) || "").trim();
+
+    // Paleții din depozit. Locurile se aduc separat și se lipesc în JS: o
+    // paletă lată stă pe două-trei locuri, iar un JOIN ar multiplica rândul
+    // și ar strica totalurile de cantitate și valoare.
+    const paleti = await db
+      .prepare(
+        `SELECT p.id, p.cod, p.produs_id, p.produs_text, p.cantitate, p.um, p.lot, p.categorie,
+                p.data_intrare, p.pret_unitar, p.pret_sursa, p.furnizor_id, p.furnizor_text,
+                pr.denumire AS produs, pr.cod AS produs_cod, pr.unitate_masura,
+                f.nume AS furnizor_nume
+           FROM ct_paleti p
+           LEFT JOIN produse pr ON pr.id = p.produs_id
+           LEFT JOIN parteneri f ON f.id = p.furnizor_id
+          WHERE p.data_iesire IS NULL
+          ORDER BY p.data_intrare DESC, p.id DESC`
+      )
+      .all();
+
+    const locuri = await db
+      .prepare(
+        `SELECT o.palet_id, l.adresa, l.nivel, l.camp, l.pozitie, r.numar AS rand
+           FROM ct_ocupari o
+           JOIN ct_locuri l ON l.id = o.loc_id
+           JOIN ct_randuri r ON r.id = l.rand_id
+          ORDER BY r.numar, l.nivel, l.camp, l.pozitie`
+      )
+      .all();
+    const peP = new Map();
+    for (const l of locuri) {
+      const k = Number(l.palet_id);
+      if (!peP.has(k)) peP.set(k, []);
+      peP.get(k).push(l);
+    }
+
+    // Furnizorul, când nu e scris pe paletă. Se ia din ultima factură de
+    // ACHIZIȚIE în care apare produsul — e o deducție, nu un fapt, de-aia se
+    // arată cu gri și cu „(dedus)". Ce se scrie la recepție bate deducția.
+    const idProduse = [...new Set(paleti.map((p) => nr(p.produs_id)).filter(Boolean))];
+    const dedus = new Map();
+    if (idProduse.length) {
+      const semne = idProduse.map(() => "?").join(", ");
+      const randuri = await db
+        .prepare(
+          `SELECT fl.produs_id, pa.nume, f.data_emiterii
+             FROM facturi_linii fl
+             JOIN facturi f ON f.id = fl.factura_id AND f.directie = 'achizitie'
+             JOIN parteneri pa ON pa.id = f.partener_id
+            WHERE fl.produs_id IN (${semne})
+            ORDER BY f.data_emiterii`
+        )
+        .all(...idProduse)
+        .catch(() => []);
+      // Ordonate crescător, deci ultima scriere câștigă: rămâne cea mai recentă.
+      for (const r of randuri || []) dedus.set(nr(r.produs_id), r.nume);
+    }
+
+    const randuriStoc = paleti.map((p) => {
+      const ls = peP.get(Number(p.id)) || [];
+      const furnizor = p.furnizor_nume || p.furnizor_text || null;
+      const furnizorDedus = furnizor ? null : dedus.get(nr(p.produs_id)) || null;
+      return {
+        ...p,
+        marfa: p.produs || p.produs_text || "(fără denumire)",
+        cod: p.produs_cod || p.cod || "",
+        um: p.um || p.unitate_masura || "",
+        adrese: ls.map((l) => l.adresa),
+        rand: ls.length ? ls[0].rand : null,
+        nivel: ls.length ? ls[0].nivel : null,
+        camp: ls.length ? ls[0].camp : null,
+        furnizor,
+        furnizorDedus,
+        valoare: nr(p.cantitate) * nr(p.pret_unitar),
+      };
+    });
+
+    const potrivit = (r) => {
+      if (!cauta) return true;
+      const t = cauta.toLowerCase();
+      return [r.marfa, r.cod, r.lot, r.categorie, r.furnizor, r.furnizorDedus, r.um, r.data_intrare]
+        .concat(r.adrese)
+        .some((x) => String(x || "").toLowerCase().includes(t));
+    };
+    const vizibile = randuriStoc.filter(potrivit);
+
+    // Grupate pe categorie, în ordinea din nomenclator, cu „fără categorie" la
+    // final — nu în mijloc, unde s-ar pierde.
+    const ordine = CATEGORII.concat(["(fără categorie)"]);
+    const grupe = new Map(ordine.map((c) => [c, []]));
+    for (const r of vizibile) {
+      const c = CATEGORII.includes(String(r.categorie)) ? String(r.categorie) : "(fără categorie)";
+      grupe.get(c).push(r);
+    }
+
+    const valoareTotala = vizibile.reduce((s, r) => s + r.valoare, 0);
+    const faraPret = vizibile.filter((r) => !nr(r.pret_unitar)).length;
+    const locuriOcupate = vizibile.reduce((s, r) => s + r.adrese.length, 0);
+
+    const cap = ["Marfă", "Cod", "Lot", "Cantitate", "Furnizor", "Intrat în stoc", "Unde stă", "Valoare"];
+    const randCatre = (r) => [
+      `<strong>${esc(r.marfa)}</strong>`,
+      esc(r.cod || "—"),
+      esc(r.lot || "—"),
+      `${nr(r.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 3 })} ${esc(r.um)}`,
+      r.furnizor
+        ? esc(r.furnizor)
+        : r.furnizorDedus
+          ? `<span style="color:var(--text-muted)">${esc(r.furnizorDedus)} <span style="font-size:11px">(dedus)</span></span>`
+          : '<span style="color:var(--text-muted)">—</span>',
+      esc(String(r.data_intrare || "").slice(0, 10)),
+      r.adrese.length
+        ? `<span title="${esc(r.adrese.join(", "))}">${esc(r.adrese[0])}${r.adrese.length > 1 ? ` <span style="font-size:11px;color:var(--text-muted)">+${r.adrese.length - 1}</span>` : ""}</span>
+           <div style="font-size:11px;color:var(--text-muted)">rând ${esc(String(r.rand))} · câmp ${esc(String(r.camp))} · nivel ${esc(String(r.nivel))}</div>`
+        : '<span style="color:var(--danger,#b91c1c)">nicăieri — paletă fără loc</span>',
+      nr(r.pret_unitar)
+        ? `${r.valoare.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei
+           <div style="font-size:11px;color:var(--text-muted)">${nr(r.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} / ${esc(r.um || "UM")}</div>`
+        : '<span style="color:var(--text-muted)">fără preț</span>',
+    ];
+
+    const sectiuni = ordine
+      .filter((c) => grupe.get(c).length)
+      .map((c) => {
+        const lista = grupe.get(c);
+        const val = lista.reduce((s, r) => s + r.valoare, 0);
+        const total = [
+          `<strong>${plural(lista.length, "palet", "paleți")}</strong>`,
+          "",
+          "",
+          "",
+          "",
+          "",
+          `<strong>${plural(lista.reduce((s, r) => s + r.adrese.length, 0), "loc", "locuri")}</strong>`,
+          `<strong>${val.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</strong>`,
+        ];
+        return `<h2 style="margin:22px 0 6px">${esc(c)} <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— ${plural(lista.length, "palet", "paleți")}</span></h2>
+          <div class="tabel-scroll">${table(cap, lista.map(randCatre), { total })}</div>`;
+      })
+      .join("");
+
+    const body = `
+      ${subtabs("/stocuri/ct-park/stoc")}
+      <h1 style="margin:6px 0 2px">Stoc la zi</h1>
+      <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:900px">
+        Tot ce e acum în depozit, grupat pe categorii. Pentru fiecare paletă: de la cine a venit, când a intrat
+        și pe ce raft stă. Căutarea merge în denumire, cod, lot, furnizor, categorie și adresă — deci poți căuta
+        și „R3-05" ca să vezi ce e pe un anume loc.
+      </p>
+
+      <form method="get" action="/stocuri/ct-park/stoc" class="toolbar">
+        <input type="search" name="q" value="${esc(cauta)}" placeholder="caută marfă, lot, furnizor, adresă…" style="min-width:320px">
+        <button class="btn" type="submit">Caută</button>
+        ${cauta ? `<a class="btn secondary" href="/stocuri/ct-park/stoc">Vezi tot</a>` : ""}
+        <a class="btn secondary" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>
+      </form>
+
+      <div class="cards">
+        <div class="card"><div class="label">Paleți${cauta ? " găsiți" : " în depozit"}</div><div class="value">${vizibile.length}</div>
+          <div class="ct-sub">${cauta ? `din ${randuriStoc.length} în total` : "paleți reali, nu locuri"}</div></div>
+        <div class="card"><div class="label">Locuri ocupate</div><div class="value">${locuriOcupate}</div>
+          <div class="ct-sub">${vizibile.length ? (locuriOcupate / vizibile.length).toFixed(2) : "0"} locuri/palet · un palet lat stă pe 2–3</div></div>
+        <div class="card"><div class="label">Valoare la preț de intrare</div><div class="value">${lei(valoareTotala)}</div>
+          <div class="ct-sub">${faraPret ? `<strong>${plural(faraPret, "palet fără preț", "paleți fără preț")}</strong>, nu intră în sumă` : "toți paleții au preț"}</div></div>
+      </div>
+
+      ${vizibile.length ? sectiuni : `<p style="margin-top:18px">${cauta ? "Nimic nu se potrivește cu „" + esc(cauta) + "”." : "Depozitul e gol."}</p>`}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Stoc la zi · CT-Park", active: "/stocuri/ct-park", body }));
+  });
+
   // ---- Fața unui rând ----------------------------------------------------
   router.get("/stocuri/ct-park/rand/:id", async (ctx) => {
     const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
     if (!r) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/stocuri/ct-park", body: "<p>Rândul nu există.</p>" }));
     const locuri = await locuriRand(r.id);
+    const niveluri = await niveluriRand(r);
 
     // Cheia „nivel|camp|pozitie" ca să pot desena grila fără să caut în listă.
     const h = new Map();
@@ -553,15 +1033,24 @@ function register(router) {
     const ocupate = locuri.filter((l) => l.palet_id).length;
     const latimeCamp = nr(r.latime_loc) * nr(r.locuri_pe_camp);
 
+    // Desenul e la scară pe verticală: un nivel de 2,2 m se vede mai înalt
+    // decât unul de 1,2 m. Altfel „designul de stocare" arată la fel oricum
+    // l-ai configura, și nu se vede ce-ai făcut.
+    const PX_PE_MM = 0.024;
+    const inaltimePx = (mm) => Math.max(26, Math.min(120, Math.round(nr(mm) * PX_PE_MM)));
+
     let grila = "";
-    for (let nivel = nr(r.niveluri); nivel >= 1; nivel--) {
+    for (let i = niveluri.length - 1; i >= 0; i--) {
+      const n = niveluri[i];
+      const nivel = n.nivel;
+      const hPx = inaltimePx(n.inaltime);
       let celule = "";
       for (let camp = 1; camp <= nr(r.campuri); camp++) {
         let pozitii = "";
-        for (let poz = 1; poz <= nr(r.locuri_pe_camp); poz++) {
+        for (let poz = 1; poz <= n.locuri; poz++) {
           const l = h.get(`${nivel}|${camp}|${poz}`);
           if (!l) {
-            pozitii += `<div class="ct-loc lipsa"></div>`;
+            pozitii += `<div class="ct-loc lipsa" style="height:${hPx}px"></div>`;
             continue;
           }
           const ocupat = !!l.palet_id;
@@ -569,9 +1058,9 @@ function register(router) {
           const titlu = ocupat
             ? `${l.adresa} · ${l.produs || l.produs_text || "marfă"} · ${nr(l.cantitate) || "?"} ${l.um || ""} · intrat ${l.data_intrare}`
             : `${l.adresa} · liber${l.categorie ? " · zonă " + l.categorie : ""}`;
-          pozitii += `<${ocupat ? `a href="/stocuri/ct-park/palet/${l.palet_id}"` : "div"} class="ct-loc${ocupat ? " ocupat" : " liber"}${l.blocat ? " blocat" : ""}"
+          pozitii += `<${ocupat ? `a href="/stocuri/ct-park/palet/${l.palet_id}"` : "div"} class="ct-loc${ocupat ? " ocupat" : " liber"}${nr(l.blocat) ? " blocat" : ""}"
               title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
-              ${ocupat ? `style="background:${culoare}1f;border-color:${culoare}66"` : ""}>
+              style="height:${hPx}px${ocupat ? `;background:${culoare}1f;border-color:${culoare}66` : ""}">
               <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
               ${ocupat ? `<span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, 22))}</span>` : ""}
             </${ocupat ? "a" : "div"}>`;
@@ -582,7 +1071,14 @@ function register(router) {
             <div class="ct-camp-eticheta">${camp}${zona && zona.categorie ? ` · ${esc(zona.categorie)}` : ""}</div>
           </div>`;
       }
-      grila += `<div class="ct-nivel"><div class="ct-nivel-eticheta">N${nivel}</div><div class="ct-nivel-campuri">${celule}</div></div>`;
+      grila += `<div class="ct-nivel">
+          <div class="ct-nivel-eticheta" title="${esc(n.eticheta || "")}">
+            <span>N${nivel}</span>
+            <span class="ct-nivel-mm">${(n.inaltime / 1000).toFixed(2)} m</span>
+            <span class="ct-nivel-mm">${n.locuri} pal.</span>
+          </div>
+          <div class="ct-nivel-campuri">${celule}</div>
+        </div>`;
     }
 
     const body = `
@@ -591,12 +1087,19 @@ function register(router) {
         <a class="btn secondary" href="/stocuri/ct-park">← Harta depozitului</a>
         <a class="btn" href="/stocuri/ct-park/intrare?rand=${r.id}">+ Intrare marfă în rândul ăsta</a>
       </div>
+      ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Rândul ${r.numar} ${pastila(r.eticheta)}</h1>
-      <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px">
-        ${r.campuri} câmpuri × ${r.niveluri} niveluri × ${r.locuri_pe_camp} paleți = ${locuri.length} locuri, din care
-        <strong>${ocupate} ocupate</strong>. Un loc de palet: ${nr(r.latime_loc)} × ${nr(r.adancime_loc)} mm,
-        înălțime utilă ${nr(r.inaltime_nivel)} mm. Un câmp are ${(latimeCamp / 1000).toFixed(2)} m deschidere.
+      <p style="margin:0 0 6px;color:var(--text-muted);font-size:13px">
+        ${r.campuri} câmpuri × ${niveluri.length} niveluri = <strong>${locuri.length} locuri</strong>, din care
+        <strong>${ocupate} ocupate</strong>. Înălțimea rândului: <strong>${(inaltimeRand(niveluri) / 1000).toFixed(2)} m</strong>.
+        Un loc de palet: ${nr(r.latime_loc)} × ${nr(r.adancime_loc)} mm, un câmp are ${(latimeCamp / 1000).toFixed(2)} m deschidere.
+        ${niveluri.some((n) => n.propriu) ? "Nivelurile nu sunt toate la fel — vezi cotele din stânga desenului." : ""}
       </p>
+      <div class="ct-niv-butoane" style="margin-bottom:10px">
+        ${butoaneNivel(r, "rand")}
+        <span style="font-size:12px;color:var(--text-muted)">niveluri — adaugă unul deasupra sau scoate-l pe cel de sus</span>
+        <a class="btn small secondary" href="/stocuri/ct-park/configurare/${r.id}">Înălțimi și paleți pe nivel</a>
+      </div>
 
       <div class="ct-fata">
         <div class="ct-grila">${grila}</div>
@@ -616,7 +1119,9 @@ function register(router) {
       </p>
       <form class="form" method="post" action="/stocuri/ct-park/rand/${r.id}/zone" style="max-width:900px">
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
-          ${Array.from({ length: nr(r.niveluri) }, (_, i) => nr(r.niveluri) - i)
+          ${niveluri
+            .map((n) => n.nivel)
+            .reverse()
             .flatMap((nivel) =>
               Array.from({ length: nr(r.campuri) }, (_, j) => {
                 const camp = j + 1;
@@ -638,12 +1143,13 @@ function register(router) {
         .ct-fata { background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; }
         .ct-grila { display:flex; flex-direction:column; gap:6px; min-width:600px; }
         .ct-nivel { display:flex; align-items:stretch; gap:8px; }
-        .ct-nivel-eticheta { width:34px; flex:none; display:flex; align-items:center; justify-content:center; font-weight:600; font-size:12px; color:var(--text-muted); border-right:2px solid var(--border); }
+        .ct-nivel-eticheta { width:58px; flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-weight:600; font-size:12px; color:var(--text-muted); border-right:2px solid var(--border); }
+        .ct-nivel-mm { font-weight:400; font-size:10px; }
         .ct-nivel-campuri { display:flex; gap:8px; flex:1; }
         .ct-camp { flex:1; min-width:96px; }
         .ct-camp-locuri { display:flex; gap:2px; }
         .ct-camp-eticheta { font-size:10px; color:var(--text-muted); text-align:center; margin-top:2px; }
-        .ct-loc { flex:1; min-width:26px; height:42px; border:1px solid var(--border); border-radius:3px; background:#f7f8fa;
+        .ct-loc { flex:1; min-width:26px; border:1px solid var(--border); border-radius:3px; background:#f7f8fa;
                   display:flex; flex-direction:column; align-items:center; justify-content:center; text-decoration:none; color:inherit; overflow:hidden; }
         .ct-loc.ocupat { cursor:pointer; }
         .ct-loc.ocupat:hover { outline:2px solid var(--primary); }
@@ -651,7 +1157,7 @@ function register(router) {
         .ct-loc.blocat { background:#f0e2e2; }
         .ct-loc-adresa { font-size:10px; color:var(--text-muted); }
         .ct-loc-marfa { font-size:9px; line-height:1.05; text-align:center; padding:0 2px; }
-        .ct-podea { margin-top:6px; margin-left:42px; border-top:3px solid #8a8f98; font-size:11px; color:var(--text-muted); padding-top:2px; }
+        .ct-podea { margin-top:6px; margin-left:66px; border-top:3px solid #8a8f98; font-size:11px; color:var(--text-muted); padding-top:2px; }
         .ct-legenda2 { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12px; margin:10px 0 18px; }
         .ct-legenda2 i { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
       </style>
@@ -1160,6 +1666,12 @@ function register(router) {
   // omul vede exact unde va merge marfa înainte să care ceva.
   router.get("/stocuri/ct-park/intrare", async (ctx) => {
     const randuri = await sumarRanduri();
+    // Furnizorii, ca să se poată alege la recepție de unde a venit marfa.
+    // Fără asta, „de la cine e paleta asta" se poate doar deduce din facturi.
+    const furnizori = await db
+      .prepare("SELECT id, nume FROM parteneri WHERE tip = 'furnizor' ORDER BY nume")
+      .all()
+      .catch(() => []);
     const cauta = String(ctx.query.q || "").trim();
     let gasite = [];
     if (cauta) {
@@ -1214,6 +1726,13 @@ function register(router) {
           că e luat de acolo, nu de pe factura ei.
         </p>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px">
+          <label class="field">Furnizor
+            <select name="furnizor_id">
+              <option value="">— nu știu acum —</option>
+              ${(furnizori || []).map((f) => `<option value="${f.id}">${esc(f.nume)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field">…sau scris liber<input name="furnizor_text" placeholder="dacă nu e în listă"></label>
           <label class="field">Lot<input name="lot"></label>
           <label class="field">Categorie
             <select name="categorie">
@@ -1312,6 +1831,8 @@ function register(router) {
       <input type="hidden" name="produs_text" value="${esc(String(b.produs_text || ""))}">
       <input type="hidden" name="um" value="${esc(String(b.um || (produs ? produs.unitate_masura : "") || ""))}">
       <input type="hidden" name="pret_unitar" value="${esc(String(b.pret_unitar || ""))}">
+      <input type="hidden" name="furnizor_id" value="${esc(String(b.furnizor_id || ""))}">
+      <input type="hidden" name="furnizor_text" value="${esc(String(b.furnizor_text || ""))}">
       <input type="hidden" name="lot" value="${esc(String(b.lot || ""))}">
       <input type="hidden" name="categorie" value="${esc(categorie || "")}">
       <input type="hidden" name="observatii" value="${esc(String(b.observatii || ""))}">`;
@@ -1403,8 +1924,8 @@ function register(router) {
 
       const r = await db
         .prepare(
-          `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa)
-           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+          `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa, furnizor_id, furnizor_text)
+           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
         )
         .run(
           nr(b.produs_id) || null,
@@ -1417,7 +1938,9 @@ function register(router) {
           String(b.observatii || "").trim() || null,
           ctx.user ? ctx.user.nume : null,
           pretPaleta,
-          pretSursa
+          pretSursa,
+          nr(b.furnizor_id) || null,
+          String(b.furnizor_text || "").trim() || null
         );
       const id = r.lastInsertRowid;
       if (!id) continue;
@@ -1567,11 +2090,14 @@ function register(router) {
 
     const body = `
       ${subtabs("/stocuri/ct-park/configurare")}
+      ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Configurare rânduri</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
         Câte câmpuri și câte niveluri are fiecare rând. Din cifrele astea se nasc adresele de palet — de-aia,
         dacă schimbi numărul de câmpuri sau de niveluri, locurile se regenerează. Locurile pe care stă marfă
         <strong>nu se șterg</strong>: dacă ai reduce rândul sub ele, salvarea se oprește și îți spune care.
+        Butoanele <strong>+</strong> și <strong>−</strong> de pe coloana „Niveluri" adaugă un nivel deasupra sau îl
+        scot pe cel de sus, dintr-un click. Intră pe rând ca să dai fiecărui nivel înălțimea și numărul lui de paleți.
       </p>
 
       ${
@@ -1582,7 +2108,7 @@ function register(router) {
                 `<a href="/stocuri/ct-park/rand/${r.id}"><strong>${r.numar}</strong></a>`,
                 pastila(r.eticheta) || "—",
                 String(r.campuri),
-                String(r.niveluri),
+                butoaneNivel(r, ""),
                 String(r.locuri_pe_camp),
                 String(r.locuri),
                 String(r.ocupate),
@@ -1678,6 +2204,91 @@ function register(router) {
     redirect(ctx.res, "/stocuri/ct-park/configurare");
   });
 
+  // ---- Un nivel în plus sau în minus, dintr-un click ----------------------
+  // E cea mai obișnuită schimbare la un depozit care încă se așază, și n-are
+  // rost să treacă de fiecare dată prin formularul mare. Se adaugă mereu
+  // DEASUPRA, se scoate mereu de sus — așa adresele de jos rămân valabile și
+  // etichetele lipite pe raft nu trebuie retipărite.
+  router.post("/stocuri/ct-park/configurare/:id/nivel", async (ctx) => {
+    const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
+    if (!r) return redirect(ctx.res, "/stocuri/ct-park/configurare");
+    const inapoi =
+      String(ctx.body.inapoi || "") === "rand"
+        ? `/stocuri/ct-park/rand/${r.id}`
+        : `/stocuri/ct-park/configurare/${r.id}`;
+    const spune = (cheie, text) => redirect(ctx.res, `${inapoi}?${cheie}=${encodeURIComponent(text)}`);
+    const acum = nr(r.niveluri);
+
+    if (String(ctx.body.spre || "adauga") !== "scoate") {
+      if (acum >= 12) return spune("eroare", "Rândul are deja 12 niveluri — mai sus nu se poate.");
+      await db.prepare("UPDATE ct_randuri SET niveluri = ? WHERE id = ?").run(acum + 1, r.id);
+      await regenereazaLocuri(r.id);
+      return spune("ok", `Nivelul ${acum + 1} a fost adăugat deasupra.`);
+    }
+
+    if (acum <= 1) return spune("eroare", "Rândul are un singur nivel, n-am ce scoate.");
+    const niv = await niveluriRand(r);
+    const h = new Map(niv.map((n) => [n.nivel, n.locuri]));
+    const afara = await locuriInAfara(r.id, nr(r.campuri), acum - 1, (n) => h.get(n) || nr(r.locuri_pe_camp));
+    if (afara.length) {
+      return spune(
+        "eroare",
+        `Nu pot scoate nivelul ${acum}: pe ${afara.slice(0, 8).map((a) => a.adresa).join(", ")}${afara.length > 8 ? "…" : ""} stă marfă. Scoate-o întâi din depozit.`
+      );
+    }
+    await db.prepare("UPDATE ct_randuri SET niveluri = ? WHERE id = ?").run(acum - 1, r.id);
+    try {
+      await db.prepare("DELETE FROM ct_niveluri WHERE rand_id = ? AND nivel > ?").run(r.id, acum - 1);
+    } catch (e) {
+      /* tabelul poate lipsi pe o bază veche — nivelurile rămân cele ale rândului */
+    }
+    await regenereazaLocuri(r.id);
+    return spune("ok", `Nivelul ${acum} a fost scos.`);
+  });
+
+  // ---- Configurația fiecărui nivel în parte -------------------------------
+  // Înălțimea și numărul de paleți se scriu pe nivel, nu pe rând: jos stau
+  // paleți înalți, sus cutii. Un nivel lăsat gol moștenește cifrele rândului,
+  // deci se scrie doar ce chiar e altfel.
+  router.post("/stocuri/ct-park/configurare/:id/niveluri", async (ctx) => {
+    const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
+    if (!r) return redirect(ctx.res, "/stocuri/ct-park/configurare");
+    const b = ctx.body || {};
+    const inapoi = `/stocuri/ct-park/configurare/${r.id}`;
+
+    // Întâi verificăm că nicio micșorare nu taie raftul de sub o paletă.
+    const dorite = new Map();
+    for (let i = 1; i <= nr(r.niveluri); i++) {
+      const locuri = Math.max(1, Math.min(6, Math.round(nr(b[`n${i}_locuri`]) || nr(r.locuri_pe_camp))));
+      dorite.set(i, locuri);
+    }
+    const afara = await locuriInAfara(r.id, nr(r.campuri), nr(r.niveluri), (n) => dorite.get(n) || nr(r.locuri_pe_camp));
+    if (afara.length) {
+      const mesaj = `Nu pot îngusta nivelurile: pe ${afara.slice(0, 8).map((a) => a.adresa).join(", ")}${afara.length > 8 ? "…" : ""} stă marfă.`;
+      return redirect(ctx.res, `${inapoi}?eroare=${encodeURIComponent(mesaj)}`);
+    }
+
+    for (let i = 1; i <= nr(r.niveluri); i++) {
+      const inaltime = Math.round(nr(b[`n${i}_inaltime`]));
+      const eticheta = String(b[`n${i}_eticheta`] || "").trim().slice(0, 60) || null;
+      const locuri = dorite.get(i);
+      // Un nivel care nu se abate de la rând nu ține rând în tabel.
+      const identic = (!inaltime || inaltime === nr(r.inaltime_nivel)) && !eticheta && locuri === nr(r.locuri_pe_camp);
+      try {
+        await db.prepare("DELETE FROM ct_niveluri WHERE rand_id = ? AND nivel = ?").run(r.id, i);
+        if (!identic) {
+          await db
+            .prepare("INSERT INTO ct_niveluri (rand_id, nivel, inaltime, eticheta, locuri_pe_camp) VALUES (?, ?, ?, ?, ?)")
+            .run(r.id, i, inaltime || null, eticheta, locuri);
+        }
+      } catch (e) {
+        /* tabelul lipsește pe o bază veche — se salvează la următoarea pornire */
+      }
+    }
+    await regenereazaLocuri(r.id);
+    redirect(ctx.res, `${inapoi}?ok=${encodeURIComponent("Nivelurile au fost salvate.")}`);
+  });
+
   router.get("/stocuri/ct-park/configurare/:id", async (ctx) => {
     const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
     if (!r) return redirect(ctx.res, "/stocuri/ct-park/configurare");
@@ -1688,13 +2299,15 @@ function register(router) {
           WHERE l.rand_id = ? ORDER BY l.nivel DESC, l.camp`
       )
       .all(r.id);
-    const eroare = String(ctx.query.eroare || "");
+    const niveluri = await niveluriRand(r);
+    const ocupatePeNivel = new Map();
+    for (const o of ocupate) ocupatePeNivel.set(nr(o.nivel), (ocupatePeNivel.get(nr(o.nivel)) || 0) + 1);
 
     const body = `
       ${subtabs("/stocuri/ct-park/configurare")}
       <div class="toolbar"><a class="btn secondary" href="/stocuri/ct-park/configurare">← Toate rândurile</a>
         <a class="btn secondary" href="/stocuri/ct-park/rand/${r.id}">Vezi fața rândului</a></div>
-      ${eroare ? `<div class="detail-box" style="border-left:4px solid var(--danger)">${esc(eroare)}</div>` : ""}
+      ${mesaje(ctx.query)}
       <form class="form" method="post" action="/stocuri/ct-park/configurare/${r.id}" style="max-width:900px">
         <h1 style="margin-top:0">Rândul ${r.numar}</h1>
         <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr 1fr;gap:14px">
@@ -1714,9 +2327,53 @@ function register(router) {
         </div>
         <div class="form-actions"><button class="btn" type="submit">Salvează</button></div>
       </form>
+      <p style="font-size:12px;color:var(--text-muted);max-width:860px;margin-bottom:4px">
+        „Paleți / câmp" și „Înălțime nivel" de mai sus sunt <strong>valorile implicite ale rândului</strong>.
+        Nivelurile care au cifra lor, din tabelul de jos, o folosesc pe a lor — restul o iau de aici.
+      </p>
       <p style="font-size:12px;color:var(--text-muted);max-width:760px">
         ${ocupate.length ? `Pe rândul ăsta stau ${ocupate.length} paleți: ${ocupate.slice(0, 12).map((o) => esc(o.adresa)).join(", ")}${ocupate.length > 12 ? "…" : ""}. Nu poți micșora rândul sub ei.` : "Rândul e gol, îl poți redimensiona liber."}
       </p>
+
+      <h2 style="margin-top:22px">Nivelurile rândului</h2>
+      <p style="font-size:13px;color:var(--text-muted);max-width:860px;margin:0 0 10px">
+        Aici se face designul de stocare: fiecare nivel cu înălțimea lui și cu câți paleți intră pe un câmp.
+        Nivelul de jos poate ține paleți de 2,2 m, iar cel de sus cutii de 1 m — nu trebuie să fie toate la fel.
+        Un câmp lăsat gol moștenește cifra rândului. <strong>Nivelul 1 e cel de jos.</strong>
+        Înălțimea totală a rândului acum: <strong>${(inaltimeRand(niveluri) / 1000).toFixed(2)} m</strong>
+        (nivelurile plus ${GRINDA} mm de grindă sub fiecare).
+      </p>
+      <div class="ct-niv-butoane">
+        ${butoaneNivel(r, "")}
+        <span style="font-size:12px;color:var(--text-muted)">adaugă un nivel deasupra sau scoate-l pe cel de sus</span>
+      </div>
+      <form class="form" method="post" action="/stocuri/ct-park/configurare/${r.id}/niveluri" style="max-width:900px">
+        <table class="table" style="margin-bottom:10px">
+          <thead><tr><th>Nivel</th><th>Înălțime utilă (mm)</th><th>Paleți / câmp</th><th>La ce e</th><th>Locuri</th><th>Ocupate</th></tr></thead>
+          <tbody>
+            ${niveluri
+              .slice()
+              .reverse()
+              .map(
+                (n) => `<tr>
+                  <td><strong>N${n.nivel}</strong>${n.nivel === 1 ? ' <span style="font-size:11px;color:var(--text-muted)">jos</span>' : ""}${n.nivel === niveluri.length && niveluri.length > 1 ? ' <span style="font-size:11px;color:var(--text-muted)">sus</span>' : ""}</td>
+                  <td><input class="ct-in" type="number" name="n${n.nivel}_inaltime" min="100" max="6000" step="10" value="${n.inaltime}"></td>
+                  <td><input class="ct-in" type="number" name="n${n.nivel}_locuri" min="1" max="6" value="${n.locuri}"></td>
+                  <td><input class="ct-in" style="width:200px" type="text" name="n${n.nivel}_eticheta" value="${esc(n.eticheta || "")}" placeholder="ex. paleți înalți"></td>
+                  <td>${n.locuri * nr(r.campuri)}</td>
+                  <td>${ocupatePeNivel.get(n.nivel) || 0}</td>
+                </tr>`
+              )
+              .join("")}
+          </tbody>
+        </table>
+        <div class="form-actions"><button class="btn" type="submit">Salvează nivelurile</button></div>
+      </form>
+
+      <style>
+        .ct-in { width:110px; padding:4px 6px; font-size:13px; }
+        .ct-niv-butoane { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+      </style>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Rândul ${r.numar}`, active: "/stocuri/ct-park", body }));
   });
@@ -1772,24 +2429,38 @@ function register(router) {
 async function regenereazaLocuri(randId) {
   const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(randId);
   if (!r) return;
-  const existente = await db.prepare("SELECT id, nivel, camp, pozitie FROM ct_locuri WHERE rand_id = ?").all(randId);
-  const h = new Set(existente.map((l) => `${l.nivel}|${l.camp}|${l.pozitie}`));
-  for (let nivel = 1; nivel <= nr(r.niveluri); nivel++) {
+  const niveluri = await niveluriRand(r);
+
+  // Tot ce TREBUIE să existe după configurația de acum. Numărul de paleți pe
+  // câmp se ia de pe nivel, nu de pe rând: nivelul de jos poate ține doi
+  // paleți lați, iar cel de sus trei înguste.
+  const cerute = new Set();
+  for (const n of niveluri) {
     for (let camp = 1; camp <= nr(r.campuri); camp++) {
-      for (let poz = 1; poz <= nr(r.locuri_pe_camp); poz++) {
-        if (h.has(`${nivel}|${camp}|${poz}`)) continue;
-        await db
-          .prepare("INSERT INTO ct_locuri (rand_id, nivel, camp, pozitie, adresa) VALUES (?, ?, ?, ?, ?)")
-          .run(randId, nivel, camp, poz, adresaLoc(r.numar, camp, nivel, poz));
-      }
+      for (let poz = 1; poz <= n.locuri; poz++) cerute.add(`${n.nivel}|${camp}|${poz}`);
     }
   }
-  await db
-    .prepare(
-      `DELETE FROM ct_locuri WHERE rand_id = ? AND (camp > ? OR nivel > ? OR pozitie > ?)
-        AND id NOT IN (SELECT loc_id FROM ct_ocupari)`
-    )
-    .run(randId, nr(r.campuri), nr(r.niveluri), nr(r.locuri_pe_camp));
+
+  const existente = await db.prepare("SELECT id, nivel, camp, pozitie FROM ct_locuri WHERE rand_id = ?").all(randId);
+  const h = new Set(existente.map((l) => `${l.nivel}|${l.camp}|${l.pozitie}`));
+  for (const k of cerute) {
+    if (h.has(k)) continue;
+    const [nivel, camp, poz] = k.split("|").map(Number);
+    await db
+      .prepare("INSERT INTO ct_locuri (rand_id, nivel, camp, pozitie, adresa) VALUES (?, ?, ?, ?, ?)")
+      .run(randId, nivel, camp, poz, adresaLoc(r.numar, camp, nivel, poz));
+  }
+
+  // Ce a rămas pe dinafară se șterge — dar niciodată un loc pe care stă
+  // marfă. Rutele de salvare opresc asta înainte să ajungă aici, verificarea
+  // de aici e plasa de siguranță.
+  const ocupate = new Set((await db.prepare("SELECT loc_id FROM ct_ocupari").all()).map((o) => Number(o.loc_id)));
+  for (const l of existente) {
+    if (cerute.has(`${l.nivel}|${l.camp}|${l.pozitie}`)) continue;
+    if (ocupate.has(Number(l.id))) continue;
+    await db.prepare("DELETE FROM ct_locuri WHERE id = ?").run(l.id);
+  }
+
   // Numărul rândului se poate schimba, deci adresele se rescriu mereu.
   const toate = await db.prepare("SELECT id, nivel, camp, pozitie FROM ct_locuri WHERE rand_id = ?").all(randId);
   for (const l of toate) {
