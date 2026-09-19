@@ -51,6 +51,7 @@ require("./modules/awb").register(router);
 require("./modules/pungi").register(router);
 require("./modules/cutii").register(router);
 require("./modules/dezvoltare").register(router);
+require("./modules/procurement").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
