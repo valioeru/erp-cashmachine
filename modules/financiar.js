@@ -3,6 +3,7 @@
 // îi datorăm, cine ne datorează și cât costă lună de lună oamenii. Restul
 // (banca, angajați, salarizare, cost company) sunt paginile de dedesubt.
 const db = require("../lib/db");
+const { deschisa } = require("../lib/solduri");
 const { esc, money, layout, table, subnavFinanciar } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -30,29 +31,34 @@ function register(router) {
     const zi = azi();
     const anul = zi.slice(0, 4);
 
+    // Cele trei cifre de sus folosesc aceeasi definitie a soldului ca toate
+    // rapoartele (lib/solduri.js) si ACELASI mod de calcul: totalul cu TVA,
+    // fara facturile dintre firmele grupului. Inainte, „De incasat" scotea
+    // 11,3 milioane fata de 1,5 in scadentar — o data pentru ca numara si
+    // facturile deja achitate, o data pentru ca aduna netul, fara TVA.
     const deIncasat = await unuSau(
       `SELECT COUNT(*) AS n, COALESCE(SUM(x.rest), 0) AS suma FROM (
          SELECT f.id,
-                COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
+                COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
                 - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare' AND f.status != 'anulata'
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare' AND ${deschisa("f")} AND COALESCE(f.intercompany,0) = 0
        ) x WHERE x.rest > 1`
     );
     const restante = await unuSau(
       `SELECT COUNT(*) AS n, COALESCE(SUM(x.rest), 0) AS suma FROM (
          SELECT f.id, f.data_scadenta,
-                COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
+                COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
                 - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare' AND f.status != 'anulata'
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'vanzare' AND ${deschisa("f")} AND COALESCE(f.intercompany,0) = 0
        ) x WHERE x.rest > 1 AND x.data_scadenta IS NOT NULL AND x.data_scadenta < ?`,
       zi
     );
     const dePlatit = await unuSau(
       `SELECT COUNT(*) AS n, COALESCE(SUM(x.rest), 0) AS suma FROM (
          SELECT f.id,
-                COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
+                COALESCE((SELECT SUM(fl.cantitate * fl.pret_unitar * (1 + COALESCE(fl.cota_tva,0)/100.0)) FROM facturi_linii fl WHERE fl.factura_id = f.id), 0)
                 - COALESCE((SELECT SUM(pl.suma) FROM (SELECT * FROM plati WHERE activ = 1) pl WHERE pl.factura_id = f.id), 0) AS rest
-         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','platita')
+         FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.directie = 'achizitie' AND ${deschisa("f")} AND COALESCE(f.intercompany,0) = 0
        ) x WHERE x.rest > 1`
     );
     const banca = await unuSau(
