@@ -66,7 +66,8 @@ async function facturiDeschise() {
        JOIN parteneri p ON p.id = f.partener_id
        LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
        LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-       WHERE f.status NOT IN ('anulata','necunoscut','platita') AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5`
+       WHERE f.status NOT IN ('anulata','necunoscut','platita') AND f.inchis_istoric IS NULL
+         AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5`
     )
     .all();
   for (const f of randuri) {
@@ -331,7 +332,7 @@ function register(router) {
       .get(t.factura_id);
     if (f) {
       const status = Number(f.platit) >= Number(f.total) - 0.01 ? "platita" : "platita_partial";
-      await db.prepare("UPDATE facturi SET status = ? WHERE id = ? AND status NOT IN ('anulata','ciorna')").run(status, t.factura_id);
+      await db.prepare("UPDATE facturi SET status = ? WHERE id = ? AND status NOT IN ('anulata','ciorna') AND inchis_istoric IS NULL").run(status, t.factura_id);
     }
     return true;
   }

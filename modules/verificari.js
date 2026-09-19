@@ -322,6 +322,92 @@ const VERIFICARI = [
     },
   },
   {
+    cheie: "vanzari-duplicate",
+    titlu: "Facturi de vânzare cu același număr de document",
+    de_ce:
+      "Aceeași factură emisă, intrată de mai multe ori din import, umflă „de încasat” și apare de două-trei ori în scadențar, la aceeași zi și cu aceeași sumă. Pe 19.09.2026 erau 14 numere duplicate, 20 de exemplare în plus și 145.658 lei creanțe care nu există.",
+    gravitate: "rosu",
+    async ruleaza() {
+      const grupuri = await db
+        .prepare(
+          `SELECT COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) AS doc,
+                  f.partener_id, COUNT(*) AS n
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
+            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata')
+              AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) IS NOT NULL
+            GROUP BY 1, f.partener_id
+           HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC`
+        )
+        .all();
+      const detalii = [];
+      let inPlus = 0;
+      for (const g of grupuri) {
+        const f = await db
+          .prepare(
+            `SELECT f.id, f.data_emiterii, f.status, p.nume AS partener,
+                    COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva,0)/100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
+               FROM (SELECT * FROM facturi WHERE activ = 1) f LEFT JOIN parteneri p ON p.id = f.partener_id
+              WHERE f.directie = 'vanzare'
+                AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) = ?
+                AND f.partener_id ${g.partener_id === null ? "IS NULL" : "= ?"}
+              ORDER BY f.id`
+          )
+          .all(...(g.partener_id === null ? [g.doc] : [g.doc, g.partener_id]));
+        inPlus += f.map((x) => nr(x.total)).slice(1).reduce((a, b) => a + b, 0);
+        if (detalii.length < LIMITA) {
+          detalii.push([
+            `<strong>${esc(g.doc)}</strong>`,
+            esc((f[0] && f[0].partener) || "—"),
+            esc(String((f[0] && f[0].data_emiterii) || "").slice(0, 10)),
+            g.n,
+            f.map((x) => `<a href="/facturi/${x.id}">#${x.id}</a> ${money(x.total)}`).join("<br>"),
+          ]);
+        }
+      }
+      return {
+        n: grupuri.length,
+        sumar: `${grupuri.length} numere emise de mai multe ori, ${money(inPlus)} creanțe care nu există`,
+        antet: ["Document", "Client", "Data", "De câte ori", "Facturile"],
+        randuri: detalii,
+      };
+    },
+  },
+  {
+    cheie: "facturi-sume-uriase",
+    titlu: "Facturi de peste un milion de lei",
+    de_ce:
+      "Sunt puține și se verifică din ochi. Aici ies la iveală documentele de test rămase în bază: pe 19.09.2026, două facturi de la BSI A/S cu numere tastate la întâmplare („23123123”, „1213123”) țineau 19,2 milioane în „de plătit”. Restul trebuie să fie utilaje sau contracte reale — dacă nu recunoști unul, ăla e.",
+    gravitate: "galben",
+    async ruleaza() {
+      const randuri = await db
+        .prepare(
+          `SELECT f.id, f.directie, f.serie, f.numar, f.document_extern, f.data_emiterii, f.status,
+                  f.moneda, f.total_valuta, p.nume AS partener, COALESCE(t.total,0) AS total
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
+             LEFT JOIN parteneri p ON p.id = f.partener_id
+             LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+            WHERE f.status NOT IN ('anulata') AND COALESCE(t.total,0) >= 1000000
+            ORDER BY COALESCE(t.total,0) DESC`
+        )
+        .all();
+      const total = randuri.reduce((s, r) => s + nr(r.total), 0);
+      return {
+        n: randuri.length,
+        sumar: `${randuri.length} documente, ${money(total)} în total`,
+        antet: ["Document", "Fel", "Partener", "Data", "Sumă", "Valută"],
+        randuri: randuri.slice(0, LIMITA).map((r) => [
+          `<a href="/facturi/${r.id}">${esc(r.document_extern || String(r.serie || "") + String(r.numar || ""))}</a>`,
+          r.directie === "achizitie" ? "achiziție" : "vânzare",
+          esc(r.partener || "—"),
+          esc(String(r.data_emiterii || "").slice(0, 10)),
+          `<strong>${money(r.total)}</strong>`,
+          r.moneda && r.moneda !== "RON" ? `${esc(r.moneda)} ${money(r.total_valuta)}` : "",
+        ]),
+      };
+    },
+  },
+  {
     cheie: "facturi-fara-agent",
     titlu: "Facturi de vânzare fără agent",
     de_ce: "Fără agent, factura nu intră în comision și nu apare în raportul pe agenți. Recalcularea din Alocări le pune pe administrator.",

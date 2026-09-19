@@ -695,6 +695,9 @@ function register(router) {
     });
 
     const body = `
+      ${ctx.query && ctx.query.legat !== undefined
+        ? `<div class="flash">Legate de agent: <b>${esc(String(ctx.query.legat))}</b> comenzi. Clienți creați sau legați: <b>${esc(String(ctx.query.clienti || 0))}</b>. Aveau deja agent: ${esc(String(ctx.query.aveau || 0))}.</div>`
+        : ""}
       <form method="get" action="/alocari" class="filtre">
         <input type="search" name="q" value="${esc(cauta)}" placeholder="caută client">
         <select name="agent" onchange="this.form.submit()">
@@ -714,6 +717,14 @@ function register(router) {
         <a class="btn secondary" href="/alocari/registru" style="margin-left:6px">Potrivește numele din registru</a>
         <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
           Folosește codul reprezentantului (GT / IR / MM / CG) de pe comenzile de producție. Nu suprascrie alocările făcute manual.
+        </span>
+      </form>
+      <form method="post" action="/productie/leaga-agenti" style="margin:0 0 14px">
+        <input type="hidden" name="redirect" value="/alocari">
+        <button type="submit" class="btn secondary">Leagă agenții și clienții</button>
+        <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
+          Trece prin comenzile de producție: pune agentul pe cele care n-au unul (după codul reprezentantului)
+          și creează în Parteneri clienții scriși doar ca text, alocați agentului lor.
         </span>
       </form>
       <form method="post" action="/alocari/recalculeaza" style="margin:0 0 14px">

@@ -79,6 +79,11 @@ const CATEGORII = [
         desc: "Tot ce ai de încasat și de plătit, pe ambele firme, într-o singură fereastră, cu poziția netă pe fiecare zi.",
       },
       {
+        href: "/rapoarte/inchide-istoric",
+        nume: "Închiderea istoricului vechi",
+        desc: "Marchează achitate facturile de dinainte de un prag ales de tine, ca „de încasat” și „de plătit” să arate cât arată balanța. Reversibil, și blochează încasările viitoare pe facturile închise.",
+      },
+      {
         href: "/rapoarte/comisioane",
         nume: "Comisioane agenți (pe grup)",
         desc: "Vânzările fiecărui agent din ambele firme și comisionul aferent, la încasat sau la facturat.",
@@ -115,7 +120,7 @@ const CATEGORII = [
       },
       { href: "/rapoarte/indicatori", nume: "Indicatori financiari — ochii băncii", desc: "DSO, concentrare clienți, restanțe, trend — cu estimare de sumă finanțabilă și sugestii de îmbunătățire." },
       { href: "/rapoarte/comparatie", nume: "Comparație la zi cu anii trecuți", desc: "1 ianuarie → azi: vânzări, costuri, încasări, clienți — anul curent față de ultimii doi ani." },
-      { href: "/rapoarte/incasari?directie=achizitie&zile=15", nume: "Plăți furnizori (pe zile)", desc: "Cât ai de plătit în fiecare zi din săptămâna/perioada următoare, cu totaluri pe furnizor." },
+      { href: "/rapoarte/incasari?directie=achizitie&interval=sapt_viitoare", nume: "Plăți furnizori (pe zile)", desc: "Cât ai de plătit în fiecare zi din săptămâna/perioada aleasă, cu totaluri pe furnizor." },
       { href: "/rapoarte/vanzari", nume: "Vânzări vs. achiziții", desc: "Evoluția lunară a facturării și diferența dintre vânzări și achiziții." },
       { href: "/rapoarte/parteneri", nume: "Top clienți & furnizori", desc: "Cine aduce cei mai mulți bani și către cine pleacă cei mai mulți." },
     ],
@@ -232,6 +237,102 @@ function azi() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// ---- Intervalele scadențarului ---------------------------------------------
+// Omul nu se gândește în „următoarele 60 de zile", ci în „săptămâna asta",
+// „luna viitoare", „până la final de an". Intervalele se calculează în UTC pe
+// șiruri de forma aaaa-ll-zz, ca să nu sară o zi din cauza fusului orar.
+const INTERVALE = [
+  ["sapt_curenta", "săptămâna curentă"],
+  ["sapt_viitoare", "săptămâna viitoare"],
+  ["luna_curenta", "luna curentă"],
+  ["luna_viitoare", "luna viitoare"],
+  ["pana_final_an", "până la final de an"],
+  ["zile_30", "următoarele 30 de zile"],
+  ["zile_60", "următoarele 60 de zile"],
+  ["zile_90", "următoarele 90 de zile"],
+  ["custom", "interval ales de mine"],
+];
+
+const zi = (d) => new Date(d).toISOString().slice(0, 10);
+const plusZile = (s, n) => zi(Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10) + n));
+// Luni e prima zi a săptămânii: getUTCDay() dă 0 pentru duminică.
+const inceputSaptamanii = (s) => {
+  const d = new Date(s + "T00:00:00Z");
+  return plusZile(s, -((d.getUTCDay() + 6) % 7));
+};
+const inceputLunii = (s) => s.slice(0, 8) + "01";
+const finalLunii = (s) => zi(Date.UTC(+s.slice(0, 4), +s.slice(5, 7), 0));
+const lunaUrmatoare = (s) => zi(Date.UTC(+s.slice(0, 4), +s.slice(5, 7), 1));
+
+function calculeazaInterval(cheie, q) {
+  const a = azi();
+  const custom = (x, implicit) => {
+    const v = String((q && q[x]) || "").slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : implicit;
+  };
+  switch (cheie) {
+    case "sapt_curenta": {
+      const de = inceputSaptamanii(a);
+      return { deLa: de, panaLa: plusZile(de, 6) };
+    }
+    case "sapt_viitoare": {
+      const de = plusZile(inceputSaptamanii(a), 7);
+      return { deLa: de, panaLa: plusZile(de, 6) };
+    }
+    case "luna_curenta":
+      return { deLa: inceputLunii(a), panaLa: finalLunii(a) };
+    case "luna_viitoare": {
+      const de = lunaUrmatoare(a);
+      return { deLa: de, panaLa: finalLunii(de) };
+    }
+    case "pana_final_an":
+      return { deLa: a, panaLa: a.slice(0, 4) + "-12-31" };
+    case "zile_30":
+      return { deLa: a, panaLa: plusZile(a, 30) };
+    case "zile_60":
+      return { deLa: a, panaLa: plusZile(a, 60) };
+    case "zile_90":
+      return { deLa: a, panaLa: plusZile(a, 90) };
+    case "custom":
+      return { deLa: custom("de_la", a), panaLa: custom("pana_la", plusZile(a, 30)) };
+    default:
+      return { deLa: a, panaLa: plusZile(a, 60) };
+  }
+}
+
+// ---- Vechimea documentelor luate în calcul ---------------------------------
+// DE CE există pragul ăsta, și de ce e pus implicit pe 12 luni:
+//
+// Plățile către furnizori nu ajung deocamdată în ERP. Statusul „platita" vine
+// din SmartBill doar pentru facturile marcate acolo ca achitate; restul rămân
+// „emisa" la nesfârșit, chiar dacă banii au plecat din bancă acum patru ani.
+// Fără un prag, „de plătit" aduna fiecare factură de furnizor din 2021 încoace
+// și ieșeau 55 de milioane, din care 19,2 doar din două facturi de test de la
+// BSI A/S (numere tastate la întâmplare, sume rotunde) și 12,5 din utilajele
+// Rovenma plătite în 2022.
+//
+// Măsurat pe 19.09.2026: 1.172 facturi neplătite, 55,2 milioane în total, dar
+// numai 5,3 milioane pe ultimele 12 luni — iar ăsta e ordinul de mărime din
+// balanță (furnizori ~6,5 milioane). Deci pragul nu ascunde datorii, ci taie
+// ecoul unui istoric pe care ERP-ul nu-l cunoaște.
+//
+// Nimic nu dispare: ce cade sub prag se arată separat, pe ani, cu suma lui.
+// Când intră importul de extrase bancare (task #29) și plățile către furnizori
+// devin reale, pragul se poate pune pe „tot istoricul" fără să mintă.
+const VECHIMI = [
+  ["6", "documente din ultimele 6 luni"],
+  ["12", "documente din ultimele 12 luni"],
+  ["24", "documente din ultimii 2 ani"],
+  ["tot", "tot istoricul (inclusiv facturi vechi, probabil deja plătite)"],
+];
+
+function pragVechime(cheie) {
+  if (cheie === "tot") return null;
+  const luni = parseInt(cheie, 10);
+  const a = azi();
+  return zi(Date.UTC(+a.slice(0, 4), +a.slice(5, 7) - 1 - (luni || 12), +a.slice(8, 10)));
+}
+
 function subnav(activ) {
   const linkuri = CATEGORII.flatMap((c) => c.rapoarte)
     .map((r) => `<a href="${r.href}" class="subnav-link${activ === r.href ? " activ" : ""}">${esc(r.nume)}</a>`)
@@ -265,12 +366,33 @@ function register(router) {
   });
 
   // ---- Financiar: scadențar încasări pe zile ---------------------------
+  // Scadențarul pe zile. Filtrele s-au refăcut pe 19.09.2026, după ce Vali a
+  // arătat trei lucruri stricate deodată:
+  //
+  // 1. Bifa „include scadențele depășite" nu se putea scoate. Un checkbox
+  //    nebifat pur și simplu nu se trimite, iar codul citea `vechi !== "0"` —
+  //    adică lipsa parametrului însemna „pornit". Se debifa, se apăsa Aplică,
+  //    și se întorcea bifată. Acum e listă cu valori explicite: ce alegi, aia
+  //    ajunge în adresă.
+  // 2. Nu se putea alege o fereastră omenească. „următoarele 60 de zile" nu e
+  //    felul în care se gândește cineva la scadențe; „săptămâna viitoare" și
+  //    „până la final de an" sunt. Vezi INTERVALE.
+  // 3. Sume dublate. Alea NU erau un defect de afișare: în bază chiar există
+  //    aceeași factură de două-trei ori (CSHMUPA0038 apărea cu trei id-uri
+  //    diferite, aceeași zi, aceeași sumă). Se repară în Verificări →
+  //    „Facturi de vânzare cu același număr de document", nu aici; raportul
+  //    doar le pune una sub alta, cinstit.
   router.get("/rapoarte/incasari", async (ctx) => {
     const directie = ctx.query.directie === "achizitie" ? "achizitie" : "vanzare";
-    const zile = Math.min(365, Math.max(7, parseInt(ctx.query.zile || "60", 10) || 60));
-    const includeVechi = ctx.query.vechi !== "0";
+    const cheieInterval = INTERVALE.some(([k]) => k === ctx.query.interval) ? ctx.query.interval : "zile_60";
+    const { deLa, panaLa } = calculeazaInterval(cheieInterval, ctx.query);
+    // Explicit „1"/„0", ca alegerea să nu depindă de un parametru lipsă.
+    const includeVechi = String(ctx.query.vechi ?? "1") !== "0";
+    const cheieVechime = VECHIMI.some(([k]) => k === ctx.query.vechime) ? ctx.query.vechime : "12";
+    const prag = pragVechime(cheieVechime);
+    const sortare = ["zi", "suma"].includes(ctx.query.sort) ? ctx.query.sort : "zi";
+    const vedere = ctx.query.vedere === "lista" ? "lista" : "zile";
     const aziStr = azi();
-    const pana = new Date(Date.now() + zile * 86400000).toISOString().slice(0, 10);
 
     const facturi = await db
       .prepare(
@@ -286,17 +408,23 @@ function register(router) {
          WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna','platita') AND f.intercompany = 0
            AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
            AND (f.data_scadenta <= ? OR f.data_scadenta = '' OR f.data_scadenta IS NULL)
+           AND (CAST(? AS TEXT) = '' OR COALESCE(f.data_emiterii, f.data_scadenta, '') = '' OR COALESCE(f.data_emiterii, f.data_scadenta) >= CAST(? AS TEXT))
          ORDER BY f.data_scadenta ASC, f.id ASC`
       )
-      .all(directie, pana);
+      .all(directie, panaLa, prag || "", prag || "");
 
     const peZi = new Map();
     let totalRestant = 0;
     let totalDepasit = 0;
+    const retinute = [];
     for (const f of facturi) {
       const scad = (f.data_scadenta || "").slice(0, 10);
       const depasita = Boolean(scad) && scad < aziStr;
       if (depasita && !includeVechi) continue;
+      // Cu „doar din interval" cerut, ce e scadent înainte de începutul
+      // ferestrei nu mai are ce căuta în total.
+      if (!includeVechi && scad && scad < deLa) continue;
+      retinute.push(f);
       const cheie = scad || "(fără scadență)";
       if (!peZi.has(cheie)) peZi.set(cheie, { zi: cheie, depasita, facturi: [], suma: 0 });
       const g = peZi.get(cheie);
@@ -312,39 +440,98 @@ function register(router) {
       const aFara = a.zi === "(fără scadență)";
       const bFara = b.zi === "(fără scadență)";
       if (aFara !== bFara) return aFara ? 1 : -1;
+      if (sortare === "suma") return b.suma - a.suma;
       return a.zi < b.zi ? -1 : a.zi > b.zi ? 1 : 0;
     });
     const maxZi = Math.max(1, ...grupuri.map((g) => g.suma));
 
     const eticheta = directie === "achizitie" ? "de plătit" : "de încasat";
-    const optiuniZile = [15, 30, 60, 90, 180, 365]
-      .map((z) => `<option value="${z}"${zile === z ? " selected" : ""}>următoarele ${z} de zile</option>`)
-      .join("");
+    const optInterval = INTERVALE.map(([k, t]) => `<option value="${k}"${cheieInterval === k ? " selected" : ""}>${esc(t)}</option>`).join("");
+    const optVechime = VECHIMI.map(([k, t]) => `<option value="${k}"${cheieVechime === k ? " selected" : ""}>${esc(t)}</option>`).join("");
+
+    const randDocument = (f) => {
+      const scad = (f.data_scadenta || "").slice(0, 10);
+      const depasita = Boolean(scad) && scad < aziStr;
+      return `
+        <td><a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar}`)}</a></td>
+        <td><a href="/parteneri/${f.partener_id}">${esc(f.partener_nume)}</a></td>
+        <td>${money(f.total)}</td>
+        <td>${money(f.platit)}</td>
+        <td><strong>${money(f.restant)}</strong></td>
+        <td>
+          <form method="post" action="/rapoarte/incasari/status" class="status-form">
+            <input type="hidden" name="factura_id" value="${f.id}">
+            <input type="hidden" name="redirect" value="${esc(ctx.req.url)}">
+            <select name="actiune" onchange="this.form.submit()">
+              <option value="">${f.status === "platita_partial" ? "achitat parțial" : "neachitat"}${depasita ? " · depășit" : ""}</option>
+              <option value="incasata">→ marchează achitat integral</option>
+              <option value="amana">→ amână scadența cu 30 de zile</option>
+              <option value="anulata">→ anulează documentul</option>
+            </select>
+          </form>
+          <form method="post" action="/rapoarte/incasari/status" class="status-form" style="margin-top:4px">
+            <input type="hidden" name="factura_id" value="${f.id}">
+            <input type="hidden" name="redirect" value="${esc(ctx.req.url)}">
+            <input type="hidden" name="actiune" value="scadenta">
+            <input type="date" name="scadenta" value="${esc(scad)}" onchange="this.form.submit()" title="Setează scadența">
+          </form>
+        </td>`;
+    };
+
+    // Vederea „listă": un singur tabel, deci se poate sorta după orice coloană
+    // cu un click pe antet (scriptul global din layout). Pe zile nu se putea:
+    // fiecare zi era propriul tabel.
+    const vedereLista = () =>
+      `<table class="table"><thead><tr><th>Scadența</th><th>Document</th><th>${directie === "achizitie" ? "Furnizor" : "Client"}</th><th>Total</th><th>Achitat</th><th>Rest</th><th>Status</th></tr></thead><tbody>` +
+      retinute
+        .slice()
+        .sort((a, b) => (sortare === "suma" ? Number(b.restant) - Number(a.restant) : String(a.data_scadenta || "9999").localeCompare(String(b.data_scadenta || "9999"))))
+        .map((f) => {
+          const scad = (f.data_scadenta || "").slice(0, 10);
+          const depasita = Boolean(scad) && scad < aziStr;
+          return `<tr><td>${scad ? (depasita ? `<span class="badge rosu">${esc(scad)}</span>` : esc(scad)) : '<span class="badge gri">fără scadență</span>'}</td>${randDocument(f)}</tr>`;
+        })
+        .join("") +
+      `</tbody></table>`;
 
     const continut = `
       <div class="cards">
         <div class="card"><div class="label">Total ${eticheta}</div><div class="value">${money(totalRestant)}</div></div>
         <div class="card"><div class="label">Din care depășit (scadență trecută)</div><div class="value" style="color:var(--danger)">${money(totalDepasit)}</div></div>
-        <div class="card"><div class="label">Documente</div><div class="value">${grupuri.reduce((s, g) => s + g.facturi.length, 0)}</div></div>
+        <div class="card"><div class="label">Documente</div><div class="value">${retinute.length}</div></div>
       </div>
 
       <form class="filtre" method="get" action="/rapoarte/incasari">
-        <select name="directie">
+        <select name="directie" onchange="this.form.submit()">
           <option value="vanzare"${directie === "vanzare" ? " selected" : ""}>Încasări de la clienți</option>
           <option value="achizitie"${directie === "achizitie" ? " selected" : ""}>Plăți către furnizori</option>
         </select>
-        <select name="zile">${optiuniZile}</select>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-          <input type="checkbox" name="vechi" value="1"${includeVechi ? " checked" : ""}> include scadențele depășite
-        </label>
+        <select name="interval" onchange="this.form.submit()">${optInterval}</select>
+        ${cheieInterval === "custom" ? `<input type="date" name="de_la" value="${esc(deLa)}"><input type="date" name="pana_la" value="${esc(panaLa)}">` : ""}
+        <select name="vechi" onchange="this.form.submit()">
+          <option value="1"${includeVechi ? " selected" : ""}>cu scadențele depășite</option>
+          <option value="0"${includeVechi ? "" : " selected"}>doar din intervalul ales</option>
+        </select>
+        <select name="vechime" onchange="this.form.submit()">${optVechime}</select>
+        <select name="sort" onchange="this.form.submit()">
+          <option value="zi"${sortare === "zi" ? " selected" : ""}>ordonat pe zile</option>
+          <option value="suma"${sortare === "suma" ? " selected" : ""}>ordonat după sumă</option>
+        </select>
+        <select name="vedere" onchange="this.form.submit()">
+          <option value="zile"${vedere === "zile" ? " selected" : ""}>grupat pe zile</option>
+          <option value="lista"${vedere === "lista" ? " selected" : ""}>listă (sortabilă din antet)</option>
+        </select>
         <button class="btn small" type="submit">Aplică</button>
       </form>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:-6px">
+        Fereastra: ${esc(deLa)} → ${esc(panaLa)}${prag ? ` · documente emise după ${esc(prag)}` : " · tot istoricul"}.
+      </p>
 
       ${
-        directie === "achizitie" && facturi.length
+        directie === "achizitie" && retinute.length
           ? (() => {
               const peFurnizor = new Map();
-              for (const f of facturi) {
+              for (const f of retinute) {
                 if (!peFurnizor.has(f.partener_id)) peFurnizor.set(f.partener_id, { nume: f.partener_nume, id: f.partener_id, suma: 0, nr: 0 });
                 const g = peFurnizor.get(f.partener_id);
                 g.suma += Number(f.restant);
@@ -353,15 +540,18 @@ function register(router) {
               const listaF = [...peFurnizor.values()].sort((a, b) => b.suma - a.suma);
               return `<h2>Total pe furnizor în perioada selectată</h2>` + table(
                 ["Furnizor", "Documente", "Total de plătit"],
-                listaF.map((x) => [`<a href="/parteneri/${x.id}">${esc(x.nume)}</a>`, x.nr, money(x.suma)])
+                listaF.map((x) => [`<a href="/parteneri/${x.id}">${esc(x.nume)}</a>`, x.nr, money(x.suma)]),
+                { total: ["Total", String(retinute.length), money(totalRestant)] }
               );
             })()
           : ""
       }
 
       ${
-        grupuri.length === 0
+        retinute.length === 0
           ? `<p>Nimic ${eticheta} în intervalul selectat.</p>`
+          : vedere === "lista"
+          ? vedereLista()
           : grupuri
               .map(
                 (g) => `
@@ -375,35 +565,7 @@ function register(router) {
           ${bar((g.suma / maxZi) * 100, g.depasita ? "rosu" : "verde")}
           <table class="table" style="margin-top:10px">
             <tr><th>Document</th><th>${directie === "achizitie" ? "Furnizor" : "Client"}</th><th>Total</th><th>Achitat</th><th>Rest</th><th>Status</th></tr>
-            ${g.facturi
-              .map(
-                (f) => `<tr>
-                  <td><a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar}`)}</a></td>
-                  <td><a href="/parteneri/${f.partener_id}">${esc(f.partener_nume)}</a></td>
-                  <td>${money(f.total)}</td>
-                  <td>${money(f.platit)}</td>
-                  <td><strong>${money(f.restant)}</strong></td>
-                  <td>
-                    <form method="post" action="/rapoarte/incasari/status" class="status-form">
-                      <input type="hidden" name="factura_id" value="${f.id}">
-                      <input type="hidden" name="redirect" value="${esc(ctx.req.url)}">
-                      <select name="actiune" onchange="this.form.submit()">
-                        <option value="">${f.status === "platita_partial" ? "achitat parțial" : "neachitat"}${g.depasita ? " · depășit" : ""}</option>
-                        <option value="incasata">→ marchează achitat integral</option>
-                        <option value="amana">→ amână scadența cu 30 de zile</option>
-                        <option value="anulata">→ anulează documentul</option>
-                      </select>
-                    </form>
-                    <form method="post" action="/rapoarte/incasari/status" class="status-form" style="margin-top:4px">
-                      <input type="hidden" name="factura_id" value="${f.id}">
-                      <input type="hidden" name="redirect" value="${esc(ctx.req.url)}">
-                      <input type="hidden" name="actiune" value="scadenta">
-                      <input type="date" name="scadenta" value="${esc((f.data_scadenta || "").slice(0, 10))}" onchange="this.form.submit()" title="Setează scadența">
-                    </form>
-                  </td>
-                </tr>`
-              )
-              .join("")}
+            ${g.facturi.map((f) => `<tr>${randDocument(f)}</tr>`).join("")}
           </table>
         </div>`
               )
@@ -412,6 +574,7 @@ function register(router) {
       <p style="font-size:12px;color:var(--text-muted);margin-top:18px">
         „Depășit” nu e un status stocat, ci se calculează automat din scadență față de ziua curentă — așa nu poate rămâne niciodată nesincronizat.
         Statusul stocat pe factură (neachitat / achitat parțial / achitat / anulat) se schimbă din coloana Status.
+        Dacă vezi același document de două ori, nu e afișarea: chiar e de două ori în bază — <a href="/verificari">Verificări</a> le listează.
       </p>
     `;
     send(ctx.res, 200, pagina(ctx, `Scadențar ${directie === "achizitie" ? "plăți" : "încasări"}`, "/rapoarte/incasari", continut));
@@ -764,8 +927,10 @@ function register(router) {
   // ---- GRUP: de încasat și de plătit, într-o singură fereastră ------------
   router.get("/rapoarte/scadentar-grup", async (ctx) => {
     const aziStr = azi();
-    const zile = Math.min(120, Math.max(7, parseInt(ctx.query.zile || "30", 10) || 30));
-    const pana = new Date(Date.now() + zile * 86400000).toISOString().slice(0, 10);
+    const cheieInterval = INTERVALE.some(([k]) => k === ctx.query.interval) ? ctx.query.interval : "zile_30";
+    const { deLa, panaLa } = calculeazaInterval(cheieInterval, ctx.query);
+    const cheieVechime = VECHIMI.some(([k]) => k === ctx.query.vechime) ? ctx.query.vechime : "12";
+    const prag = pragVechime(cheieVechime);
 
     const randuri = await db
       .prepare(
@@ -782,18 +947,25 @@ function register(router) {
       )
       .all();
 
-    const deIncasat = randuri.filter((r) => r.directie === "vanzare");
-    const dePlatit = randuri.filter((r) => r.directie === "achizitie");
+    // Documentul e „vechi" după data emiterii, nu după scadență: o factură din
+    // 2022 rămasă fără scadență completată nu trebuie să scape de prag.
+    const dataDoc = (r) => String(r.data_emiterii || r.data_scadenta || "").slice(0, 10);
+    const eVechi = (r) => prag !== null && dataDoc(r) !== "" && dataDoc(r) < prag;
+    const recente = randuri.filter((r) => !eVechi(r));
+    const vechi = randuri.filter(eVechi);
+
+    const deIncasat = recente.filter((r) => r.directie === "vanzare");
+    const dePlatit = recente.filter((r) => r.directie === "achizitie");
     const sum = (l) => l.reduce((s, r) => s + Number(r.rest), 0);
     const restant = (l) => l.filter((r) => r.data_scadenta && r.data_scadenta < aziStr);
-    const inOrizont = (l) => l.filter((r) => r.data_scadenta && r.data_scadenta >= aziStr && r.data_scadenta <= pana);
+    const inOrizont = (l) => l.filter((r) => r.data_scadenta && r.data_scadenta >= deLa && r.data_scadenta <= panaLa);
 
-    // poziția netă pe zile: cât intră minus cât iese, în orizontul ales
+    // poziția netă pe zile: cât intră minus cât iese, în intervalul ales
     const peZi = new Map();
     for (const r of [...inOrizont(deIncasat), ...inOrizont(dePlatit)]) {
-      const zi = r.data_scadenta;
-      if (!peZi.has(zi)) peZi.set(zi, { zi, incasez: 0, platesc: 0 });
-      const g = peZi.get(zi);
+      const z = r.data_scadenta;
+      if (!peZi.has(z)) peZi.set(z, { zi: z, incasez: 0, platesc: 0 });
+      const g = peZi.get(z);
       if (r.directie === "vanzare") g.incasez += Number(r.rest);
       else g.platesc += Number(r.rest);
     }
@@ -818,11 +990,50 @@ function register(router) {
         ])
       );
 
-    const optiuni = [7, 14, 30, 60, 90].map((z) => `<option value="${z}"${zile === z ? " selected" : ""}>următoarele ${z} de zile</option>`).join("");
+    const optInterval = INTERVALE.map(([k, t]) => `<option value="${k}"${cheieInterval === k ? " selected" : ""}>${esc(t)}</option>`).join("");
+    const optVechime = VECHIMI.map(([k, t]) => `<option value="${k}"${cheieVechime === k ? " selected" : ""}>${esc(t)}</option>`).join("");
+
+    // ---- ce a rămas afară, pe ani ----------------------------------------
+    const peAn = new Map();
+    for (const r of vechi) {
+      const an = dataDoc(r).slice(0, 4) || "fără dată";
+      if (!peAn.has(an)) peAn.set(an, { an, incasat: 0, platit: 0, nrI: 0, nrP: 0 });
+      const g = peAn.get(an);
+      if (r.directie === "vanzare") { g.incasat += Number(r.rest); g.nrI++; }
+      else { g.platit += Number(r.rest); g.nrP++; }
+    }
+    const aniOrd = [...peAn.values()].sort((a, b) => (a.an < b.an ? -1 : 1));
+    const vechiDeIncasat = vechi.filter((r) => r.directie === "vanzare");
+    const vechiDePlatit = vechi.filter((r) => r.directie === "achizitie");
+
+    const blocVechi = !vechi.length
+      ? ""
+      : `
+      <h2>Ce n-a intrat în totalurile de sus (${vechi.length} documente, ${money(sum(vechi))})</h2>
+      <p style="font-size:13px;color:var(--text-muted);max-width:820px">
+        Documente emise înainte de ${esc(prag)}. Nu sunt șterse și nu sunt uitate — sunt scoase din totaluri
+        fiindcă <strong>ERP-ul nu are încă istoricul plăților către furnizori</strong>: o plată se naște doar
+        din raportul de încasări, care merge numai pe vânzări. O factură de furnizor plătită prin bancă acum
+        trei ani a rămas aici „emisă" și se aduna la infinit. Se repară definitiv când intră importul de
+        extrase bancare — atunci pune filtrul pe „tot istoricul” și cifra rămâne corectă.
+        Dacă vrei să scapi de ele acum, <a href="/rapoarte/inchide-istoric">închide istoricul vechi</a>:
+        le marchează achitate dintr-o dată, reversibil, și le ferește de încasările care ar veni pe ele mai târziu.
+      </p>
+      ${table(
+        ["Anul", "Documente de încasat", "De încasat", "Documente de plătit", "De plătit"],
+        aniOrd.map((g) => [esc(g.an), String(g.nrI), money(g.incasat), String(g.nrP), money(g.platit)]),
+        {
+          total: ["Total", String(vechiDeIncasat.length), money(sum(vechiDeIncasat)), String(vechiDePlatit.length), money(sum(vechiDePlatit))],
+        }
+      )}
+    `;
 
     const continut = `
       <form class="filtre" method="get" action="/rapoarte/scadentar-grup">
-        <select name="zile" onchange="this.form.submit()">${optiuni}</select>
+        <label>Proiecția pe zile <select name="interval" onchange="this.form.submit()">${optInterval}</select></label>
+        ${cheieInterval === "custom" ? `<input type="date" name="de_la" value="${esc(deLa)}"><input type="date" name="pana_la" value="${esc(panaLa)}">` : ""}
+        <label>Ia în calcul <select name="vechime" onchange="this.form.submit()">${optVechime}</select></label>
+        ${cheieInterval === "custom" ? '<button type="submit" class="btn small">Aplică</button>' : ""}
       </form>
 
       <div class="cards">
@@ -832,8 +1043,11 @@ function register(router) {
         <div class="card"><div class="label">din care restant</div><div class="value" style="color:var(--danger)">${money(sum(restant(dePlatit)))}</div></div>
         <div class="card"><div class="label">Poziție netă</div><div class="value" style="color:${sum(deIncasat) - sum(dePlatit) >= 0 ? "var(--success)" : "var(--danger)"}">${money(sum(deIncasat) - sum(dePlatit))}</div></div>
       </div>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:-8px">
+        Totalurile de mai sus cuprind ${recente.length} documente${prag ? ` emise după ${esc(prag)}` : " — tot istoricul"}.
+      </p>
 
-      <h2>Pe zile, în următoarele ${zile} de zile</h2>
+      <h2>Pe zile, ${esc((INTERVALE.find(([k]) => k === cheieInterval) || [, ""])[1])} (${esc(deLa)} → ${esc(panaLa)})</h2>
       ${
         zileOrd.length
           ? table(
@@ -846,7 +1060,7 @@ function register(router) {
                 `<strong style="color:${z.cumulat >= 0 ? "inherit" : "var(--danger)"}">${money(z.cumulat)}</strong>`,
               ])
             )
-          : "<p>Nimic scadent în orizontul ales.</p>"
+          : "<p>Nimic scadent în intervalul ales.</p>"
       }
 
       <h2>De încasat de la clienți (${deIncasat.length} documente)</h2>
@@ -855,9 +1069,227 @@ function register(router) {
       <h2>De plătit către furnizori (${dePlatit.length} documente)</h2>
       ${tabelDocumente(dePlatit, "Furnizor")}
 
+      ${blocVechi}
+
       <p style="font-size:12px;color:var(--text-muted)">Cumulat pe tot grupul, cu facturile dintre firmele grupului eliminate. Documentele fără scadență apar la final și nu intră în proiecția pe zile.</p>
     `;
     send(ctx.res, 200, pagina(ctx, "Scadențar grup — de încasat și de plătit", "/rapoarte/scadentar-grup", continut));
+  });
+
+
+  // ---- Închiderea istoricului vechi --------------------------------------
+  // DE CE există pagina asta, cu cuvintele lui Vali: „pune tot din urma
+  // incasat lasa ce se potriveste din balanta" și „ia anul curent restul pune
+  // incasat si ignora incasarile ptr facturi vechi viitoare".
+  //
+  // ERP-ul n-a avut niciodată plățile către furnizori (se nasc doar din
+  // raportul de încasări, care merge pe vânzări), iar încasările vechi s-au
+  // pierdut prin importuri succesive. Rezultatul, măsurat pe 19.09.2026:
+  // 55,2 milioane „de plătit" și 2,3 milioane „de încasat", față de ~6,5
+  // milioane furnizori în balanță. Soldurile alea nu există; sunt ecoul unui
+  // istoric pe care ERP-ul nu-l cunoaște.
+  //
+  // Închiderea le marchează „platita" și le pune data în `inchis_istoric`.
+  // Coloana aia e cea care contează mai departe: importul de încasări
+  // (modules/import.js, modules/punte.js) și reconcilierea bancară
+  // (modules/banca.js) sar peste facturile care o au. Altfel o încasare
+  // sosită mâine pe o factură din 2022 ar redeschide exact ce s-a închis.
+  //
+  // Nu se șterge nimic. Fiecare închidere își scrie în `inchideri_istoric`
+  // id-urile atinse ȘI statusul dinainte al fiecăreia, deci se poate anula
+  // în întregime, exact cum era.
+  const DIRECTII_INCHIDERE = [
+    ["vanzare", "facturi emise (de încasat)", "de încasat"],
+    ["achizitie", "facturi de furnizor (de plătit)", "de plătit"],
+  ];
+
+  async function situatiaInchiderii(directie, prag) {
+    const r = await db
+      .prepare(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS suma
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+           LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+          WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna','necunoscut','platita')
+            AND f.inchis_istoric IS NULL
+            AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+            AND COALESCE(f.data_emiterii, f.data_scadenta, '') <> ''
+            AND COALESCE(f.data_emiterii, f.data_scadenta) < CAST(? AS TEXT)`
+      )
+      .get(directie, prag);
+    const ramane = await db
+      .prepare(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(l.total,0) - COALESCE(pl.platit,0)), 0) AS suma
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+           LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+          WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna','necunoscut','platita')
+            AND f.inchis_istoric IS NULL
+            AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+            AND (COALESCE(f.data_emiterii, f.data_scadenta, '') = ''
+                 OR COALESCE(f.data_emiterii, f.data_scadenta) >= CAST(? AS TEXT))`
+      )
+      .get(directie, prag);
+    return { seInchid: r, ramane };
+  }
+
+  router.get("/rapoarte/inchide-istoric", async (ctx) => {
+    // „ia anul curent" — deci pragul implicit e 1 ianuarie anul curent.
+    const implicit = azi().slice(0, 4) + "-01-01";
+    const prag = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.prag || "")) ? ctx.query.prag : implicit;
+
+    const situatii = [];
+    for (const [dir, eticheta, scurt] of DIRECTII_INCHIDERE) {
+      situatii.push({ dir, eticheta, scurt, ...(await situatiaInchiderii(dir, prag)) });
+    }
+    const istoric = await db
+      .prepare(
+        `SELECT i.*, u.nume AS autor FROM inchideri_istoric i
+         LEFT JOIN utilizatori u ON u.id = i.facut_de ORDER BY i.id DESC LIMIT 20`
+      )
+      .all();
+    const eAdmin = ctx.user && ctx.user.rol === "admin";
+
+    const carduri = situatii
+      .map(
+        (s) => `
+      <div class="card" style="min-width:260px">
+        <div class="label">${esc(s.eticheta)}</div>
+        <div class="value" style="color:var(--danger)">${money(s.seInchid.suma)}</div>
+        <div style="font-size:12px;color:var(--text-muted)">${s.seInchid.n} documente se închid</div>
+        <div style="margin-top:8px;font-size:13px">rămâne <strong>${money(s.ramane.suma)}</strong> pe ${s.ramane.n} documente</div>
+      </div>`
+      )
+      .join("");
+
+    const formular = !eAdmin
+      ? `<p style="color:var(--text-muted)">Închiderea o face doar administratorul.</p>`
+      : `
+      <form method="get" action="/rapoarte/inchide-istoric" class="filtre">
+        <label>Închide tot ce e emis înainte de
+          <input type="date" name="prag" value="${esc(prag)}">
+        </label>
+        <button class="btn small secondary" type="submit">Recalculează</button>
+      </form>
+      <form method="post" action="/rapoarte/inchide-istoric" class="filtre"
+            onsubmit="return confirm('Marchezi ca achitate toate documentele emise înainte de ${esc(prag)}? Se poate anula după, din istoricul de mai jos.')">
+        <input type="hidden" name="prag" value="${esc(prag)}">
+        <select name="directie">
+          <option value="ambele">amândouă (și de încasat, și de plătit)</option>
+          ${DIRECTII_INCHIDERE.map(([d, e]) => `<option value="${d}">doar ${esc(e)}</option>`).join("")}
+        </select>
+        <button class="btn" type="submit">Marchează ca achitate</button>
+      </form>`;
+
+    const tabelIstoric = table(
+      ["Când", "Cine", "Ce", "Prag", "Documente", "Sumă închisă", ""],
+      istoric.map((i) => [
+        esc(String(i.facut_la || "").slice(0, 16)),
+        esc(i.autor || "—"),
+        i.directie === "vanzare" ? "de încasat" : "de plătit",
+        esc(i.prag),
+        String(i.nr_documente),
+        money(i.suma),
+        i.anulata_la
+          ? `<span class="badge gri">anulată ${esc(String(i.anulata_la).slice(0, 10))}</span>`
+          : eAdmin
+          ? `<form method="post" action="/rapoarte/inchide-istoric/${i.id}/anuleaza" class="inline-form" onsubmit="return confirm('Redeschizi cele ${i.nr_documente} documente, exact cum erau înainte?')"><button class="link-btn danger" type="submit">Anulează</button></form>`
+          : "",
+      ])
+    );
+
+    const continut = `
+      <p style="max-width:860px">
+        ERP-ul n-a avut niciodată plățile către furnizori, iar încasările vechi s-au pierdut prin importuri.
+        De-aia „de plătit" arăta <strong>55,2 milioane</strong> pe 19.09.2026, cu ~6,5 milioane furnizori în balanță.
+        Aici se închid dintr-o dată documentele vechi, ca ERP-ul să arate cât arată balanța.
+        <br><strong>Nimic nu se șterge</strong>: fiecare închidere reține id-urile și statusul dinainte al fiecărei facturi, deci se poate da înapoi.
+        Iar facturile închise nu mai primesc încasări la importurile viitoare — dacă mâine vine o încasare pe o factură din 2022, e ignorată și raportată ca atare.
+      </p>
+      <div class="cards">${carduri}</div>
+      ${formular}
+      <h2>Închideri făcute până acum</h2>
+      ${tabelIstoric}
+    `;
+    send(ctx.res, 200, pagina(ctx, "Închiderea istoricului vechi", "/rapoarte/scadentar-grup", continut));
+  });
+
+  router.post("/rapoarte/inchide-istoric", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/rapoarte/inchide-istoric?eroare=acces");
+    const prag = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.body.prag || "")) ? ctx.body.prag : azi().slice(0, 4) + "-01-01";
+    const cerut = String(ctx.body.directie || "ambele");
+    const directii = cerut === "ambele" ? DIRECTII_INCHIDERE.map(([d]) => d) : DIRECTII_INCHIDERE.map(([d]) => d).filter((d) => d === cerut);
+    const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
+
+    for (const dir of directii) {
+      const tinte = await db
+        .prepare(
+          `SELECT f.id, f.status, COALESCE(l.total,0) - COALESCE(pl.platit,0) AS rest
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
+             LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+             LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+            WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna','necunoscut','platita')
+              AND f.inchis_istoric IS NULL
+              AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+              AND COALESCE(f.data_emiterii, f.data_scadenta, '') <> ''
+              AND COALESCE(f.data_emiterii, f.data_scadenta) < CAST(? AS TEXT)`
+        )
+        .all(dir, prag);
+      if (!tinte.length) continue;
+
+      // Pe loturi: o listă de 1.100 de id-uri într-un singur IN (...) e la
+      // limita a ce înghite driverul, iar dacă pică la jumătate rămâne o
+      // închidere pe jumătate făcută, care nu se mai poate anula corect.
+      const LOT = 200;
+      for (let i = 0; i < tinte.length; i += LOT) {
+        const lot = tinte.slice(i, i + LOT);
+        await db
+          .prepare(`UPDATE facturi SET status = 'platita', inchis_istoric = ? WHERE id IN (${lot.map(() => "?").join(",")})`)
+          .run(acum.slice(0, 10), ...lot.map((t) => t.id));
+      }
+      await db
+        .prepare("INSERT INTO inchideri_istoric (facut_la, facut_de, directie, prag, nr_documente, suma, ids) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          acum,
+          ctx.user.id,
+          dir,
+          prag,
+          tinte.length,
+          tinte.reduce((s, t) => s + Number(t.rest || 0), 0),
+          JSON.stringify(tinte.map((t) => [t.id, t.status]))
+        );
+    }
+    redirect(ctx.res, `/rapoarte/inchide-istoric?prag=${encodeURIComponent(prag)}&gata=1`);
+  });
+
+  router.post("/rapoarte/inchide-istoric/:id/anuleaza", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/rapoarte/inchide-istoric?eroare=acces");
+    const inch = await db.prepare("SELECT * FROM inchideri_istoric WHERE id = ?").get(ctx.params.id);
+    if (!inch || inch.anulata_la) return redirect(ctx.res, "/rapoarte/inchide-istoric");
+
+    let perechi = [];
+    try { perechi = JSON.parse(inch.ids || "[]"); } catch (e) { perechi = []; }
+    // Fiecare factură se pune înapoi pe statusul ei de dinainte, nu pe unul
+    // presupus: unele erau „emisa", altele „platita_partial".
+    const peStatus = new Map();
+    for (const [id, st] of perechi) {
+      const cheie = st || "emisa";
+      if (!peStatus.has(cheie)) peStatus.set(cheie, []);
+      peStatus.get(cheie).push(id);
+    }
+    for (const [st, ids] of peStatus) {
+      const LOT = 200;
+      for (let i = 0; i < ids.length; i += LOT) {
+        const lot = ids.slice(i, i + LOT);
+        await db
+          .prepare(`UPDATE facturi SET status = ?, inchis_istoric = NULL WHERE id IN (${lot.map(() => "?").join(",")})`)
+          .run(st, ...lot);
+      }
+    }
+    await db
+      .prepare("UPDATE inchideri_istoric SET anulata_la = ?, anulata_de = ? WHERE id = ?")
+      .run(new Date().toISOString().slice(0, 19).replace("T", " "), ctx.user.id, inch.id);
+    redirect(ctx.res, "/rapoarte/inchide-istoric");
   });
 
   // ---- GRUP: comisioane agenți de vânzări --------------------------------

@@ -436,13 +436,7 @@ function register(router) {
         <a href="/productie/noua" class="btn">+ Comandă nouă în producție</a>
         <a href="/productie/planificare" class="btn secondary">Planificare</a>
         <a href="/import" class="btn secondary">Import din Excel</a>
-        ${ctx.user && ctx.user.rol === "admin"
-          ? `<form method="post" action="/productie/leaga-agenti" class="inline-form"><button class="btn secondary" type="submit" title="Pune agentul pe comenzile care n-au unul și creează clienții care lipsesc">Leagă agenții și clienții</button></form>`
-          : ""}
       </div>
-      ${ctx.query && ctx.query.legat !== undefined
-        ? `<div class="flash">Legate de agent: <b>${esc(String(ctx.query.legat))}</b> comenzi. Clienți creați sau legați: <b>${esc(String(ctx.query.clienti || 0))}</b>. Aveau deja agent: ${esc(String(ctx.query.aveau || 0))}.</div>`
-        : ""}
       <div class="cards">
         ${STATUSURI.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div></div>`).join("")}
         <div class="card"><div class="label">Cu termenul depășit</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
@@ -763,8 +757,17 @@ function register(router) {
     redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
   });
 
+  // „Leagă agenții și clienții" stătea în bara de sus din Producție, unde nu
+  // avea ce căuta: nu atinge nicio comandă de producție ca atare, ci pune
+  // agentul pe comenzi și creează clienții lipsă — treabă de CRM. Butonul a
+  // trecut în Alocări (lângă „Alocă automat" și „Recalculează agentul"), unde
+  // stau toate operațiile de agenți-clienți. Ruta a rămas aici fiindcă aici
+  // sunt ajutoarele pe care le folosește (agentDinCod, alocaClientul,
+  // partenerSauCreeaza); pagina de întoarcere vine din formular.
   router.post("/productie/leaga-agenti", async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/productie");
+    const inapoiCerut = String((ctx.body && ctx.body.redirect) || "/alocari");
+    const inapoiBaza = inapoiCerut.startsWith("/") ? inapoiCerut : "/alocari";
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, inapoiBaza);
     uitaAgentii();
     const fara = await db
       .prepare("SELECT id, reprezentant, client_text, partener_id, agent_id FROM comenzi_productie ORDER BY id")
@@ -793,7 +796,7 @@ function register(router) {
         }
       }
     }
-    redirect(ctx.res, `/productie?legat=${agenti}&clienti=${clienti}&aveau=${deja}`);
+    redirect(ctx.res, `${inapoiBaza}${inapoiBaza.includes("?") ? "&" : "?"}legat=${agenti}&clienti=${clienti}&aveau=${deja}`);
   });
 
   router.get("/productie/noua", async (ctx) => {

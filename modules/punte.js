@@ -1025,18 +1025,24 @@ const RECONSTITUITE = ["Plată reconstituită automat din statusul din SmartBill
 
 async function ingestIncasari(randuri) {
   const facturi = await db
-    .prepare("SELECT id, serie, numar, document_extern FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
+    .prepare("SELECT id, serie, numar, document_extern, inchis_istoric FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
     .all();
   const dupaCheie = new Map();
-  const pune = (cheie, id) => {
+  // Facturile inchise ca istorie veche nu mai primesc incasari. Vezi tabelul
+  // inchideri_istoric din lib/db.js: soldurile vechi au fost inchise dintr-o
+  // data, ca ERP-ul sa arate cat arata balanta, iar o incasare care soseste
+  // acum pe o factura din 2022 ar redeschide exact ce s-a inchis.
+  const cheiInchise = new Set();
+  const pune = (cheie, id, inchisa) => {
     const k = String(cheie || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!k) return;
+    if (inchisa) { cheiInchise.add(k); return; }
     if (!dupaCheie.has(k)) dupaCheie.set(k, []);
     if (!dupaCheie.get(k).includes(id)) dupaCheie.get(k).push(id);
   };
   for (const f of facturi) {
-    pune(`${f.serie || ""}${f.numar || ""}`, f.id);
-    if (f.document_extern) pune(f.document_extern, f.id);
+    pune(`${f.serie || ""}${f.numar || ""}`, f.id, Boolean(f.inchis_istoric));
+    if (f.document_extern) pune(f.document_extern, f.id, Boolean(f.inchis_istoric));
   }
 
   const existente = new Set(
@@ -1069,6 +1075,7 @@ async function ingestIncasari(randuri) {
   let surogateSterse = 0;
   let dubluri = 0;
   let negasite = 0;
+  let inchiseVechi = 0;
   const exemple = [];
 
   for (const r of randuri) {
@@ -1081,9 +1088,16 @@ async function ingestIncasari(randuri) {
       .map((x) => x.trim())
       .filter(Boolean);
     const tinte = [];
+    let atinsInchisa = false;
     for (const c of chei) {
-      const ids = dupaCheie.get(c.toUpperCase().replace(/[^A-Z0-9]/g, ""));
+      const k = c.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const ids = dupaCheie.get(k);
       if (ids && ids.length) tinte.push(ids[0]);
+      else if (cheiInchise.has(k)) atinsInchisa = true;
+    }
+    if (!tinte.length && atinsInchisa) {
+      inchiseVechi++;
+      continue;
     }
     if (!tinte.length) {
       negasite++;
@@ -1144,7 +1158,7 @@ async function ingestIncasari(randuri) {
     }
   }
 
-  return { incasari_scrise: scrise, dubluri_sarite: dubluri, surogate_sterse: surogateSterse, facturi_negasite: negasite, exemple_negasite: exemple.slice(0, 10) };
+  return { incasari_scrise: scrise, dubluri_sarite: dubluri, surogate_sterse: surogateSterse, facturi_negasite: negasite, inchise_istoric_ignorate: inchiseVechi, exemple_negasite: exemple.slice(0, 10) };
 }
 
 const HANDLERE = {

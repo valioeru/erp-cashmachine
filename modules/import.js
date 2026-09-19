@@ -1101,11 +1101,18 @@ function register(router) {
 
     // Indexăm facturile de vânzare după serie+număr, ca să potrivim rapid.
     const facturi = await db
-      .prepare("SELECT id, serie, numar FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
+      .prepare("SELECT id, serie, numar, inchis_istoric FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
       .all();
+    // Facturile inchise ca istorie veche nu mai primesc plati. Regula lui
+    // Vali, cuvant cu cuvant: „daca in viitor apar incasari ptr facturi mai
+    // vechi le ignori". Le tinem intr-un set separat ca sa le putem numara si
+    // sa nu le raportam drept „factura negasita" -- alea sunt doua lucruri
+    // diferite si se rezolva diferit.
     const dupaCheie = new Map();
+    const cheiInchise = new Set();
     for (const f of facturi) {
       const cheie = `${String(f.serie || "").toUpperCase()}${String(f.numar || "")}`.replace(/[^A-Z0-9]/g, "");
+      if (f.inchis_istoric) { cheiInchise.add(cheie); continue; }
       if (!dupaCheie.has(cheie)) dupaCheie.set(cheie, []);
       dupaCheie.get(cheie).push(f.id);
     }
@@ -1143,7 +1150,7 @@ function register(router) {
     );
 
     const erori = [];
-    let adaugate = 0, duplicate = 0, faraFactura = 0, randuri = 0;
+    let adaugate = 0, duplicate = 0, faraFactura = 0, randuri = 0, inchiseVechi = 0;
     const deInserat = [];
 
     for (let r = randHeader + 1; r < rows.length; r++) {
@@ -1167,11 +1174,14 @@ function register(router) {
       // O încasare poate lista mai multe facturi, separate prin virgulă.
       const bucati = brutFactura.split(/[,;]+/).map((x) => x.trim()).filter(Boolean);
       const tinte = [];
+      let atinsInchisa = false;
       for (const b of bucati) {
         const cheie = b.toUpperCase().replace(/[^A-Z0-9]/g, "");
         const gasite = dupaCheie.get(cheie);
         if (gasite && gasite.length) tinte.push(gasite[0]);
+        else if (cheiInchise.has(cheie)) atinsInchisa = true;
       }
+      if (!tinte.length && atinsInchisa) { inchiseVechi++; amprente.add(amprenta); continue; }
       if (!tinte.length) { faraFactura++; if (erori.length < 60) erori.push(`Rândul ${r + 1}: nu găsesc factura „${brutFactura}" în ERP.`); continue; }
 
       // împărțim suma proporțional cu soldul (sau egal, dacă n-avem solduri)
@@ -1203,7 +1213,7 @@ function register(router) {
     // parțial, sau neîncasat — ca listele de creanțe să fie corecte.
     await db.exec(`
       UPDATE facturi SET status = 'platita'
-       WHERE directie = 'vanzare' AND status NOT IN ('anulata')
+       WHERE directie = 'vanzare' AND status NOT IN ('anulata') AND inchis_istoric IS NULL
          AND id IN (
            SELECT f.id FROM (SELECT * FROM facturi WHERE activ = 1) f
            JOIN (SELECT factura_id, SUM(suma) s FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) p ON p.factura_id = f.id
@@ -1212,7 +1222,7 @@ function register(router) {
     `);
     await db.exec(`
       UPDATE facturi SET status = 'platita_partial'
-       WHERE directie = 'vanzare' AND status NOT IN ('anulata')
+       WHERE directie = 'vanzare' AND status NOT IN ('anulata') AND inchis_istoric IS NULL
          AND id IN (
            SELECT f.id FROM (SELECT * FROM facturi WHERE activ = 1) f
            JOIN (SELECT factura_id, SUM(suma) s FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) p ON p.factura_id = f.id
@@ -1230,6 +1240,7 @@ function register(router) {
           "Plăți adăugate": adaugate,
           "Duplicate sărite": duplicate,
           "Fără factură în ERP": faraFactura,
+          "Ignorate (facturi închise ca istoric vechi)": inchiseVechi,
         },
         erori
       )
