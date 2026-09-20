@@ -150,7 +150,7 @@ async function salveazaAtasamente(cont, mesajId, m, partenerId) {
     } catch (e) {
       // Un atașament care nu se urcă nu are voie să piardă mesajul. Rândul
       // rămâne, cu eroarea scrisă pe el, și se poate reîncerca.
-      rand.eroare = String(e.message || e).slice(0, 300);
+      rand.eroare = mesajul(e).slice(0, 300);
     }
     await db
       .prepare(
@@ -204,6 +204,20 @@ async function salveazaMesaj(cont, id) {
   return { sarit: false, id: mesajId, atasamente: at.total, urcate: at.urcate };
 }
 
+// Un „throw" nu vine întotdeauna cu un Error: dacă vine un obiect simplu,
+// String(el) dă „[object Object]" și mesajul adevărat se pierde. Aici nu se
+// pierde — pentru pagina de verificare, mesajul ESTE tot ce are omul.
+function mesajul(e) {
+  if (!e) return "eroare fără mesaj";
+  if (typeof e === "string") return e;
+  if (e.message) return String(e.message);
+  try {
+    const t = JSON.stringify(e);
+    if (t && t !== "{}") return t;
+  } catch (x) { /* obiecte cu cicluri */ }
+  return String(e);
+}
+
 async function sincronizeazaCont(cont) {
   const rezumat = { adresa: cont.adresa, noi: 0, sarite: 0, atasamente: 0, eroare: null };
   try {
@@ -240,7 +254,7 @@ async function sincronizeazaCont(cont) {
       .prepare("UPDATE email_conturi SET history_id = ?, ultima_sincronizare = ?, ultima_eroare = NULL, mesaje_aduse = mesaje_aduse + ? WHERE id = ?")
       .run(historyNou || cont.history_id || null, acum(), rezumat.noi, cont.id);
   } catch (e) {
-    rezumat.eroare = String(e.message || e).slice(0, 500);
+    rezumat.eroare = mesajul(e).slice(0, 500);
     await db.prepare("UPDATE email_conturi SET ultima_sincronizare = ?, ultima_eroare = ? WHERE id = ?").run(acum(), rezumat.eroare, cont.id);
   }
   return rezumat;
@@ -650,7 +664,7 @@ async function verifica() {
     await google.tokenDrive();
     adauga("Google acceptă cheia", true, "s-a obținut token pentru Drive", "");
   } catch (e) {
-    adauga("Google acceptă cheia", false, String(e.message || e), "pasul 1");
+    adauga("Google acceptă cheia", false, mesajul(e), "pasul 1");
     return pasi;
   }
 
@@ -666,7 +680,7 @@ async function verifica() {
       await drive.sterge(urcat.id);
       adauga("Se poate scrie în folder", true, "am urcat un fișier de probă și l-am șters", "");
     } catch (e) {
-      adauga("Folderul din Drive", false, String(e.message || e), "pasul 3 — ai dat share pe folder către adresa service account-ului?");
+      adauga("Folderul din Drive", false, mesajul(e), "pasul 3 — ai dat share pe folder către adresa service account-ului?");
     }
   }
 
@@ -677,7 +691,7 @@ async function verifica() {
       const p = await gmail.profil(cont.adresa);
       adauga(`Căsuța ${cont.adresa}`, true, `${p.mesaje.toLocaleString("ro-RO")} mesaje, ${p.fire.toLocaleString("ro-RO")} fire`, "");
     } catch (e) {
-      adauga(`Căsuța ${cont.adresa}`, false, String(e.message || e), "pasul 2 — delegarea cu scope gmail.readonly");
+      adauga(`Căsuța ${cont.adresa}`, false, mesajul(e), "pasul 2 — delegarea cu scope gmail.readonly");
     }
   }
   return pasi;
