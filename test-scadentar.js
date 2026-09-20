@@ -241,7 +241,7 @@ function fixture() {
   const rv = res();
   await ruteV.get["/admin/date"]({ user: VALI, params: {}, query: {}, body: {}, res: rv, req: { url: "/admin/date" } });
   cere("pagina de verificări cu cele două controale noi", rv.corp,
-    ["Facturi de vânzare cu același număr de document", "Facturi de peste un milion de lei", "1.000.000,00"], []);
+    ["Facturi de vânzare înregistrate de mai multe ori", "Facturi de peste un milion de lei", "1.000.000,00"], []);
 
   // Curățăm după noi: testul depozitului își reface propria fixtură ștergând
   // facturile, iar o plată rămasă aici i-ar bloca ștergerea prin cheia străină.

@@ -162,7 +162,7 @@ egal("  antetul „De la” bate semnătura",
     de_la: "marian.radu@godac.ro", de_la_nume: "Marian Radu", de_la_domeniu: "godac.ro",
     partener_nume: "CARMANGERIA GODAC SRL", corp: cuSeparator,
   }),
-  { nume: "Marian Radu", email: "marian.radu@godac.ro", functie: "Director Achiziții", telefon: "0722351929" });
+  { nume: "Marian Radu", email: "marian.radu@godac.ro", functie: "Director Achiziții", telefon: "0722351929", fel: "persoana" });
 
 egal("  când „De la” e numele firmei, caută omul în semnătură",
   (c.culegeDinMesaj({
@@ -177,18 +177,22 @@ egal("  gmail.com se sare — domeniul nu spune nimic",
     partener_nume: "X SRL", corp: cuSeparator,
   }), null);
 
-egal("  fără nume de om, nu se culege nimic",
+// Regula veche era „fără nume de om nu se culege nimic". S-a schimbat la
+// cererea lui Vali: adresa de birou rămâne contact — marcat ca rol, nu ca om —
+// pentru că ai unde trimite oferta chiar dacă nu știi cine o citește.
+egal("  fără nume de om rămâne biroul, marcat ca rol",
   c.culegeDinMesaj({
     de_la: "office@godac.ro", de_la_nume: "GODAC SRL", de_la_domeniu: "godac.ro",
     partener_nume: "GODAC SRL", corp: "Bună ziua,\n\nVă rog oferta.\n\nGODAC SRL\n0722351929",
-  }), null);
+  }),
+  { nume: "Office", email: "office@godac.ro", functie: null, telefon: "0722351929", fel: "rol" });
 
 egal("  mesaj fără semnătură: omul intră, fără telefon",
   c.culegeDinMesaj({
     de_la: "ana@acme.ro", de_la_nume: "Ana Popescu", de_la_domeniu: "acme.ro",
     partener_nume: "ACME SRL", corp: "ok, mulțumesc",
   }),
-  { nume: "Ana Popescu", email: "ana@acme.ro", functie: null, telefon: null });
+  { nume: "Ana Popescu", email: "ana@acme.ro", functie: null, telefon: null, fel: "persoana" });
 
 // --- 6. scrierea în Contacte (pe bază reală) --------------------------------
 (async () => {
@@ -216,29 +220,32 @@ mesaj("culegere-test-1", "marian.radu@godactest.ro", "Marian Radu", "godactest.r
 mesaj("culegere-test-2", "ana.popescu@acmetest.ro", "Ana Popescu", "acmetest.ro", client, cuIncheiere);
 // al doilea mesaj de la același om: nu trebuie să-l adauge iar
 mesaj("culegere-test-3", "marian.radu@godactest.ro", "Marian  Radu", "godactest.ro", furnizor, cuSeparator);
-// de la o adresă de firmă, fără om în semnătură: nu trebuie cules nimic
+// de la o adresă de birou, fără om în semnătură: intră ca rol, nu ca om
 mesaj("culegere-test-4", "office@godactest.ro", "GODAC TEST SRL", "godactest.ro", furnizor, "Vă rog confirmarea.\n\nGODAC TEST SRL");
 // de pe gmail: se sare
 mesaj("culegere-test-5", "vasile@gmail.com", "Vasile Ionescu", "gmail.com", client, cuSeparator);
 
 let r = await c.culegeSemnaturi({ zile: 3 });
-egal("  contacte noi", r.adaugati, 2);
+egal("  contacte noi", r.adaugati, 3);
 egal("  nimic completat la prima rulare", r.completati, 0);
 
 const gasite = q(`SELECT nume, functie, telefon, email, sursa, partener_id FROM mk_contacte WHERE partener_id IN (${furnizor},${client}) ORDER BY nume`);
-egal("  s-au scris exact doi oameni", gasite.length, 2);
+egal("  s-au scris doi oameni și un birou", gasite.length, 3);
 egal("  Ana, cu funcția din semnătură",
   { nume: gasite[0].nume, functie: gasite[0].functie, telefon: gasite[0].telefon, sursa: gasite[0].sursa },
   { nume: "Ana Popescu", functie: "Manager Vânzări", telefon: "0733444474", sursa: "semnatura" });
 egal("  Marian, legat de furnizorul lui",
   { nume: gasite[1].nume, functie: gasite[1].functie, partener: Number(gasite[1].partener_id) },
   { nume: "Marian Radu", functie: "Director Achiziții", partener: furnizor });
+egal("  biroul, cu adresa pe el și sursa „adresa”",
+  { nume: gasite[2].nume, email: gasite[2].email, sursa: gasite[2].sursa, partener: Number(gasite[2].partener_id) },
+  { nume: "Office", email: "office@godactest.ro", sursa: "adresa", partener: furnizor });
 
 // a doua rulare: același om nu se dublează
 r = await c.culegeSemnaturi({ zile: 3 });
 egal("  a doua rulare nu mai adaugă pe nimeni", r.adaugati, 0);
 egal("  și nici nu are ce completa", r.completati, 0);
-egal("  tot doi oameni sunt", q(`SELECT COUNT(*) AS n FROM mk_contacte WHERE partener_id IN (${furnizor},${client})`)[0].n, "2");
+egal("  tot trei contacte sunt", q(`SELECT COUNT(*) AS n FROM mk_contacte WHERE partener_id IN (${furnizor},${client})`)[0].n, "3");
 
 // --- 7. nu suprascrie ce a pus un om ---------------------------------------
 console.log("\nrespectul pentru ce a scris omul");
@@ -464,6 +471,74 @@ exec1(`DELETE FROM ach_articole WHERE id = ${art1}`);
 exec1(`DELETE FROM mk_contacte WHERE partener_id = ${furn}`);
 exec1(`DELETE FROM taskuri WHERE partener_id = ${furn}`);
 exec1(`DELETE FROM parteneri WHERE id = ${furn}`);
+
+
+// --- 17. numele scos din adresă --------------------------------------------
+// Cerința lui Vali: „în adresa de email ai de obicei compania, așa că alocă
+// mailul la acea companie, contactul la acea companie cu cel puțin adresa de
+// email". Deci nu mai renunțăm când semnătura nu dă un nume — coborâm la ce
+// scrie înainte de @.
+console.log("\nnumele din adresă");
+for (const [email, asteptat] of [
+  ["andreea.cernea@aectra.ro", { nume: "Andreea Cernea", fel: "persoana" }],
+  ["ion_popescu@firma.ro", { nume: "Ion Popescu", fel: "persoana" }],
+  ["maria-elena.radu@firma.ro", { nume: "Maria Elena Radu", fel: "persoana" }],
+  ["comercial@euroink.it", { nume: "Comercial", fel: "rol" }],
+  ["office@firma.ro", { nume: "Office", fel: "rol" }],
+  ["export2@rotapack.hu", { nume: "Export2", fel: "rol" }],
+  ["vlad@firma.ro", { nume: "Vlad", fel: "persoana" }],
+  ["a@firma.ro", null],
+  ["", null],
+]) egal(`  ${email || "(gol)"}`, c.numeDinAdresa(email), asteptat);
+
+// --- 18. mesajul fără semnătură tot dă contact -----------------------------
+console.log("\nmesaj fără semnătură");
+egal("  omul se ia din adresă",
+  c.culegeDinMesaj({
+    de_la: "andreea.cernea@aectratest.ro", de_la_nume: "AECTRA TEST SRL",
+    de_la_domeniu: "aectratest.ro", partener_nume: "AECTRA TEST SRL", corp: "Buna ziua, va trimit avizul.",
+  }),
+  { nume: "Andreea Cernea", email: "andreea.cernea@aectratest.ro", functie: null, telefon: null, fel: "persoana" });
+
+egal("  adresa de birou devine contact de rol",
+  (c.culegeDinMesaj({
+    de_la: "comercial@euroinktest.it", de_la_nume: "EUROINK TEST", de_la_domeniu: "euroinktest.it",
+    partener_nume: "EUROINK TEST SRL", corp: "ok",
+  }) || {}).fel, "rol");
+
+egal("  gmail rămâne sărit, chiar și cu adresă bună",
+  c.culegeDinMesaj({
+    de_la: "ion.popescu@gmail.com", de_la_nume: "Ion Popescu", de_la_domeniu: "gmail.com",
+    partener_nume: "X", corp: "ok",
+  }), null);
+
+// --- 19. același om, trei scrieri, un singur contact ------------------------
+console.log("\nacelași om nu se scrie de trei ori");
+exec1(`DELETE FROM mk_contacte WHERE partener_id IN (SELECT id FROM parteneri WHERE cui = 'RO-CUL-5')`);
+exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-adr-%'`);
+exec1(`DELETE FROM parteneri WHERE cui = 'RO-CUL-5'`);
+const firmaAdr = Number(q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('AECTRA ADRTEST SRL','RO-CUL-5','furnizor') RETURNING id`)[0].id);
+const acumStr = new Date().toISOString().slice(0, 19).replace("T", " ");
+for (const [gid, numeDeLa] of [
+  ["culegere-adr-1", "Andreea Cernea"],
+  ["culegere-adr-2", "CERNEA ANDREEA"],
+  ["culegere-adr-3", "AECTRA ADRTEST SRL"],
+]) {
+  q(
+    `INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, corp, directie, partener_id, activ)
+     VALUES (?,?,?,'andreea.cernea@aectraadrtest.ro',?,'aectraadrtest.ro','test','Buna ziua.','primit',?,1)`,
+    [cont, gid, acumStr, numeDeLa, firmaAdr]
+  );
+}
+const rAdr = await c.culegeSemnaturi({ zile: 2 });
+egal("  un singur contact, deși numele e scris în trei feluri",
+  Number(q(`SELECT COUNT(*) AS n FROM mk_contacte WHERE partener_id = ${firmaAdr}`)[0].n), 1);
+egal("  și are adresa pe el",
+  q(`SELECT id, email FROM mk_contacte WHERE partener_id = ${firmaAdr}`)[0].email, "andreea.cernea@aectraadrtest.ro");
+
+exec1(`DELETE FROM mk_contacte WHERE partener_id = ${firmaAdr}`);
+exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-adr-%'`);
+exec1(`DELETE FROM parteneri WHERE id = ${firmaAdr}`);
 
 // --- curățenie --------------------------------------------------------------
 exec1(`DELETE FROM mk_contacte WHERE partener_id IN (${furnizor},${client})`);

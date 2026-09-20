@@ -56,6 +56,7 @@ require("./modules/marketing").register(router);
 require("./modules/concurenta").register(router);
 require("./modules/inbox").register(router);
 require("./modules/culegere").register(router);
+require("./modules/legare").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
