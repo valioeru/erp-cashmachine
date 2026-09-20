@@ -405,7 +405,7 @@ function register(router) {
           : "<p>Nimic programat pentru azi.</p>"
       }
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "CRM — pipeline vânzări", active: "/crm", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări — pipeline", active: "/crm", body }));
   });
 
   router.get("/crm/oportunitati/noua", async (ctx) => {

@@ -135,7 +135,7 @@ function register(router) {
     const body = `
       <div class="toolbar">
         <a href="/taskuri/nou" class="btn">+ Task nou</a>
-        <a href="/crm" class="btn secondary">CRM</a>
+        <a href="/crm" class="btn secondary">Vânzări</a>
       </div>
 
       <div class="cards">

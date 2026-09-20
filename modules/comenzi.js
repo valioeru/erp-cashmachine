@@ -217,7 +217,7 @@ function register(router) {
         ])
       )}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări & CRM — comenzi", active: "/comenzi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări — comenzi", active: "/comenzi", body }));
   });
 
   router.get("/comenzi/nou", async (ctx) => {

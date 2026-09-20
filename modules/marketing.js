@@ -225,6 +225,37 @@ function porneste() {
   setInterval(bate, 30 * 60 * 1000).unref();
 }
 
+// ---- ce e om și ce e firmă --------------------------------------------------
+// La prima adunare au intrat 139 de „contacte", din care vreo 60 nu erau
+// oameni: pe multe fișe de partener și în multe leaduri, în locul persoanei de
+// contact e scris tot numele firmei („DPD", „Evomag", „ALSA IMED SRL"), iar pe
+// altele e trecut direct un număr de telefon. Unui asemenea contact nu-i poți
+// scrie „La mulți ani, ALSA IMED SRL", deci nu are ce căuta în listă.
+//
+// Regula e conservatoare intenționat: se aruncă doar ce e sigur că nu e om.
+// Un nume scurt și ciudat, dar care nu seamănă cu firma, rămâne — mai bine un
+// contact în plus de verificat decât un om pierdut.
+const normNume = (x) => String(x || "").trim().toLowerCase().replace(/[.,]/g, "").replace(/\s+/g, " ");
+// „SRL", „S.R.L.", „SA", „PFA", „d.o.o.", „GmbH" — sufixe de formă juridică.
+const SUFIX_FIRMA = /\b(s\s?r\s?l|srl|s\.?r\.?l\.?|s\.?a\.?|sa|pfa|ii|inc|ltd|llc|gmbh|bv|nv|ag|spa|d\.?o\.?o\.?)\s*$/i;
+function pareFirma(nume, firma) {
+  const n = normNume(nume);
+  if (!n) return true;
+  // doar cifre, puncte, spații, paranteze, plus: e un telefon scris în loc de nume
+  if (/^[\d\s+().\-\/]+$/.test(n)) return true;
+  const f = normNume(firma);
+  if (f && n === f) return true;
+  // „ALTEXPRESS COURIER & E-FULFILLMENT SERVICES S.R.L." vs „… SRL": aceeași
+  // firmă scrisă în două feluri. Se compară după ce se scot punctele și
+  // spațiile de tot.
+  const strans = (x) => x.replace(/[^a-z0-9ăâîșț]/gi, "");
+  if (f && strans(n) === strans(f)) return true;
+  if (SUFIX_FIRMA.test(n)) return true;
+  // un domeniu web scris în loc de nume: „vindem-ieftin.ro", „materiale.online"
+  if (/\.(ro|com|eu|net|org|online|shop|info|biz)\b/i.test(n)) return true;
+  return false;
+}
+
 // ---- adunarea contactelor din restul ERP-ului ------------------------------
 // Sursele reale de oameni din bază: persoana de contact scrisă pe partener și
 // leadurile. Facturile n-au persoană, au firmă — de-aia firma apare ca activă,
@@ -252,6 +283,7 @@ async function adunaContacte(utilizatorId) {
   for (const p of dinParteneri) {
     const nume = String(p.persoana_contact || "").trim();
     if (!nume) continue;
+    if (pareFirma(nume, p.firma)) continue;
     if (existente.has(cheie(p.id, null, nume))) continue;
     existente.add(cheie(p.id, null, nume));
     await db
@@ -269,6 +301,7 @@ async function adunaContacte(utilizatorId) {
   for (const l of dinLeaduri) {
     const nume = String(l.nume || "").trim();
     if (!nume) continue;
+    if (pareFirma(nume, l.companie)) continue;
     const k = cheie(l.partener_id ? Number(l.partener_id) : null, l.companie, nume);
     if (existente.has(k)) continue;
     existente.add(k);
@@ -844,4 +877,8 @@ module.exports = {
   mesajAniversare,
   subiectAniversare,
   ziLuna,
+  // Folosite de culegerea din emailuri: aceeași regulă de „om sau firmă" în
+  // ambele locuri, ca să nu se contrazică butonul cu serviciul de noapte.
+  pareFirma,
+  normNume,
 };

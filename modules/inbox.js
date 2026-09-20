@@ -334,6 +334,7 @@ function subnav(activ) {
     ["/email", "Inbox"],
     ["/email/atasamente", "Atașamente"],
     ["/email/conturi", "Căsuțe"],
+    ["/email/culegere", "Culegere"],
     ["/configurari/email-google", "Conexiunea Google"],
   ];
   return `<div class="subnav">${linkuri
