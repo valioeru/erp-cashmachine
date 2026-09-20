@@ -19,6 +19,7 @@ const db = require("../lib/db");
 const google = require("../lib/google");
 const gmail = require("../lib/gmail");
 const drive = require("../lib/drive");
+const firme = require("../lib/firme");
 const { esc, layout, table, dataRo, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -172,25 +173,41 @@ async function salveazaAtasamente(cont, mesajId, m, partenerId) {
 // Lista se ține în memorie cât ține o sincronizare: la o mie de mesaje ar fi
 // însemnat o mie de interogări pentru același răspuns. Se reîmprospătează la
 // fiecare rulare, deci un expeditor blocat acum nu mai intră la următoarea.
-// Domeniile firmei. Se deduc din căsuțele conectate, nu se scriu într-o
-// constantă: când intră warehouseall.ro ca a doua firmă, adăugarea căsuței e
-// tot ce trebuie făcut, iar tot ce depinde de „e al nostru?" se ia după ea.
-// Adresa pusă pe cașetă e adevărul; o listă scrisă de mână ar rămâne în urmă.
-async function domeniileNoastre() {
-  const r = await db.prepare("SELECT DISTINCT lower(adresa) AS adresa FROM email_conturi").all().catch(() => []);
-  const s = new Set(["cashmachine.ro"]);
-  for (const x of r) {
-    const d = String(x.adresa || "").split("@")[1];
-    if (d) s.add(d.toLowerCase());
-  }
-  return s;
-}
-async function eAlNostru(domeniu) {
-  const d = String(domeniu || "").toLowerCase();
-  if (!d) return false;
-  const ale = await domeniileNoastre();
-  for (const x of ale) if (d === x || d.endsWith("." + x)) return true;
-  return false;
+// Domeniile firmei stau într-un singur loc, lib/firme.js: le folosesc și
+// legarea pe domenii, și blocarea, și alegerea adresei de trimitere.
+const domeniileNoastre = () => firme.domenii();
+const eAlNostru = (d) => firme.eAlNostru(d);
+
+// ---- de pe ce adresă are voie omul să trimită ------------------------------
+//
+// Cererea lui Vali: „agenții pot avea email la fel ca pe cash și pe
+// warehouseall.ro […] când trimitem alegem de pe ce adresă să trimitem".
+//
+// Regula e aceeași cu cea de la citit, și dinadins aceeași: îți vezi căsuța
+// ta și pe cele comune, adminul le vede pe toate. Dacă ar fi două reguli,
+// una pentru citit și alta pentru trimis, s-ar despărți la prima modificare
+// și cineva ar ajunge să trimită dintr-o căsuță pe care nici n-o vede.
+async function adreseDeTrimitere(user) {
+  if (!user) return [];
+  const conturi = await db
+    .prepare("SELECT adresa, tip, utilizator_id, eticheta FROM email_conturi WHERE activ = 1 ORDER BY tip, adresa")
+    .all()
+    .catch(() => []);
+  const aleLui = conturi.filter(
+    (c) => user.rol === "admin" || c.tip === "comun" || Number(c.utilizator_id) === Number(user.id)
+  );
+  const out = [];
+  const vazute = new Set();
+  const pune = (adresa, nota) => {
+    const a = String(adresa || "").trim().toLowerCase();
+    if (!a || !a.includes("@") || vazute.has(a)) return;
+    vazute.add(a);
+    out.push({ adresa: a, firma: firme.eticheta(firme.domeniulDin(a)), nota: nota || "" });
+  };
+  // Adresa lui proprie e prima: aia e implicit expeditorul, ca până acum.
+  pune(user.email_expeditor || user.email, "adresa ta");
+  for (const c of aleLui) pune(c.adresa, c.tip === "comun" ? "căsuță comună" : c.eticheta || "");
+  return out;
 }
 
 let blocateCache = null;
@@ -1248,6 +1265,7 @@ module.exports = {
   listaBlocate,
   uitaBlocate,
   domeniileNoastre,
+  adreseDeTrimitere,
   eAlNostru,
   MAX_CORP,
 };

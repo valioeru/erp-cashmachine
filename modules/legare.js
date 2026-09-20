@@ -38,7 +38,11 @@ const DOMENII_PUBLICE = new Set([
   "protonmail.com", "proton.me", "aol.com", "gmx.com", "gmx.net", "mail.ru", "yandex.ru",
 ]);
 
-const DOMENIUL_NOSTRU = "cashmachine.ro";
+// Domeniile firmei nu mai sunt o constantă: agenții au adrese și pe
+// warehouseall.ro, iar un domeniu de-al nostru nelistat ar fi fost propus
+// drept firmă — adică fiecare mesaj între colegi ar fi ajuns în istoricul
+// unui client. Se deduc din căsuțele conectate (vezi lib/firme.js).
+const firme = require("../lib/firme");
 
 const acum = () => new Date().toISOString().slice(0, 19).replace("T", " ");
 
@@ -53,7 +57,11 @@ function eFolositor(domeniu) {
   const d = String(domeniu || "").toLowerCase();
   if (!d || !d.includes(".")) return false;
   if (DOMENII_PUBLICE.has(d)) return false;
-  if (d === DOMENIUL_NOSTRU || d.endsWith("." + DOMENIUL_NOSTRU)) return false;
+  // Sincron dinadins: funcția asta se cheamă în bucle, pe mii de rânduri.
+  // Lista se împrospătează o dată pe rulare (hartaDomenii / sugestii o cer
+  // înainte), iar până atunci rămâne domeniul implicit — adică niciodată
+  // mai permisiv decât înainte.
+  if (firme.eAlNostruAcum(d)) return false;
   return true;
 }
 
@@ -90,6 +98,9 @@ function numeStrans(nume) {
 // Domeniile pe care le știm sigur: învățate din clicuri, plus cele din fișele
 // partenerilor. Un domeniu revendicat de două firme nu se leagă de niciuna.
 async function hartaDomenii() {
+  // Domeniile firmei se cer aici, o dată, și rămân în memorie pentru toate
+  // apelurile sincrone de eFolositor() care urmează.
+  await firme.domenii();
   const harta = new Map();
   const ambigue = new Set();
 
@@ -181,6 +192,9 @@ async function releagaTot() {
 // Ce partener are domeniul ăsta, dacă știm. Folosit la legarea unui mesaj nou.
 async function dinDomeniu(domeniu) {
   const d = String(domeniu || "").toLowerCase();
+  // Se cheamă pe fiecare mesaj adus, deci e primul loc unde un domeniu de-al
+  // nostru nelistat ar face rău: mesajul unui coleg legat de un client.
+  await firme.domenii();
   if (!eFolositor(d)) return null;
   const r = await db
     .prepare("SELECT partener_id FROM email_domenii WHERE lower(domeniu) = lower(?) LIMIT 1")

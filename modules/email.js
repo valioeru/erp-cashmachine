@@ -168,6 +168,9 @@ function register(router) {
     }
 
     const semnatura = u.email_semnatura ? `\n\n${u.email_semnatura}` : "";
+    // Adresele de pe care are voie să trimită. Când e una singură, nu se
+    // arată nicio listă — nu punem un buton unde nu e nimic de ales.
+    const expeditori = await require("./inbox").adreseDeTrimitere(u);
 
     // Șabloane de email precompletate (deocamdată: urarea de zi de naștere,
     // folosită din Biroul agentului).
@@ -187,7 +190,25 @@ function register(router) {
         <input type="hidden" name="partener_id" value="${partenerId || ""}">
         <input type="hidden" name="lead_id" value="${leadId || ""}">
         <input type="hidden" name="oportunitate_id" value="${oportunitateId || ""}">
-        <p style="font-size:13px;color:var(--text-muted);margin:0">De la: <strong>${esc(config.expeditor)}</strong> · <a href="/profil/email">schimbă</a></p>
+        ${
+          expeditori.length > 1
+            ? `<label class="field">De pe ce adresă trimitem
+                 <select name="de_la">
+                   ${expeditori
+                     .map(
+                       (x) =>
+                         `<option value="${esc(x.adresa)}"${x.adresa === String(config.expeditor || "").toLowerCase() ? " selected" : ""}>${esc(
+                           x.adresa
+                         )}${x.firma ? ` — ${esc(x.firma)}` : ""}${x.nota ? ` (${esc(x.nota)})` : ""}</option>`
+                     )
+                     .join("")}
+                 </select>
+               </label>
+               <p style="font-size:12px;color:var(--text-muted);margin:-6px 0 0">
+                 Ai adrese pe mai multe firme. Alege de pe care pleacă mesajul — clientul vede exact adresa asta.
+               </p>`
+            : `<p style="font-size:13px;color:var(--text-muted);margin:0">De la: <strong>${esc(config.expeditor)}</strong> · <a href="/profil/email">schimbă</a></p>`
+        }
         <label class="field">Către<input name="catre" required value="${esc(destinatar)}" placeholder="client@exemplu.ro"></label>
         <label class="field">Cc (opțional)<input name="cc" placeholder="coleg@cashmachine.ro"></label>
         <label class="field">Subiect<input name="subiect" required value="${esc(subiectPrecompletat)}"></label>
@@ -218,7 +239,14 @@ function register(router) {
     let eroare = null;
     try {
       if (!catre.length) throw new Error("Adresa destinatarului nu e validă.");
-      await mail.trimiteDeLa(u, { catre, cc, subiect, corp });
+      // Adresa aleasă se verifică pe server, nu se crede pe cuvânt: altcineva
+      // ar putea trimite un formular cu orice expeditor în el, iar un mesaj
+      // plecat „de la" o căsuță străină nu se mai poate lua înapoi.
+      const permise = await require("./inbox").adreseDeTrimitere(u);
+      const cerut = String(b.de_la || "").trim().toLowerCase();
+      const deLa = permise.find((x) => x.adresa === cerut) ? cerut : null;
+      if (cerut && !deLa) throw new Error("Nu ai voie să trimiți de pe adresa " + cerut + ".");
+      await mail.trimiteDeLa(u, { catre, cc, subiect, corp, deLa });
     } catch (e) {
       status = "esuat";
       eroare = e.message;
