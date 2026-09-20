@@ -12,6 +12,8 @@ const db = require("../lib/db");
 const { esc, layout, table, money, subnavCrm } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
+const concurenta = require("./concurenta");
+const inbox = require("./inbox");
 
 const STATUS = {
   ciorna: "Ciornă",
@@ -166,6 +168,19 @@ function register(router) {
     const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva, unitate_masura FROM produse ORDER BY denumire LIMIT 2000").all();
     const editabil = poateEdita(ctx.user, o) && ["ciorna", "trimisa"].includes(o.status);
 
+    // Blocul de piață: cu ce prețuri ne bate concurența la clientul ăsta.
+    // Îl umplu cu liniile ofertei ca referință, ca diferența să se vadă pe loc,
+    // nu după ce omul deschide alt raport și caută produsul cu mâna.
+    const emailuri = await inbox.blocEmailuri({ user: ctx.user, ofertaId: o.id });
+    const bi = await concurenta.blocBI({
+      user: ctx.user,
+      directie: "vanzare",
+      ofertaId: o.id,
+      partenerId: o.partener_id,
+      inapoi: `/oferte/${o.id}`,
+      referinte: linii.map((l) => ({ produs_id: l.produs_id, denumire: l.denumire, pret: l.pret_unitar, moneda: "RON" })),
+    });
+
     const body = `
       ${subnavCrm("/oferte", ctx.user)}
       ${ctx.query.eroare ? `<p style="color:var(--danger);max-width:640px">${esc(ctx.query.eroare)}</p>` : ""}
@@ -259,6 +274,10 @@ function register(router) {
         dintre ele, oricând. La „versiune nouă", oferta asta rămâne ca istoric și se deschide una
         nouă, cu aceleași linii, pe care o modifici.
       </p>
+
+      ${bi}
+
+      ${emailuri}
 
       ${
         versiuni.length > 1

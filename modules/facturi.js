@@ -2,6 +2,7 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, actionLinks } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const inbox = require("./inbox");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const smartbill = require("../lib/smartbill");
 
@@ -513,7 +514,8 @@ function register(router) {
         </form>
       </div>
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${factura.serie}-${factura.numar ?? factura.id}`, active: eVanzare ? "/facturi" : "/facturi/achizitii", body }));
+    const emailuri = await inbox.blocEmailuri({ user: ctx.user, facturaId: factura.id });
+    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${factura.serie}-${factura.numar ?? factura.id}`, active: eVanzare ? "/facturi" : "/facturi/achizitii", body: body + emailuri }));
   });
 
   router.post("/facturi/:id/plata", async (ctx) => {

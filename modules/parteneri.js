@@ -5,6 +5,7 @@ const alocari = require("./alocari");
 const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const inbox = require("./inbox");
 const tsk = require("./taskuri");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
@@ -346,7 +347,10 @@ function register(router) {
         ])
       )}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: `Partener: ${partener.nume}`, active: "/parteneri", body }));
+    // Emailurile schimbate cu partenerul, aduse din Gmail. Blocul se intoarce
+    // gol daca nu e nimic sau daca omul n-are drept la casuta din care vin.
+    const emailuri = await inbox.blocEmailuri({ user: ctx.user, partenerId: partener.id });
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Partener: ${partener.nume}`, active: "/parteneri", body: body + emailuri }));
   });
 
   router.post("/parteneri/:id/interactiuni", async (ctx) => {

@@ -21,6 +21,7 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, actionLinks } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const concurenta = require("./concurenta");
 
 const nr = (v) => Number(v || 0);
 const azi = () => new Date().toISOString().slice(0, 10);
@@ -247,6 +248,7 @@ function register(router) {
       <div class="toolbar">
         <a href="/procurement/nou" class="btn">+ Ofertă nouă</a>
         <a href="/procurement/articole" class="btn secondary">Articole & categorii</a>
+        <a href="/procurement/concurenta" class="btn secondary">Prețurile concurenței</a>
       </div>
 
       <form class="filtre" method="get" action="/procurement">
@@ -322,6 +324,19 @@ function register(router) {
     const valabile = oferte.filter((o) => !o.valabil_pana || String(o.valabil_pana).slice(0, 10) >= aziStr);
     const cuLei = valabile.map((o) => ({ ...o, lei: inLei(o.pret, o.moneda, c) })).filter((o) => o.lei > 0);
     const ceaMaiBuna = cuLei.length ? cuLei.reduce((m, o) => (o.lei < m.lei ? o : m)) : null;
+
+    // Blocul de piață: ce prețuri iau ALȚII pe același articol. Referința față
+    // de care se compară e cea mai bună ofertă valabilă a noastră — dacă altul
+    // cumpără sub ea, se vede pe loc, pe pagina articolului.
+    const bi = await concurenta.blocBI({
+      user: ctx.user,
+      directie: "achizitie",
+      achArticolId: id,
+      inapoi: `/procurement/articol/${id}`,
+      referinte: ceaMaiBuna
+        ? [{ produs_id: a.produs_id, denumire: a.nume, pret: ceaMaiBuna.pret, moneda: ceaMaiBuna.moneda }]
+        : [{ produs_id: a.produs_id, denumire: a.nume, pret: 0, moneda: "EUR" }],
+    });
 
     // Ultimul preț al fiecărui furnizor, ca să vezi dintr-o privire cine unde e.
     const peFurnizor = new Map();
@@ -457,6 +472,7 @@ function register(router) {
         ])
       )}
       ${oferte.some((o) => o.observatii) ? `<h2>Note</h2><ul>${oferte.filter((o) => o.observatii).map((o) => `<li><strong>${esc(String(o.data_ofertei).slice(0, 10))}</strong> ${esc(o.furnizor_nume || o.furnizor_text || "")}: ${esc(o.observatii)}</li>`).join("")}</ul>` : ""}
+      ${bi}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: a.nume, active: "/procurement", body }));
   });
