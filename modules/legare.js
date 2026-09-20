@@ -263,9 +263,19 @@ function register(router) {
     const faraPropunere = props.filter((p) => !p.propus);
 
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri ORDER BY nume LIMIT 5000").all().catch(() => []);
-    const optiuni = (ales) =>
+
+    // Lista de firme se trimite O SINGURĂ DATĂ, ca date, și se toarnă în
+    // select abia când omul dă clic pe el.
+    //
+    // De ce: prima variantă scria toate cele ~1.500 de firme în fiecare din
+    // cele 120 de rânduri. Pagina ieșea de 2,7 MB, se încărca în zeci de
+    // secunde, iar butonul „Leagă tot" de sus nu se mai putea apăsa —
+    // funcția exista, dar nimeni n-ajungea la ea. Un buton pe care nu poți
+    // apăsa e ca și cum n-ar fi scris.
+    const firmeJson = JSON.stringify(parteneri.map((p) => [Number(p.id), String(p.nume)]));
+    const selectGol = (ales) =>
       `<option value="">— alege firma —</option>` +
-      parteneri.map((p) => `<option value="${p.id}"${Number(p.id) === Number(ales) ? " selected" : ""}>${esc(p.nume)}</option>`).join("");
+      (ales ? `<option value="${Number(ales)}" selected>${esc((parteneri.find((p) => Number(p.id) === Number(ales)) || {}).nume || "")}</option>` : "");
 
     const nLegate = Number(total.n || 0) - Number(fara.n || 0);
     const procent = Number(total.n) ? Math.round((nLegate / Number(total.n)) * 100) : 0;
@@ -339,13 +349,41 @@ function register(router) {
                 esc(String(d.ultimul || "").slice(0, 10)),
                 `<form method="post" action="/email/domenii/confirma" class="inline-form" style="gap:6px">
                    <input type="hidden" name="domeniu" value="${esc(d.domeniu)}">
-                   <select name="partener_id" style="max-width:240px">${optiuni(null)}</select>
+                   <select name="partener_id" class="alege-firma" style="max-width:240px">${selectGol(null)}</select>
                    <button class="btn small secondary" type="submit">Leagă</button>
                  </form>`,
               ])
             )
           : "<p>Niciunul.</p>"
-      }`;
+      }
+
+      <script>
+        // Firmele, o dată. Fiecare select se umple la primul clic pe el.
+        (function () {
+          var FIRME = ${firmeJson};
+          function umple(sel) {
+            if (sel.dataset.pline) return;
+            sel.dataset.pline = "1";
+            var ales = sel.value;
+            var buc = ['<option value="">— alege firma —</option>'];
+            for (var i = 0; i < FIRME.length; i++) {
+              buc.push('<option value="' + FIRME[i][0] + '">' +
+                String(FIRME[i][1]).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</option>");
+            }
+            sel.innerHTML = buc.join("");
+            if (ales) sel.value = ales;
+          }
+          document.addEventListener("mousedown", function (e) {
+            var s = e.target.closest ? e.target.closest("select.alege-firma") : null;
+            if (s) umple(s);
+          }, true);
+          document.addEventListener("focusin", function (e) {
+            if (e.target && e.target.classList && e.target.classList.contains("alege-firma")) umple(e.target);
+          });
+          // Dacă cineva trimite formularul fără să fi deschis lista, selectul
+          // e gol și n-are ce trimite — nu se pierde nimic, doar nu se leagă.
+        })();
+      </script>`;
 
     send(ctx.res, 200, layout({ user: ctx.user, title: "Domeniile care leagă emailurile de firme", active: "/email", body }));
   });

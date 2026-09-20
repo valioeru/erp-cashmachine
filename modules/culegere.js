@@ -598,53 +598,111 @@ async function culegeOferte({ zile } = {}) {
     return Object.assign(rezumat, { eroare: String(e.message || e).slice(0, 200) });
   }
 
-  for (const m of mesaje) {
-    rezumat.citite++;
-    try {
-      const furnizor = ["furnizor", "ambele"].includes(String(m.tip || ""));
-      if (!pareOferta(m, { furnizor })) continue;
-      rezumat.oferte++;
+  for (const m of mesaje) await unMesajDeOferta(m, articole, rezumat);
+  return rezumat;
+}
 
-      const dataOfertei = String(m.data || "").slice(0, 10) || azi();
-      const furnizorText = m.partener_id ? null : String(m.de_la_nume || m.de_la_domeniu || m.de_la || "").slice(0, 120);
+// Munca pe un singur mesaj, scoasă deoparte: o folosesc și rularea de noapte,
+// care se uită la ultimele zile, și scotocirea prin tot istoricul. Dacă ar fi
+// scrisă de două ori, cele două s-ar depărta la prima schimbare și ai avea
+// prețuri culese altfel din mailul de ieri decât din cel de acum doi ani.
+async function unMesajDeOferta(m, articole, rezumat) {
+  rezumat.citite++;
+  try {
+    const furnizor = ["furnizor", "ambele"].includes(String(m.tip || ""));
+    if (!pareOferta(m, { furnizor })) return;
+    rezumat.oferte++;
 
-      for (const g of preturiDinText(m.corp)) {
-        const { articol, cum } = potrivesteArticol(g.textProdus, articole);
-        let achId = null;
-        let stare = "de_confirmat";
+    const dataOfertei = String(m.data || "").slice(0, 10) || azi();
+    const furnizorText = m.partener_id ? null : String(m.de_la_nume || m.de_la_domeniu || m.de_la || "").slice(0, 120);
 
-        // Doar potrivirea exactă intră singură. Restul așteaptă un om.
-        if (articol && cum === "exact") {
-          const r = await db
-            .prepare(
-              `INSERT INTO ach_oferte (articol_id, furnizor_id, furnizor_text, pret, moneda, um, data_ofertei,
-                                        sursa, email_id, email_subiect, email_de_la, observatii)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'email', ?, ?, ?, ?) RETURNING id`
-            )
-            .run(
-              articol.id, m.partener_id, furnizorText, g.pret, g.moneda, g.um || articol.um || null, dataOfertei,
-              String(m.id), scurt(m.subiect, 160), String(m.de_la || ""),
-              `Citit automat din rândul: „${scurt(g.linie, 160)}"`
-            );
-          achId = r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
-          if (achId) { stare = "pus"; rezumat.puse++; }
-        }
-        if (stare !== "pus") rezumat.de_confirmat++;
+    for (const g of preturiDinText(m.corp)) {
+      const { articol, cum } = potrivesteArticol(g.textProdus, articole);
+      let achId = null;
+      let stare = "de_confirmat";
 
-        await db
+      // Doar potrivirea exactă intră singură. Restul așteaptă un om.
+      if (articol && cum === "exact") {
+        const r = await db
           .prepare(
-            `INSERT INTO email_oferte (mesaj_id, partener_id, furnizor_text, linie, text_produs, articol_id,
-                                        pret, moneda, um, data_ofertei, stare, ach_oferta_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+            `INSERT INTO ach_oferte (articol_id, furnizor_id, furnizor_text, pret, moneda, um, data_ofertei,
+                                      sursa, email_id, email_subiect, email_de_la, observatii)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'email', ?, ?, ?, ?) RETURNING id`
           )
-          .run(m.id, m.partener_id, furnizorText, g.linie, g.textProdus, articol ? articol.id : null,
-               g.pret, g.moneda, g.um, dataOfertei, stare, achId);
+          .run(
+            articol.id, m.partener_id, furnizorText, g.pret, g.moneda, g.um || articol.um || null, dataOfertei,
+            String(m.id), scurt(m.subiect, 160), String(m.de_la || ""),
+            `Citit automat din rândul: „${scurt(g.linie, 160)}"`
+          );
+        achId = r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
+        if (achId) { stare = "pus"; rezumat.puse++; }
       }
+      if (stare !== "pus") rezumat.de_confirmat++;
 
-      await db.prepare("UPDATE email_mesaje SET fel = 'oferta' WHERE id = ?").run(m.id);
-    } catch (e) {
-      rezumat.erori++;
+      await db
+        .prepare(
+          `INSERT INTO email_oferte (mesaj_id, partener_id, furnizor_text, linie, text_produs, articol_id,
+                                      pret, moneda, um, data_ofertei, stare, ach_oferta_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+        )
+        .run(m.id, m.partener_id, furnizorText, g.linie, g.textProdus, articol ? articol.id : null,
+             g.pret, g.moneda, g.um, dataOfertei, stare, achId);
     }
+
+    await db.prepare("UPDATE email_mesaje SET fel = 'oferta' WHERE id = ?").run(m.id);
+  } catch (e) {
+    rezumat.erori++;
+  }
+}
+
+// ---- scotocirea prin tot istoricul -----------------------------------------
+//
+// Rularea de noapte se uită la ultimele zile — bună pentru ce vine de acum
+// încolo, inutilă pentru cei doi ani de emailuri deja în bază. Cererea lui
+// Vali: ofertele de la furnizori din emailuri să intre în Procurement, nu doar
+// cele noi.
+//
+// De ce nu merge pur și simplu `culegeOferte({ zile: 4000 })`: acolo lista se
+// ia cu LIMIT 300 ordonată după dată, iar un mesaj care NU e ofertă rămâne în
+// continuare candidat. A doua rulare ar citi din nou exact aceleași 300 de
+// mesaje vechi și n-ar înainta niciodată. Aici se merge pe id, cu cursor: ce a
+// trecut o dată nu se mai întoarce.
+let scotoceste = false;
+async function culegeOferteIstoric({ lot, plafon } = {}) {
+  if (scotoceste) return { ruleaza_deja: true };
+  scotoceste = true;
+  const rezumat = { citite: 0, oferte: 0, puse: 0, de_confirmat: 0, erori: 0, loturi: 0 };
+  try {
+    const articole = await db.prepare("SELECT id, nume, um FROM ach_articole WHERE activ = 1 ORDER BY id").all();
+    // Lotul se poate cere mic (testul cere doi), ca să se verifice chiar
+    // înaintarea cursorului de la un lot la altul — altfel totul ar încăpea
+    // într-un singur lot și capcana n-ar fi păzită de nimic.
+    const L = Math.max(1, Math.min(500, Number(lot) || 200));
+    const MAX = Math.max(L, Number(plafon) || 20000);
+    let dupaId = 0;
+    while (rezumat.citite < MAX) {
+      const mesaje = await db
+        .prepare(
+          `SELECT m.id, m.de_la, m.de_la_nume, m.de_la_domeniu, m.subiect, m.corp, m.data,
+                  m.partener_id, p.nume AS partener_nume, lower(COALESCE(p.tip,'')) AS tip
+             FROM email_mesaje m
+             LEFT JOIN parteneri p ON p.id = m.partener_id
+            WHERE m.activ = 1 AND m.directie = 'primit' AND m.id > ?
+              AND NOT EXISTS (SELECT 1 FROM email_oferte o WHERE o.mesaj_id = m.id)
+            ORDER BY m.id
+            LIMIT ${L}`
+        )
+        .all(dupaId);
+      if (!mesaje.length) break;
+      rezumat.loturi++;
+      dupaId = Number(mesaje[mesaje.length - 1].id);
+      for (const m of mesaje) await unMesajDeOferta(m, articole, rezumat);
+    }
+    rezumat.terminat = rezumat.citite < MAX;
+  } catch (e) {
+    rezumat.eroare = String(e.message || e).slice(0, 200);
+  } finally {
+    scotoceste = false;
   }
   return rezumat;
 }
@@ -970,12 +1028,43 @@ function register(router) {
           .join("")}`;
     });
 
+    // Rezultatul scotocirii prin istoric, întors prin adresă ca să se vadă
+    // după redirect. Numerele sunt ale rulării, nu totaluri.
+    const dupaIstoric = ctx.query.istoric
+      ? {
+          citite: Number(ctx.query.citite || 0),
+          oferte: Number(ctx.query.oferte || 0),
+          puse: Number(ctx.query.puse || 0),
+          de_confirmat: Number(ctx.query.de_confirmat || 0),
+        }
+      : null;
+
     const body = `
       <p style="color:var(--text-muted);font-size:13px;max-width:860px">
         Prețurile citite din emailurile de la furnizori. Cele care s-au potrivit <strong>exact</strong> pe un articol
         de achiziție au intrat deja în oferte. Restul așteaptă aici: alegi articolul, verifici prețul, apeși.
         Majoritatea ofertelor vin ca PDF sau Excel — alea sunt în Drive, la un clic pe subiectul mesajului.
       </p>
+
+      ${
+        dupaIstoric
+          ? `<div class="card" style="border-left:4px solid var(--ok,#1e7a45);margin-bottom:12px;max-width:860px">
+               Am citit <strong>${dupaIstoric.citite.toLocaleString("ro-RO")}</strong> emailuri din istoric:
+               <strong>${dupaIstoric.oferte}</strong> erau oferte de la furnizori,
+               <strong>${dupaIstoric.puse}</strong> prețuri au intrat direct în oferte (potrivire exactă pe articol),
+               <strong>${dupaIstoric.de_confirmat}</strong> așteaptă mai jos să le alegi articolul.
+             </div>`
+          : ""
+      }
+
+      <form method="post" action="/procurement/din-email/istoric" class="inline-form" style="margin-bottom:12px"
+            onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Caut… poate dura un minut';">
+        <button class="btn secondary" type="submit">Caută ofertele în tot istoricul de emailuri</button>
+        <span style="font-size:12px;color:var(--text-muted)">
+          Rularea de noapte se uită doar la ultimele zile. Asta trece o dată prin toate emailurile primite,
+          inclusiv cele vechi. Nu citește de două ori același mesaj și nu strică nimic din ce e deja aici.
+        </span>
+      </form>
 
       <div class="filtre" style="margin-bottom:10px">
         <a href="/procurement/din-email?stare=de_confirmat" class="chip${stare === "de_confirmat" ? " activ" : ""}">De confirmat (${cate("de_confirmat")})</a>
@@ -986,6 +1075,20 @@ function register(router) {
       ${blocuri.length ? blocuri.join("") : "<p>Nimic aici.</p>"}`;
 
     send(ctx.res, 200, layout({ user: ctx.user, title: "Oferte citite din emailuri", active: "/procurement", body }));
+  });
+
+  router.post("/procurement/din-email/istoric", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const r = await culegeOferteIstoric({});
+    if (r.ruleaza_deja) return redirect(ctx.res, "/procurement/din-email?ruleaza=1");
+    const p = new URLSearchParams({
+      istoric: "1",
+      citite: String(r.citite || 0),
+      oferte: String(r.oferte || 0),
+      puse: String(r.puse || 0),
+      de_confirmat: String(r.de_confirmat || 0),
+    });
+    redirect(ctx.res, "/procurement/din-email?" + p.toString());
   });
 
   router.post("/procurement/din-email/:id/confirma", async (ctx) => {
@@ -1041,6 +1144,7 @@ module.exports = {
   culegeSemnaturi,
   clasificaMesaje,
   culegeOferte,
+  culegeOferteIstoric,
   pareOferta,
   preturiDinText,
   potrivesteArticol,

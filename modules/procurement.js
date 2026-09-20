@@ -202,6 +202,15 @@ function register(router) {
     const categorii = await db.prepare("SELECT * FROM ach_categorii WHERE activ = 1 ORDER BY ordine, nume").all();
     const piata = await referintePiata();
 
+    // Cât așteaptă în ofertele citite din emailuri. Cifra stă pe butonul din
+    // bara de sus: altfel pagina aia rămâne o ușă închisă, pe care nimeni n-are
+    // motiv s-o deschidă, iar prețurile culese din mailuri stau acolo degeaba.
+    const dinEmail = await db
+      .prepare("SELECT COUNT(*) AS n FROM email_oferte WHERE stare = 'de_confirmat'")
+      .get()
+      .catch(() => ({ n: 0 }));
+    const nDinEmail = Number((dinEmail && dinEmail.n) || 0);
+
     // Gruparea pe categorii. În fiecare, ofertele stau deja în ordinea
     // descrescătoare a datei — cererea lui Vali: „sus … ofertele mai recente".
     const peCategorie = new Map();
@@ -249,7 +258,9 @@ function register(router) {
         <a href="/procurement/nou" class="btn">+ Ofertă nouă</a>
         <a href="/procurement/articole" class="btn secondary">Articole & categorii</a>
         <a href="/procurement/concurenta" class="btn secondary">Prețurile concurenței</a>
-        <a href="/procurement/din-email" class="btn secondary">Din emailuri</a>
+        <a href="/procurement/din-email" class="btn secondary">Oferte din emailuri${
+          nDinEmail ? ` <span class="badge rosu">${nDinEmail}</span>` : ""
+        }</a>
       </div>
 
       <form class="filtre" method="get" action="/procurement">
