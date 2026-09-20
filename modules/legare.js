@@ -229,7 +229,14 @@ async function sugestii({ minim } = {}) {
       continue;
     }
     let cel = null;
+    // Câte firme se potrivesc EXACT pe miezul domeniului. Contează, pentru că
+    // la egalitate bucla de mai jos o ține pe prima găsită și tace: la „aquila"
+    // sunt șapte fișe Aquila în bază, iar o alegere făcută pe tăcute între ele
+    // e mai rea decât niciuna. Când sunt mai multe, propunerea nu se aplică în
+    // masă — rămâne de ales de un om.
+    let egali = 0;
     for (const p of cuNume) {
+      if (p.strans === n) egali++;
       if (!p.strans.includes(n) && !n.includes(p.strans)) continue;
       // Cu cât potrivirea acoperă mai mult din numele firmei, cu atât e mai bună.
       const scor = Math.min(n.length, p.strans.length) / Math.max(n.length, p.strans.length);
@@ -240,6 +247,8 @@ async function sugestii({ minim } = {}) {
       nucleu: n,
       propus: cel ? cel.partener : null,
       scor: cel ? Math.round(cel.scor * 100) : 0,
+      egali,
+      sigur: !!cel && cel.scor === 1 && egali === 1,
       motiv: cel ? "" : "nicio firmă cu nume asemănător",
     });
   }
@@ -261,6 +270,8 @@ function register(router) {
     const props = await sugestii({ minim: 1 });
     const cuPropunere = props.filter((p) => p.propus);
     const faraPropunere = props.filter((p) => !p.propus);
+    const sigure = cuPropunere.filter((p) => p.sigur);
+    const mesajeSigure = sigure.reduce((s, p) => s + Number(p.mesaje || 0), 0);
 
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri ORDER BY nume LIMIT 5000").all().catch(() => []);
 
@@ -281,6 +292,15 @@ function register(router) {
     const procent = Number(total.n) ? Math.round((nLegate / Number(total.n)) * 100) : 0;
 
     const body = `
+      ${
+        ctx.query.sigure
+          ? `<div class="card" style="border-left:4px solid var(--ok,#1e7a45);margin-bottom:12px;max-width:880px">
+               Am confirmat <strong>${Number(ctx.query.sigure || 0)}</strong> domenii și am legat
+               <strong>${Number(ctx.query.legate || 0).toLocaleString("ro-RO")}</strong> de mesaje.
+               De acum, orice mesaj nou de pe domeniile alea se leagă singur.
+             </div>`
+          : ""
+      }
       <p style="color:var(--text-muted);font-size:13px;max-width:880px">
         Un email se leagă de o firmă după <strong>domeniul expeditorului</strong>. Domeniile se învață:
         când cineva atribuie un mesaj unui partener, domeniul rămâne legat de el, iar toate mesajele de pe
@@ -297,11 +317,24 @@ function register(router) {
       </div>
 
       <form method="post" action="/email/domenii/releaga" class="inline-form" style="margin:14px 0">
-        <button class="btn" type="submit">Leagă tot ce se poate acum</button>
+        <button class="btn secondary" type="submit">Leagă tot ce se poate acum</button>
         <span style="font-size:12px;color:var(--text-muted)">
           Folosește doar domeniile deja știute. Nu atinge mesajele legate deja de cineva.
         </span>
       </form>
+
+      ${
+        sigure.length
+          ? `<form method="post" action="/email/domenii/confirma-sigure" class="inline-form" style="margin:14px 0"
+                   onsubmit="return confirm('Confirm cele ${sigure.length} domenii și leg ${mesajeSigure} de mesaje?')">
+               <button class="btn" type="submit">Confirmă cele ${sigure.length} potriviri sigure (${mesajeSigure.toLocaleString("ro-RO")} mesaje)</button>
+               <span style="font-size:12px;color:var(--text-muted)">
+                 Doar unde miezul domeniului e identic, literă cu literă, cu numele firmei — ȘI unde o singură
+                 firmă se potrivește așa. Restul rămân de confirmat unul câte unul, mai jos.
+               </span>
+             </form>`
+          : ""
+      }
 
       ${
         ambigue.size
@@ -322,7 +355,11 @@ function register(router) {
                 String(d.mesaje),
                 esc(d.nume_exemplu || d.exemplu || ""),
                 `<select name="x" disabled style="max-width:280px"><option>${esc(d.propus.nume)}</option></select>`,
-                `${d.scor}%`,
+                d.sigur
+                  ? '<span class="badge verde">sigur</span>'
+                  : d.egali > 1
+                  ? `<span class="badge rosu" title="${d.egali} firme se potrivesc la fel de bine">${d.scor}% · ${d.egali} firme la fel</span>`
+                  : `${d.scor}%`,
                 `<form method="post" action="/email/domenii/confirma" class="inline-form">
                    <input type="hidden" name="domeniu" value="${esc(d.domeniu)}">
                    <input type="hidden" name="partener_id" value="${d.propus.id}">
@@ -408,6 +445,38 @@ function register(router) {
     if (!ctx.user) return redirect(ctx.res, "/");
     await releagaTot();
     redirect(ctx.res, "/email/domenii");
+  });
+
+  // Confirmă dintr-o apăsare doar potrivirile care nu lasă loc de interpretare.
+  //
+  // „Sigur" înseamnă două lucruri deodată, și amândouă contează:
+  //   1. miezul domeniului e IDENTIC cu numele firmei strâns — nu „seamănă",
+  //      nu „conține", ci literă cu literă: warehouseall.ro ↔ WAREHOUSE ALL SRL;
+  //   2. o SINGURĂ firmă din bază se potrivește așa. Unde sunt mai multe —
+  //      cele șapte fișe Aquila — nu se alege nimic automat, fiindcă alegerea
+  //      s-ar face pe tăcute, după ordinea din bază, și nimeni n-ar ști de ce
+  //      emailurile au ajuns la fișa greșită.
+  //
+  // Lista se recalculează aici, nu se primește din formular: butonul și
+  // tabelul trebuie să vadă exact aceleași rânduri.
+  router.post("/email/domenii/confirma-sigure", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const props = await sugestii({ minim: 1 });
+    let domenii = 0;
+    let legate = 0;
+    for (const d of props) {
+      if (!d.sigur || !d.propus) continue;
+      await tineMinte(d.domeniu, d.propus.id, ctx.user.id, "nume-exact");
+      const r = await db
+        .prepare(
+          "UPDATE email_mesaje SET partener_id = ?, legat_cum = ? WHERE activ = 1 AND partener_id IS NULL AND lower(COALESCE(de_la_domeniu,'')) = ?"
+        )
+        .run(d.propus.id, "domeniul " + d.domeniu, d.domeniu);
+      domenii++;
+      legate += Number(d.mesaje || 0);
+      void r;
+    }
+    redirect(ctx.res, `/email/domenii?sigure=${domenii}&legate=${legate}`);
   });
 }
 

@@ -167,12 +167,73 @@ async function salveazaAtasamente(cont, mesajId, m, partenerId) {
   return { total: utile.length, urcate };
 }
 
+// ---- expeditorii blocați ----------------------------------------------------
+//
+// Lista se ține în memorie cât ține o sincronizare: la o mie de mesaje ar fi
+// însemnat o mie de interogări pentru același răspuns. Se reîmprospătează la
+// fiecare rulare, deci un expeditor blocat acum nu mai intră la următoarea.
+// Domeniile firmei. Se deduc din căsuțele conectate, nu se scriu într-o
+// constantă: când intră warehouseall.ro ca a doua firmă, adăugarea căsuței e
+// tot ce trebuie făcut, iar tot ce depinde de „e al nostru?" se ia după ea.
+// Adresa pusă pe cașetă e adevărul; o listă scrisă de mână ar rămâne în urmă.
+async function domeniileNoastre() {
+  const r = await db.prepare("SELECT DISTINCT lower(adresa) AS adresa FROM email_conturi").all().catch(() => []);
+  const s = new Set(["cashmachine.ro"]);
+  for (const x of r) {
+    const d = String(x.adresa || "").split("@")[1];
+    if (d) s.add(d.toLowerCase());
+  }
+  return s;
+}
+async function eAlNostru(domeniu) {
+  const d = String(domeniu || "").toLowerCase();
+  if (!d) return false;
+  const ale = await domeniileNoastre();
+  for (const x of ale) if (d === x || d.endsWith("." + x)) return true;
+  return false;
+}
+
+let blocateCache = null;
+async function listaBlocate({ proaspat } = {}) {
+  if (blocateCache && !proaspat) return blocateCache;
+  const r = await db
+    .prepare("SELECT fel, lower(valoare) AS valoare FROM email_blocate WHERE activ = 1")
+    .all()
+    .catch(() => []);
+  blocateCache = {
+    adrese: new Set(r.filter((x) => x.fel === "adresa").map((x) => x.valoare)),
+    domenii: new Set(r.filter((x) => x.fel === "domeniu").map((x) => x.valoare)),
+  };
+  return blocateCache;
+}
+function uitaBlocate() {
+  blocateCache = null;
+}
+function eBlocat(lista, adresa, domeniu) {
+  const a = String(adresa || "").toLowerCase();
+  const d = String(domeniu || "").toLowerCase();
+  if (a && lista.adrese.has(a)) return true;
+  if (!d) return false;
+  // Se blochează și subdomeniile: „mail.reclame.ro" cade sub „reclame.ro",
+  // altfel fiecare robot și-ar face alt subdomeniu și n-am termina niciodată.
+  for (const x of lista.domenii) {
+    if (d === x || d.endsWith("." + x)) return true;
+  }
+  return false;
+}
+
 async function salveazaMesaj(cont, id) {
   const existent = await db.prepare("SELECT id FROM email_mesaje WHERE cont_id = ? AND gmail_id = ?").get(cont.id, id);
   if (existent) return { sarit: true };
 
   const m = await gmail.mesaj(cont.adresa, id);
   const de = gmail.adresa(m.de_la);
+
+  // Blocatul se verifică ÎNAINTE de atașamente: un newsletter cu poze în el
+  // altfel ar urca zece fișiere în Drive înainte să aflăm că nu-l voiam.
+  const blocate = await listaBlocate();
+  if (eBlocat(blocate, de.adresa, gmail.domeniu(de.adresa))) return { sarit: true, blocat: true };
+
   const legaturi = await leaga(m);
   const directie = de.adresa && de.adresa === String(cont.adresa).toLowerCase() ? "trimis" : "primit";
   const corp = String(m.text || "").slice(0, MAX_CORP);
@@ -224,7 +285,7 @@ function mesajul(e) {
 }
 
 async function sincronizeazaCont(cont) {
-  const rezumat = { adresa: cont.adresa, noi: 0, sarite: 0, atasamente: 0, eroare: null };
+  const rezumat = { adresa: cont.adresa, noi: 0, sarite: 0, blocate: 0, atasamente: 0, eroare: null };
   try {
     let iduri = [];
     let historyNou = "";
@@ -248,7 +309,8 @@ async function sincronizeazaCont(cont) {
 
     for (const id of iduri) {
       const r = await salveazaMesaj(cont, id);
-      if (r.sarit) rezumat.sarite++;
+      if (r.blocat) { rezumat.sarite++; rezumat.blocate++; }
+      else if (r.sarit) rezumat.sarite++;
       else {
         rezumat.noi++;
         rezumat.atasamente += r.urcate || 0;
@@ -271,6 +333,10 @@ async function sincronizeazaTot() {
   if (ruleaza) return [];
   ruleaza = true;
   try {
+    // Lista de blocați se citește o dată, la începutul rulării: dacă cineva a
+    // blocat un expeditor acum cinci minute, de la sincronizarea asta nu mai
+    // intră.
+    await listaBlocate({ proaspat: true });
     const conturi = await db.prepare("SELECT * FROM email_conturi WHERE activ = 1 ORDER BY id").all();
     const rezultate = [];
     for (const c of conturi) rezultate.push(await sincronizeazaCont(c));
@@ -454,6 +520,7 @@ function subnav(activ) {
     ["/email/atasamente", "Atașamente"],
     ["/email/conturi", "Căsuțe"],
     ["/email/domenii", "Domenii"],
+    ["/email/blocate", "Blocați"],
     ["/email/culegere", "Culegere"],
     ["/configurari/email-google", "Conexiunea Google"],
   ];
@@ -770,6 +837,123 @@ function register(router) {
     return redirect(ctx.res, "/email");
   });
 
+  // ---- blocarea unui expeditor --------------------------------------------
+  router.post("/email/:id/blocheaza", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (!/^\d+$/.test(String(ctx.params.id || ""))) return redirect(ctx.res, "/email");
+    const v = undeVedeUtilizatorul(ctx.user);
+    const m = await db
+      .prepare(`SELECT m.id, m.de_la, m.de_la_domeniu FROM email_mesaje m WHERE m.id = ? AND ${v.sql}`)
+      .get(Number(ctx.params.id), ...v.args);
+    if (!m) return redirect(ctx.res, "/email");
+
+    const b = ctx.body || {};
+    const fel = b.fel === "domeniu" ? "domeniu" : "adresa";
+    const valoare = String((fel === "domeniu" ? m.de_la_domeniu : m.de_la) || "").trim().toLowerCase();
+    if (!valoare) return redirect(ctx.res, `/email/${m.id}`);
+    // Domeniul nostru nu se blochează niciodată: o apăsare greșită acolo ar
+    // opri tot emailul firmei, iar nimeni n-ar bănui de ce.
+    if (fel === "domeniu" && await eAlNostru(valoare)) return redirect(ctx.res, `/email/${m.id}?nu=domeniul-nostru`);
+
+    let scoase = 0;
+    if (String(b.scoate) === "1") {
+      const unde =
+        fel === "domeniu"
+          ? "lower(COALESCE(de_la_domeniu,'')) = ? OR lower(COALESCE(de_la_domeniu,'')) LIKE ?"
+          : "lower(COALESCE(de_la,'')) = ?";
+      const args = fel === "domeniu" ? [valoare, "%." + valoare] : [valoare];
+      const n = await db
+        .prepare(`SELECT COUNT(*) AS n FROM email_mesaje WHERE activ = 1 AND (${unde})`)
+        .get(...args);
+      scoase = Number((n && n.n) || 0);
+      // Se dezactivează, nu se șterg: dacă blocarea a fost o greșeală, se
+      // deblochează și mesajele sunt tot acolo.
+      await db.prepare(`UPDATE email_mesaje SET activ = 0 WHERE activ = 1 AND (${unde})`).run(...args);
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO email_blocate (fel, valoare, motiv, mesaje_scoase, pus_de) VALUES (?,?,?,?,?)
+         ON CONFLICT (fel, lower(valoare)) DO UPDATE SET activ = 1, mesaje_scoase = email_blocate.mesaje_scoase + EXCLUDED.mesaje_scoase, pus_de = EXCLUDED.pus_de`
+      )
+      .run(fel, valoare, String(b.motiv || "").slice(0, 200) || null, scoase, ctx.user.id);
+    uitaBlocate();
+    return redirect(ctx.res, "/email/blocate?blocat=" + encodeURIComponent(valoare) + "&scoase=" + scoase);
+  });
+
+  router.get("/email/blocate", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const randuri = await db
+      .prepare(
+        `SELECT b.*, u.nume AS autor FROM email_blocate b
+           LEFT JOIN utilizatori u ON u.id = b.pus_de
+          ORDER BY b.activ DESC, b.id DESC`
+      )
+      .all()
+      .catch(() => []);
+    const active = randuri.filter((r) => Number(r.activ));
+    const scoaseTotal = active.reduce((s, r) => s + Number(r.mesaje_scoase || 0), 0);
+
+    const corp = `
+      ${
+        ctx.query.blocat
+          ? `<div class="card" style="border-left:4px solid var(--ok,#1e7a45);margin-bottom:12px;max-width:820px">
+               <strong>${esc(String(ctx.query.blocat))}</strong> nu mai intră în ERP.
+               ${Number(ctx.query.scoase || 0) ? `Am scos și ${Number(ctx.query.scoase).toLocaleString("ro-RO")} de mesaje deja aduse.` : ""}
+             </div>`
+          : ""
+      }
+      <p style="color:var(--text-muted);font-size:13px;max-width:820px">
+        Expeditorii de aici nu mai intră în ERP la sincronizare. În Gmail nu se schimbă nimic — mesajele rămân
+        în căsuță, doar ERP-ul nu se mai uită la ele. Blocarea pe domeniu prinde și subdomeniile
+        („mail.reclame.ro" cade sub „reclame.ro"), fiindcă altfel fiecare robot și-ar face alt subdomeniu.
+        Se deblochează oricând, iar mesajele scoase se întorc — nu se șterge nimic.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">Expeditori blocați</div><div class="value">${active.length}</div></div>
+        <div class="card"><div class="label">Mesaje scoase din ERP</div><div class="value">${scoaseTotal.toLocaleString("ro-RO")}</div></div>
+      </div>
+      ${
+        randuri.length
+          ? table(
+              ["Ce", "Fel", "Cine a blocat", "Când", "Mesaje scoase", "Stare", ""],
+              randuri.map((r) => [
+                `<strong>${esc(r.valoare)}</strong>`,
+                r.fel === "domeniu" ? '<span class="badge albastru">tot domeniul</span>' : '<span class="badge gri">o adresă</span>',
+                esc(r.autor || "—"),
+                esc(String(r.creat_la || "").slice(0, 16)),
+                Number(r.mesaje_scoase || 0).toLocaleString("ro-RO"),
+                Number(r.activ) ? '<span class="badge verde">blocat</span>' : '<span class="badge gri">deblocat</span>',
+                `<form method="post" action="/email/blocate/${r.id}/comuta" class="inline-form"><button class="link-btn" type="submit">${
+                  Number(r.activ) ? "deblochează" : "blochează la loc"
+                }</button></form>`,
+              ])
+            )
+          : "<p>Niciun expeditor blocat. Butonul e pe fișa fiecărui mesaj, jos.</p>"
+      }`;
+    send(ctx.res, 200, pagina(ctx, "Expeditori blocați", "/email/blocate", corp));
+  });
+
+  router.post("/email/blocate/:id/comuta", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const r = await db.prepare("SELECT * FROM email_blocate WHERE id = ?").get(Number(ctx.params.id));
+    if (!r) return redirect(ctx.res, "/email/blocate");
+    const nou = Number(r.activ) ? 0 : 1;
+    await db.prepare("UPDATE email_blocate SET activ = ? WHERE id = ?").run(nou, r.id);
+    // La deblocare, mesajele scoase se întorc. Blocarea a fost o hotărâre, nu
+    // o ștergere: dacă omul se răzgândește, trebuie să găsească tot ce era.
+    if (!nou) {
+      const unde =
+        r.fel === "domeniu"
+          ? "lower(COALESCE(de_la_domeniu,'')) = ? OR lower(COALESCE(de_la_domeniu,'')) LIKE ?"
+          : "lower(COALESCE(de_la,'')) = ?";
+      const args = r.fel === "domeniu" ? [String(r.valoare).toLowerCase(), "%." + String(r.valoare).toLowerCase()] : [String(r.valoare).toLowerCase()];
+      await db.prepare(`UPDATE email_mesaje SET activ = 1 WHERE activ = 0 AND (${unde})`).run(...args);
+    }
+    uitaBlocate();
+    return redirect(ctx.res, "/email/blocate");
+  });
+
   // ---- un mesaj -----------------------------------------------------------
   // „/email/:id" prinde orice vine după /email/, inclusiv cuvinte. Dacă vreun
   // modul își înregistrează pagina după ăsta — „/email/domenii", de pildă —
@@ -836,6 +1020,28 @@ function register(router) {
             </select>
           </label>
           <button class="btn" type="submit">Salvează</button>
+        </div>
+      </form>
+
+      <h2>Nu mai aduce de aici</h2>
+      <p style="font-size:13px;color:var(--text-muted);max-width:700px">
+        Reclamele și roboții intră în ERP la fel ca un mesaj de la un client și umflă lista de atribuit.
+        Nu filtrăm după cuvinte și nu ghicim ce e reclamă — tu, care vezi mesajul, apeși o dată, iar de-atunci
+        expeditorul ăsta nu mai intră. În timp lista se așază singură.
+        <strong>În Gmail nu se schimbă nimic</strong>: mesajele rămân la locul lor, doar ERP-ul nu se mai uită la ele.
+      </p>
+      <form method="post" action="/email/${m.id}/blocheaza" class="form" style="max-width:700px">
+        <label style="display:block;font-size:13px;margin-bottom:6px">
+          <input type="checkbox" name="scoate" value="1"> scoate și mesajele deja aduse de la acest expeditor
+        </label>
+        <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+          <button class="btn secondary" type="submit" name="fel" value="adresa">Blochează ${esc(m.de_la || "")}</button>
+          ${
+            m.de_la_domeniu
+              ? `<button class="btn secondary" type="submit" name="fel" value="domeniu">Blochează tot ${esc(m.de_la_domeniu)}</button>`
+              : ""
+          }
+          <a class="btn secondary" href="/email/blocate">Vezi lista blocaților</a>
         </div>
       </form>`;
     send(ctx.res, 200, pagina(ctx, m.subiect || "Email", "/email", corp));
@@ -1037,5 +1243,11 @@ module.exports = {
   numereDinText,
   undeVedeUtilizatorul,
   verifica,
+  // Blocarea expeditorilor: regula pură și domeniile firmei, verificate în test.
+  eBlocat,
+  listaBlocate,
+  uitaBlocate,
+  domeniileNoastre,
+  eAlNostru,
   MAX_CORP,
 };

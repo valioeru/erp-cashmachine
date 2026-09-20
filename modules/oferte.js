@@ -53,7 +53,10 @@ async function totalOferta(ofertaId) {
 function poateEdita(user, oferta) {
   if (!user) return false;
   if (user.rol === "admin") return true;
-  return oferta.agent_id === user.id;
+  // Number() dinadins, nu „===" pe ce vine din bază: un id întors ca text ar
+  // face oferta agentului să pară a altcuiva, iar el ar vedea-o doar de citit,
+  // fără niciun mesaj care să-i spună de ce.
+  return Number(oferta.agent_id) === Number(user.id) && Number.isFinite(Number(user.id));
 }
 
 function register(router) {
@@ -172,6 +175,46 @@ function register(router) {
     // Îl umplu cu liniile ofertei ca referință, ca diferența să se vadă pe loc,
     // nu după ce omul deschide alt raport și caută produsul cu mâna.
     const emailuri = await inbox.blocEmailuri({ user: ctx.user, ofertaId: o.id });
+
+    // Ce știe piața despre fiecare produs, trimis o dată ca date. Agentul vede
+    // prețurile concurenței în clipa în care alege produsul, fără reîncărcare
+    // și fără să deschidă alt raport — cererea lui Vali, cuvânt cu cuvânt:
+    // „când ofertează un anume produs i se afișează în timp real ultimele
+    // prețuri ofertate de concurenți și la ce dată pe acel produs".
+    const piata = await concurenta.ultimelePeProdus({ directie: "vanzare", cate: 3 });
+    const normP = concurenta.normalizeaza;
+    // În pagină intră DOAR produsele despre care chiar avem ceva de spus.
+    // Altfel am fi cărat nomenclatorul de 3.000 de produse degeaba, ca la
+    // pagina de domenii.
+    const piataProduse = {};
+    for (const p of produse) {
+      const l = piata.peProdus[String(p.id)] || piata.peNume[normP(p.denumire)];
+      if (l && l.length) piataProduse[String(p.id)] = l;
+    }
+    const piataJson = JSON.stringify(piataProduse);
+    const cuPiata = Object.keys(piataProduse).length;
+
+    // Pentru liniile deja puse pe ofertă: aceeași informație, dar randată pe
+    // server, ca să se vadă fără niciun clic.
+    const piataLiniei = (l) => {
+      const lista = (l.produs_id && piata.peProdus[String(l.produs_id)]) || piata.peNume[normP(l.denumire)] || [];
+      if (!lista.length) return '<span style="color:var(--text-muted)">—</span>';
+      const nostru = Number(l.pret_unitar) || 0;
+      return lista
+        .map((x) => {
+          const dif = nostru && x.moneda === "RON" ? nostru - x.pret : null;
+          const semn =
+            dif === null
+              ? ""
+              : dif > 0
+              ? ` <span style="color:var(--danger)">(+${money(dif)} la noi)</span>`
+              : ` <span style="color:var(--ok,#1e7a45)">(${money(dif)} la noi)</span>`;
+          return `<div style="font-size:12px;white-space:nowrap">${esc(x.concurent)}: <strong>${money(x.pret)}</strong> ${esc(x.moneda)}${
+            x.um ? "/" + esc(x.um) : ""
+          } · ${esc(x.data)}${semn}</div>`;
+        })
+        .join("");
+    };
     const bi = await concurenta.blocBI({
       user: ctx.user,
       directie: "vanzare",
@@ -199,7 +242,7 @@ function register(router) {
 
       <h2>Linii</h2>
       ${table(
-        ["Denumire", "U.M.", "Cantitate", "Preț unitar", "TVA %", "Valoare", ...(editabil ? ["Acțiuni"] : [])],
+        ["Denumire", "U.M.", "Cantitate", "Preț unitar", "TVA %", "Valoare", "Concurența", ...(editabil ? ["Acțiuni"] : [])],
         linii.map((l) => [
           esc(l.denumire),
           esc(l.um || "buc"),
@@ -207,21 +250,30 @@ function register(router) {
           money(l.pret_unitar),
           `${Number(l.cota_tva).toFixed(0)}%`,
           money(l.cantitate * l.pret_unitar),
+          piataLiniei(l),
           ...(editabil
             ? [`<form method="post" action="/oferte/${o.id}/linii/${l.id}/sterge" class="inline-form"><button class="link-btn danger" type="submit">șterge</button></form>`]
             : []),
         ]),
-        { total: ["TOTAL", "", "", "", "", money(t.net), ...(editabil ? [""] : [])] }
+        { total: ["TOTAL", "", "", "", "", money(t.net), "", ...(editabil ? [""] : [])] }
       )}
 
       ${
         editabil
           ? `<form method="post" action="/oferte/${o.id}/linii" class="form" style="max-width:820px">
+              <div id="piata-produs" style="display:none;margin-bottom:10px;padding:10px 12px;border-left:4px solid var(--danger);background:var(--card,#fff);border-radius:6px"></div>
               <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
                 <label class="field" style="flex:2;min-width:220px"><span>Produs (sau scrie liber mai jos)</span>
-                  <select name="produs_id">
+                  <select name="produs_id" id="alege-produs">
                     <option value="">— fără produs din nomenclator —</option>
-                    ${produse.map((p) => `<option value="${p.id}" data-pret="${p.pret_vanzare}">${esc(p.denumire)}</option>`).join("")}
+                    ${produse
+                      .map(
+                        (p) =>
+                          `<option value="${p.id}" data-pret="${p.pret_vanzare}">${esc(p.denumire)}${
+                            piataProduse[String(p.id)] ? " ●" : ""
+                          }</option>`
+                      )
+                      .join("")}
                   </select>
                 </label>
                 <label class="field" style="flex:2;min-width:180px"><span>Denumire (dacă nu alegi produs)</span><input name="denumire"></label>
@@ -231,7 +283,53 @@ function register(router) {
                 <label class="field" style="width:90px"><span>TVA %</span><input name="cota_tva" type="number" step="0.1" value="21"></label>
                 <button class="btn" type="submit">Adaugă linia</button>
               </div>
-            </form>`
+              <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0">
+                Produsele cu ● au prețuri de concurență în ERP (${cuPiata} din ${produse.length}).
+                Alege produsul și le vezi aici, cu data lor.
+              </p>
+            </form>
+            <script>
+              // Piața, o dată, ca date. Nu se cere nimic de la server la
+              // schimbarea produsului: dacă ar fi fost un apel, agentul ar fi
+              // văzut prețurile cu o secundă întârziere, adică după ce a scris
+              // deja prețul lui — exact prea târziu.
+              (function () {
+                var PIATA = ${piataJson};
+                var sel = document.getElementById("alege-produs");
+                var cutia = document.getElementById("piata-produs");
+                var pretul = document.querySelector('input[name="pret_unitar"]');
+                if (!sel || !cutia) return;
+                function bani(x) {
+                  return Number(x).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                }
+                function esc(s) {
+                  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                }
+                function arata() {
+                  var lista = PIATA[sel.value];
+                  if (!lista || !lista.length) { cutia.style.display = "none"; cutia.innerHTML = ""; return; }
+                  var alNostru = Number(String(pretul && pretul.value || "").replace(",", ".")) || 0;
+                  var r = ['<strong>Ce a ofertat concurența la produsul ăsta</strong>'];
+                  for (var i = 0; i < lista.length; i++) {
+                    var x = lista[i];
+                    var dif = "";
+                    if (alNostru && x.moneda === "RON") {
+                      var d = alNostru - x.pret;
+                      dif = d > 0
+                        ? ' <span style="color:var(--danger)">(+' + bani(d) + ' lei la noi)</span>'
+                        : ' <span style="color:var(--ok,#1e7a45)">(' + bani(d) + ' lei la noi)</span>';
+                    }
+                    r.push('<div style="font-size:13px;margin-top:4px">' + esc(x.concurent) + ": <strong>" +
+                      bani(x.pret) + " " + esc(x.moneda) + (x.um ? "/" + esc(x.um) : "") + "</strong> · " + esc(x.data) + dif + "</div>");
+                  }
+                  cutia.innerHTML = r.join("");
+                  cutia.style.display = "";
+                }
+                sel.addEventListener("change", arata);
+                if (pretul) pretul.addEventListener("input", arata);
+                arata();
+              })();
+            </script>`
           : ""
       }
 

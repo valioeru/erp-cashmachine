@@ -89,6 +89,79 @@ function poateSterge(user, rand) {
 // diferența pe loc, nu după ce deschide alt raport. La vânzare sunt liniile
 // ofertei; la achiziție, ofertele primite pe articolul respectiv.
 // ---------------------------------------------------------------------------
+// ---- ce știm despre piață, pe produs ---------------------------------------
+//
+// Cererea lui Vali: „când ofertează un anume produs, agentului i se afișează
+// în timp real ultimele prețuri ofertate de concurenți și la ce dată pe acel
+// produs". Deci NU prețurile agățate de oferta curentă (alea le arată blocBI),
+// ci tot ce știm despre produsul ăla, din orice ofertă, de la oricine.
+//
+// Se întoarce o hartă, nu HTML: pagina de ofertare o trimite o dată, ca date,
+// și o folosește la fiecare schimbare de produs fără să mai întrebe serverul.
+// De-aia „în timp real" chiar înseamnă pe loc, nu după o reîncărcare.
+//
+// Potrivirea se face pe două chei, în ordinea încrederii: produs_id, când
+// prețul a fost scris pe un produs din nomenclator, și denumirea normalizată,
+// când a fost scris liber — la telefon nu scrie nimeni codul produsului.
+async function ultimelePeProdus(opts) {
+  const o = opts || {};
+  const directie = o.directie === "achizitie" ? "achizitie" : "vanzare";
+  const cate = Math.max(1, Math.min(10, Number(o.cate) || 3));
+
+  const randuri = await db
+    .prepare(
+      `SELECT c.produs_id, c.denumire, c.concurent, c.pret, c.moneda, c.um, c.data_ofertei,
+              p.denumire AS produs_nume
+         FROM concurenta_preturi c
+         LEFT JOIN produse p ON p.id = c.produs_id
+        WHERE c.activ = 1 AND c.directie = ?
+        ORDER BY c.data_ofertei DESC, c.id DESC
+        LIMIT 3000`
+    )
+    .all(directie)
+    .catch(() => []);
+
+  // Prețurile scrise liber, fără produs din nomenclator, trebuie să ajungă tot
+  // la produsul lor. Altfel prețul aflat la târg — unde nimeni nu deschide
+  // ERP-ul ca să aleagă produsul din listă — rămâne invizibil exact la
+  // ofertarea produsului ăluia. Puntea e denumirea normalizată.
+  const produse = await db
+    .prepare("SELECT id, denumire FROM produse LIMIT 20000")
+    .all()
+    .catch(() => []);
+  const numeCatreId = new Map();
+  for (const p of produse) {
+    const k = normalizeaza(p.denumire);
+    // La denumiri duplicate nu ghicim: rândul rămâne doar sub nume.
+    if (numeCatreId.has(k)) numeCatreId.set(k, null);
+    else numeCatreId.set(k, Number(p.id));
+  }
+
+  const peProdus = {};
+  const peNume = {};
+  const pune = (cos, cheie, r) => {
+    if (!cheie) return;
+    if (!cos[cheie]) cos[cheie] = [];
+    if (cos[cheie].length >= cate) return;
+    cos[cheie].push({
+      concurent: String(r.concurent || "—"),
+      pret: Number(r.pret) || 0,
+      moneda: String(r.moneda || "RON"),
+      um: r.um ? String(r.um) : "",
+      data: String(r.data_ofertei || "").slice(0, 10),
+    });
+  };
+  // Rândurile vin deja în ordinea datei descrescătoare, deci primele puse
+  // sunt cele mai noi — exact ce trebuie arătat.
+  for (const r of randuri) {
+    const cheieNume = normalizeaza(r.produs_nume || r.denumire);
+    const id = r.produs_id ? Number(r.produs_id) : numeCatreId.get(cheieNume);
+    if (id) pune(peProdus, String(id), r);
+    pune(peNume, cheieNume, r);
+  }
+  return { peProdus, peNume };
+}
+
 async function blocBI(opts) {
   const o = opts || {};
   const directie = o.directie === "achizitie" ? "achizitie" : "vanzare";
@@ -566,4 +639,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, blocBI, inLei, cursEur, normalizeaza, SURSE, MONEDE };
+module.exports = { register, blocBI, ultimelePeProdus, inLei, cursEur, normalizeaza, SURSE, MONEDE };
