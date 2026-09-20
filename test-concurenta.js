@@ -202,7 +202,7 @@ function curatenie() {
   await cer("/procurement/concurenta/adauga", {
     metoda: "post",
     user: VALI,
-    body: { directie: "achizitie", ach_articol_id: "92302", denumire: "TEST Granule LLDPE", concurent: "TEST Rivalul", pret: "1.26", moneda: "EUR", um: "kg", data_ofertei: azi, sursa: "furnizor", inapoi: "/procurement/articol/92302" },
+    body: { directie: "achizitie", ach_articol_id: "92302", denumire: "TEST Granule LLDPE", concurent: "TEST Rivalul", pret: "1.26", moneda: "EUR", um: "kg", data_ofertei: azi, sursa: "furnizor", partener_id: "92002", inapoi: "/procurement/articol/92302" },
   });
   r = await cer("/procurement/articol/:id", { params: { id: "92302" }, user: VALI });
   cere(
@@ -210,6 +210,17 @@ function curatenie() {
     r.corp,
     ["Prețurile concurenței", "TEST Rivalul", "1,26 EUR", "6,30 lei", "-10.0%"]
   );
+
+  // ---- clientul de la care am aflat pretul --------------------------------
+  egal(
+    "clientul sursă se salvează de pe ofertare",
+    q("SELECT partener_id FROM concurenta_preturi WHERE concurent = 'TEST Concurentul Mare'")[0].partener_id,
+    "92001"
+  );
+  r = await cer("/oferte/:id", { params: { id: "92201" }, user: AGENT });
+  cere("blocul de pe ofertă arată de la cine am aflat", r.corp, ["Aflat de la", "CLIENT CONCURENTA SRL"]);
+  r = await cer("/procurement/articol/:id", { params: { id: "92302" }, user: VALI });
+  cere("și pe articolul de achiziție", r.corp, ["Aflat de la", "FURNIZOR CONCURENTA SRL"]);
 
   // ---- cine vede ce -------------------------------------------------------
   r = await cer("/crm/concurenta", { user: AGENT });
@@ -234,6 +245,10 @@ function curatenie() {
     r.corp,
     ["TEST Concurentul Mare", "TEST Concurentul Mic", "0,90 lei", "1,20 lei", "proaspăt"]
   );
+  r = await cer("/rapoarte/concurenta", { user: VALI, query: { partener: "92001" } });
+  // „TEST Rivalul" rămâne în lista derulantă de concurenți — acolo trebuie să
+  // fie. Verific că nu e în TABEL, prin prețul lui în lei, care apare doar pe rând.
+  cere("filtrul pe clientul sursă", r.corp, ["TEST Concurentul Mare", "0,90 lei"], ["6,30 lei"]);
   r = await cer("/rapoarte/concurenta", { user: VALI, query: { vedere: "istoric", q: "Concurentul Mic" } });
   // „TEST Rivalul" rămâne în lista derulantă de concurenți a filtrului — acolo
   // trebuie să fie, altfel n-ai cum să-l alegi. Verific că nu e în TABEL, prin

@@ -136,31 +136,45 @@ function furnizoriDedusi(s) {
   return activ - s.capital - (s.profit || 0) - s.credit;
 }
 
+// Fixtura scrie ȘI coloanele de „total sume" (ts_d / ts_c), fiindcă de acolo
+// citește raportul fluxurile: total sume minus solduri inițiale = cumulatul
+// anului, și pe o balanță trasă cumulat, și pe una trasă pe o lună. Tot de
+// acolo iese profitul — veniturile închise în 121 minus cheltuielile — ca să
+// nu depindă de ce a rămas în 121 din anul trecut.
+//
+// Cheltuielile sunt fixate să închidă exact: cifra de afaceri minus profitul.
 function balanta(eticheta, deLa, panaLa, d) {
   const F = Object.assign({}, FINAL, { profit: d.profit });
   const I = INITIAL;
   const fF = furnizoriDedusi(F);
   const fI = furnizoriDedusi(I);
+  const cheltuieliTotal = d.ca - d.profit;
+  const umplutura = cheltuieliTotal - (FLUX.amort + FLUX.dob + FLUX.imp + FLUX.consum);
   const R = [];
+  // ts = sold inițial + rulaj cumulat de la 1 ianuarie
   const pune = (cont, den, siD, siC, rD, rC, sfD, sfC) =>
     R.push(
-      `(${lit(eticheta)},${lit(deLa)},${lit(panaLa)},${lit(cont)},${lit(den)},${siD || 0},${siC || 0},${rD || 0},${rC || 0},0,0,${sfD || 0},${sfC || 0},'test')`
+      `(${lit(eticheta)},${lit(deLa)},${lit(panaLa)},${lit(cont)},${lit(den)},${siD || 0},${siC || 0},${rD || 0},${rC || 0},${(siD || 0) + (rD || 0)},${
+        (siC || 0) + (rC || 0)
+      },${sfD || 0},${sfC || 0},'test')`
     );
   pune("1012", "Capital social", 0, I.capital, 0, 0, 0, F.capital);
-  pune("121", "Profit sau pierdere", 0, I.profit, 0, 0, 0, F.profit);
+  // 121: veniturile se închid pe credit, cheltuielile pe debit
+  pune("121", "Profit sau pierdere", 0, I.profit, cheltuieliTotal, d.ca, 0, F.profit);
   pune("1621", "Credite bancare pe termen lung", 0, I.credit, 0, 0, 0, F.credit);
   pune("2131", "Echipamente", I.imob, 0, 0, 0, F.imob, 0);
   pune("371", "Mărfuri", I.marfa, 0, 0, 0, F.marfa, 0);
   pune("4111", "Clienți", I.clienti, 0, 0, 0, F.clienti, 0);
   pune("401", "Furnizori", 0, fI, 0, 0, 0, fF);
   pune("5121", "Conturi la bănci în lei", I.banca, 0, 0, 0, F.banca, 0);
-  pune("701", "Venituri din vânzarea produselor finite", 0, 0, 0, d.ca, 0, 0);
+  pune("701", "Venituri din vânzarea produselor finite", 0, 0, d.ca, d.ca, 0, 0);
   pune("6811", "Cheltuieli de exploatare privind amortizarea", 0, 0, FLUX.amort, FLUX.amort, 0, 0);
   pune("666", "Cheltuieli privind dobânzile", 0, 0, FLUX.dob, FLUX.dob, 0, 0);
   pune("691", "Cheltuieli cu impozitul pe profit", 0, 0, FLUX.imp, FLUX.imp, 0, 0);
   pune("607", "Cheltuieli privind mărfurile", 0, 0, FLUX.consum, FLUX.consum, 0, 0);
-  // umplutură: alte cheltuieli, ca balanța să treacă pragul de „balanță întreagă"
-  for (let i = 0; i < 12; i++) pune("62" + (10 + i), "Cheltuială " + i, 0, 0, 1000 + i, 1000 + i, 0, 0);
+  pune("6280", "Alte cheltuieli cu serviciile", 0, 0, umplutura, umplutura, 0, 0);
+  // umplutură: conturi fără sume, ca balanța să treacă pragul de „balanță întreagă"
+  for (let i = 0; i < 11; i++) pune("62" + (10 + i), "Cheltuială " + i, 0, 0, 0, 0, 0, 0);
   return `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, si_d, si_c, r_d, r_c, ts_d, ts_c, sf_d, sf_c, fisier) VALUES ${R.join(",")}`;
 }
 
