@@ -71,6 +71,17 @@ db.prepare = (sql) => ({
 
 const L = require(path.join(RAD, "modules", "legare.js"));
 
+const rute = { get: {}, post: {} };
+L.register({ get: (p, h) => { rute.get[p] = h; }, post: (p, h) => { rute.post[p] = h; }, options: () => {} });
+const res = () => {
+  const o = { cod: 0, antet: null, corp: "" };
+  o.writeHead = (c, h) => { o.cod = c; o.antet = h; return o; };
+  o.setHeader = () => {};
+  o.end = (b) => { o.corp = b || ""; };
+  return o;
+};
+const VALI = { id: 1, nume: "Vali", rol: "admin" };
+
 let rele = 0;
 function egal(ce, avut, asteptat) {
   const a = JSON.stringify(avut), b = JSON.stringify(asteptat);
@@ -202,6 +213,46 @@ egal("  domeniul se scoate din adresă", L.domeniulDin("Comercial <COMERCIAL@Eur
   await L.releagaTot();
   const dupa = q(`SELECT id, partener_id FROM email_mesaje WHERE gmail_id LIKE 'legtest-%' ORDER BY id`);
   egal("  a doua rulare nu mișcă nimic", JSON.stringify(dupa), JSON.stringify(inainte));
+
+  // --- 5. pagina nu are voie să crească cu fiecare firmă ---------------------
+  // Prima variantă scria lista întreagă de firme în fiecare rând de tabel.
+  // Cu ~1.500 de firme în bază și 120 de domenii pe pagină, ieșeau 2,7 MB:
+  // pagina se încărca în zeci de secunde, iar butonul „Leagă tot" de sus nu se
+  // mai putea apăsa deloc. Funcția era scrisă, testată și moartă.
+  //
+  // Testul măsoară exact asta: lista de firme are voie să apară O SINGURĂ
+  // dată, iar pagina să rămână mică oricâte domenii ar fi pe ea.
+  console.log("\ncât de mare e pagina");
+  // Fixtura trebuie să semene cu baza adevărată, altfel testul trece și cu
+  // bug-ul în el: cu șapte firme în bază, nici varianta proastă nu se vedea.
+  exec1(`INSERT INTO parteneri (nume, cui, tip)
+         SELECT 'FIRMA DE UMPLUTURA LEGTEST NUMARUL ' || i, 'RO-LEG-U' || i, 'client'
+           FROM generate_series(1, 250) AS i`);
+  exec1(`INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, corp, directie, activ)
+         SELECT ${cont}, 'legtest-u' || i, '2026-09-01', 'x@necunoscut' || i || 'legtest.ro', 'X',
+                'necunoscut' || i || 'legtest.ro', 'test', 'text', 'primit', 1
+           FROM generate_series(1, 30) AS i`);
+
+  const nFirme = Number(q(`SELECT COUNT(*) AS n FROM parteneri`)[0].n);
+  const p = res();
+  await rute.get["/email/domenii"]({ user: VALI, params: {}, query: {}, body: {}, res: p, req: { url: "/email/domenii" } });
+
+  // O firmă anume: de câte ori apare numele ei în pagină? O dată, în lista de
+  // date. Dacă apare de zeci de ori, s-a întors bug-ul.
+  const oFirma = q(`SELECT nume FROM parteneri WHERE nume <> '' ORDER BY id LIMIT 1`)[0];
+  const deCateOri = oFirma
+    ? p.corp.split(String(oFirma.nume).replace(/&/g, "&amp;").replace(/</g, "&lt;")).length - 1
+    : 0;
+  egal("  numele unei firme apare cel mult de două ori în pagină", deCateOri <= 2, true);
+  egal("  lista de firme se trimite o singură dată, ca date", p.corp.includes("var FIRME = ["), true);
+  egal("  rândurile au selecturi goale, umplute la clic", p.corp.includes('class="alege-firma"'), true);
+
+  // Pragul crește cu numărul de firme, nu e un număr fix: pagina are voie să
+  // ducă O copie a listei, nu câte una de fiecare rând. Cu bug-ul în ea,
+  // pagina asta făcea 549 KB la 257 de firme — de cincisprezece ori peste.
+  const prag = 120 * 1024 + nFirme * 80;
+  console.log(`  (${nFirme} firme în bază, pagina are ${Math.round(p.corp.length / 1024)} KB, pragul e ${Math.round(prag / 1024)} KB)`);
+  egal("  pagina duce o singură copie a listei de firme", p.corp.length < prag, true);
 
   // --- curățenie
   exec1(`DELETE FROM email_domenii WHERE domeniu LIKE '%legtest%'`);

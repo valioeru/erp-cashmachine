@@ -70,6 +70,19 @@ db.prepare = (sql) => ({
 
 const c = require(path.join(RAD, "modules", "culegere.js"));
 
+// Rutele modulului, prinse într-un router de mucava: butonul din pagină se
+// verifică apelând direct funcția lui, nu ghicind ce face.
+const rute = { get: {}, post: {} };
+c.register({ get: (p, h) => { rute.get[p] = h; }, post: (p, h) => { rute.post[p] = h; }, options: () => {} });
+const res = () => {
+  const o = { cod: 0, antet: null, corp: "" };
+  o.writeHead = (cod, h) => { o.cod = cod; o.antet = h; return o; };
+  o.setHeader = () => {};
+  o.end = (b) => { o.corp = b || ""; };
+  return o;
+};
+const VALI = { id: 1, nume: "Vali", rol: "admin" };
+
 let rele = 0;
 function egal(ce, avut, asteptat) {
   const a = JSON.stringify(avut), b = JSON.stringify(asteptat);
@@ -471,6 +484,79 @@ exec1(`DELETE FROM ach_articole WHERE id = ${art1}`);
 exec1(`DELETE FROM mk_contacte WHERE partener_id = ${furn}`);
 exec1(`DELETE FROM taskuri WHERE partener_id = ${furn}`);
 exec1(`DELETE FROM parteneri WHERE id = ${furn}`);
+
+// --- 16b. scotocirea prin tot istoricul ------------------------------------
+// Rularea de noapte se uită la ultimele zile. Cererea lui Vali a fost ca
+// ofertele de la furnizori din emailuri să intre în Procurement — și pentru
+// cele vechi, nu doar pentru ce vine de acum încolo.
+//
+// Capcana pe care o păzește testul: dacă scotocirea ar merge tot cu „ultimele
+// N zile" și LIMIT, mesajele care NU sunt oferte ar rămâne veșnic în capul
+// listei și lotul n-ar înainta niciodată dincolo de ele. De-aia aici se
+// verifică explicit că, și cu lotul de doi, oferta de acum doi ani e găsită
+// de după un teanc de mesaje obișnuite.
+console.log("\noferte: tot istoricul");
+exec1(`DELETE FROM email_oferte WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE gmail_id LIKE 'culegere-ist-%')`);
+exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-ist-%'`);
+exec1(`DELETE FROM ach_oferte WHERE email_subiect = 'Oferta veche folie'`);
+exec1(`DELETE FROM ach_articole WHERE nume = 'Folie istoric test 77'`);
+exec1(`DELETE FROM parteneri WHERE cui = 'RO-CUL-6'`);
+
+const furnV = Number(q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('FURNIZOR VECHI SRL','RO-CUL-6','furnizor') RETURNING id`)[0].id);
+const catA = q(`SELECT id FROM ach_categorii ORDER BY id LIMIT 1`)[0];
+const artV = Number(q(`INSERT INTO ach_articole (nume, categorie_id, um, activ) VALUES ('Folie istoric test 77', ${catA ? catA.id : "NULL"}, 'kg', 1) RETURNING id`)[0].id);
+
+const mesajIst = (gid, data, subiect, corp) =>
+  Number(q(
+    `INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, snippet, corp, directie, partener_id, activ)
+     VALUES (?, ?, ?, 'vanzari@furnizorvechi.ro', 'Ion Vechi', 'furnizorvechi.ro', ?, '', ?, 'primit', ?, 1) RETURNING id`,
+    [cont, gid, data, subiect, corp, furnV]
+  )[0].id);
+
+// Cinci mesaje obișnuite, vechi, care nu-s oferte — exact teancul peste care
+// rularea pe zile s-ar fi împotmolit.
+for (let i = 1; i <= 5; i++) mesajIst(`culegere-ist-${i}`, "2024-03-0" + i, "Salut", "Bună ziua, ne vedem joi.");
+// Și o ofertă adevărată, de acum doi ani, după ele.
+const idVeche = mesajIst("culegere-ist-9", "2024-03-09", "Oferta veche folie",
+  ["Bună ziua,", "", "Vă transmitem oferta noastră:", "Folie istoric test 77 - 33,40 lei/kg", "", "Cu stimă,"].join("\n"));
+
+const recent = await c.culegeOferte({ zile: 3 });
+egal("  rularea pe zile nu vede oferta veche", recent.oferte, 0);
+
+// Lot de doi, dinadins: dacă ar exista capcana, aici s-ar opri la primele două.
+const ist = await c.culegeOferteIstoric({ lot: 2 });
+egal("  scotocirea trece prin toate mesajele", ist.citite >= 6, true);
+egal("  a mers pe mai multe loturi", ist.loturi >= 3, true);
+egal("  și a terminat, nu s-a oprit la plafon", ist.terminat, true);
+egal("  a găsit oferta veche", ist.oferte, 1);
+egal("  și a pus prețul direct în oferte", ist.puse, 1);
+
+const achV = q(`SELECT * FROM ach_oferte WHERE articol_id = ${artV} AND sursa = 'email'`);
+egal("  e o singură ofertă în Procurement", achV.length, 1);
+egal("  cu prețul din mailul vechi", Number(achV[0].pret), 33.4);
+egal("  cu data mailului, nu cu ziua de azi", String(achV[0].data_ofertei).slice(0, 10), "2024-03-09");
+egal("  și cu furnizorul legat", Number(achV[0].furnizor_id), furnV);
+
+const ist2 = await c.culegeOferteIstoric({ lot: 2 });
+egal("  a doua scotocire nu mai citește ce a citit", ist2.oferte, 0);
+egal("  și nu dublează oferta din Procurement",
+  q(`SELECT COUNT(*) AS n FROM ach_oferte WHERE articol_id = ${artV} AND sursa = 'email'`)[0].n, "1");
+
+// Butonul din pagină întoarce cifrele rulării în adresă.
+const rIst = res();
+await rute.post["/procurement/din-email/istoric"](
+  { user: VALI, params: {}, query: {}, body: {}, res: rIst, req: { url: "/x" } });
+const unde = String((rIst.antet && rIst.antet.Location) || "");
+egal("  butonul duce înapoi la pagina de oferte din email", unde.startsWith("/procurement/din-email?"), true);
+egal("  și spune câte a citit", /citite=\d+/.test(unde), true);
+
+exec1(`DELETE FROM email_oferte WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE gmail_id LIKE 'culegere-ist-%')`);
+exec1(`DELETE FROM ach_oferte WHERE articol_id = ${artV}`);
+exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-ist-%'`);
+exec1(`DELETE FROM ach_articole WHERE id = ${artV}`);
+exec1(`DELETE FROM mk_contacte WHERE partener_id = ${furnV}`);
+exec1(`DELETE FROM taskuri WHERE partener_id = ${furnV}`);
+exec1(`DELETE FROM parteneri WHERE id = ${furnV}`);
 
 
 // --- 17. numele scos din adresă --------------------------------------------
