@@ -249,6 +249,7 @@ function register(router) {
         <a href="/procurement/nou" class="btn">+ Ofertă nouă</a>
         <a href="/procurement/articole" class="btn secondary">Articole & categorii</a>
         <a href="/procurement/concurenta" class="btn secondary">Prețurile concurenței</a>
+        <a href="/procurement/din-email" class="btn secondary">Din emailuri</a>
       </div>
 
       <form class="filtre" method="get" action="/procurement">

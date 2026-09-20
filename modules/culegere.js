@@ -392,10 +392,219 @@ async function faceComandaCiorna(m, agentId) {
   return comandaId;
 }
 
+
+// ============================================================================
+// OFERTE PRIMITE DE LA FURNIZORI
+// ============================================================================
+//
+// Realitatea, înainte de orice cod: cele mai multe oferte de la furnizori vin
+// ca PDF sau Excel atașat, nu ca text în mesaj. Atașamentele urcă deja singure
+// în Drive. Deci ce facem aici NU e „citim automat toate ofertele" — e
+// „nu mai pierdem nicio ofertă și scoatem din text ce se poate scoate sigur".
+//
+// Un preț dintr-un email e text liber. „12,50 lei/kg" poate fi prețul mărfii,
+// al transportului, sau o cifră dintr-o discuție veche citată mai jos în fir.
+// De-aia sunt două drumuri:
+//   - se potrivește EXACT pe un articol de achiziție → intră direct în oferte;
+//   - orice altceva → așteaptă la Procurement → „Din emailuri", cu articolul
+//     sugerat, cu rândul din care s-a citit, și cu un om care apasă butonul.
+//
+// Și o poartă pe care n-o trecem niciodată: office@ e și căsuță de vânzări, și
+// de achiziții. Un „Solicitare ofertă" venit de la un CLIENT nu are ce căuta
+// în Procurement. Dacă partenerul e doar client, mesajul nu e ofertă, oricâte
+// prețuri ar conține.
+
+const OFERTA = new RegExp(
+  [
+    "ofert(a|ă|ăm|am|are)", "cotat(ie|ie)", "quotation", "\\bquote\\b", "price list",
+    "list[ăa] de pre[țt]uri", "pre[țt]uri valabile", "v[ăa] transmitem", "transmitem (oferta|pre[țt])",
+    "ca urmare a solicit[ăa]rii", "conform discu[țt]iei", "our (offer|quotation|prices)",
+    "we (offer|can offer|quote)", "best price", "proforma",
+  ].join("|"),
+  "i"
+);
+
+// Un preț: cifră + monedă, în orice ordine. Moneda e obligatorie — un număr
+// singur nu e preț, e orice.
+const MONEDE = { lei: "RON", ron: "RON", eur: "EUR", euro: "EUR", "€": "EUR", usd: "USD", "$": "USD", dolari: "USD" };
+const NUMAR = "\\d{1,3}(?:[.\\s]\\d{3})*(?:[.,]\\d{1,4})?|\\d+(?:[.,]\\d{1,4})?";
+const SEMN_MONEDA = "lei|ron|eur|euro|€|usd|\\$|dolari";
+// Prețul se prinde ÎNTREG, cu tot cu unitatea de măsură lipită după monedă:
+// „12,50 lei/kg" e o singură bucată. Dacă am scoate întâi prețul și abia apoi
+// am căuta unitatea, „lei" ar fi dispărut deja și „/kg" ar rămâne lipit de
+// denumire — „Punga curier 345x410 /buc" — iar potrivirea exactă pe articol
+// n-ar mai nimeri niciodată. Din afară ar fi părut că merge: mesajele s-ar
+// recunoaște ca oferte, doar că niciuna n-ar intra singură în Procurement.
+const PRET_DUPA = new RegExp(`(${NUMAR})\\s*(${SEMN_MONEDA})(?![a-zăâîșț])(?:\\s*[\\/]\\s*(${UM})(?![a-zăâîșț]))?`, "i");
+const PRET_INAINTE = new RegExp(`(${SEMN_MONEDA})\\s*(${NUMAR})(?![\\d])(?:\\s*[\\/]\\s*(${UM})(?![a-zăâîșț]))?`, "i");
+
+function numarRo(t) {
+  // „1.234,56" e românesc; „1,234.56" e englezesc. Se deosebesc după care
+  // separator vine ultimul — cel din urmă e cel zecimal.
+  let x = String(t || "").replace(/\s/g, "");
+  const ultimaVirgula = x.lastIndexOf(",");
+  const ultimulPunct = x.lastIndexOf(".");
+  if (ultimaVirgula > ultimulPunct) x = x.replace(/\./g, "").replace(",", ".");
+  else x = x.replace(/,/g, "");
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Prețurile dintr-un text, rând cu rând. Întoarce { textProdus, pret, moneda,
+// um, linie } — textProdus e ce a rămas din rând după ce s-a scos prețul.
+function preturiDinText(corp) {
+  const gasite = [];
+  for (const l of String(corp || "").replace(/\r/g, "").split("\n")) {
+    const t = l.replace(/\s+/g, " ").trim();
+    // Rândurile citate din firul de mai jos („> ...") sunt discuții vechi.
+    if (!t || t.length > 250 || /^[>|]/.test(t)) continue;
+
+    const dupa = t.match(PRET_DUPA);
+    const inainte = dupa ? null : t.match(PRET_INAINTE);
+    const m = dupa || inainte;
+    if (!m) continue;
+
+    const pret = numarRo(dupa ? m[1] : m[2]);
+    if (pret === null || pret <= 0 || pret > 10000000) continue;
+    const brutMoneda = dupa ? m[2] : m[1];
+    const um = m[3] ? String(m[3]).toLowerCase() : null;
+
+    const textProdus = t
+      .replace(m[0], " ")
+      .replace(/[-–—:|]+/g, " ")
+      .replace(/\b(pre[țt]ul?|price|la|de|cu|per|buc[ăa]ata)\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    gasite.push({ textProdus: textProdus.slice(0, 160), pret, moneda: MONEDE[String(brutMoneda).toLowerCase()] || "RON", um, linie: t.slice(0, 200) });
+    if (gasite.length >= 40) break;
+  }
+  return gasite;
+}
+
+// Potrivirea cu articolele de achiziție. Două trepte, cu consecințe diferite:
+//   - „exact": numele articolului, normalizat, e chiar textul rămas din rând.
+//     Ăsta intră singur în oferte.
+//   - „posibil": numele articolului (de cel puțin 5 caractere) se regăsește în
+//     rând. Ăsta se propune, dar nu intră singur.
+const faraDiacritice = (x) =>
+  String(x || "").toLowerCase()
+    .replace(/[ăâ]/g, "a").replace(/î/g, "i").replace(/[șş]/g, "s").replace(/[țţ]/g, "t")
+    .replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+
+function potrivesteArticol(textProdus, articole) {
+  const t = faraDiacritice(textProdus);
+  if (!t) return { articol: null, cum: "" };
+  for (const a of articole) {
+    if (faraDiacritice(a.nume) === t) return { articol: a, cum: "exact" };
+  }
+  let cel = null;
+  for (const a of articole) {
+    const n = faraDiacritice(a.nume);
+    if (n.length < 5 || !t.includes(n)) continue;
+    if (!cel || n.length > faraDiacritice(cel.nume).length) cel = a;
+  }
+  return cel ? { articol: cel, cum: "posibil" } : { articol: null, cum: "" };
+}
+
+// Mesajul e ofertă de la furnizor? Regula e strictă dinadins.
+function pareOferta(m, { furnizor }) {
+  if (pareRobot(m)) return false;
+  // Poarta: un client nu ne ofertează. Dacă partenerul e legat și e DOAR
+  // client, mesajul nu intră în Procurement oricâte prețuri ar avea.
+  if (m.partener_id && !furnizor) return false;
+  const text = `${m.subiect || ""}\n${m.corp || ""}`;
+  if (!OFERTA.test(text)) return false;
+  return preturiDinText(m.corp).length > 0;
+}
+
+async function culegeOferte({ zile } = {}) {
+  const deLa = new Date(Date.now() - (zile || 3) * 86400000).toISOString().slice(0, 10);
+  const rezumat = { citite: 0, oferte: 0, puse: 0, de_confirmat: 0, erori: 0 };
+
+  let mesaje = [];
+  let articole = [];
+  try {
+    mesaje = await db
+      .prepare(
+        `SELECT m.id, m.de_la, m.de_la_nume, m.de_la_domeniu, m.subiect, m.corp, m.data,
+                m.partener_id, p.nume AS partener_nume, lower(COALESCE(p.tip,'')) AS tip
+           FROM email_mesaje m
+           LEFT JOIN parteneri p ON p.id = m.partener_id
+          WHERE m.activ = 1 AND m.directie = 'primit'
+            AND COALESCE(m.fel,'') <> 'oferta'
+            AND NOT EXISTS (SELECT 1 FROM email_oferte o WHERE o.mesaj_id = m.id)
+            AND COALESCE(m.data,'') >= ?
+          ORDER BY m.data
+          LIMIT 300`
+      )
+      .all(deLa);
+    articole = await db.prepare("SELECT id, nume, um FROM ach_articole WHERE activ = 1 ORDER BY id").all();
+  } catch (e) {
+    return Object.assign(rezumat, { eroare: String(e.message || e).slice(0, 200) });
+  }
+
+  for (const m of mesaje) {
+    rezumat.citite++;
+    try {
+      const furnizor = ["furnizor", "ambele"].includes(String(m.tip || ""));
+      if (!pareOferta(m, { furnizor })) continue;
+      rezumat.oferte++;
+
+      const dataOfertei = String(m.data || "").slice(0, 10) || azi();
+      const furnizorText = m.partener_id ? null : String(m.de_la_nume || m.de_la_domeniu || m.de_la || "").slice(0, 120);
+
+      for (const g of preturiDinText(m.corp)) {
+        const { articol, cum } = potrivesteArticol(g.textProdus, articole);
+        let achId = null;
+        let stare = "de_confirmat";
+
+        // Doar potrivirea exactă intră singură. Restul așteaptă un om.
+        if (articol && cum === "exact") {
+          const r = await db
+            .prepare(
+              `INSERT INTO ach_oferte (articol_id, furnizor_id, furnizor_text, pret, moneda, um, data_ofertei,
+                                        sursa, email_id, email_subiect, email_de_la, observatii)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'email', ?, ?, ?, ?) RETURNING id`
+            )
+            .run(
+              articol.id, m.partener_id, furnizorText, g.pret, g.moneda, g.um || articol.um || null, dataOfertei,
+              String(m.id), scurt(m.subiect, 160), String(m.de_la || ""),
+              `Citit automat din rândul: „${scurt(g.linie, 160)}"`
+            );
+          achId = r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
+          if (achId) { stare = "pus"; rezumat.puse++; }
+        }
+        if (stare !== "pus") rezumat.de_confirmat++;
+
+        await db
+          .prepare(
+            `INSERT INTO email_oferte (mesaj_id, partener_id, furnizor_text, linie, text_produs, articol_id,
+                                        pret, moneda, um, data_ofertei, stare, ach_oferta_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+          )
+          .run(m.id, m.partener_id, furnizorText, g.linie, g.textProdus, articol ? articol.id : null,
+               g.pret, g.moneda, g.um, dataOfertei, stare, achId);
+      }
+
+      await db.prepare("UPDATE email_mesaje SET fel = 'oferta' WHERE id = ?").run(m.id);
+    } catch (e) {
+      rezumat.erori++;
+    }
+  }
+  return rezumat;
+}
+
 // ---- rularea clasificării ---------------------------------------------------
 async function clasificaMesaje({ zile } = {}) {
   const deLa = new Date(Date.now() - (zile || 3) * 86400000).toISOString().slice(0, 10);
   const rezumat = { citite: 0, cereri: 0, comenzi: 0, taskuri: 0, fara_agent: 0, erori: 0 };
+
+  // Ofertele se culeg ÎNTÂI, și dinadins. O ofertă de la un furnizor începe
+  // des cu „ca urmare a solicitării dumneavoastră" — ceea ce sună a cerere.
+  // Dacă am lăsa-o pe mâna clasificării de cereri, i-am face un task de
+  // răspuns în 24 de ore agentului clientului, pentru un mesaj de la un
+  // furnizor. Marcată ca ofertă, nu mai ajunge acolo.
+  rezumat.oferte = await culegeOferte({ zile });
 
   let mesaje = [];
   try {
@@ -406,6 +615,7 @@ async function clasificaMesaje({ zile } = {}) {
           WHERE m.activ = 1 AND m.directie = 'primit'
             AND m.partener_id IS NOT NULL
             AND m.clasificat_la IS NULL
+            AND COALESCE(m.fel,'') <> 'oferta'
             AND COALESCE(m.data,'') >= ?
           ORDER BY m.data
           LIMIT 500`
@@ -621,6 +831,147 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Culegere din emailuri", active: "/email", body }));
   });
 
+
+  // ---- Procurement → ofertele citite din emailuri ---------------------------
+  router.get("/procurement/din-email", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const stare = ["de_confirmat", "pus", "respins"].includes(ctx.query.stare) ? ctx.query.stare : "de_confirmat";
+
+    const randuri = await db
+      .prepare(
+        `SELECT o.*, m.subiect, m.de_la, m.de_la_nume, m.data AS data_mesaj,
+                p.nume AS partener_nume, a.nume AS articol_nume,
+                (SELECT COUNT(*) FROM email_atasamente x WHERE x.mesaj_id = m.id) AS atasamente
+           FROM email_oferte o
+           JOIN email_mesaje m ON m.id = o.mesaj_id
+           LEFT JOIN parteneri p ON p.id = o.partener_id
+           LEFT JOIN ach_articole a ON a.id = o.articol_id
+          WHERE o.stare = ?
+          ORDER BY o.mesaj_id DESC, o.id
+          LIMIT 300`
+      )
+      .all(stare)
+      .catch(() => []);
+
+    const articole = await db
+      .prepare("SELECT id, nume FROM ach_articole WHERE activ = 1 ORDER BY nume LIMIT 2000")
+      .all()
+      .catch(() => []);
+    const numaratori = await db
+      .prepare("SELECT stare, COUNT(*) AS n FROM email_oferte GROUP BY stare")
+      .all()
+      .catch(() => []);
+    const cate = (s2) => (numaratori.find((x) => x.stare === s2) || {}).n || 0;
+
+    // Grupate pe mesaj: o ofertă are de obicei mai multe rânduri, și le vezi
+    // împreună cu subiectul și cu atașamentul din care vin cu adevărat.
+    const peMesaj = new Map();
+    for (const r of randuri) {
+      if (!peMesaj.has(r.mesaj_id)) peMesaj.set(r.mesaj_id, []);
+      peMesaj.get(r.mesaj_id).push(r);
+    }
+
+    const optiuniArticol = (ales) =>
+      `<option value="">— alege articolul —</option>` +
+      articole.map((a) => `<option value="${a.id}"${Number(a.id) === Number(ales) ? " selected" : ""}>${esc(a.nume)}</option>`).join("");
+
+    const blocuri = [...peMesaj.entries()].map(([mesajId, lista]) => {
+      const cap = lista[0];
+      return `
+        <h2 style="margin-top:22px;font-size:16px">
+          <a href="/email/${mesajId}">${esc(cap.subiect || "(fără subiect)")}</a>
+          <span style="font-weight:400;font-size:13px;color:var(--text-muted)">
+            · ${esc(cap.partener_nume || cap.furnizor_text || cap.de_la_nume || cap.de_la || "necunoscut")}
+            · ${esc(String(cap.data_mesaj || "").slice(0, 16))}
+            ${Number(cap.atasamente) ? ` · ${cap.atasamente} atașamente` : ""}
+          </span>
+        </h2>
+        ${lista
+          .map((r) =>
+            stare === "de_confirmat"
+              ? `<form method="post" action="/procurement/din-email/${r.id}/confirma" class="filtre" style="align-items:flex-end;gap:8px;margin-bottom:6px">
+                   <div style="flex:2 1 320px;font-size:13px;color:var(--text-muted)">
+                     <div style="color:var(--text);font-weight:600">${esc(r.text_produs || "—")}</div>
+                     <div>din rând: ${esc(r.linie || "")}</div>
+                   </div>
+                   <label class="field" style="flex:2 1 260px;margin:0"><span>Articol</span>
+                     <select name="articol_id" required>${optiuniArticol(r.articol_id)}</select></label>
+                   <label class="field" style="flex:0 1 110px;margin:0"><span>Preț</span>
+                     <input name="pret" value="${esc(String(r.pret ?? ""))}" required></label>
+                   <label class="field" style="flex:0 1 90px;margin:0"><span>Monedă</span>
+                     <input name="moneda" value="${esc(r.moneda || "RON")}"></label>
+                   <label class="field" style="flex:0 1 90px;margin:0"><span>UM</span>
+                     <input name="um" value="${esc(r.um || "")}"></label>
+                   <button class="btn small" type="submit">Pune în oferte</button>
+                   <button class="link-btn danger" type="submit" formaction="/procurement/din-email/${r.id}/respinge">Nu e ofertă</button>
+                 </form>`
+              : `<div class="filtre" style="font-size:13px;margin-bottom:4px">
+                   <span style="flex:2 1 320px">${esc(r.text_produs || "—")}</span>
+                   <span style="flex:1 1 200px">${esc(r.articol_nume || "—")}</span>
+                   <span>${esc(String(r.pret ?? ""))} ${esc(r.moneda || "")}${r.um ? " / " + esc(r.um) : ""}</span>
+                   ${r.ach_oferta_id ? `<a href="/procurement">în oferte</a>` : ""}
+                 </div>`
+          )
+          .join("")}`;
+    });
+
+    const body = `
+      <p style="color:var(--text-muted);font-size:13px;max-width:860px">
+        Prețurile citite din emailurile de la furnizori. Cele care s-au potrivit <strong>exact</strong> pe un articol
+        de achiziție au intrat deja în oferte. Restul așteaptă aici: alegi articolul, verifici prețul, apeși.
+        Majoritatea ofertelor vin ca PDF sau Excel — alea sunt în Drive, la un clic pe subiectul mesajului.
+      </p>
+
+      <div class="filtre" style="margin-bottom:10px">
+        <a href="/procurement/din-email?stare=de_confirmat" class="chip${stare === "de_confirmat" ? " activ" : ""}">De confirmat (${cate("de_confirmat")})</a>
+        <a href="/procurement/din-email?stare=pus" class="chip${stare === "pus" ? " activ" : ""}">Puse în oferte (${cate("pus")})</a>
+        <a href="/procurement/din-email?stare=respins" class="chip${stare === "respins" ? " activ" : ""}">Respinse (${cate("respins")})</a>
+      </div>
+
+      ${blocuri.length ? blocuri.join("") : "<p>Nimic aici.</p>"}`;
+
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Oferte citite din emailuri", active: "/procurement", body }));
+  });
+
+  router.post("/procurement/din-email/:id/confirma", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const r = await db.prepare("SELECT * FROM email_oferte WHERE id = ?").get(ctx.params.id);
+    if (!r || r.stare !== "de_confirmat") return redirect(ctx.res, "/procurement/din-email");
+
+    const articolId = parseInt(ctx.body.articol_id, 10);
+    const pret = Number(String(ctx.body.pret || "").replace(",", "."));
+    if (!articolId || !Number.isFinite(pret) || pret <= 0) return redirect(ctx.res, "/procurement/din-email");
+
+    const m = await db.prepare("SELECT subiect, de_la FROM email_mesaje WHERE id = ?").get(r.mesaj_id);
+    const ins = await db
+      .prepare(
+        `INSERT INTO ach_oferte (articol_id, furnizor_id, furnizor_text, pret, moneda, um, data_ofertei,
+                                  sursa, email_id, email_subiect, email_de_la, observatii, creat_de)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'email', ?, ?, ?, ?, ?) RETURNING id`
+      )
+      .run(
+        articolId, r.partener_id, r.furnizor_text, pret,
+        String(ctx.body.moneda || r.moneda || "RON").toUpperCase().slice(0, 8),
+        String(ctx.body.um || r.um || "").slice(0, 16) || null,
+        r.data_ofertei || azi(),
+        String(r.mesaj_id), scurt(m && m.subiect, 160), String((m && m.de_la) || ""),
+        `Confirmat din emailul citit automat. Rândul: „${scurt(r.linie, 160)}"`,
+        ctx.user.id
+      );
+    await db
+      .prepare("UPDATE email_oferte SET stare = 'pus', articol_id = ?, pret = ?, ach_oferta_id = ?, confirmat_de = ?, confirmat_la = ? WHERE id = ?")
+      .run(articolId, pret, ins && ins.lastInsertRowid ? Number(ins.lastInsertRowid) : null, ctx.user.id, acum(), r.id);
+    redirect(ctx.res, "/procurement/din-email");
+  });
+
+  router.post("/procurement/din-email/:id/respinge", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    await db
+      .prepare("UPDATE email_oferte SET stare = 'respins', confirmat_de = ?, confirmat_la = ? WHERE id = ? AND stare = 'de_confirmat'")
+      .run(ctx.user.id, acum(), ctx.params.id);
+    redirect(ctx.res, "/procurement/din-email");
+  });
+
   router.post("/email/culegere/acum", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/email/culegere");
     await ruleaza();
@@ -634,6 +985,11 @@ module.exports = {
   ruleaza,
   culegeSemnaturi,
   clasificaMesaje,
+  culegeOferte,
+  pareOferta,
+  preturiDinText,
+  potrivesteArticol,
+  numarRo,
   felulMesajului,
   liniiDinText,
   scadentaLa24h,
