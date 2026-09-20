@@ -16,6 +16,7 @@ module.exports = function registerRute(router, deps) {
   };
 
   const TIPURI_ETICHETE = {
+    parteneri: "Clienți și furnizori (lista din SmartBill)",
     produse: "Produse / servicii",
     stoc: "Stoc la zi",
     productie: "Rapoarte de producție (dau rețetele)",
@@ -759,6 +760,27 @@ module.exports = function registerRute(router, deps) {
     } catch (e) {
       ctx.res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       ctx.res.end("scriptul punții nu a fost găsit");
+    }
+  });
+
+  // Puntea pentru lista de clienți și furnizori. Se rulează în tab-ul
+  // SmartBill al firmei de la care iei lista — inclusiv al altei firme, cum e
+  // Warehouse All, care are cont separat și de la care nu se poate lua nimic
+  // de la distanță.
+  router.get("/punte/parteneri.js", async (ctx) => {
+    const fs = require("fs");
+    const path = require("path");
+    try {
+      const cod = fs.readFileSync(path.join(__dirname, "..", "punte", "parteneri.js"), "utf8");
+      ctx.res.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      ctx.res.end(cod);
+    } catch (e) {
+      ctx.res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      ctx.res.end("scriptul de parteneri nu a fost găsit");
     }
   });
 

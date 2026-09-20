@@ -34,6 +34,17 @@ function register(router) {
     const tip = ["client", "furnizor", "ambii"].includes(String(ctx.query.tip)) ? String(ctx.query.tip) : "ambii";
     const cauta = String(ctx.query.q || "").trim();
 
+    // Cu care firmă din grup a lucrat partenerul. Nu e un câmp scris pe el și
+    // nici nu trebuie să fie: partenerii sunt COMUNI pe tot grupul (vezi
+    // lib/grup.js), iar firma emitentă stă pe factură. Deci se deduce, și e
+    // mereu adevărat — un client care cumpără de la amândouă apare cu
+    // amândouă, fără ca cineva să bifeze ceva.
+    const firmeGrup = await db
+      .prepare("SELECT id, nume, culoare FROM firme WHERE COALESCE(operationala,1) = 1 ORDER BY implicita DESC, id")
+      .all()
+      .catch(() => []);
+    const firmaCeruta = Number(ctx.query.firma) || 0;
+
     const args = [];
     let unde = "1 = 1";
     if (tip === "client") unde = "p.tip IN ('client','ambele')";
@@ -41,6 +52,9 @@ function register(router) {
     if (cauta) {
       unde += " AND (LOWER(p.nume) LIKE ? OR LOWER(COALESCE(p.cui,'')) LIKE ?)";
       args.push("%" + cauta.toLowerCase() + "%", "%" + cauta.toLowerCase() + "%");
+    }
+    if (firmaCeruta > 0) {
+      unde += ` AND EXISTS (SELECT 1 FROM facturi fx WHERE fx.activ = 1 AND fx.partener_id = p.id AND fx.firma_id = ${firmaCeruta})`;
     }
 
     const T = "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
@@ -64,7 +78,8 @@ function register(router) {
                                      AND ${deschisa("f")}
                                      AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5
                                     THEN COALESCE(t.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS sold,
-                  MAX(f.data_emiterii) AS ultima
+                  MAX(f.data_emiterii) AS ultima,
+                  string_agg(DISTINCT CAST(f.firma_id AS TEXT), ',') AS firme
              FROM (SELECT * FROM facturi WHERE activ = 1) f
              LEFT JOIN ${T} t ON t.factura_id = f.id
              LEFT JOIN ${P} pl ON pl.factura_id = f.id
@@ -75,7 +90,8 @@ function register(router) {
                 u.nume AS agent,
                 COALESCE(a.rulaj, 0) AS rulaj,
                 COALESCE(a.sold, 0) AS sold,
-                a.ultima AS ultima
+                a.ultima AS ultima,
+                a.firme AS firme
            FROM parteneri p
            LEFT JOIN utilizatori u ON u.id = p.agent_id
            LEFT JOIN agregat a ON a.partener_id = p.id
@@ -84,9 +100,34 @@ function register(router) {
       )
       .all(acum12, ...args);
 
-    const qs = cauta ? "&q=" + encodeURIComponent(cauta) : "";
+    const qs = (cauta ? "&q=" + encodeURIComponent(cauta) : "") + (firmaCeruta ? "&firma=" + firmaCeruta : "");
     const buton = (v, eticheta) =>
       `<a class="btn ${tip === v ? "" : "secondary"}" href="/parteneri?tip=${v}${qs}">${esc(eticheta)}</a>`;
+
+    // „Cash Machine SRL" pe o insignă de tabel e zgomot: forma juridică nu
+    // deosebește nimic aici, toate firmele grupului sunt SRL.
+    const scurtFirma = (x) => String(x || "").replace(/\s*S\.?R\.?L\.?\s*$/i, "").trim();
+    const dupaId = new Map(firmeGrup.map((f) => [String(f.id), f]));
+    const insigneFirme = (lista) => {
+      const ids = String(lista || "").split(",").map((x) => x.trim()).filter(Boolean);
+      if (!ids.length) return '<span style="color:var(--text-muted)" title="N-are nicio factură în ERP">—</span>';
+      const vazute = [];
+      for (const id of ids) {
+        const f = dupaId.get(id);
+        if (f && !vazute.some((x) => x.id === f.id)) vazute.push(f);
+      }
+      if (!vazute.length) return '<span style="color:var(--text-muted)">—</span>';
+      return vazute
+        .map(
+          (f) =>
+            `<span class="badge" style="background:${esc(f.culoare || "#6b7280")};color:#fff">${esc(scurtFirma(f.nume))}</span>`
+        )
+        .join(" ");
+    };
+
+    const qsTip = "tip=" + tip + (cauta ? "&q=" + encodeURIComponent(cauta) : "");
+    const butonFirma = (id, eticheta) =>
+      `<a class="btn small ${firmaCeruta === id ? "" : "secondary"}" href="/parteneri?${qsTip}${id ? "&firma=" + id : ""}">${esc(eticheta)}</a>`;
 
     const body = `
       <div class="toolbar">
@@ -95,6 +136,15 @@ function register(router) {
         ${buton("client", "Clienți")}
         ${buton("furnizor", "Furnizori")}
       </div>
+      ${
+        firmeGrup.length > 1
+          ? `<div class="toolbar" style="flex-wrap:wrap;gap:6px">
+               <span style="font-size:13px;color:var(--text-muted);align-self:center">Firma cu care a lucrat:</span>
+               ${butonFirma(0, "oricare")}
+               ${firmeGrup.map((f) => butonFirma(Number(f.id), scurtFirma(f.nume))).join("")}
+             </div>`
+          : ""
+      }
       <form method="get" action="/parteneri" class="filtre">
         <input type="hidden" name="tip" value="${esc(tip)}">
         <input name="q" placeholder="caută după nume sau CUI" value="${esc(cauta)}" style="min-width:240px">
@@ -105,11 +155,12 @@ function register(router) {
         ${randuri.length} parteneri, ordonați după rulajul din ultimele 12 luni.
       </p>
       ${table(
-        ["#", "Nume", "Tip", "Agent", "Rulaj 12 luni", "De încasat", "Ultima factură", "Stare"],
+        ["#", "Nume", "Tip", "Firma", "Agent", "Rulaj 12 luni", "De încasat", "Ultima factură", "Stare"],
         randuri.slice(0, 300).map((r, i) => [
           String(i + 1),
           `<a href="/parteneri/${r.id}">${esc(r.nume)}</a>`,
           esc(TIP_LABEL[r.tip] || r.tip),
+          insigneFirme(r.firme),
           esc(r.agent || "—"),
           money(r.rulaj),
           Number(r.sold) > 0.5 ? `<strong style="color:var(--danger)">${money(r.sold)}</strong>` : "—",

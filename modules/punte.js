@@ -1161,7 +1161,129 @@ async function ingestIncasari(randuri) {
   return { incasari_scrise: scrise, dubluri_sarite: dubluri, surogate_sterse: surogateSterse, facturi_negasite: negasite, inchise_istoric_ignorate: inchiseVechi, exemple_negasite: exemple.slice(0, 10) };
 }
 
+// ---- lista de clienți și furnizori, citită de pe ecran ---------------------
+//
+// De ce prin punte și nu prin export: aceeași poveste ca la restul — exportul
+// SmartBill e blocat de Chrome, iar Warehouse All are cont separat, deci nu se
+// poate lua nimic „de la distanță". Browserul, care are deja sesiunea lui
+// deschisă, citește tabelul de pe ecran și trimite rândurile aici.
+//
+// Scriptul din browser NU știe ce coloane sunt: trimite pur și simplu ce scrie
+// în capul tabelului. Potrivirea se face aici, pe server, după denumirea
+// coloanei — așa scriptul merge și pe lista de clienți, și pe cea de
+// furnizori, și nu se strică la prima schimbare de interfață SmartBill.
+const COLOANE_PARTENER = {
+  nume: ["nume", "denumire", "client", "furnizor", "partener", "denumirepartener", "numeclient", "numefurnizor", "razasociala", "denumirefirma"],
+  cui: ["cui", "cif", "codfiscal", "cuicif", "codunicdeinregistrare", "cnp", "cifcnp"],
+  email: ["email", "emailuri", "adresaemail", "eMail"],
+  telefon: ["telefon", "tel", "mobil", "telefoane", "nrtelefon"],
+  adresa: ["adresa", "adresasediu", "sediu", "strada", "adresacompleta"],
+  oras: ["oras", "localitate", "municipiu"],
+  judet: ["judet", "county"],
+};
+
+function cheieColoana(x) {
+  return String(x || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+// Din rândul brut (chei = capetele de coloană, cum scrie pe ecran) scoate
+// câmpurile pe care le știm. Ce nu recunoaștem se ignoră, nu se pierde nimic
+// important: numele și CUI-ul sunt tot ce trebuie ca să existe partenerul.
+function campuriPartener(r) {
+  const gasit = {};
+  const chei = Object.keys(r || {});
+  for (const [camp, variante] of Object.entries(COLOANE_PARTENER)) {
+    for (const k of chei) {
+      if (!variante.includes(cheieColoana(k))) continue;
+      const v = curat(r[k]);
+      if (v) { gasit[camp] = v; break; }
+    }
+  }
+  // Scriptul poate trimite și direct câmpuri numite, dacă cineva le pregătește
+  // de mână. Alea bat ce s-a dedus din capul tabelului.
+  for (const camp of Object.keys(COLOANE_PARTENER)) {
+    if (r && r[camp] !== undefined && curat(r[camp])) gasit[camp] = curat(r[camp]);
+  }
+  return gasit;
+}
+
+// CUI-ul vine scris în zece feluri: „RO12345678", „ro 12345678", „12345678".
+// Se păstrează cum l-a scris omul, dar se compară pe cifrele din el — altfel
+// același client intră de două ori, o dată cu RO și o dată fără.
+function cifreCui(x) {
+  return String(x || "").replace(/\D/g, "");
+}
+
+async function ingestParteneri(randuri) {
+  // Tipul vine pe FIECARE rând, pus de scriptul din browser („ești pe lista de
+  // clienți sau pe cea de furnizori?"), nu ca parametru al lotului: așa un
+  // singur lot poate duce și una, și alta, iar calea generică prin care trec
+  // toate punțile rămâne neatinsă.
+  let noi = 0, actualizate = 0, sarite = 0;
+  let nrClienti = 0, nrFurnizori = 0;
+
+  const existenti = await db.prepare("SELECT id, nume, cui, tip FROM parteneri").all();
+  const dupaCui = new Map();
+  const dupaNume = new Map();
+  for (const p of existenti) {
+    const c = cifreCui(p.cui);
+    if (c) dupaCui.set(c, p);
+    dupaNume.set(String(p.nume || "").trim().toLowerCase(), p);
+  }
+
+  for (const r of randuri) {
+    const c = campuriPartener(r);
+    if (!c.nume) { sarite++; continue; }
+    const tipRand = String((r && (r.tip_partener || r.tip)) || "client").toLowerCase() === "furnizor" ? "furnizor" : "client";
+    if (tipRand === "furnizor") nrFurnizori++; else nrClienti++;
+    const cuiCifre = cifreCui(c.cui);
+    const adresa = [c.adresa, c.oras, c.judet].filter(Boolean).join(", ");
+
+    const gasit = (cuiCifre && dupaCui.get(cuiCifre)) || dupaNume.get(c.nume.trim().toLowerCase());
+    if (gasit) {
+      // Se COMPLETEAZĂ golurile, nu se suprascrie nimic. Un email sau un
+      // telefon scris pe fișă de un om bate lista din SmartBill: de multe ori
+      // acolo e adresa de facturare, iar pe fișă e omul cu care vorbești. La
+      // fel și tipul: un client care e și furnizor a fost pus „ambele" de
+      // cineva care știa ce face, iar importul n-are de unde să știe mai bine.
+      await db
+        .prepare(
+          `UPDATE parteneri SET
+             cui     = COALESCE(NULLIF(cui, ''), NULLIF(?, '')),
+             email   = COALESCE(NULLIF(email, ''), NULLIF(?, '')),
+             telefon = COALESCE(NULLIF(telefon, ''), NULLIF(?, '')),
+             adresa  = COALESCE(NULLIF(adresa, ''), NULLIF(?, ''))
+           WHERE id = ?`
+        )
+        .run(c.cui || "", c.email || "", c.telefon || "", adresa, gasit.id);
+      actualizate++;
+      continue;
+    }
+
+    const ins = await db
+      .prepare("INSERT INTO parteneri (tip, nume, cui, email, telefon, adresa) VALUES (?,?,?,?,?,?) RETURNING id")
+      .run(tipRand, c.nume, c.cui || null, c.email || null, c.telefon || null, adresa || null);
+    const proaspat = { id: Number(ins.lastInsertRowid), nume: c.nume, cui: c.cui, tip: tipRand };
+    if (cuiCifre) dupaCui.set(cuiCifre, proaspat);
+    dupaNume.set(c.nume.trim().toLowerCase(), proaspat);
+    noi++;
+  }
+
+  return {
+    "Parteneri noi": noi,
+    "Actualizați": actualizate,
+    "Rânduri fără nume": sarite,
+    "Din care clienți": nrClienti,
+    "Din care furnizori": nrFurnizori,
+  };
+}
+
 const HANDLERE = {
+  parteneri: ingestParteneri,
   produse: ingestProduse,
   stoc: ingestStoc,
   productie: ingestProductie,
