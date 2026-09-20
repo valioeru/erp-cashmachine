@@ -23,6 +23,48 @@ const LIMITA = 25;
 
 // Fiecare verificare întoarce { n, sumar, antet, randuri } — pagina le redă
 // la fel pe toate, deci se adaugă una nouă scriind doar interogarea.
+// ---------------------------------------------------------------------------
+// Ce inseamna, de fapt, "duplicat"
+//
+// Un NUMAR de document care se repeta nu inseamna duplicat. La achizitii,
+// bonurile fiscale isi reiau numerele la nesfarsit: "Bon fiscal 42" de la OMV
+// apare de doua ori, cu 35,00 lei si cu 523,79 lei — sunt doua alimentari
+// diferite, nu o greseala de import. Prima varianta a verificarii se uita doar
+// la numar si le raporta pe amandoua ca duplicate, iar butonul de curatare
+// le-ar fi dezactivat pe cele bune.
+//
+// Un duplicat adevarat are TOT la fel: acelasi document, acelasi partener,
+// aceeasi data de emitere si aceeasi suma la banut. Asta se cere aici, si
+// asta se cere si la curatare — cele doua trebuie sa vada exact aceleasi
+// randuri, altfel butonul ar sterge ce raportul nu arata.
+//
+// Raman false pozitive posibile: doua livrari identice catre acelasi client,
+// in aceeasi zi, la aceeasi suma. Sunt rare, se vad in lista, iar curatarea
+// nu porneste niciodata singura.
+function sqlDuplicate(directie) {
+  const doc =
+    directie === "achizitie"
+      ? "NULLIF(f.document_extern,'')"
+      : "COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT))";
+  return `
+    SELECT ${doc} AS doc,
+           f.partener_id,
+           f.data_emiterii,
+           ROUND(CAST(COALESCE(t.total,0) AS NUMERIC), 2) AS suma,
+           COUNT(*) AS n,
+           string_agg(CAST(f.id AS TEXT), ',' ORDER BY f.id) AS ids,
+           MIN(p.nume) AS partener
+      FROM (SELECT * FROM facturi WHERE activ = 1) f
+      LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total
+                   FROM facturi_linii GROUP BY factura_id) t ON t.factura_id = f.id
+      LEFT JOIN parteneri p ON p.id = f.partener_id
+     WHERE f.directie = '${directie}' AND f.status NOT IN ('anulata')
+       AND ${doc} IS NOT NULL AND ${doc} <> ''
+     GROUP BY 1, f.partener_id, f.data_emiterii, 4
+    HAVING COUNT(*) > 1
+     ORDER BY COUNT(*) DESC, 1`;
+}
+
 const VERIFICARI = [
   {
     cheie: "plati-peste-factura",
@@ -274,112 +316,75 @@ const VERIFICARI = [
   },
   {
     cheie: "achizitii-duplicate",
-    titlu: "Facturi de achiziție cu același număr de document",
+    titlu: "Facturi de achiziție înregistrate de două ori",
     de_ce:
-      "Aceeași factură de furnizor înregistrată de două ori dublează datoria. E prima suspectă când „de plătit” din ERP nu seamănă cu soldul din balanță.",
+      "Aceeași factură de furnizor înregistrată de două ori dublează datoria. E prima suspectă când „de plătit” din ERP nu seamănă cu soldul din balanță. Se raportează doar când TOTUL e la fel — document, furnizor, dată și sumă — fiindcă numerele de bon fiscal se reiau la nesfârșit și singure nu dovedesc nimic.",
     gravitate: "rosu",
     async ruleaza() {
-      const grupuri = await db
-        .prepare(
-          `SELECT f.document_extern AS doc, f.partener_id, COUNT(*) AS n
-             FROM (SELECT * FROM facturi WHERE activ = 1) f
-            WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata')
-              AND f.document_extern IS NOT NULL AND f.document_extern <> ''
-            GROUP BY f.document_extern, f.partener_id
-           HAVING COUNT(*) > 1
-            ORDER BY COUNT(*) DESC`
-        )
-        .all();
-      const detalii = [];
+      const grupuri = await db.prepare(sqlDuplicate("achizitie")).all();
       let inPlus = 0;
+      const detalii = [];
       for (const g of grupuri) {
-        const f = await db
-          .prepare(
-            `SELECT f.id, p.nume AS partener,
-                    COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva,0)/100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
-               FROM (SELECT * FROM facturi WHERE activ = 1) f LEFT JOIN parteneri p ON p.id = f.partener_id
-              WHERE f.directie = 'achizitie' AND f.document_extern = ? AND f.partener_id ${g.partener_id === null ? "IS NULL" : "= ?"}
-              ORDER BY f.id`
-          )
-          .all(...(g.partener_id === null ? [g.doc] : [g.doc, g.partener_id]));
-        const sume = f.map((x) => nr(x.total));
-        inPlus += sume.slice(1).reduce((a, b) => a + b, 0);
+        const ids = String(g.ids || "").split(",").filter(Boolean);
+        inPlus += nr(g.suma) * (ids.length - 1);
         if (detalii.length < LIMITA) {
           detalii.push([
             `<strong>${esc(g.doc)}</strong>`,
-            esc((f[0] && f[0].partener) || "—"),
+            esc(g.partener || "—"),
+            esc(String(g.data_emiterii || "").slice(0, 10)),
+            money(g.suma),
             g.n,
-            f.map((x) => `<a href="/facturi/${x.id}">#${x.id}</a> ${money(x.total)}`).join("<br>"),
+            ids.map((id) => `<a href="/facturi/${id}">#${esc(id)}</a>`).join(" · "),
           ]);
         }
       }
       return {
         n: grupuri.length,
         sumar: `${grupuri.length} documente înregistrate de mai multe ori, ${money(inPlus)} datorie în plus`,
-        antet: ["Document", "Furnizor", "De câte ori", "Facturile"],
+        antet: ["Document", "Furnizor", "Data", "Suma", "De câte ori", "Facturile"],
         randuri: detalii,
       };
     },
   },
   {
     cheie: "vanzari-duplicate",
-    titlu: "Facturi de vânzare cu același număr de document",
+    titlu: "Facturi de vânzare înregistrate de mai multe ori",
     de_ce:
-      "Aceeași factură emisă, intrată de mai multe ori din import, umflă „de încasat” și apare de două-trei ori în scadențar, la aceeași zi și cu aceeași sumă. Pe 19.09.2026 erau 14 numere duplicate, 20 de exemplare în plus și 145.658 lei creanțe care nu există.",
+      "Aceeași factură emisă, intrată de mai multe ori din import, umflă „de încasat” și apare de două-trei ori în scadențar. Se raportează doar exemplarele identice în tot — același număr, același client, aceeași dată și aceeași sumă la bănuț; un număr care se repetă, singur, nu dovedește nimic.",
     gravitate: "rosu",
     async ruleaza() {
-      const grupuri = await db
-        .prepare(
-          `SELECT COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) AS doc,
-                  f.partener_id, COUNT(*) AS n
-             FROM (SELECT * FROM facturi WHERE activ = 1) f
-            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata')
-              AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) IS NOT NULL
-            GROUP BY 1, f.partener_id
-           HAVING COUNT(*) > 1
-            ORDER BY COUNT(*) DESC`
-        )
-        .all();
-      const detalii = [];
+      const grupuri = await db.prepare(sqlDuplicate("vanzare")).all();
       let inPlus = 0;
+      const detalii = [];
       for (const g of grupuri) {
-        const f = await db
-          .prepare(
-            `SELECT f.id, f.data_emiterii, f.status, p.nume AS partener,
-                    COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva,0)/100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
-               FROM (SELECT * FROM facturi WHERE activ = 1) f LEFT JOIN parteneri p ON p.id = f.partener_id
-              WHERE f.directie = 'vanzare'
-                AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) = ?
-                AND f.partener_id ${g.partener_id === null ? "IS NULL" : "= ?"}
-              ORDER BY f.id`
-          )
-          .all(...(g.partener_id === null ? [g.doc] : [g.doc, g.partener_id]));
-        inPlus += f.map((x) => nr(x.total)).slice(1).reduce((a, b) => a + b, 0);
+        const ids = String(g.ids || "").split(",").filter(Boolean);
+        inPlus += nr(g.suma) * (ids.length - 1);
         if (detalii.length < LIMITA) {
           detalii.push([
             `<strong>${esc(g.doc)}</strong>`,
-            esc((f[0] && f[0].partener) || "—"),
-            esc(String((f[0] && f[0].data_emiterii) || "").slice(0, 10)),
+            esc(g.partener || "—"),
+            esc(String(g.data_emiterii || "").slice(0, 10)),
+            money(g.suma),
             g.n,
-            f.map((x) => `<a href="/facturi/${x.id}">#${x.id}</a> ${money(x.total)}`).join("<br>"),
+            ids
+              .map((id, i) => `<a href="/facturi/${id}">#${esc(id)}</a>${i === 0 ? ' <span class="badge verde">se păstrează</span>' : ""}`)
+              .join("<br>"),
           ]);
         }
       }
       return {
         n: grupuri.length,
-        sumar: `${grupuri.length} numere emise de mai multe ori, ${money(inPlus)} creanțe care nu există`,
-        antet: ["Document", "Client", "Data", "De câte ori", "Facturile"],
+        sumar: `${grupuri.length} facturi intrate de mai multe ori, ${money(inPlus)} creanțe care nu există`,
+        antet: ["Document", "Client", "Data", "Suma", "Exemplare", "Facturile"],
         randuri: detalii,
-        // Butonul apare doar dacă are ce curăța. Păstrează exemplarul cel mai
-        // vechi al fiecărui număr — ăla e originalul — și le scoate pe
-        // celelalte. Se poate da înapoi.
         actiune: grupuri.length
-          ? `<form method="post" action="/admin/date/duplicate/curata" style="margin:10px 0"
-                   onsubmit="return confirm('Păstrez primul exemplar al fiecărui număr și le scot pe celelalte. Se poate anula după. Continui?')">
-               <button class="btn" type="submit">Scoate copiile, păstrează originalul</button>
-               <span style="font-size:12px;color:var(--text-muted);margin-left:8px">Nimic nu se șterge din bază — copiile se dezactivează, iar acțiunea se poate anula.</span>
-             </form>`
-          : "",
+          ? {
+              href: "/admin/date/duplicate/curata",
+              eticheta: "Scoate exemplarele în plus",
+              confirmare:
+                "Se dezactivează exact rândurile marcate în tabelul de mai sus — din fiecare grup rămâne exemplarul cu cel mai mic id, restul trec pe inactiv. Nu se șterge nimic: se poate anula oricând din istoricul de curățări de mai jos. Continui?",
+            }
+          : null,
       };
     },
   },
@@ -1264,41 +1269,27 @@ function register(router) {
   });
 
   // ---- curățarea facturilor duplicate -------------------------------------
-  // Păstrează exemplarul cu id-ul cel mai mic — primul intrat, adică
-  // originalul — și pune restul pe activ = 0. Id-urile atinse rămân scrise,
-  // deci se poate da înapoi întreg.
+  // Butonul folosește EXACT interogarea care alimentează raportul
+  // („vanzari-duplicate”, prin sqlDuplicate), ca să nu poată atinge niciodată
+  // altceva decât rândurile pe care le vezi acolo. Din fiecare grup rămâne
+  // exemplarul cu id-ul cel mai mic — primul intrat, adică originalul — iar
+  // restul trec pe activ = 0. Id-urile atinse rămân scrise, deci se poate da
+  // înapoi întreg.
   router.post("/admin/date/duplicate/curata", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
-    const grupuri = await db
-      .prepare(
-        `SELECT COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) AS doc,
-                f.partener_id, COUNT(*) AS n
-           FROM (SELECT * FROM facturi WHERE activ = 1) f
-          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata')
-            AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) IS NOT NULL
-          GROUP BY 1, f.partener_id
-         HAVING COUNT(*) > 1`
-      )
-      .all();
+    const grupuri = await db.prepare(sqlDuplicate("vanzare")).all();
 
     const deScos = [];
     let suma = 0;
     for (const g of grupuri) {
-      const f = await db
-        .prepare(
-          `SELECT f.id,
-                  COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva,0)/100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
-             FROM (SELECT * FROM facturi WHERE activ = 1) f
-            WHERE f.directie = 'vanzare'
-              AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) = ?
-              AND f.partener_id ${g.partener_id === null ? "IS NULL" : "= ?"}
-            ORDER BY f.id`
-        )
-        .all(...(g.partener_id === null ? [g.doc] : [g.doc, g.partener_id]));
-      for (const x of f.slice(1)) {
-        deScos.push(Number(x.id));
-        suma += nr(x.total);
-      }
+      const ids = String(g.ids || "")
+        .split(",")
+        .map((x) => Number(x))
+        .filter((x) => x > 0)
+        .sort((a, b) => a - b);
+      if (ids.length < 2) continue;
+      for (const id of ids.slice(1)) deScos.push(id);
+      suma += nr(g.suma) * (ids.length - 1);
     }
     if (!deScos.length) return redirect(ctx.res, "/admin/date#vanzari-duplicate");
 
