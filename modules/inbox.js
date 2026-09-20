@@ -771,8 +771,15 @@ function register(router) {
   });
 
   // ---- un mesaj -----------------------------------------------------------
+  // „/email/:id" prinde orice vine după /email/, inclusiv cuvinte. Dacă vreun
+  // modul își înregistrează pagina după ăsta — „/email/domenii", de pildă —
+  // ruta asta i-o ia înainte și ajunge cu „domenii" în loc de număr. În
+  // server.js modulele alea se înregistrează înaintea inboxului, dar paza de
+  // aici rămâne: o pagină care nu există se întoarce la listă, nu crapă cu
+  // „invalid input syntax for type integer".
   router.get("/email/:id", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
+    if (!/^\d+$/.test(String(ctx.params.id || ""))) return redirect(ctx.res, "/email");
     const v = undeVedeUtilizatorul(ctx.user);
     const m = await db
       .prepare(
@@ -839,6 +846,7 @@ function register(router) {
   // veni. Un furnizor se atribuie o dată în viață, nu la fiecare mesaj.
   router.post("/email/:id/leaga", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
+    if (!/^\d+$/.test(String(ctx.params.id || ""))) return redirect(ctx.res, "/email");
     const id = Number(ctx.params.id);
     const p = Number((ctx.body || {}).partener_id) || null;
     await db.prepare("UPDATE email_mesaje SET partener_id = ?, legat_cum = ? WHERE id = ?").run(p, p ? "pus de om" : null, id);
