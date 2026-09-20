@@ -394,6 +394,60 @@ function mesajFals(id, x) {
   p = await cer("/email/atasamente", { user: VALI, query: { stare: "nereusite" } });
   cere("filtrul pe atașamente nereușite", p.corp, ["stricat.xlsx"], ["oferta.pdf"]);
 
+  // --- a doua firmă: warehouseall.ro ----------------------------------------
+  // Cererea lui Vali: „agenții pot avea email la fel ca pe cash și pe
+  // warehouseall.ro; trebuie să aducem și acele emailuri fix ca la
+  // cashmachine.ro, le cumulăm per client, iar când trimitem alegem de pe ce
+  // adresă".
+  //
+  // Partea nevăzută, și cea mai periculoasă: dacă domeniul celei de-a doua
+  // firme nu e recunoscut ca AL NOSTRU, legarea pe domenii l-ar propune drept
+  // firmă — și fiecare mesaj între colegi ar ajunge în istoricul unui client.
+  // De-aia „domeniile noastre" se deduc din căsuțele conectate, nu se scriu
+  // pe undeva în cod.
+  console.log("\na doua firmă");
+  const firme = require(path.join(RAD, "lib", "firme.js"));
+  const legare = require(path.join(RAD, "modules", "legare.js"));
+
+  firme.uita();
+  egal("înainte de a adăuga căsuța, domeniul e străin", legare.eFolositor("warehousetest.ro"), true);
+
+  rulaj("INSERT INTO email_conturi (adresa, eticheta, tip, utilizator_id) VALUES ('office@warehousetest.ro','a doua firmă','comun',NULL)");
+  firme.uita();
+  const dom = await firme.domenii({ proaspat: true });
+  egal("domeniul celei de-a doua firme e recunoscut ca al nostru", dom.has("warehousetest.ro"), true);
+  egal("și cel dintâi rămâne", dom.has("cashmachine.ro"), true);
+  egal("legarea nu-l mai propune ca firmă străină", legare.eFolositor("warehousetest.ro"), false);
+  egal("nici subdomeniile lui", legare.eFolositor("mail.warehousetest.ro"), false);
+  egal("dar un domeniu chiar străin rămâne bun de legat", legare.eFolositor("clientoarecare.ro"), true);
+  egal("și domeniul firmei nu se poate bloca", await inbox.eAlNostru("warehousetest.ro"), true);
+
+  // de pe ce adrese are voie să trimită fiecare
+  const aleAdminului = await inbox.adreseDeTrimitere({ id: 1, rol: "admin", email: "vali@cashmachine.ro" });
+  egal("adminul poate trimite și de pe a doua firmă",
+    aleAdminului.some((x) => x.adresa === "office@warehousetest.ro"), true);
+  egal("prima din listă e adresa lui", aleAdminului[0].adresa, "vali@cashmachine.ro");
+  egal("fiecare adresă poartă firma ei",
+    (aleAdminului.find((x) => x.adresa === "office@warehousetest.ro") || {}).firma, "Warehousetest");
+
+  const aleAgentului = await inbox.adreseDeTrimitere({ id: 2, rol: "vanzari", email: "agent@cashmachine.ro" });
+  egal("agentul vede căsuța comună a firmei a doua",
+    aleAgentului.some((x) => x.adresa === "office@warehousetest.ro"), true);
+  egal("și pe a lui", aleAgentului.some((x) => x.adresa === "agent@test-inbox.ro"), true);
+  rulaj("INSERT INTO email_conturi (adresa, eticheta, tip, utilizator_id) VALUES ('altul@warehousetest.ro','a altuia','personal',3)");
+  const aleAgentului2 = await inbox.adreseDeTrimitere({ id: 2, rol: "vanzari", email: "agent@cashmachine.ro" });
+  egal("dar nu și căsuța personală a altui coleg",
+    aleAgentului2.some((x) => x.adresa === "altul@warehousetest.ro"), false);
+  const aleAdminului2 = await inbox.adreseDeTrimitere({ id: 1, rol: "admin", email: "vali@cashmachine.ro" });
+  egal("adminul o vede și pe aia",
+    aleAdminului2.some((x) => x.adresa === "altul@warehousetest.ro"), true);
+  rulaj("DELETE FROM email_conturi WHERE adresa = 'altul@warehousetest.ro'");
+  egal("cine nu e logat nu trimite de nicăieri", (await inbox.adreseDeTrimitere(null)).length, 0);
+
+  rulaj("DELETE FROM email_conturi WHERE adresa = 'office@warehousetest.ro'");
+  firme.uita();
+  await firme.domenii({ proaspat: true });
+
   // --- expeditorii blocați --------------------------------------------------
   // Cererea lui Vali: „la orice email sosit să-i împiedicăm pe viitor să mai
   // intre în ERP; odată marcate așa, în timp scăpăm de reclame".
