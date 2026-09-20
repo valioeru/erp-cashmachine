@@ -2430,6 +2430,13 @@ function register(router) {
     const aziStr = azi();
     const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
     const acum24 = new Date(Date.now() - 730 * 86400000).toISOString().slice(0, 10);
+    // Topurile de parteneri se socotesc pe ANUL ÎN CURS, de la 1 ianuarie
+    // încoace: asta e perioada despre care se vorbește la masă și cea pe care
+    // o cere banca la „cine sunt clienții voștri". Fereastra de douăsprezece
+    // luni rămâne pentru DSO, DPO și plafoane, unde un an întreg de rulaj e
+    // singura bază corectă.
+    const anCurent = Number(aziStr.slice(0, 4));
+    const deLaAnul = `${anCurent}-01-01`;
 
     const agg = async (directie, deLa, panaLa) =>
       await db
@@ -2443,6 +2450,8 @@ function register(router) {
     const v12 = await agg("vanzare", acum12, aziStr);
     const v24 = await agg("vanzare", acum24, acum12);
     const a12 = await agg("achizitie", acum12, aziStr);
+    const vAn = await agg("vanzare", deLaAnul, aziStr);
+    const aAn = await agg("achizitie", deLaAnul, aziStr);
 
     const solduri = await db
       .prepare(
@@ -2462,6 +2471,8 @@ function register(router) {
     const vanzariNet12 = Number(v12.net);
     const vanzariNetPrec = Number(v24.net);
     const achizitiiNet12 = Number(a12.net);
+    const vanzariNetAn = Number(vAn.net);
+    const achizitiiNetAn = Number(aAn.net);
     const creanteClienti = Number(sV.sold);
     const datoriiFurnizori = Number(sA.sold);
 
@@ -2474,9 +2485,9 @@ function register(router) {
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
          GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
       )
-      .all(acum12);
-    const top1 = topClienti.length && vanzariNet12 > 0 ? (Number(topClienti[0].net) / vanzariNet12) * 100 : 0;
-    const top5 = vanzariNet12 > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariNet12) * 100 : 0;
+      .all(deLaAnul);
+    const top1 = topClienti.length && vanzariNetAn > 0 ? (Number(topClienti[0].net) / vanzariNetAn) * 100 : 0;
+    const top5 = vanzariNetAn > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariNetAn) * 100 : 0;
 
     // Concentrarea pe furnizori — partea cealaltă a aceluiași risc. Banca se
     // uită și aici: dacă marfa vine de la un singur om, o ceartă cu el oprește
@@ -2490,9 +2501,9 @@ function register(router) {
           WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
           GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
       )
-      .all(acum12);
-    const furn1 = topFurnizori.length && achizitiiNet12 > 0 ? (Number(topFurnizori[0].net) / achizitiiNet12) * 100 : 0;
-    const furn5 = achizitiiNet12 > 0 ? (topFurnizori.reduce((s, c) => s + Number(c.net), 0) / achizitiiNet12) * 100 : 0;
+      .all(deLaAnul);
+    const furn1 = topFurnizori.length && achizitiiNetAn > 0 ? (Number(topFurnizori[0].net) / achizitiiNetAn) * 100 : 0;
+    const furn5 = achizitiiNetAn > 0 ? (topFurnizori.reduce((s, c) => s + Number(c.net), 0) / achizitiiNetAn) * 100 : 0;
 
     const dso = vanzariNet12 > 0 ? (creanteClienti / (vanzariNet12 * 1.19)) * 365 : null; // creanțele sunt cu TVA
     const dpo = achizitiiNet12 > 0 ? (datoriiFurnizori / (achizitiiNet12 * 1.19)) * 365 : null;
@@ -2500,7 +2511,7 @@ function register(router) {
     const pctDepasit = creanteClienti > 0 ? (Number(sV.depasit) / creanteClienti) * 100 : 0;
 
     const areSolduriInitiale = Number((await db.prepare("SELECT COUNT(*) AS n FROM inregistrari_contabile WHERE sursa = 'sold_initial'").get()).n) > 0;
-    const areAchizitii = achizitiiNet12 > 0;
+    const areAchizitii = achizitiiNet12 > 0 || achizitiiNetAn > 0;
 
     // Estimarea de finanțabilitate — pe logica standard a produselor bancare:
     //  - linie de credit pentru capital de lucru: uzual ~8–12% din cifra anuală;
@@ -2585,21 +2596,21 @@ function register(router) {
         explicatie: "Banca scade creanțele vechi din garanții — și din încredere.",
       },
       {
-        nume: "Concentrarea pe primul client",
+        nume: `Concentrarea pe primul client (${anCurent})`,
         valoare: topClienti.length ? `${top1.toFixed(0)}% (${esc(topClienti[0].nume)})` : "—",
         tinta: "< 30%",
         stare: nota(top1 < 30, top1 < 50),
         explicatie: "Dependența de un singur client e primul risc semnalat de analist.",
       },
       {
-        nume: "Concentrarea pe top 5 clienți",
+        nume: `Concentrarea pe top 5 clienți (${anCurent})`,
         valoare: `${top5.toFixed(0)}%`,
         tinta: "< 60%",
         stare: nota(top5 < 60, top5 < 80),
         explicatie: "",
       },
       {
-        nume: "Concentrarea pe primul furnizor",
+        nume: `Concentrarea pe primul furnizor (${anCurent})`,
         valoare: topFurnizori.length ? `${furn1.toFixed(0)}% (${esc(topFurnizori[0].nume)})` : "n/a (fără facturi de achiziție)",
         tinta: "< 40%",
         stare: topFurnizori.length ? nota(furn1 < 40, furn1 < 60) : "",
@@ -2702,11 +2713,11 @@ function register(router) {
       );
     if (top1 > 30)
       sugestii.push(
-        `<strong>Diversifică portofoliul.</strong> ${esc(topClienti.length ? topClienti[0].nume : "")} = ${top1.toFixed(0)}% din vânzări. Băncile taie punctajul peste 30%. Pipeline-ul CRM și lead-urile sunt unealta — fiecare client nou mare scade riscul.`
+        `<strong>Diversifică portofoliul.</strong> ${esc(topClienti.length ? topClienti[0].nume : "")} = ${top1.toFixed(0)}% din vânzările de anul ăsta. Băncile taie punctajul peste 30%. Pipeline-ul CRM și lead-urile sunt unealta — fiecare client nou mare scade riscul.`
       );
     if (furn1 > 40)
       sugestii.push(
-        `<strong>Ai a doua sursă la ${esc(topFurnizori.length ? topFurnizori[0].nume : "")}?</strong> ${furn1.toFixed(0)}% din achizițiile ultimelor 12 luni vin de la el. Analistul de credit întreabă exact asta, iar răspunsul „nu" se plătește în preț la fiecare negociere. Ofertele alternative se strâng în <a href="/procurement">Procurement</a>.`
+        `<strong>Ai a doua sursă la ${esc(topFurnizori.length ? topFurnizori[0].nume : "")}?</strong> ${furn1.toFixed(0)}% din achizițiile de anul ăsta vin de la el. Analistul de credit întreabă exact asta, iar răspunsul „nu" se plătește în preț la fiecare negociere. Ofertele alternative se strâng în <a href="/procurement">Procurement</a>.`
       );
     if (!areAchizitii)
       sugestii.push(
@@ -2858,29 +2869,29 @@ function register(router) {
       )}`;
 
     const tabelTopuri = `
-      <h2>Top 5 clienți (concentrarea riscului)</h2>
+      <h2>Top 5 clienți în ${anCurent} (concentrarea riscului)</h2>
       ${table(
-        ["Client", "Vânzări 12 luni (net)", "% din total"],
-        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariNet12 > 0 ? ((Number(c.net) / vanzariNet12) * 100).toFixed(1) + "%" : "—"]),
+        [`Client`, `Vânzări ${anCurent} (net)`, "% din total"],
+        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariNetAn > 0 ? ((Number(c.net) / vanzariNetAn) * 100).toFixed(1) + "%" : "—"]),
         { total: ["<strong>Top 5</strong>", `<strong>${money(topClienti.reduce((s, c) => s + Number(c.net), 0))}</strong>`, `<strong>${top5.toFixed(1)}%</strong>`] }
       )}
 
-      <h2>Top 5 furnizori (concentrarea aprovizionării)</h2>
+      <h2>Top 5 furnizori în ${anCurent} (concentrarea aprovizionării)</h2>
       ${table(
-        ["Furnizor", "Achiziții 12 luni (net)", "% din total", "Facturi", "Ultima factură"],
+        [`Furnizor`, `Achiziții ${anCurent} (net)`, "% din total", "Facturi", "Ultima factură"],
         topFurnizori.map((c) => [
           esc(c.nume),
           money(c.net),
-          achizitiiNet12 > 0 ? ((Number(c.net) / achizitiiNet12) * 100).toFixed(1) + "%" : "—",
+          achizitiiNetAn > 0 ? ((Number(c.net) / achizitiiNetAn) * 100).toFixed(1) + "%" : "—",
           String(c.facturi),
           esc(String(c.ultima || "")),
         ]),
         { total: ["<strong>Top 5</strong>", `<strong>${money(topFurnizori.reduce((s, c) => s + Number(c.net), 0))}</strong>`, `<strong>${furn5.toFixed(1)}%</strong>`, "", ""] }
       )}
-      <p style="font-size:12px;color:var(--text-muted)">${
-        achizitiiNet12 > 0
-          ? `Din ${money(achizitiiNet12)} achiziții în ultimele 12 luni (fără TVA, fără intercompany).`
-          : `Nu sunt facturi de achiziție în ultimele 12 luni — tabelul se umple după importul facturilor de furnizori de la <a href="/import">Import</a>.`
+      <p style="font-size:12px;color:var(--text-muted)">Amândouă topurile sunt pe anul în curs, 1 ianuarie ${anCurent} → ${dataRo(aziStr)}, fără TVA și fără intercompany. ${
+        achizitiiNetAn > 0
+          ? `Total vânzări ${money(vanzariNetAn)}, total achiziții ${money(achizitiiNetAn)}.`
+          : `Total vânzări ${money(vanzariNetAn)}. Nu sunt facturi de achiziție pe ${anCurent} — tabelul de furnizori se umple după importul facturilor de la <a href="/import">Import</a>.`
       }</p>`;
 
     const blocSugestii = `
