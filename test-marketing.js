@@ -93,6 +93,11 @@ function cere(eticheta, corp, bucati, interzise) {
   ok(eticheta + " (" + corp.length + " octeți)");
 }
 
+function egal(eticheta, avut, asteptat) {
+  const a = JSON.stringify(avut), b = JSON.stringify(asteptat);
+  if (a !== b) rau(eticheta, "am " + a + ", așteptam " + b); else ok(eticheta + " = " + b);
+}
+
 const azi = new Date().toISOString().slice(0, 10);
 const ziLunaAzi = azi.slice(5);
 
@@ -271,6 +276,82 @@ const ziLunaAzi = azi.slice(5);
   else ok("bara de sus are Management și Marketing, iar Rapoarte a intrat sub Management");
   if (!pag.includes('href="/rapoarte" class="subnav-link')) rau("Rapoarte nu apare în subnavigația Management");
   else ok("Dashboard, Rapoarte, Configurări și Utilizatori stau în subnavigația Management");
+
+  // --- contactele care nu sunt oameni --------------------------------------
+  // Din 139 de contacte strânse din ERP, vreo 60 nu erau oameni: numele firmei
+  // pus în dreptul persoanei, o funcție scrisă singură, un rând cu cifre.
+  // Butonul le scoate — dar nu are voie să atingă nimic scris de mână, nimic
+  // corectat de cineva, și nici adresele de birou, care sunt puse dinadins.
+  console.log("\ncontacte care nu par oameni");
+  execFileSync("psql", ["-X", "-q", "-c", "TRUNCATE mk_aniversari, mk_contacte_istoric, mk_contacte RESTART IDENTITY CASCADE"],
+    { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
+
+  const pun = (nume, sursa, firma, extra) =>
+    Number(q(
+      "INSERT INTO mk_contacte (nume, email, firma_text, functie, sursa, activ) VALUES (?, ?, ?, ?, ?, 1) RETURNING id",
+      [nume, (extra && extra.email) || null, firma || null, (extra && extra.functie) || null, sursa]
+    )[0].id);
+
+  const deScos = {
+    firma: pun("ALTEXPRESS COURIER SRL", "parteneri", "ALTEXPRESS COURIER SRL"),
+    firmaFaraSufix: pun("EUROINK TEST", "semnatura", "EUROINK TEST SRL"),
+    cifre: pun("Depozit 2", "parteneri", "ACME SRL"),
+    site: pun("vindem-ieftin.ro", "parteneri", "ACME SRL"),
+    functie: pun("Șef achiziții", "semnatura", "ACME SRL"),
+    unCuvant: pun("Popescu", "leaduri", "ACME SRL"),
+  };
+  const deLasat = {
+    om: pun("Marian Radu", "semnatura", "ACME SRL"),
+    manual: pun("BIROU CENTRAL SRL", "manual", "BIROU CENTRAL SRL"),
+    rol: pun("Office", "adresa", "ACME SRL", { email: "office@acme.ro" }),
+  };
+  // Unul dintre cele de scos, dar pe care l-a corectat un om: nu se mai atinge.
+  const atins = pun("DELIVERY SOLUTIONS SA", "parteneri", "DELIVERY SOLUTIONS SA");
+  q("INSERT INTO mk_contacte_istoric (contact_id, camp, valoare_veche, valoare_noua, schimbat_de) VALUES (?, 'telefon', NULL, '0722000000', 1)", [atins]);
+
+  const propuse = await mod.contacteDeCuratat();
+  const ids = propuse.map((c) => Number(c.id)).sort((a, b) => a - b);
+  egal("se propun exact cele șase care nu-s oameni", ids, Object.values(deScos).sort((a, b) => a - b));
+  egal("omul adevărat nu e propus", ids.includes(deLasat.om), false);
+  egal("contactul scris de mână nu e propus, oricât ar semăna cu o firmă", ids.includes(deLasat.manual), false);
+  egal("adresa de birou nu e propusă — e pusă dinadins", ids.includes(deLasat.rol), false);
+  egal("contactul corectat de un om nu e propus", ids.includes(atins), false);
+
+  const motive = {};
+  for (const c of propuse) motive[Number(c.id)] = c.motiv;
+  egal("numele firmei", motive[deScos.firma], "e numele firmei, nu al unui om");
+  egal("firma scrisă fără SRL", motive[deScos.firmaFaraSufix], "e numele firmei, nu al unui om");
+  egal("cifre în nume", motive[deScos.cifre], "cifre în nume");
+  egal("site în loc de nume", motive[deScos.site], "adresă sau site în loc de nume");
+  egal("funcție în loc de nume", motive[deScos.functie], "e o funcție, nu un nume");
+  egal("un singur cuvânt", motive[deScos.unCuvant], "un singur cuvânt");
+
+  let p2 = await cer("/marketing/contacte/curatenie", { user: VALI });
+  cere("pagina arată lista cu motive", p2.corp,
+    ["Contacte care nu par oameni", "Scoate toate cele 6", "ALTEXPRESS COURIER SRL", "e o funcție, nu un nume"],
+    ["Marian Radu", "BIROU CENTRAL SRL"]);
+
+  p2 = await cer("/marketing/contacte/curatenie", { user: GABI });
+  egal("agentul nu vede pagina de curățenie", locatie(p2), "/marketing/contacte");
+
+  await cer("/marketing/contacte/curatenie", { user: VALI, metoda: "post", body: {} });
+  egal("fără confirmare nu se scoate nimeni",
+    Number(q("SELECT COUNT(*) AS n FROM mk_contacte WHERE activ = 1")[0].n), 10);
+  await cer("/marketing/contacte/curatenie", { user: GABI, metoda: "post", body: { da: "1" } });
+  egal("nici agentul, chiar cu confirmare",
+    Number(q("SELECT COUNT(*) AS n FROM mk_contacte WHERE activ = 1")[0].n), 10);
+
+  await cer("/marketing/contacte/curatenie", { user: VALI, metoda: "post", body: { da: "1" } });
+  egal("rămân doar cei care par oameni",
+    q("SELECT nume FROM mk_contacte WHERE activ = 1 ORDER BY nume").map((x) => x.nume),
+    ["BIROU CENTRAL SRL", "DELIVERY SOLUTIONS SA", "Marian Radu", "Office"]);
+  egal("niciunul nu e șters din bază, doar dezactivat",
+    Number(q("SELECT COUNT(*) AS n FROM mk_contacte")[0].n), 10);
+  egal("fiecare scos are motivul în istoric",
+    Number(q("SELECT COUNT(*) AS n FROM mk_contacte_istoric WHERE valoare_noua = 'scos — nu pare om'")[0].n), 6);
+
+  p2 = await cer("/marketing/contacte/curatenie", { user: VALI });
+  cere("a doua oară nu mai e nimic de scos", p2.corp, ["Nimic de scos"], ["Scoate toate cele"]);
 
   // Curățăm după noi: testul depozitului își reface fixtura ștergând parteneri,
   // iar un lead rămas aici i-ar bloca ștergerea prin cheia străină.
