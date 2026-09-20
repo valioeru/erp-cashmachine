@@ -638,7 +638,8 @@ function register(router) {
             : '<span class="badge gri">oprită</span>',
           ...(eAdmin
             ? [
-                `<form method="post" action="/email/cont/${c.id}/comuta" class="inline-form"><button class="link-btn" type="submit">${Number(c.activ) ? "oprește" : "pornește"}</button></form>`,
+                `<form method="post" action="/email/cont/${c.id}/comuta" class="inline-form"><button class="link-btn" type="submit">${Number(c.activ) ? "oprește" : "pornește"}</button></form>` +
+                  ` <a class="link-btn danger" href="/email/cont/${c.id}/sterge">șterge</a>`,
               ]
             : []),
         ])
@@ -646,7 +647,7 @@ function register(router) {
       ${
         eAdmin
           ? `<h2>Adaugă o căsuță</h2>
-      <p style="color:var(--text-muted);font-size:13px;margin:-4px 0 12px">Trebuie să fie o adresă de pe domeniul firmei. O căsuță „comună" o vede toată lumea; una „personală", doar omul ei și tu.</p>
+      <p style="color:var(--text-muted);font-size:13px;margin:-4px 0 12px">Trebuie să fie o adresă de pe domeniul firmei. O căsuță „comună" o vede toată lumea; una „personală", doar omul ei și tu. „Oprește" lasă mesajele în ERP și doar nu mai aduce altele; „șterge" scoate și căsuța, și mesajele ei.</p>
       <form method="post" action="/email/conturi" class="form" style="max-width:820px">
         <div class="rand" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
           <label style="flex:2 1 260px">Adresa <input name="adresa" type="email" required placeholder="cineva@cashmachine.ro"></label>
@@ -680,6 +681,86 @@ function register(router) {
   router.post("/email/cont/:id/comuta", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/email/conturi");
     await db.prepare("UPDATE email_conturi SET activ = CASE WHEN activ = 1 THEN 0 ELSE 1 END WHERE id = ?").run(Number(ctx.params.id));
+    return redirect(ctx.res, "/email/conturi");
+  });
+
+  // ---- ștergerea unei căsuțe ----------------------------------------------
+  //
+  // „Oprește" era singura ieșire, și nu e de ajuns: o căsuță adăugată greșit
+  // rămânea pe listă cu mesajele ei cu tot. Ștergerea le scoate pe amândouă,
+  // dar nu pe ascuns — întâi se arată ce dispare, la bucată, și abia apoi se
+  // apasă. Nu există „undo", așa că numărul de pe ecran e singura apărare.
+  //
+  // Ce NU se atinge, intenționat:
+  //   - taskurile și comenzile născute din mesajele astea. Sunt treabă de
+  //     lucru, nu copii ale emailului; rămân, doar legătura către mesaj se
+  //     taie, ca să nu arate spre un rând care nu mai există.
+  //   - fișierele din Drive. ERP-ul le-a pus acolo, dar folderul e al firmei;
+  //     ce intră în Drive se șterge din Drive, de mână.
+  //   - ce s-a cules în Contacte din semnăturile mesajelor. Omul de la
+  //     furnizor rămâne om și după ce ștergi căsuța pe care a scris.
+  async function bilantSterge(id) {
+    const cont = await db.prepare("SELECT * FROM email_conturi WHERE id = ?").get(id);
+    if (!cont) return null;
+    const r = await db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM email_mesaje WHERE cont_id = ?) AS mesaje,
+           (SELECT COUNT(*) FROM email_atasamente a JOIN email_mesaje m ON m.id = a.mesaj_id WHERE m.cont_id = ?) AS atasamente,
+           (SELECT COUNT(*) FROM email_oferte o JOIN email_mesaje m ON m.id = o.mesaj_id WHERE m.cont_id = ?) AS oferte,
+           (SELECT COUNT(*) FROM email_mesaje WHERE cont_id = ? AND task_id IS NOT NULL) AS taskuri,
+           (SELECT COUNT(*) FROM comenzi c JOIN email_mesaje m ON m.id = c.email_mesaj_id WHERE m.cont_id = ?) AS comenzi`
+      )
+      .get(id, id, id, id, id);
+    return { cont, ...r };
+  }
+
+  router.get("/email/cont/:id/sterge", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (ctx.user.rol !== "admin") return redirect(ctx.res, "/email/conturi");
+    const id = Number(ctx.params.id);
+    const b = id > 0 ? await bilantSterge(id) : null;
+    if (!b) return redirect(ctx.res, "/email/conturi");
+
+    const n = (x) => Number(x || 0).toLocaleString("ro-RO");
+    const mesaje = Number(b.mesaje || 0);
+    const corp = `
+      <h2>Ștergi căsuța ${esc(b.cont.adresa)}?</h2>
+      <div class="card" style="max-width:720px;border-left:4px solid var(--danger)">
+        <p style="margin-top:0"><strong>Dispar definitiv:</strong></p>
+        <ul style="margin:0 0 12px 18px">
+          <li>căsuța <strong>${esc(b.cont.adresa)}</strong>${b.cont.eticheta ? ` (${esc(b.cont.eticheta)})` : ""}</li>
+          <li><strong>${n(b.mesaje)}</strong> ${mesaje === 1 ? "mesaj adus în ERP" : "mesaje aduse în ERP"}</li>
+          <li><strong>${n(b.atasamente)}</strong> rânduri de atașamente (fișierele rămân în Drive)</li>
+          <li><strong>${n(b.oferte)}</strong> oferte culese din mesajele ei</li>
+        </ul>
+        <p style="margin:0 0 12px"><strong>Rămân pe loc:</strong> ${n(b.taskuri)} taskuri și ${n(b.comenzi)} comenzi făcute din mesajele astea — li se taie doar legătura către mesaj. Rămân și contactele culese din semnături, și fișierele din Drive.</p>
+        <p style="margin:0 0 16px;color:var(--danger)">Nu se poate da înapoi. Dacă vrei doar să nu mai aducă mesaje noi, apasă „oprește" pe listă.</p>
+        <form method="post" action="/email/cont/${b.cont.id}/sterge" class="inline-form">
+          <input type="hidden" name="da" value="1">
+          <button class="btn" type="submit" style="background:var(--danger);border-color:var(--danger)">Șterge căsuța și ${n(b.mesaje)} ${mesaje === 1 ? "mesaj" : "mesaje"}</button>
+          <a class="btn secondary" href="/email/conturi">Renunță</a>
+        </form>
+      </div>`;
+    send(ctx.res, 200, pagina(ctx, "Ștergere căsuță", "/email/conturi", corp));
+  });
+
+  router.post("/email/cont/:id/sterge", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/email/conturi");
+    const id = Number(ctx.params.id);
+    if (!(id > 0) || String((ctx.body || {}).da) !== "1") return redirect(ctx.res, "/email/conturi");
+
+    // Totul într-o singură interogare: pg rulează un lot de comenzi simple ca
+    // o tranzacție, deci ori se șterg toate, ori niciuna. Ordinea urmează
+    // cheile străine — atașamente și oferte înainte de mesaje, mesajele
+    // înaintea căsuței — iar comenzile doar își pierd legătura.
+    await db.exec(`
+      DELETE FROM email_atasamente WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE cont_id = ${id});
+      DELETE FROM email_oferte WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE cont_id = ${id});
+      UPDATE comenzi SET email_mesaj_id = NULL WHERE email_mesaj_id IN (SELECT id FROM email_mesaje WHERE cont_id = ${id});
+      DELETE FROM email_mesaje WHERE cont_id = ${id};
+      DELETE FROM email_conturi WHERE id = ${id};
+    `);
     return redirect(ctx.res, "/email/conturi");
   });
 
