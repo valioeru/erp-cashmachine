@@ -234,6 +234,11 @@ function register(router) {
     const oportunitati = await db.prepare("SELECT * FROM oportunitati WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const taskuriPartener = await db.prepare(`${tsk.SELECT_TASK} WHERE t.partener_id = ? ORDER BY t.id DESC LIMIT 50`).all(partener.id);
     const emailuriPartener = await db.prepare("SELECT id, subiect, catre, status, trimis_la FROM emailuri WHERE partener_id = ? ORDER BY id DESC LIMIT 50").all(partener.id);
+    // Oamenii firmei, cu funcția lor. Se cere târziu, nu sus cu celelalte
+    // module, ca să nu se lege marketing.js și parteneri.js în cerc.
+    const blocOameni = await require("./marketing")
+      .blocContacte({ partenerId: partener.id, numePartener: partener.nume, user: ctx.user })
+      .catch(() => "");
     const utilizatoriActivi = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const interactiuni = await db
       .prepare("SELECT i.*, u.nume AS agent FROM interactiuni i LEFT JOIN utilizatori u ON u.id = i.utilizator_id WHERE i.partener_id = ? ORDER BY i.data DESC, i.id DESC")
@@ -360,6 +365,8 @@ function register(router) {
           ? table(tsk.CAPETE, taskuriPartener.map((t) => tsk.randTask(t, new Date().toISOString().slice(0, 10))))
           : '<p style="color:var(--text-muted)">Niciun task pentru acest partener.</p>'
       }
+
+      ${blocOameni}
 
       <h2>Emailuri trimise (${emailuriPartener.length})</h2>
       ${

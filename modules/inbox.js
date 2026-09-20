@@ -439,7 +439,7 @@ async function paginaEmailuriAgent(ctx) {
         <span style="font-weight:400;font-size:13px;color:var(--text-muted)">· ${mesaje.length} ${mesaje.length === 1 ? "mesaj" : "mesaje"}</span>
       </h2>
       ${table(
-        ["Data", "De la", "Subiect", "Ce e", "Atașamente"],
+        ["Data", "De la", "Subiect", "Ce e", "Atașamente", ""],
         mesaje.map((m) => [
           esc(String(m.data || "").slice(0, 16)),
           esc(m.de_la_nume || m.de_la || "—"),
@@ -450,6 +450,7 @@ async function paginaEmailuriAgent(ctx) {
             ? `<span class="badge albastru">cerere</span>${m.task_id ? ` <a href="/taskuri/${m.task_id}">taskul</a>` : ""}`
             : "",
           Number(m.atasamente) ? String(m.atasamente) : "",
+          `<a class="link-btn" href="/crm/email/nou?raspunde_la=${m.id}">răspunde</a>`,
         ])
       )}`);
   }
@@ -515,10 +516,21 @@ async function blocEmailuri(opts) {
     .all(...args, ...v.args);
   if (!randuri.length) return "";
 
+  // Butonul de scris stă ÎN bloc, nu în altă pagină: omul care se uită la
+  // istoricul de emailuri al unui client vrea de cele mai multe ori să-i
+  // scrie, iar „deschide altă filă și caută adresa" e exact pasul la care
+  // renunță și scrie din Gmail, pe lângă ERP.
+  const scrieLa = o.partenerId
+    ? `?partener_id=${Number(o.partenerId)}`
+    : o.ofertaId
+    ? `?oferta_id=${Number(o.ofertaId)}`
+    : "";
   return `
-    <h2>Emailuri (${randuri.length})</h2>
+    <h2>Emailuri (${randuri.length})
+      <a class="btn small" href="/crm/email/nou${scrieLa}" style="font-weight:400;margin-left:8px">Scrie un email</a>
+    </h2>
     ${table(
-      ["Data", "", "De la / către", "Subiect", "Atașamente", "Căsuța"],
+      ["Data", "", "De la / către", "Subiect", "Atașamente", "Căsuța", ""],
       randuri.map((m) => [
         esc(String(m.data || "").slice(0, 16)),
         m.directie === "trimis" ? '<span class="badge gri">trimis</span>' : '<span class="badge albastru">primit</span>',
@@ -526,6 +538,7 @@ async function blocEmailuri(opts) {
         `<a href="/email/${m.id}">${esc(m.subiect || "(fără subiect)")}</a>`,
         Number(m.atasamente) ? `<span class="badge verde">${m.atasamente}</span>` : "",
         esc(m.casuta),
+        m.directie === "trimis" ? "" : `<a class="link-btn" href="/crm/email/nou?raspunde_la=${m.id}">răspunde</a>`,
       ])
     )}`;
 }
@@ -622,11 +635,14 @@ function register(router) {
         <button class="btn" type="submit">Filtrează</button>
         <a class="link-btn" href="/email">Șterge filtrele</a>
       </form>
-      <form method="post" action="/email/sincronizeaza" class="inline-form" style="margin-bottom:12px">
-        <button class="btn secondary" type="submit">Adu emailurile noi acum</button>
-      </form>
+      <div class="toolbar" style="margin-bottom:12px">
+        <a class="btn" href="/crm/email/nou">Scrie un email</a>
+        <form method="post" action="/email/sincronizeaza" class="inline-form">
+          <button class="btn secondary" type="submit">Adu emailurile noi acum</button>
+        </form>
+      </div>
       ${table(
-        ["Data", "", "De la / către", "Subiect", "Partener", "Atașamente", "Căsuța"],
+        ["Data", "", "De la / către", "Subiect", "Partener", "Atașamente", "Căsuța", ""],
         randuri.map((m) => [
           esc(String(m.data || "").slice(0, 16)),
           m.directie === "trimis" ? '<span class="badge gri">trimis</span>' : '<span class="badge albastru">primit</span>',
@@ -635,6 +651,7 @@ function register(router) {
           m.partener ? `<a href="/parteneri/${m.partener_id}">${esc(m.partener)}</a>` : '<span class="badge galben">de atribuit</span>',
           Number(m.atasamente) ? `<span class="badge verde">${m.atasamente}</span>` : "",
           esc(m.casuta),
+          m.directie === "trimis" ? "" : `<a class="link-btn" href="/crm/email/nou?raspunde_la=${m.id}">răspunde</a>`,
         ])
       )}
       <p style="font-size:12px;color:var(--text-muted)">Se arată ultimele 300 de mesaje din filtrul ales. Fiecare își vede căsuța lui, căsuțele comune le vede toată lumea, administratorul vede tot.</p>`;
@@ -1008,6 +1025,14 @@ function register(router) {
           ${m.factura_id ? `<div><div class="k">Factură</div><a href="/facturi/${m.factura_id}">deschide factura</a></div>` : ""}
         </div>
       </div>
+      ${
+        m.directie === "trimis"
+          ? ""
+          : `<div class="toolbar" style="margin:12px 0">
+               <a class="btn" href="/crm/email/nou?raspunde_la=${m.id}">Răspunde</a>
+               ${m.partener_id ? `<a class="btn secondary" href="/crm/email/nou?partener_id=${m.partener_id}">Scrie-i altceva</a>` : ""}
+             </div>`
+      }
       <h2>Text</h2>
       <pre style="white-space:pre-wrap;font:inherit;background:var(--bg-subtle,#f6f7f9);padding:14px;border-radius:6px;max-width:900px">${esc(m.corp || m.snippet || "")}</pre>
       ${String(m.corp || "").length >= MAX_CORP ? `<p style="font-size:12px;color:var(--text-muted)">Textul e tăiat la ${MAX_CORP.toLocaleString("ro-RO")} de caractere. Restul se citește în Gmail.</p>` : ""}

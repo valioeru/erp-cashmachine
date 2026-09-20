@@ -262,6 +262,62 @@ function pareFirma(nume, firma) {
   return false;
 }
 
+// ---- oamenii firmei, pe fișa ei --------------------------------------------
+//
+// Cererea lui Vali: „la contacte pune și funcția unde o ai".
+//
+// Funcția exista — o culege serviciul de noapte din semnăturile de email — dar
+// se vedea doar în Marketing → Contacte. Pe fișa partenerului, adică fix acolo
+// unde agentul se uită înainte să sune, nu era nici măcar lista de oameni: doar
+// câmpul „persoana de contact", o singură căsuță de text.
+//
+// Blocul ăsta se pune pe fișa partenerului și arată ce știm despre fiecare om:
+// numele, FUNCȚIA, emailul, telefonul, și de unde le știm. Cu buton de scris
+// lângă fiecare, ca să nu se copieze adresa de mână.
+async function blocContacte(opts) {
+  const o = opts || {};
+  if (!o.partenerId) return "";
+  const oameni = await db
+    .prepare(
+      `SELECT c.id, c.nume, c.functie, c.email, c.telefon, c.sursa, c.data_nastere
+         FROM mk_contacte c
+        WHERE c.activ = 1 AND c.partener_id = ?
+        ORDER BY (CASE WHEN COALESCE(c.functie,'') = '' THEN 1 ELSE 0 END), c.nume`
+    )
+    .all(o.partenerId)
+    .catch(() => []);
+  if (!oameni.length) return "";
+
+  const DE_UNDE = {
+    semnatura: "din semnătura unui email",
+    adresa: "din adresa de email",
+    parteneri: "de pe fișa firmei",
+    leaduri: "dintr-un lead",
+    manual: "scris de un om",
+  };
+
+  return `
+    <h2>Oameni la firma asta (${oameni.length})
+      <a class="btn small" href="/marketing/contacte?q=${encodeURIComponent(o.numePartener || "")}"
+         style="font-weight:400;margin-left:8px">Vezi în Contacte</a>
+    </h2>
+    ${table(
+      ["Nume", "Funcție", "Email", "Telefon", "De unde știm", ""],
+      oameni.map((c) => [
+        `<a href="/marketing/contact/${c.id}">${esc(c.nume || "—")}</a>`,
+        c.functie
+          ? `<strong>${esc(c.functie)}</strong>`
+          : '<span style="color:var(--text-muted)">—</span>',
+        c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—",
+        esc(c.telefon || "—"),
+        `<span style="font-size:12px;color:var(--text-muted)">${esc(DE_UNDE[c.sursa] || c.sursa || "—")}</span>`,
+        c.email
+          ? `<a class="link-btn" href="/crm/email/nou?partener_id=${Number(o.partenerId)}&catre=${encodeURIComponent(c.email)}">scrie-i</a>`
+          : "",
+      ])
+    )}`;
+}
+
 // ---- contactele care nu sunt oameni ----------------------------------------
 //
 // Din 139 de contacte strânse din ERP, vreo 60 nu erau oameni: numele firmei
@@ -1018,6 +1074,7 @@ module.exports = {
   pareFirma,
   normNume,
   // Curățenia de contacte care nu-s oameni: regula și lista, verificate în test.
+  blocContacte,
   nuEOm,
   contacteDeCuratat,
 };

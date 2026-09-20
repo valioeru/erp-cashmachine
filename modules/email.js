@@ -7,6 +7,7 @@ const { esc, layout } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const mail = require("../lib/mail");
 const google = require("../lib/google");
+const drive = require("../lib/drive");
 
 function adrese(text) {
   return String(text || "")
@@ -27,6 +28,68 @@ async function utilizatorComplet(id) {
 function poateTrimite(u) {
   if (mail.configUtilizator(u)) return true;
   return Boolean(google.cont().ok && String((u && (u.email_expeditor || u.email)) || "").trim());
+}
+
+// Folderul din care se atașează documente la emailuri. Se face singur, la
+// prima folosire, în Drive-ul la care e legat ERP-ul — lângă „atasamente
+// email", nu în altă parte: contul tehnic n-are acces nicăieri altundeva.
+//
+// Numele e cel cerut de Vali. Dacă se adaugă subfoldere (pe furnizor, pe an),
+// se umblă prin ele din formular.
+const DOSAR_DOCUMENTE = "Oferte și fișe tehnice";
+
+async function dosarDocumente() {
+  const radacina = google.folderDrive && google.folderDrive();
+  if (!radacina) return null;
+  const id = await drive.cale([DOSAR_DOCUMENTE], radacina);
+  return { id, nume: DOSAR_DOCUMENTE };
+}
+
+// Adresa paginii curente, cu un parametru schimbat. Folosită la umblatul prin
+// subfolderele din Drive: se păstrează partenerul, leadul și răspunsul la care
+// lucrează omul, altfel un clic pe un folder i-ar pierde tot contextul.
+function caleaMea(ctx, schimbari) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(ctx.query || {})) if (v !== undefined && v !== "") p.set(k, String(v));
+  for (const [k, v] of Object.entries(schimbari || {})) {
+    if (v === "" || v === null || v === undefined) p.delete(k);
+    else p.set(k, String(v));
+  }
+  const s = p.toString();
+  return "/crm/email/nou" + (s ? "?" + s : "");
+}
+
+// Gmail refuză mesajele peste 25 MB. Se verifică ÎNAINTE de trimitere, ca
+// omul să afle de ce nu merge, nu să primească un refuz de la Google după ce
+// a așteptat descărcarea a zece fișiere.
+const MAX_ATASAMENTE = 24 * 1024 * 1024;
+
+// Id-urile fișierelor care CHIAR sunt în folderul de documente (inclusiv în
+// subfolderele lui). Se recalculează la fiecare trimitere: e singura apărare
+// împotriva unei bife măsluite, iar o listă ținută în memorie s-ar învechi
+// exact când cineva adaugă o ofertă nouă.
+async function idDinDosar() {
+  const set = new Set();
+  const d = await dosarDocumente();
+  if (!d) return set;
+  const deUmblat = [d.id];
+  let paza = 0;
+  while (deUmblat.length && paza++ < 50) {
+    const aici = await drive.listeaza(deUmblat.shift(), { cate: 200 }).catch(() => []);
+    for (const f of aici) {
+      if (f.folder) deUmblat.push(f.id);
+      else set.add(f.id);
+    }
+  }
+  return set;
+}
+
+function marimeOmeneasca(n) {
+  const x = Number(n) || 0;
+  if (!x) return "";
+  if (x < 1024) return x + " B";
+  if (x < 1024 * 1024) return Math.round(x / 1024) + " KB";
+  return (x / (1024 * 1024)).toFixed(1).replace(".", ",") + " MB";
 }
 
 function register(router) {
@@ -137,13 +200,66 @@ function register(router) {
     const u = await utilizatorComplet(ctx.user && ctx.user.id);
     const config = poateTrimite(u) ? (mail.configUtilizator(u) || { expeditor: u.email_expeditor || u.email, prinGmail: true }) : null;
 
-    const partenerId = parseInt(ctx.query.partener_id, 10) || null;
+    let partenerId = parseInt(ctx.query.partener_id, 10) || null;
     const leadId = parseInt(ctx.query.lead_id, 10) || null;
     const oportunitateId = parseInt(ctx.query.oportunitate_id, 10) || null;
 
+    // ---- răspuns la un email primit ----------------------------------------
+    // Butonul „Răspunde" de pe fișa mesajului trimite aici cu mesaj_id. Se
+    // preiau destinatarul, subiectul cu „Re:" și textul citat, ca omul să nu
+    // le copieze de mână dintr-o filă în alta.
+    const raspundeLa = parseInt(ctx.query.raspunde_la, 10) || null;
+    let subiectRaspuns = "";
+    let citat = "";
+    let deLaSugerat = "";
     let destinatar = "";
     let context = "";
-    if (partenerId) {
+    if (raspundeLa) {
+      const v = require("./inbox").undeVedeUtilizatorul(ctx.user);
+      const m = await db
+        .prepare(
+          `SELECT m.*, c.adresa AS casuta, p.nume AS partener
+             FROM email_mesaje m JOIN email_conturi c ON c.id = m.cont_id
+             LEFT JOIN parteneri p ON p.id = m.partener_id
+            WHERE m.id = ? AND ${v.sql}`
+        )
+        .get(raspundeLa, ...v.args)
+        .catch(() => null);
+      if (m) {
+        destinatar = String(m.de_la || "");
+        const s = String(m.subiect || "");
+        subiectRaspuns = /^\s*re\s*:/i.test(s) ? s : "Re: " + s;
+        if (!partenerId && m.partener_id) partenerId = Number(m.partener_id);
+        // Se răspunde din căsuța în care a venit mesajul. Altfel clientul
+        // primește răspunsul de la altcineva decât cel căruia i-a scris.
+        deLaSugerat = String(m.casuta || "");
+        const textul = String(m.corp || m.snippet || "").split("\n").slice(0, 40).map((r) => "> " + r).join("\n");
+        citat =
+          `\n\n---\nPe ${String(m.data || "").slice(0, 16)}, ${String(m.de_la_nume || m.de_la || "")} a scris:\n` + textul;
+        context =
+          `Răspuns la <a href="/email/${m.id}">${esc(s || "(fără subiect)")}</a>` +
+          (m.partener ? ` · <a href="/parteneri/${m.partener_id}">${esc(m.partener)}</a>` : "") +
+          ` · primit în ${esc(m.casuta)}`;
+      }
+    }
+
+    // De pe fișa unei oferte se scrie clientului ei. Fără asta, butonul de pe
+    // ofertă ar fi deschis un formular gol și omul ar fi căutat adresa de mână.
+    const ofertaId = parseInt(ctx.query.oferta_id, 10) || null;
+    if (ofertaId && !partenerId) {
+      const o = await db
+        .prepare("SELECT o.id, o.numar, o.partener_id FROM oferte o WHERE o.id = ?")
+        .get(ofertaId)
+        .catch(() => null);
+      if (o && o.partener_id) partenerId = Number(o.partener_id);
+    }
+
+    // Adresa cerută explicit (butonul „scrie-i" de lângă un om, de pe fișa
+    // firmei) bate adresa firmei: ăla e omul cu care vorbești, nu contabilul
+    // de pe factură.
+    if (!destinatar && ctx.query.catre) destinatar = String(ctx.query.catre).slice(0, 200);
+
+    if (partenerId && !destinatar) {
       const p = await db.prepare("SELECT id, nume, email FROM parteneri WHERE id = ?").get(partenerId);
       if (p) {
         destinatar = p.email || "";
@@ -172,10 +288,39 @@ function register(router) {
     // arată nicio listă — nu punem un buton unde nu e nimic de ales.
     const expeditori = await require("./inbox").adreseDeTrimitere(u);
 
+    // Fișierele din Drive care se pot atașa. Cererea lui Vali: „să ataseze
+    // documente din drive-ul la care e legat ERP-ul, un folder nou acolo,
+    // oferte și fișe tehnice".
+    //
+    // Se citește DOAR folderul ăla, nu tot Drive-ul: contul tehnic n-are acces
+    // decât unde i s-a dat share, iar o listă cu tot Drive-ul firmei într-un
+    // formular de email ar fi și inutilă, și o portiță de scurs documente.
+    const dosar = await dosarDocumente().catch(() => null);
+    let fisiere = [];
+    let eroareDrive = null;
+    if (dosar) {
+      try {
+        fisiere = await drive.listeaza(dosar.id, { cate: 200 });
+      } catch (e) {
+        eroareDrive = google.mesajul ? google.mesajul(e) : String(e.message || e);
+      }
+    }
+    const subDosar = String(ctx.query.dosar || "");
+    // Paza e clasa de caractere, nu lungimea: id-ul intră într-o interogare
+    // Drive, iar acolo contează să nu conțină ghilimele sau spații. O limită
+    // de lungime ghicită ar fi refuzat tăcut foldere bune.
+    if (dosar && subDosar && /^[A-Za-z0-9_-]{4,120}$/.test(subDosar)) {
+      try {
+        fisiere = await drive.listeaza(subDosar, { cate: 200 });
+      } catch (e) {
+        eroareDrive = String(e.message || e);
+      }
+    }
+
     // Șabloane de email precompletate (deocamdată: urarea de zi de naștere,
     // folosită din Biroul agentului).
-    let subiectPrecompletat = "";
-    let corpPrecompletat = semnatura;
+    let subiectPrecompletat = subiectRaspuns;
+    let corpPrecompletat = citat ? semnatura + citat : semnatura;
     if (ctx.query.sablon === "zi_nastere" && partenerId) {
       const p = await db.prepare("SELECT nume, persoana_contact FROM parteneri WHERE id = ?").get(partenerId);
       const catreCine = p && p.persoana_contact ? p.persoana_contact : "dumneavoastră";
@@ -184,9 +329,97 @@ function register(router) {
         catreCine === "dumneavoastră" ? "" : `dumneavoastră, ${catreCine}, `
       }un sincer „La mulți ani!" — multă sănătate, bucurii și reușite.\n\nVă mulțumim pentru colaborare și ne bucurăm să vă avem alături.${semnatura}`;
     }
+    // Oamenii firmei, cu funcția lor, ca destinatari dintr-un clic. Fără asta,
+    // „Către" se completa cu adresa de pe fișa firmei — de multe ori adresa de
+    // facturare — iar omul cu care vorbești chiar acum trebuia căutat în altă
+    // pagină și copiat de mână.
+    const oameni = partenerId
+      ? await db
+          .prepare(
+            `SELECT nume, functie, email FROM mk_contacte
+              WHERE activ = 1 AND partener_id = ? AND COALESCE(email,'') <> ''
+              ORDER BY (CASE WHEN COALESCE(functie,'') = '' THEN 1 ELSE 0 END), nume
+              LIMIT 25`
+          )
+          .all(partenerId)
+          .catch(() => [])
+      : [];
+    const blocOameni = oameni.length
+      ? `<div class="field" style="display:block">
+           <span style="font-weight:600">Oamenii firmei</span>
+           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+             ${oameni
+               .map(
+                 (c) =>
+                   `<button type="button" class="btn secondary small pune-catre" data-email="${esc(c.email)}"
+                            title="${esc(c.email)}">${esc(c.nume || c.email)}${
+                     c.functie ? ` <span style="font-weight:400;opacity:.8">— ${esc(c.functie)}</span>` : ""
+                   }</button>`
+               )
+               .join("")}
+           </div>
+           <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Un clic îl pune în „Către". Încă un clic pe altul îl adaugă lângă.</p>
+         </div>`
+      : "";
+
+    // Atașamentele din Drive. Sunt bife, nu un câmp de scris: omul alege din
+    // ce vede, iar id-ul fișierului nu se tastează niciodată de mână.
+    const foldere = fisiere.filter((f) => f.folder);
+    const documente = fisiere.filter((f) => !f.folder);
+    const blocDrive = !dosar
+      ? `<p style="font-size:12px;color:var(--text-muted)">Drive-ul nu e configurat, deci nu se pot atașa documente. Vezi Email → Conexiunea Google.</p>`
+      : eroareDrive
+      ? `<p style="font-size:12px;color:var(--danger)">Nu am putut citi folderul „${esc(DOSAR_DOCUMENTE)}": ${esc(eroareDrive)}</p>`
+      : `<details class="field" style="display:block"${documente.length ? "" : ""}>
+           <summary style="cursor:pointer;font-weight:600">
+             Atașează din Drive — ${esc(DOSAR_DOCUMENTE)}
+             <span style="font-weight:400;color:var(--text-muted);font-size:13px">
+               (${documente.length} ${documente.length === 1 ? "document" : "documente"}${foldere.length ? `, ${foldere.length} foldere` : ""})
+             </span>
+           </summary>
+           <div style="margin-top:8px;max-height:280px;overflow:auto;border:1px solid var(--border,#e3e5e9);border-radius:6px;padding:8px">
+             ${
+               subDosar
+                 ? `<p style="margin:0 0 8px"><a href="${esc(caleaMea(ctx, { dosar: "" }))}">← înapoi la ${esc(DOSAR_DOCUMENTE)}</a></p>`
+                 : ""
+             }
+             ${
+               foldere.length
+                 ? foldere
+                     .map(
+                       (f) =>
+                         `<div style="padding:3px 0"><a href="${esc(caleaMea(ctx, { dosar: f.id }))}">📁 ${esc(f.nume)}</a></div>`
+                     )
+                     .join("")
+                 : ""
+             }
+             ${
+               documente.length
+                 ? documente
+                     .map(
+                       (f) =>
+                         `<label style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:13px">
+                            <input type="checkbox" name="drive" value="${esc(f.id)}">
+                            <span>${esc(f.nume)}</span>
+                            <span style="color:var(--text-muted);font-size:11px">${esc(marimeOmeneasca(f.marime))}${
+                           f.modificat ? " · " + esc(f.modificat) : ""
+                         }</span>
+                          </label>`
+                     )
+                     .join("")
+                 : `<p style="margin:0;color:var(--text-muted);font-size:13px">Folderul e gol. Pune ofertele și fișele tehnice în „${esc(DOSAR_DOCUMENTE)}" din Drive și apar aici.</p>`
+             }
+           </div>
+           <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">
+             Documentele Google (Docs, Sheets) se trimit ca PDF — clientul poate să nu aibă cont Google.
+             Gmail nu duce mai mult de 25 MB per mesaj, cu tot cu atașamente.
+           </p>
+         </details>`;
+
     const body = `
       ${context ? `<div class="detail-box" style="padding:12px">${context}</div>` : ""}
       <form class="form" method="post" action="/crm/email">
+        <input type="hidden" name="raspunde_la" value="${raspundeLa || ""}">
         <input type="hidden" name="partener_id" value="${partenerId || ""}">
         <input type="hidden" name="lead_id" value="${leadId || ""}">
         <input type="hidden" name="oportunitate_id" value="${oportunitateId || ""}">
@@ -197,7 +430,7 @@ function register(router) {
                    ${expeditori
                      .map(
                        (x) =>
-                         `<option value="${esc(x.adresa)}"${x.adresa === String(config.expeditor || "").toLowerCase() ? " selected" : ""}>${esc(
+                         `<option value="${esc(x.adresa)}"${x.adresa === String(deLaSugerat || config.expeditor || "").toLowerCase() ? " selected" : ""}>${esc(
                            x.adresa
                          )}${x.firma ? ` — ${esc(x.firma)}` : ""}${x.nota ? ` (${esc(x.nota)})` : ""}</option>`
                      )
@@ -209,15 +442,30 @@ function register(router) {
                </p>`
             : `<p style="font-size:13px;color:var(--text-muted);margin:0">De la: <strong>${esc(config.expeditor)}</strong> · <a href="/profil/email">schimbă</a></p>`
         }
-        <label class="field">Către<input name="catre" required value="${esc(destinatar)}" placeholder="client@exemplu.ro"></label>
+        <label class="field">Către<input name="catre" id="catre" required value="${esc(destinatar)}" placeholder="client@exemplu.ro"></label>
+        ${blocOameni}
         <label class="field">Cc (opțional)<input name="cc" placeholder="coleg@cashmachine.ro"></label>
         <label class="field">Subiect<input name="subiect" required value="${esc(subiectPrecompletat)}"></label>
         <label class="field">Mesaj<textarea name="corp" rows="12" required>${esc(corpPrecompletat)}</textarea></label>
+        ${blocDrive}
         <label class="field" style="flex-direction:row;align-items:center;gap:8px">
           <input type="checkbox" name="inregistreaza" value="1" checked> Înregistrează și ca interacțiune în istoricul partenerului
         </label>
         <div class="form-actions"><button class="btn" type="submit">Trimite</button> <a class="btn secondary" href="/crm/activitate">Renunță</a></div>
       </form>
+      <script>
+        document.addEventListener("click", function (e) {
+          var b = e.target.closest ? e.target.closest(".pune-catre") : null;
+          if (!b) return;
+          var c = document.getElementById("catre");
+          if (!c) return;
+          var a = b.dataset.email;
+          var are = c.value.split(/[,;\s]+/).filter(Boolean);
+          if (are.indexOf(a) < 0) are.push(a);
+          c.value = are.join(", ");
+          c.focus();
+        });
+      </script>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Email nou", active: "/crm", body }));
   });
@@ -246,7 +494,35 @@ function register(router) {
       const cerut = String(b.de_la || "").trim().toLowerCase();
       const deLa = permise.find((x) => x.adresa === cerut) ? cerut : null;
       if (cerut && !deLa) throw new Error("Nu ai voie să trimiți de pe adresa " + cerut + ".");
-      await mail.trimiteDeLa(u, { catre, cc, subiect, corp, deLa });
+
+      // Atașamentele bifate din Drive. Se descarcă aici, la trimitere, nu la
+      // afișarea formularului: altfel fiecare deschidere de pagină ar trage
+      // zeci de megaocteți degeaba.
+      //
+      // Se verifică fiecare id că e CHIAR în folderul de documente. Fără asta,
+      // cine ar schimba valoarea bifei ar putea cere orice fișier la care are
+      // acces contul tehnic — adică și atașamentele altor clienți.
+      const cerute = (Array.isArray(b.drive) ? b.drive : b.drive ? [b.drive] : [])
+        .map((x) => String(x || "").trim())
+        .filter(Boolean)
+        .slice(0, 10);
+      const atasamente = [];
+      if (cerute.length) {
+        const permiseDrive = await idDinDosar();
+        for (const id of cerute) {
+          if (!permiseDrive.has(id)) throw new Error("Fișierul ales nu e în folderul „" + DOSAR_DOCUMENTE + "”.");
+          const f = await drive.descarca(id);
+          atasamente.push(f);
+        }
+        const total = atasamente.reduce((s2, a) => s2 + (a.continut ? a.continut.length : 0), 0);
+        if (total > MAX_ATASAMENTE) {
+          throw new Error(
+            `Atașamentele adună ${Math.round(total / 1024 / 1024)} MB, iar Gmail nu duce mai mult de 25 MB per mesaj. Trimite-le în două mesaje sau pune un link.`
+          );
+        }
+      }
+
+      await mail.trimiteDeLa(u, { catre, cc, subiect, corp, deLa, atasamente });
     } catch (e) {
       status = "esuat";
       eroare = e.message;

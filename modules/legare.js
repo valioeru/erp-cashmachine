@@ -287,20 +287,64 @@ function register(router) {
     const sigure = cuPropunere.filter((p) => p.sigur);
     const mesajeSigure = sigure.reduce((s, p) => s + Number(p.mesaje || 0), 0);
 
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri ORDER BY nume LIMIT 5000").all().catch(() => []);
+    // Cine se poate alege: TOȚI partenerii — inclusiv cei care au o singură
+    // factură — plus leadurile scrise de agenți, care încă n-au fișă de
+    // partener. Fiecare vine cu firma din grup cu care a lucrat, ca să se
+    // deosebească între ele firmele cu nume asemănător.
+    const parteneri = await db
+      .prepare(
+        `SELECT p.id, p.nume, p.cui, p.tip,
+                (SELECT string_agg(DISTINCT f.nume, ' + ')
+                   FROM facturi fx JOIN firme f ON f.id = fx.firma_id
+                  WHERE fx.activ = 1 AND fx.partener_id = p.id) AS firme
+           FROM parteneri p ORDER BY p.nume LIMIT 8000`
+      )
+      .all()
+      .catch(() => []);
 
-    // Lista de firme se trimite O SINGURĂ DATĂ, ca date, și se toarnă în
-    // select abia când omul dă clic pe el.
+    // Leadurile agenților: clienți potențiali, încă fără fișă de partener.
+    // Cererea lui Vali: „aș vrea să găsesc clienți și furnizori, inclusiv
+    // potențiali adăugați de agenți". Se aleg la fel ca un partener; fișa se
+    // creează la confirmare, din datele lead-ului, și se spune pe față.
+    const leaduri = await db
+      .prepare(
+        `SELECT id, COALESCE(NULLIF(companie,''), nume) AS nume, email, nume AS persoana
+           FROM leaduri
+          WHERE COALESCE(stadiu,'') <> 'convertit' AND partener_id IS NULL
+          ORDER BY 2 LIMIT 3000`
+      )
+      .all()
+      .catch(() => []);
+
+    // Lista se trimite O SINGURĂ DATĂ, ca date, și se caută în ea în pagină.
     //
-    // De ce: prima variantă scria toate cele ~1.500 de firme în fiecare din
-    // cele 120 de rânduri. Pagina ieșea de 2,7 MB, se încărca în zeci de
-    // secunde, iar butonul „Leagă tot" de sus nu se mai putea apăsa —
-    // funcția exista, dar nimeni n-ajungea la ea. Un buton pe care nu poți
-    // apăsa e ca și cum n-ar fi scris.
-    const firmeJson = JSON.stringify(parteneri.map((p) => [Number(p.id), String(p.nume)]));
-    const selectGol = (ales) =>
-      `<option value="">— alege firma —</option>` +
-      (ales ? `<option value="${Number(ales)}" selected>${esc((parteneri.find((p) => Number(p.id) === Number(ales)) || {}).nume || "")}</option>` : "");
+    // De ce nu un <select>: prima variantă scria toate cele ~1.500 de firme în
+    // fiecare din cele 120 de rânduri — pagina ieșea de 2,7 MB. A doua le
+    // turna în select la clic, dar un select nativ caută doar după PRIMA
+    // literă: scrii „dinamic" și nu ajungi niciodată la „DYNAMIC PARCEL
+    // DISTRIBUTION". Firma era acolo, cu facturi și tot, dar nu se putea
+    // găsi — ceea ce, pentru omul din fața ecranului, e totuna cu a nu exista.
+    //
+    // Acum se caută pe orice bucată din nume sau din CUI, fără diacritice.
+    const cheieCautare = (x) =>
+      String(x || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+    const listaCautare = [
+      ...parteneri.map((p) => [
+        Number(p.id),
+        String(p.nume),
+        cheieCautare(p.nume + " " + (p.cui || "")),
+        [p.tip === "furnizor" ? "furnizor" : p.tip === "ambele" ? "client și furnizor" : "client", p.firme || ""].filter(Boolean).join(" · "),
+        0,
+      ]),
+      ...leaduri.map((l) => [
+        Number(l.id),
+        String(l.nume),
+        cheieCautare(l.nume + " " + (l.persoana || "") + " " + (l.email || "")),
+        "lead al agenților — încă fără fișă de partener",
+        1,
+      ]),
+    ];
+    const firmeJson = JSON.stringify(listaCautare);
 
     const nLegate = Number(total.n || 0) - Number(fara.n || 0);
     const procent = Number(total.n) ? Math.round((nLegate / Number(total.n)) * 100) : 0;
@@ -400,7 +444,12 @@ function register(router) {
                 esc(String(d.ultimul || "").slice(0, 10)),
                 `<form method="post" action="/email/domenii/confirma" class="inline-form" style="gap:6px">
                    <input type="hidden" name="domeniu" value="${esc(d.domeniu)}">
-                   <select name="partener_id" class="alege-firma" style="max-width:240px">${selectGol(null)}</select>
+                   <span class="alege-firma" style="position:relative;display:inline-block;min-width:260px">
+                     <input type="hidden" name="partener_id" value="">
+                     <input type="hidden" name="lead_id" value="">
+                     <input type="search" class="cauta-firma" placeholder="scrie 2-3 litere din nume sau CUI"
+                            autocomplete="off" style="width:100%;padding:5px 8px">
+                   </span>
                    <button class="btn small secondary" type="submit">Leagă</button>
                  </form>`,
               ])
@@ -409,40 +458,145 @@ function register(router) {
       }
 
       <script>
-        // Firmele, o dată. Fiecare select se umple la primul clic pe el.
+        // Căutarea în listă. Firmele vin o singură dată, ca date; filtrarea se
+        // face în pagină, pe orice bucată din nume sau CUI, fără diacritice.
+        // Fiecare rând al listei [id, nume, cautabil, lamurire, eLead].
         (function () {
           var FIRME = ${firmeJson};
-          function umple(sel) {
-            if (sel.dataset.pline) return;
-            sel.dataset.pline = "1";
-            var ales = sel.value;
-            var buc = ['<option value="">— alege firma —</option>'];
-            for (var i = 0; i < FIRME.length; i++) {
-              buc.push('<option value="' + FIRME[i][0] + '">' +
-                String(FIRME[i][1]).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</option>");
-            }
-            sel.innerHTML = buc.join("");
-            if (ales) sel.value = ales;
+          var MAX = 25;
+
+          function fara(x) {
+            return String(x || "").toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").replace(/\\s+/g, " ").trim();
           }
-          document.addEventListener("mousedown", function (e) {
-            var s = e.target.closest ? e.target.closest("select.alege-firma") : null;
-            if (s) umple(s);
-          }, true);
-          document.addEventListener("focusin", function (e) {
-            if (e.target && e.target.classList && e.target.classList.contains("alege-firma")) umple(e.target);
+          function esc(s) {
+            return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+          }
+          function cauta(q) {
+            var bucati = fara(q).split(" ").filter(Boolean);
+            if (!bucati.length) return [];
+            var out = [];
+            for (var i = 0; i < FIRME.length && out.length < MAX; i++) {
+              var r = FIRME[i];
+              var bun = true;
+              for (var j = 0; j < bucati.length; j++) {
+                if (r[2].indexOf(bucati[j]) < 0) { bun = false; break; }
+              }
+              if (bun) out.push(r);
+            }
+            return out;
+          }
+
+          function inchide(cutie) {
+            var l = cutie.querySelector(".lista-firme");
+            if (l) l.remove();
+          }
+
+          function alege(cutie, r) {
+            cutie.querySelector('input[name="partener_id"]').value = r[4] ? "" : r[0];
+            cutie.querySelector('input[name="lead_id"]').value = r[4] ? r[0] : "";
+            var c = cutie.querySelector(".cauta-firma");
+            c.value = r[1] + (r[4] ? "  (lead)" : "");
+            c.dataset.ales = "1";
+            inchide(cutie);
+          }
+
+          function deseneaza(cutie, q) {
+            inchide(cutie);
+            var gasite = cauta(q);
+            if (!gasite.length) return;
+            var l = document.createElement("div");
+            l.className = "lista-firme";
+            l.style.cssText = "position:absolute;z-index:50;left:0;right:0;top:100%;max-height:260px;overflow:auto;" +
+              "background:var(--card,#fff);border:1px solid var(--border,#d7dae0);border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.12)";
+            for (var i = 0; i < gasite.length; i++) {
+              var r = gasite[i];
+              var el = document.createElement("div");
+              el.style.cssText = "padding:6px 9px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border,#eee)";
+              el.innerHTML = "<strong>" + esc(r[1]) + "</strong>" +
+                (r[3] ? '<br><span style="font-size:11px;color:var(--text-muted)">' + esc(r[3]) + "</span>" : "");
+              el.onmouseenter = function () { this.style.background = "var(--bg-subtle,#f3f4f6)"; };
+              el.onmouseleave = function () { this.style.background = ""; };
+              (function (rr) { el.onmousedown = function (ev) { ev.preventDefault(); alege(cutie, rr); }; })(r);
+              l.appendChild(el);
+            }
+            cutie.appendChild(l);
+          }
+
+          document.addEventListener("input", function (e) {
+            if (!e.target.classList || !e.target.classList.contains("cauta-firma")) return;
+            var cutie = e.target.closest(".alege-firma");
+            // De la prima tastă alegerea veche nu mai e valabilă: altfel ai fi
+            // trimis firma dinainte, cu alt nume scris în căsuță.
+            cutie.querySelector('input[name="partener_id"]').value = "";
+            cutie.querySelector('input[name="lead_id"]').value = "";
+            deseneaza(cutie, e.target.value);
           });
-          // Dacă cineva trimite formularul fără să fi deschis lista, selectul
-          // e gol și n-are ce trimite — nu se pierde nimic, doar nu se leagă.
+          document.addEventListener("focusout", function (e) {
+            if (!e.target.classList || !e.target.classList.contains("cauta-firma")) return;
+            var cutie = e.target.closest(".alege-firma");
+            setTimeout(function () { inchide(cutie); }, 150);
+          });
+          // Formularul nu pleacă fără o alegere făcută din listă: un nume
+          // scris de mână n-ar avea id și legarea ar părea că s-a făcut.
+          document.addEventListener("submit", function (e) {
+            var cutie = e.target.querySelector ? e.target.querySelector(".alege-firma") : null;
+            if (!cutie) return;
+            var p = cutie.querySelector('input[name="partener_id"]').value;
+            var l = cutie.querySelector('input[name="lead_id"]').value;
+            if (!p && !l) {
+              e.preventDefault();
+              var c = cutie.querySelector(".cauta-firma");
+              c.focus();
+              deseneaza(cutie, c.value);
+              if (!c.value) c.placeholder = "alege întâi o firmă din listă";
+            }
+          });
         })();
       </script>`;
 
     send(ctx.res, 200, layout({ user: ctx.user, title: "Domeniile care leagă emailurile de firme", active: "/email", body }));
   });
 
+  // Din lead se face fișa de partener, cu aceleași reguli ca la conversia din
+  // CRM: dacă firma există deja (după CUI sau nume), se refolosește, ca să nu
+  // apară un dublet în lista de parteneri.
+  async function partenerDinLead(leadId, utilizatorId) {
+    const l = await db.prepare("SELECT * FROM leaduri WHERE id = ?").get(leadId).catch(() => null);
+    if (!l) return null;
+    if (l.partener_id) return Number(l.partener_id);
+    const nume = String(l.companie || l.nume || "").trim();
+    if (!nume) return null;
+    let existent = await db.prepare("SELECT id FROM parteneri WHERE LOWER(nume) = LOWER(?)").get(nume).catch(() => null);
+    let pid;
+    if (existent) pid = Number(existent.id);
+    else {
+      const ins = await db
+        .prepare(
+          "INSERT INTO parteneri (tip, nume, email, telefon, sursa, stare) VALUES ('client', ?, ?, ?, ?, 'lead') RETURNING id"
+        )
+        .run(nume, l.email || null, l.telefon || null, `lead: ${l.sursa || "manual"}`);
+      pid = Number(ins.lastInsertRowid);
+    }
+    await db
+      .prepare("UPDATE leaduri SET stadiu = 'convertit', partener_id = ?, ultima_activitate = ? WHERE id = ?")
+      .run(pid, new Date().toISOString().slice(0, 10), l.id)
+      .catch(() => {});
+    await db.prepare("UPDATE taskuri SET partener_id = ? WHERE lead_id = ?").run(pid, l.id).catch(() => {});
+    void utilizatorId;
+    return pid;
+  }
+
   router.post("/email/domenii/confirma", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
     const dom = String((ctx.body || {}).domeniu || "").toLowerCase();
-    const pid = parseInt((ctx.body || {}).partener_id, 10);
+    let pid = parseInt((ctx.body || {}).partener_id, 10);
+    // Dacă s-a ales un lead, fișa de partener se face acum, din datele lui.
+    const leadId = parseInt((ctx.body || {}).lead_id, 10);
+    let dinLead = null;
+    if (!pid && leadId > 0) {
+      pid = await partenerDinLead(leadId, ctx.user.id);
+      dinLead = pid ? leadId : null;
+    }
     if (dom && pid) {
       await tineMinte(dom, pid, ctx.user.id, "nume");
       // Se aplică imediat: omul tocmai a confirmat, n-are rost să mai aștepte.
