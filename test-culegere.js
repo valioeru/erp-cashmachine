@@ -355,6 +355,116 @@ exec1(`DELETE FROM mk_contacte WHERE partener_id = ${clientAlocat}`);
 exec1(`DELETE FROM parteneri WHERE id = ${clientAlocat}`);
 exec1(`DELETE FROM utilizatori WHERE id = ${agent}`);
 
+
+// --- 13. prețurile din text ------------------------------------------------
+console.log("\noferte: prețurile din text");
+egal("  număr românesc", c.numarRo("1.234,56"), 1234.56);
+egal("  număr englezesc", c.numarRo("1,234.56"), 1234.56);
+egal("  număr simplu", c.numarRo("12,50"), 12.5);
+egal("  fără separatori", c.numarRo("450"), 450);
+
+const p1 = c.preturiDinText("Punga curier 345x410 - 0,42 lei/buc");
+egal("  preț cu monedă și UM",
+  { pret: p1[0].pret, moneda: p1[0].moneda, um: p1[0].um }, { pret: 0.42, moneda: "RON", um: "buc" });
+egal("  denumirea rămâne curată", p1[0].textProdus, "Punga curier 345x410");
+
+egal("  euro se recunoaște", (c.preturiDinText("Folie stretch 1.250 EUR/to")[0] || {}).moneda, "EUR");
+egal("  simbolul € se recunoaște", (c.preturiDinText("Carton 890 €")[0] || {}).moneda, "EUR");
+egal("  moneda înaintea cifrei", (c.preturiDinText("Pret: EUR 45,00")[0] || {}).pret, 45);
+egal("  un număr fără monedă nu e preț", c.preturiDinText("Comanda 12345 va fi livrata"), []);
+egal("  rândurile citate din fir se sar", c.preturiDinText("> anul trecut era 10 lei"), []);
+
+// --- 14. potrivirea cu articolele ------------------------------------------
+console.log("\noferte: potrivirea cu articolele");
+const ART = [
+  { id: 1, nume: "Folie stretch 23 mic", um: "kg" },
+  { id: 2, nume: "Punga curier 345x410", um: "buc" },
+  { id: 3, nume: "Carton", um: "kg" },
+];
+egal("  exact, cu diacritice ignorate",
+  c.potrivesteArticol("Punga curier 345x410", ART), { articol: ART[1], cum: "exact" });
+egal("  exact, cu majuscule și punctuație",
+  c.potrivesteArticol("FOLIE STRETCH 23 MIC.", ART).cum, "exact");
+egal("  doar conținut → posibil, nu exact",
+  c.potrivesteArticol("oferta noastra pentru Folie stretch 23 mic livrata", ART).cum, "posibil");
+egal("  nimic nu se potrivește", c.potrivesteArticol("Ceva cu totul altceva", ART).articol, null);
+egal("  denumirile scurte nu se potrivesc pe bucăți",
+  c.potrivesteArticol("Transport si manipulare", ART).articol, null);
+
+// --- 15. ce e ofertă și ce nu ----------------------------------------------
+console.log("\noferte: poarta dinspre vânzări");
+const oferta = (m, furnizor) => c.pareOferta(Object.assign({ de_la: "x@furnizor.ro" }, m), { furnizor });
+
+egal("  ofertă de la furnizor",
+  oferta({ subiect: "Oferta folie", corp: "Vă transmitem oferta: Folie stretch 23 mic - 12,50 lei/kg", partener_id: 5 }, true), true);
+egal("  aceeași ofertă, dar partenerul e CLIENT → nu intră în Procurement",
+  oferta({ subiect: "Oferta folie", corp: "Vă transmitem oferta: 12,50 lei/kg", partener_id: 5 }, false), false);
+egal("  cuvinte de ofertă fără niciun preț → nu e ofertă",
+  oferta({ subiect: "Oferta", corp: "Vă trimitem oferta atașată.", partener_id: 5 }, true), false);
+egal("  prețuri fără cuvinte de ofertă → nu e ofertă",
+  oferta({ subiect: "Re: factura", corp: "Am plătit 1.200 lei ieri.", partener_id: 5 }, true), false);
+egal("  furnizor necunoscut (fără partener) tot se ia",
+  oferta({ subiect: "Quotation", corp: "our prices: Carton 890 EUR", partener_id: null }, false), true);
+
+// --- 16. culegerea ofertelor pe bază reală ---------------------------------
+console.log("\noferte: culegerea");
+exec1(`DELETE FROM email_oferte WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE gmail_id LIKE 'culegere-test-%')`);
+const furn = Number(q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('FURNIZOR OFERTA SRL','RO-CUL-4','furnizor') RETURNING id`)[0].id);
+const catArt = q(`SELECT id FROM ach_categorii ORDER BY id LIMIT 1`)[0];
+const art1 = Number(q(`INSERT INTO ach_articole (nume, categorie_id, um, activ) VALUES ('Folie stretch test 23', ${catArt ? catArt.id : "NULL"}, 'kg', 1) RETURNING id`)[0].id);
+
+const corpOferta = [
+  "Bună ziua,",
+  "",
+  "Ca urmare a solicitării dumneavoastră, vă transmitem oferta:",
+  "Folie stretch test 23 - 12,50 lei/kg",
+  "Ceva ce nu avem in articole - 8,20 lei/kg",
+  "",
+  "Cu stimă,",
+].join("\n");
+
+const idOferta = Number(q(
+  `INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, snippet, corp, directie, partener_id, activ)
+   VALUES (?, 'culegere-test-20', ?, 'vanzari@furnizoroferta.ro', 'Ion Furnizor', 'furnizoroferta.ro', 'Oferta folie', 'oferta', ?, 'primit', ?, 1) RETURNING id`,
+  [cont, new Date().toISOString().slice(0, 19).replace("T", " "), corpOferta, furn]
+)[0].id);
+
+const ro = await c.culegeOferte({ zile: 2 });
+egal("  un mesaj recunoscut ca ofertă", ro.oferte, 1);
+egal("  o linie pusă singură în oferte", ro.puse, 1);
+egal("  una lăsată de confirmat", ro.de_confirmat, 1);
+
+const achPus = q(`SELECT * FROM ach_oferte WHERE articol_id = ${art1} AND sursa = 'email'`)[0];
+egal("  oferta din ach_oferte are prețul corect", Number(achPus.pret), 12.5);
+egal("  și moneda", achPus.moneda, "RON");
+egal("  și furnizorul", Number(achPus.furnizor_id), furn);
+egal("  și trimiterea la email", achPus.email_id, String(idOferta));
+
+const deConf = q(`SELECT * FROM email_oferte WHERE mesaj_id = ${idOferta} AND stare = 'de_confirmat'`);
+egal("  rândul nepotrivit așteaptă un om", deConf.length, 1);
+egal("  cu prețul citit", Number(deConf[0].pret), 8.2);
+egal("  fără articol ghicit", deConf[0].articol_id, null);
+
+egal("  mesajul e marcat ca ofertă", q(`SELECT fel FROM email_mesaje WHERE id = ${idOferta}`)[0].fel, "oferta");
+
+// a doua rulare nu duplică
+const ro2 = await c.culegeOferte({ zile: 2 });
+egal("  a doua rulare nu mai ia mesajul", ro2.oferte, 0);
+egal("  și nu face a doua ofertă", q(`SELECT COUNT(*) AS n FROM ach_oferte WHERE articol_id = ${art1} AND sursa = 'email'`)[0].n, "1");
+
+// o ofertă NU trebuie să nască task de răspuns pentru agentul clientului
+const k3 = await c.clasificaMesaje({ zile: 2 });
+egal("  oferta nu naște task de cerere",
+  q(`SELECT COUNT(*) AS n FROM taskuri WHERE partener_id = ${furn}`)[0].n, "0");
+
+exec1(`DELETE FROM email_oferte WHERE mesaj_id = ${idOferta}`);
+exec1(`DELETE FROM ach_oferte WHERE articol_id = ${art1}`);
+exec1(`DELETE FROM email_mesaje WHERE id = ${idOferta}`);
+exec1(`DELETE FROM ach_articole WHERE id = ${art1}`);
+exec1(`DELETE FROM mk_contacte WHERE partener_id = ${furn}`);
+exec1(`DELETE FROM taskuri WHERE partener_id = ${furn}`);
+exec1(`DELETE FROM parteneri WHERE id = ${furn}`);
+
 // --- curățenie --------------------------------------------------------------
 exec1(`DELETE FROM mk_contacte WHERE partener_id IN (${furnizor},${client})`);
 exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-test-%'`);
