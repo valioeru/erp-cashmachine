@@ -19,7 +19,7 @@ const db = require("../lib/db");
 const google = require("../lib/google");
 const gmail = require("../lib/gmail");
 const drive = require("../lib/drive");
-const { esc, layout, table, dataRo } = require("../lib/render");
+const { esc, layout, table, dataRo, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // Cât din corpul mesajului se păstrează. Peste atât, textul se taie și rămâne
@@ -269,6 +269,17 @@ async function sincronizeazaTot() {
     const conturi = await db.prepare("SELECT * FROM email_conturi WHERE activ = 1 ORDER BY id").all();
     const rezultate = [];
     for (const c of conturi) rezultate.push(await sincronizeazaCont(c));
+
+    // Cererile și comenzile se prind ACUM, nu la noapte. Un client care scrie
+    // luni la 09:00 și al cărui task se naște marți la 02:00 a pierdut 17 din
+    // cele 24 de ore de răspuns înainte ca agentul lui să afle că există.
+    // Se cere târziu (nu sus, cu celelalte) ca să nu se lege modulele în cerc.
+    try {
+      const rez = await require("./culegere").clasificaMesaje({ zile: 3 });
+      if (rez.taskuri) console.log(`[inbox] din emailuri: ${rez.cereri} cereri, ${rez.comenzi} comenzi, ${rez.taskuri} taskuri`);
+    } catch (e) {
+      console.error("[inbox] clasificarea a picat:", e.message);
+    }
     return rezultate;
   } finally {
     ruleaza = false;
@@ -283,6 +294,109 @@ function porneste() {
   setInterval(() => {
     sincronizeazaTot().catch(() => {});
   }, MINUTE_SINCRONIZARE * 60 * 1000);
+}
+
+
+// --- emailurile clienților unui agent, în CRM --------------------------------
+//
+// Agentul nu trebuie să intre în Inbox ca să vadă ce i-au scris clienții lui.
+// Pagina asta ia clienții alocați lui — alocarea explicită, iar unde nu e,
+// agentul de pe fișa partenerului — și arată ultimele mesaje primite de la
+// fiecare. Câte 20 de client, cum a cerut Vali: destul cât să vezi firul
+// discuției, nu atât cât să devină un al doilea inbox.
+const EMAILURI_PE_CLIENT = 20;
+
+async function paginaEmailuriAgent(ctx) {
+  const eAdmin = ctx.user && ctx.user.rol === "admin";
+  // Un admin poate privi peste umărul oricui; ceilalți se văd doar pe ei.
+  const cerut = parseInt(ctx.query.agent, 10);
+  const agentId = eAdmin && Number.isFinite(cerut) && cerut > 0 ? cerut : ctx.user.id;
+
+  const agenti = eAdmin
+    ? await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all()
+    : [];
+
+  // Clienții lui: alocarea explicită bate agent_id-ul de pe fișă.
+  const clienti = await db
+    .prepare(
+      `SELECT DISTINCT p.id, p.nume
+         FROM parteneri p
+        WHERE p.id IN (SELECT partener_id FROM alocari_clienti WHERE utilizator_id = ?)
+           OR (p.agent_id = ? AND NOT EXISTS (SELECT 1 FROM alocari_clienti a WHERE a.partener_id = p.id))
+        ORDER BY p.nume`
+    )
+    .all(agentId, agentId);
+
+  const cautat = String(ctx.query.q || "").trim().toLowerCase();
+  const deAratat = cautat ? clienti.filter((c) => String(c.nume || "").toLowerCase().includes(cautat)) : clienti;
+
+  const blocuri = [];
+  let totalMesaje = 0;
+  for (const cl of deAratat) {
+    const mesaje = await db
+      .prepare(
+        `SELECT m.id, m.data, m.de_la, m.de_la_nume, m.subiect, m.fel, m.task_id, m.comanda_id,
+                (SELECT COUNT(*) FROM email_atasamente a WHERE a.mesaj_id = m.id) AS atasamente
+           FROM email_mesaje m
+          WHERE m.activ = 1 AND m.directie = 'primit' AND m.partener_id = ?
+          ORDER BY m.data DESC
+          LIMIT ${EMAILURI_PE_CLIENT}`
+      )
+      .all(cl.id);
+    if (!mesaje.length) continue;
+    totalMesaje += mesaje.length;
+    blocuri.push(`
+      <h2 style="margin-top:22px;font-size:17px">
+        <a href="/parteneri/${cl.id}">${esc(cl.nume)}</a>
+        <span style="font-weight:400;font-size:13px;color:var(--text-muted)">· ${mesaje.length} ${mesaje.length === 1 ? "mesaj" : "mesaje"}</span>
+      </h2>
+      ${table(
+        ["Data", "De la", "Subiect", "Ce e", "Atașamente"],
+        mesaje.map((m) => [
+          esc(String(m.data || "").slice(0, 16)),
+          esc(m.de_la_nume || m.de_la || "—"),
+          `<a href="/email/${m.id}">${esc(m.subiect || "(fără subiect)")}</a>`,
+          m.fel === "comanda"
+            ? `<span class="badge galben">comandă</span>${m.comanda_id ? ` <a href="/comenzi/${m.comanda_id}">ciorna</a>` : ""}`
+            : m.fel === "cerere"
+            ? `<span class="badge albastru">cerere</span>${m.task_id ? ` <a href="/taskuri/${m.task_id}">taskul</a>` : ""}`
+            : "",
+          Number(m.atasamente) ? String(m.atasamente) : "",
+        ])
+      )}`);
+  }
+
+  const body = `
+    <p style="color:var(--text-muted);font-size:13px;max-width:820px">
+      Ultimele ${EMAILURI_PE_CLIENT} mesaje primite de la fiecare client alocat${eAdmin ? "" : " ție"}.
+      Cererile și comenzile sunt marcate, cu legătura către taskul sau ciorna născute din ele.
+    </p>
+
+    <form method="get" class="filtre" style="margin-bottom:8px">
+      ${
+        eAdmin
+          ? `<select name="agent" onchange="this.form.submit()">
+               ${agenti.map((a) => `<option value="${a.id}"${Number(a.id) === Number(agentId) ? " selected" : ""}>${esc(a.nume)}</option>`).join("")}
+             </select>`
+          : ""
+      }
+      <input name="q" value="${esc(ctx.query.q || "")}" placeholder="caută clientul">
+      <button class="btn secondary small" type="submit">Caută</button>
+    </form>
+
+    <div class="cards">
+      <div class="card"><div class="label">Clienți alocați</div><div class="value">${clienti.length}</div></div>
+      <div class="card"><div class="label">Clienți care au scris</div><div class="value">${blocuri.length}</div></div>
+      <div class="card"><div class="label">Mesaje afișate</div><div class="value">${totalMesaje}</div></div>
+    </div>
+
+    ${blocuri.length ? blocuri.join("") : "<p>Niciun email primit de la clienții alocați.</p>"}`;
+
+  send(
+    ctx.res,
+    200,
+    layout({ user: ctx.user, title: "Emailurile clienților mei", active: "/crm", body: subnavCrm("/crm/emailuri", ctx.user) + body })
+  );
 }
 
 // --- blocul de emailuri pentru fișa unui partener / ofertă / factură -------
@@ -488,6 +602,11 @@ function register(router) {
   });
 
   // ---- căsuțe -------------------------------------------------------------
+  router.get("/crm/emailuri", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    await paginaEmailuriAgent(ctx);
+  });
+
   router.get("/email/conturi", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const eAdmin = ctx.user.rol === "admin";

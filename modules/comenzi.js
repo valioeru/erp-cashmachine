@@ -9,6 +9,13 @@ const { send, redirect } = require("../lib/router");
 // atunci agentul poate cere factura → cineva cu drepturi pe facturare o
 // validează și pleacă în SmartBill.
 const STATUS_LABEL = {
+  // „Ciornă" e starea comenzilor citite automat dintr-un email. Nu e în FLUX
+  // dinadins: nu se poate factura din ea, nu intră în lista depozitului, și
+  // nu pleacă niciun anunț. Există un singur drum înainte — agentul apasă
+  // „Validează", iar atunci comanda devine „nouă" și abia atunci se anunță
+  // biroul și depozitul. Un robot care citește emailuri n-are voie să pună
+  // singur marfă în mișcare.
+  ciorna: '<span class="badge galben">ciornă — de validat</span>',
   noua: '<span class="badge gri">nouă</span>',
   confirmata: '<span class="badge albastru">confirmată</span>',
   in_productie: '<span class="badge galben">în producție</span>',
@@ -441,6 +448,20 @@ function register(router) {
       }
 
       ${
+        comanda.status === "ciorna"
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:820px;margin-bottom:14px">
+               <strong>Comandă citită dintr-un email.</strong>
+               ${comanda.email_mesaj_id ? `<a href="/email/${comanda.email_mesaj_id}">Vezi mesajul</a> · ` : ""}
+               Liniile de mai jos au fost ghicite din text — verifică-le, pune prețurile, și abia apoi validează.
+               Până validezi tu, nu pleacă niciun email către birou sau depozit.
+               <form method="post" action="/comenzi/${comanda.id}/valideaza" style="margin-top:10px"
+                     onsubmit="return confirm('Comanda devine „nouă” și pleacă anunțul către birou și depozit. Continui?')">
+                 <button class="btn" type="submit">Validează și trimite anunțul</button>
+               </form>
+             </div>`
+          : ""
+      }
+      ${
         stoc.acoperitePartial && !comanda.factura_id && comanda.status !== "anulata"
           ? `<h2>Ce faci cu comanda</h2>
              <div class="toolbar" style="flex-wrap:wrap;gap:8px">
@@ -511,6 +532,28 @@ function register(router) {
       </div>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body }));
+  });
+
+  // Validarea unei ciorne născute dintr-un email. O poate apăsa agentul comenzii
+  // sau un administrator — nu depozitul, fiindcă nu el a vorbit cu clientul.
+  router.post("/comenzi/:id/valideaza", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/comenzi");
+    const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
+    if (!c) return redirect(ctx.res, "/comenzi");
+    if (c.status !== "ciorna") return redirect(ctx.res, `/comenzi/${c.id}`);
+    const alLui = Number(c.agent_id) === Number(ctx.user.id);
+    if (!alLui && ctx.user.rol !== "admin") return redirect(ctx.res, `/comenzi/${c.id}`);
+
+    await db.prepare("UPDATE comenzi SET status = 'noua' WHERE id = ?").run(c.id);
+    await db
+      .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+      .run(c.partener_id, `Comanda ${c.numar || "#" + c.id}: validată din ciornă`, "Citită dintr-un email și confirmată de agent.", ctx.user.id);
+    try {
+      await anuntaComandaNoua(c.id, ctx.user);
+    } catch (e) {
+      console.error("[comenzi] anunt dupa validare:", e.message);
+    }
+    redirect(ctx.res, `/comenzi/${c.id}`);
   });
 
   router.post("/comenzi/:id/status", async (ctx) => {

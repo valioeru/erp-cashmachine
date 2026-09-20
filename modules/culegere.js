@@ -208,6 +208,250 @@ async function pune(contact, partenerId, rezumat) {
   return "completat";
 }
 
+
+// ============================================================================
+// CERERI ȘI COMENZI VENITE PE EMAIL
+// ============================================================================
+//
+// Rulează la FIECARE sincronizare (5 minute), nu noaptea. Un client care
+// scrie luni la 09:00 și află de el marți la 02:00 a pierdut 17 din cele 24
+// de ore de răspuns înainte ca agentul lui să afle că există. Semnăturile pot
+// aștepta noaptea; un termen de răspuns nu poate.
+//
+// Ce face, pe scurt:
+//   - o CERERE („ne puteți trimite o ofertă pentru…") naște un task pentru
+//     agentul clientului, cu scadența la 24 de ore de la ora mesajului;
+//   - o COMANDĂ („vă rugăm să ne livrați 200 de cutii") naște și ea un task,
+//     plus o comandă în CIORNĂ. Ciorna nu pleacă nicăieri: anunțul pe email
+//     către birou și depozit pleacă abia când agentul apasă „Validează".
+//
+// Regula care ține totul în frâu: la îndoială, task. Un task în plus costă
+// un clic. O comandă falsă intrată în flux costă un telefon de scuze.
+
+// Cine ne scrie ca să primească un răspuns, nu ca să ne informeze.
+const CERERE = new RegExp(
+  [
+    "solicit(are|am|ăm)", "cerere de (ofert|pre[țt])", "cerem", "a[șs] dori", "am dori",
+    "ne pute[țt]i", "pute[țt]i s[ăa] ne", "v[ăa] rug[ăa]m s[ăa] ne (transmite[țt]i|trimite[țt]i|comunica[țt]i)",
+    "a[șs]tept(ăm|am) (o )?ofert", "ofertare", "ce pre[țt]", "care (e|este) pre[țt]ul",
+    "ave[țt]i (disponibil|în stoc|in stoc)", "stoc disponibil", "termen de livrare",
+    "request for quot", "\\brfq\\b", "please (quote|send|advise)", "could you (send|provide|quote)",
+    "kindly (send|provide)", "we would like to (receive|know)",
+  ].join("|"),
+  "i"
+);
+
+// Cine ne scrie ca să cumpere. Verbele sunt la modul hotărât, nu întrebător.
+const COMANDA = new RegExp(
+  [
+    "plas(ăm|am) comand", "trimite[țt]i comanda", "comand(ăm|am) ", "dorim s[ăa] comand",
+    "v[ăa] rog s[ăa] ne livra[țt]i", "v[ăa] rug[ăa]m s[ăa] ne livra[țt]i", "confirm(ăm|am) comanda",
+    "comand[ăa] ferm", "purchase order", "\\bp\\.?o\\.? (no|nr|number)", "we order", "place (an )?order",
+  ].join("|"),
+  "i"
+);
+
+// Roboți: confirmări, newslettere, facturi automate. Nu cer răspuns de la om.
+const AUTOMAT = /^(no-?reply|noreply|do-?not-?reply|automat|auto|mailer-daemon|postmaster|notification[s]?|bounce)@/i;
+const SUBIECT_AUTOMAT = /(newsletter|dezabonare|unsubscribe|out of office|absent din birou|delivery status notification|undeliverable|factura electronic|e-?factura|spv)/i;
+
+// O linie de comandă recunoscută din text: „200 buc cutii D10" sau
+// „cutii D10 - 200 buc". Se cere o cantitate CU unitate de măsură; un număr
+// singur poate fi orice — un cod de produs, o dată, un număr de telefon.
+const UM = "buc|bucati|buc[ăa][țt]i|kg|kilograme|to|tone|t|ml|m|mp|m2|mc|m3|l|litri|role|paleti|pale[țt]i|cutii|set|seturi|colete";
+const LINIE_CANTITATE = new RegExp(`(\\d{1,3}(?:[.\\s]\\d{3})*(?:[.,]\\d+)?)\\s*(${UM})(?![a-zăâîșț])`, "i");
+
+function pareRobot(m) {
+  if (AUTOMAT.test(String(m.de_la || ""))) return true;
+  if (SUBIECT_AUTOMAT.test(String(m.subiect || ""))) return true;
+  return false;
+}
+
+// Ce fel de mesaj e. Întoarce "comanda", "cerere" sau null.
+//
+// Ordinea contează: un mesaj poate să sune și a cerere, și a comandă
+// („vă rugăm să ne trimiteți oferta și apoi comandăm 200 buc"). Comanda cere
+// mai multă certitudine — cuvinte de comandă ȘI o cantitate cu unitate de
+// măsură — tocmai ca să nu fure din cereri.
+function felulMesajului(m) {
+  if (pareRobot(m)) return null;
+  const text = `${m.subiect || ""}
+${m.corp || ""}`;
+  const areComanda = COMANDA.test(text);
+  const areCantitate = LINIE_CANTITATE.test(text);
+  if (areComanda && areCantitate) return "comanda";
+  if (areComanda || CERERE.test(text)) return "cerere";
+  return null;
+}
+
+// Liniile de comandă găsite în text. Conservator: doar rândurile care au și
+// cantitate, și unitate de măsură, și ceva care seamănă a denumire.
+function liniiDinText(corp) {
+  const gasite = [];
+  for (const l of String(corp || "").replace(/\r/g, "").split("\n")) {
+    const t = l.replace(/\s+/g, " ").trim();
+    if (!t || t.length > 200) continue;
+    const m = t.match(LINIE_CANTITATE);
+    if (!m) continue;
+    const denumire = t.replace(m[0], " ").replace(/[-–—:|]+/g, " ").replace(/\s+/g, " ").trim();
+    if (denumire.length < 3) continue;
+    const cant = Number(String(m[1]).replace(/[.\s]/g, "").replace(",", "."));
+    if (!Number.isFinite(cant) || cant <= 0) continue;
+    gasite.push({ denumire: denumire.slice(0, 160), cantitate: cant, um: m[2].toLowerCase(), linie: t });
+    if (gasite.length >= 30) break;
+  }
+  return gasite;
+}
+
+// ---- cine e agentul clientului ---------------------------------------------
+// Alocarea explicită bate agent_id-ul de pe fișă, iar dintre alocările pe
+// procente câștigă cea mai mare. Dacă nu e nimeni, taskul rămâne neatribuit și
+// se vede în lista de la Taskuri — mai bine un task orfan, pe care îl ia
+// cineva, decât unul pus la un agent care n-are treabă cu clientul.
+async function agentulClientului(partenerId) {
+  const a = await db
+    .prepare(
+      `SELECT utilizator_id FROM alocari_clienti WHERE partener_id = ? ORDER BY procent DESC, id LIMIT 1`
+    )
+    .get(partenerId);
+  if (a && a.utilizator_id) return Number(a.utilizator_id);
+  const p = await db.prepare("SELECT agent_id FROM parteneri WHERE id = ?").get(partenerId);
+  return p && p.agent_id ? Number(p.agent_id) : null;
+}
+
+// 24 de ore de la ora mesajului. Se întorc amândouă: data (pentru coloana
+// veche, după care se sortează și se colorează întârziatele) și momentul
+// exact (pentru când termenul chiar contează).
+function scadentaLa24h(dataMesaj) {
+  const t = new Date(String(dataMesaj || "").replace(" ", "T"));
+  const baza = Number.isFinite(t.getTime()) ? t : new Date();
+  const la = new Date(baza.getTime() + 24 * 3600 * 1000);
+  return { zi: la.toISOString().slice(0, 10), moment: la.toISOString().slice(0, 19).replace("T", " ") };
+}
+
+function scurt(s, n) {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+}
+
+async function faceTask(m, fel, agentId) {
+  const s = scadentaLa24h(m.data);
+  const titlu =
+    (fel === "comanda" ? "Comandă pe email: " : "Cerere pe email: ") +
+    (scurt(m.subiect, 70) || "fără subiect");
+  const descriere = [
+    `De la: ${m.de_la_nume ? m.de_la_nume + " <" + m.de_la + ">" : m.de_la}`,
+    `Primit: ${String(m.data || "").slice(0, 16)}`,
+    `Termen de răspuns: ${s.moment} (24 de ore)`,
+    "",
+    scurt(m.snippet || m.corp, 600),
+    "",
+    `Mesajul întreg: /email/${m.id}`,
+  ].join("\n");
+
+  const r = await db
+    .prepare(
+      `INSERT INTO taskuri (titlu, descriere, tip, prioritate, status, scadenta, scadenta_la, atribuit_lui, partener_id)
+       VALUES (?, ?, 'email', ?, 'deschis', ?, ?, ?, ?) RETURNING id`
+    )
+    .run(titlu, descriere, fel === "comanda" ? "urgenta" : "ridicata", s.zi, s.moment, agentId, m.partener_id);
+  return r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
+}
+
+// Comanda se naște în CIORNĂ. Nu intră în fluxul depozitului, nu se poate
+// factura, și — cel mai important — nu pleacă niciun email. Agentul o
+// deschide, corectează liniile pe care le-am citit din text, și abia el apasă
+// butonul care o face „nouă" și trimite anunțul.
+async function faceComandaCiorna(m, agentId) {
+  const r = await db
+    .prepare(
+      `INSERT INTO comenzi (partener_id, status, observatii, agent_id, sursa, email_mesaj_id)
+       VALUES (?, 'ciorna', ?, ?, 'email', ?) RETURNING id`
+    )
+    .run(
+      m.partener_id,
+      `Citită automat din emailul „${scurt(m.subiect, 80)}" de la ${m.de_la}, primit ${String(m.data || "").slice(0, 16)}. Verifică liniile înainte de validare.`,
+      agentId,
+      m.id
+    );
+  const comandaId = r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
+  if (!comandaId) return null;
+
+  // Liniile intră doar dacă produsul se recunoaște. Un produs ghicit greșit
+  // într-o comandă e mai rău decât o comandă goală: goala se completează în
+  // două minute, greșita pleacă mai departe fără să observe nimeni.
+  for (const l of liniiDinText(m.corp)) {
+    const p = await db
+      .prepare("SELECT id FROM produse WHERE lower(denumire) = lower(?) OR lower(cod) = lower(?) ORDER BY id LIMIT 1")
+      .get(l.denumire, l.denumire);
+    if (!p) continue;
+    await db
+      .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (?, ?, ?, 0)")
+      .run(comandaId, p.id, l.cantitate);
+  }
+  return comandaId;
+}
+
+// ---- rularea clasificării ---------------------------------------------------
+async function clasificaMesaje({ zile } = {}) {
+  const deLa = new Date(Date.now() - (zile || 3) * 86400000).toISOString().slice(0, 10);
+  const rezumat = { citite: 0, cereri: 0, comenzi: 0, taskuri: 0, fara_agent: 0, erori: 0 };
+
+  let mesaje = [];
+  try {
+    mesaje = await db
+      .prepare(
+        `SELECT m.id, m.de_la, m.de_la_nume, m.subiect, m.snippet, m.corp, m.data, m.partener_id
+           FROM email_mesaje m
+          WHERE m.activ = 1 AND m.directie = 'primit'
+            AND m.partener_id IS NOT NULL
+            AND m.clasificat_la IS NULL
+            AND COALESCE(m.data,'') >= ?
+          ORDER BY m.data
+          LIMIT 500`
+      )
+      .all(deLa);
+  } catch (e) {
+    return Object.assign(rezumat, { eroare: String(e.message || e).slice(0, 200) });
+  }
+
+  for (const m of mesaje) {
+    rezumat.citite++;
+    try {
+      const fel = felulMesajului(m);
+      // Se marchează ca văzut chiar și când nu e nici cerere, nici comandă:
+      // altfel l-am reciti la fiecare cinci minute, la nesfârșit.
+      if (!fel) {
+        await db.prepare("UPDATE email_mesaje SET clasificat_la = ? WHERE id = ?").run(acum(), m.id);
+        continue;
+      }
+      const agentId = await agentulClientului(m.partener_id);
+      if (!agentId) rezumat.fara_agent++;
+
+      const taskId = await faceTask(m, fel, agentId);
+      if (taskId) rezumat.taskuri++;
+
+      let comandaId = null;
+      if (fel === "comanda") {
+        comandaId = await faceComandaCiorna(m, agentId);
+        if (comandaId && taskId) {
+          await db.prepare("UPDATE taskuri SET comanda_id = ? WHERE id = ?").run(comandaId, taskId);
+        }
+        rezumat.comenzi++;
+      } else {
+        rezumat.cereri++;
+      }
+
+      await db
+        .prepare("UPDATE email_mesaje SET fel = ?, task_id = ?, comanda_id = ?, clasificat_la = ? WHERE id = ?")
+        .run(fel, taskId, comandaId, acum(), m.id);
+    } catch (e) {
+      rezumat.erori++;
+    }
+  }
+  return rezumat;
+}
+
 // ---- rularea ----------------------------------------------------------------
 
 async function culegeSemnaturi({ zile } = {}) {
@@ -251,10 +495,15 @@ async function culegeSemnaturi({ zile } = {}) {
 async function ruleaza({ zile } = {}) {
   const inceput = Date.now();
   const semnaturi = await culegeSemnaturi({ zile });
+  // Clasificarea merge la fiecare sincronizare; aici e doar plasa de siguranță
+  // pentru ce s-a ratat (server căzut, bază indisponibilă), cu fereastra mai
+  // largă decât cea de la sincronizare.
+  const clasificare = await clasificaMesaje({ zile: zile || ZILE_INAPOI });
   const rezumat = {
     la: acum(),
     secunde: Math.round((Date.now() - inceput) / 1000),
     semnaturi,
+    clasificare,
   };
   try {
     await db
@@ -304,13 +553,15 @@ function register(router) {
       let j = {};
       try { j = JSON.parse(r.rezumat || "{}"); } catch (e) { j = {}; }
       const s = j.semnaturi || {};
+      const k = j.clasificare || {};
       return [
         esc(String(r.rulat_la || "").slice(0, 16)),
         String(s.citite || 0),
-        String(s.cuSemnatura || 0),
         `<strong>${s.adaugati || 0}</strong>`,
         String(s.completati || 0),
-        s.erori ? `<span class="badge rosu">${s.erori}</span>` : "—",
+        String(k.cereri || 0),
+        String(k.comenzi || 0),
+        (s.erori || 0) + (k.erori || 0) ? `<span class="badge rosu">${(s.erori || 0) + (k.erori || 0)}</span>` : "—",
         `${j.secunde || 0}s`,
       ];
     });
@@ -327,9 +578,15 @@ function register(router) {
 
     const body = `
       <p style="color:var(--text-muted);font-size:13px;max-width:820px">
-        În fiecare noapte, la ora ${ORA_RULARE}:00, ERP-ul citește semnăturile din emailurile primite în
-        ultimele ${ZILE_INAPOI} zile și scoate din ele oamenii: nume, funcție, telefon. Îi pune în Contacte,
-        legați de firma de la care au scris. Nu suprascrie nimic scris de mână — completează doar golurile.
+        <strong>Semnăturile</strong> se citesc în fiecare noapte, la ora ${ORA_RULARE}:00, din emailurile primite în
+        ultimele ${ZILE_INAPOI} zile. Din ele ies oamenii — nume, funcție, telefon — și intră în Contacte, legați de
+        firma de la care au scris. Nu se suprascrie nimic scris de mână: se completează doar golurile.
+      </p>
+      <p style="color:var(--text-muted);font-size:13px;max-width:820px">
+        <strong>Cererile și comenzile</strong> nu așteaptă noaptea: se prind la fiecare sincronizare, deci la
+        5 minute. O cerere naște un task pentru agentul clientului, cu termen de răspuns la 24 de ore.
+        O comandă naște și un task, și o comandă în <em>ciornă</em> — care nu pleacă nicăieri până n-o
+        validează agentul. Rularea de noapte trece încă o dată peste ce s-a ratat.
       </p>
 
       <form method="post" action="/email/culegere/acum" class="inline-form" style="margin:14px 0">
@@ -340,7 +597,7 @@ function register(router) {
       <h2>Ultimele rulări</h2>
       ${
         randuri.length
-          ? table(["Când", "Mesaje citite", "Cu semnătură", "Contacte noi", "Completate", "Erori", "Durata"], randuri)
+          ? table(["Când", "Mesaje citite", "Contacte noi", "Completate", "Cereri", "Comenzi", "Erori", "Durata"], randuri)
           : "<p>N-a rulat încă. Prima rulare e la ora " + ORA_RULARE + ":00, sau apeși butonul de mai sus.</p>"
       }
 
@@ -376,6 +633,11 @@ module.exports = {
   porneste,
   ruleaza,
   culegeSemnaturi,
+  clasificaMesaje,
+  felulMesajului,
+  liniiDinText,
+  scadentaLa24h,
+  agentulClientului,
   // exportate pentru teste: sunt funcții pure și acolo se prind greșelile
   bloculSemnaturii,
   telefoaneDin,
