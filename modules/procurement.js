@@ -94,6 +94,60 @@ function pretText(o) {
   return `${Number(o.pret).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${esc(o.moneda)}${o.um ? " / " + esc(o.um) : ""}`;
 }
 
+// Referința de piață a fiecărui articol: cea mai recentă estimare, într-o
+// singură interogare pentru toate articolele (DISTINCT ON e exact pentru asta).
+async function referintePiata() {
+  const r = await db
+    .prepare(
+      `SELECT DISTINCT ON (articol_id) articol_id, pret, pret_max, moneda, um, data, sursa, url, metoda, nota
+         FROM ach_piata WHERE activ = 1
+        ORDER BY articol_id, data DESC, id DESC`
+    )
+    .all();
+  const m = new Map();
+  for (const x of r) m.set(Number(x.articol_id), x);
+  return m;
+}
+
+// Mijlocul benzii de piață. Când piața se dă ca interval (de obicei), un
+// singur capăt ar minți: comparația se face cu mijlocul.
+function piataMijloc(ref, c) {
+  if (!ref) return 0;
+  const jos = inLei(ref.pret, ref.moneda, c);
+  const sus = ref.pret_max ? inLei(ref.pret_max, ref.moneda, c) : jos;
+  return (jos + sus) / 2;
+}
+
+// Cât e oferta față de piață, în cuvinte și culoare. Sub piață e bine, peste
+// e scump — dar mult sub e și el un semn: fie ai dat peste ceva foarte bun,
+// fie marfa nu e ce crezi.
+// Unitatile trebuie sa fie aceeasi, altfel procentul e o minciuna: 99.170 lei
+// pe transport fata de 6 dolari pe kilogram nu inseamna nimic. Cand nu se
+// potrivesc, nu se afiseaza nimic — mai bine gol decat gresit.
+function acelasiUM(a, b) {
+  const n = (x) => String(x || "").trim().toLowerCase().replace(/[ăâ]/g, "a").replace(/[țţ]/g, "t");
+  if (!n(a) || !n(b)) return true;
+  return n(a) === n(b);
+}
+
+function fataDePiata(pretLei, ref, c, umOferta) {
+  if (ref && !acelasiUM(umOferta, ref.um)) return "";
+  const mij = piataMijloc(ref, c);
+  if (!(mij > 0) || !(pretLei > 0)) return "";
+  const p = ((pretLei - mij) / mij) * 100;
+  const cifra = (p > 0 ? "+" : "") + p.toFixed(0) + "%";
+  if (p <= -5) return `<span style="color:var(--success)" title="sub referinta de piata">${cifra}</span>`;
+  if (p >= 5) return `<span style="color:var(--danger)" title="peste referinta de piata">${cifra}</span>`;
+  return `<span style="color:var(--text-muted)" title="la nivelul pietei">${cifra}</span>`;
+}
+
+function textPiata(ref) {
+  if (!ref) return "—";
+  const f = (x) => Number(x).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  return ref.pret_max
+    ? `${f(ref.pret)} – ${f(ref.pret_max)} ${esc(ref.moneda)}${ref.um ? " / " + esc(ref.um) : ""}`
+    : `${f(ref.pret)} ${esc(ref.moneda)}${ref.um ? " / " + esc(ref.um) : ""}`;
+}
 function numeFurnizor(o) {
   const nume = o.furnizor_nume || o.furnizor_text || "—";
   return o.furnizor_id ? `<a href="/parteneri/${o.furnizor_id}">${esc(nume)}</a>` : esc(nume);
@@ -145,6 +199,7 @@ function register(router) {
       .all(...args);
 
     const categorii = await db.prepare("SELECT * FROM ach_categorii WHERE activ = 1 ORDER BY ordine, nume").all();
+    const piata = await referintePiata();
 
     // Gruparea pe categorii. În fiecare, ofertele stau deja în ordinea
     // descrescătoare a datei — cererea lui Vali: „sus … ofertele mai recente".
@@ -174,6 +229,7 @@ function register(router) {
         `<strong>${pretText(o)}</strong>`,
         o.cantitate_min ? esc(String(o.cantitate_min)) + (o.um ? " " + esc(o.um) : "") : "",
         o.valabil_pana ? esc(String(o.valabil_pana).slice(0, 10)) : '<span style="color:var(--text-muted)">fără termen</span>',
+        fataDePiata(inLei(o.pret, o.moneda, c), piata.get(Number(o.articol_id)), c, o.um || o.articol_um),
         o.email_subiect
           ? `<span title="${esc(o.email_subiect)}" style="font-size:12px">${esc(o.sursa)}</span>`
           : `<span style="font-size:12px">${esc(o.sursa)}</span>`,
@@ -182,7 +238,7 @@ function register(router) {
         <h2 style="margin-top:26px">${esc(numeCat)} <span style="font-weight:400;font-size:14px;color:var(--text-muted)">· ${lista.length} ${
         lista.length === 1 ? "ofertă" : "oferte"
       }</span></h2>
-        ${table(["Data", "Articol", "Furnizor", "Preț", "Cant. minimă", "Valabilă până", "Sursa"], randuri)}
+        ${table(["Data", "Articol", "Furnizor", "Preț", "Cant. minimă", "Valabilă până", "Față de piață", "Sursa"], randuri)}
         ${lista.length > 12 ? `<p style="font-size:12px;color:var(--text-muted)">Se văd cele mai noi 12. Filtrează pe categorie ca să le vezi pe toate.</p>` : ""}
       `;
     };
@@ -246,6 +302,13 @@ function register(router) {
       .get(id);
     if (!a) return redirect(ctx.res, "/procurement");
 
+    // Referința de piață: cea mai recentă estimare plus istoricul ei, ca să
+    // se vadă cum s-a mișcat piața, nu doar unde e azi.
+    const referinte = await db
+      .prepare("SELECT * FROM ach_piata WHERE articol_id = ? AND activ = 1 ORDER BY data DESC, id DESC")
+      .all(id);
+    const ref = referinte[0] || null;
+
     const oferte = await db
       .prepare(
         `SELECT o.*, p.nume AS furnizor_nume
@@ -305,6 +368,22 @@ function register(router) {
         </div>
         <div class="card"><div class="label">Furnizori care au ofertat</div><div class="value">${peFurnizor.size}</div></div>
         <div class="card"><div class="label">Oferte în total</div><div class="value">${oferte.length}</div></div>
+        <div class="card"><div class="label">Referința de piață</div>
+          <div class="value">${textPiata(ref)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${
+            ref ? esc(String(ref.data).slice(0, 10)) + (ref.sursa ? " · " + esc(ref.sursa) : "") : "nicio estimare încă"
+          }</div>
+        </div>
+        ${
+          ref && ceaMaiBuna
+            ? `<div class="card"><div class="label">Cea mai bună ofertă față de piață</div>
+                 <div class="value">${fataDePiata(ceaMaiBuna.lei, ref, c, ceaMaiBuna.um || a.um) || '<span style="font-size:14px;color:var(--text-muted)">altă unitate de măsură</span>'}</div>
+                 <div style="font-size:12px;color:var(--text-muted)">${
+                   ceaMaiBuna.lei < piataMijloc(ref, c) ? "cumperi sub piață" : "cumperi peste piață"
+                 }</div>
+               </div>`
+            : ""
+        }
         ${
           a.pret_achizitie
             ? `<div class="card"><div class="label">Preț de achiziție în nomenclator</div><div class="value">${money(a.pret_achizitie)}</div></div>`
@@ -324,6 +403,42 @@ function register(router) {
         ])
       )}
 
+      <h2>Referința de piață</h2>
+      <p style="font-size:13px;color:var(--text-muted);max-width:820px">
+        O ofertă nu înseamnă nimic singură. Aici stă cât cere piața pentru articolul ăsta, cu sursa și data —
+        ca diferența față de ofertele primite să fie o cifră, nu o impresie. Piața se mișcă, deci estimările
+        se păstrează toate; se compară întotdeauna cu cea mai recentă.
+      </p>
+      ${
+        referinte.length
+          ? table(
+              ["Data", "Preț de referință", "Sursa", "Cum s-a calculat", "Notă"],
+              referinte.map((x) => [
+                esc(String(x.data).slice(0, 10)),
+                `<strong>${textPiata(x)}</strong>`,
+                x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.sursa || x.url)}</a>` : esc(x.sursa || ""),
+                esc(x.metoda || ""),
+                esc(x.nota || ""),
+              ])
+            )
+          : "<p>Nicio estimare încă.</p>"
+      }
+      <form class="form" method="post" action="/procurement/articol/${a.id}/piata" style="max-width:820px;margin-top:10px">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1.4fr;gap:10px">
+          <label class="field"><span>De la</span><input type="number" step="0.0001" name="pret" required placeholder="1.55"></label>
+          <label class="field"><span>Până la (opțional)</span><input type="number" step="0.0001" name="pret_max" placeholder="1.75"></label>
+          <label class="field"><span>Moneda</span><select name="moneda">${MONEDE.map((m) => `<option value="${m}"${m === (ref ? ref.moneda : "EUR") ? " selected" : ""}>${m}</option>`).join("")}</select></label>
+          <label class="field"><span>Pe unitate</span><input name="um" value="${esc((ref && ref.um) || a.um || "")}"></label>
+          <label class="field"><span>Data</span><input type="date" name="data" value="${azi()}" required></label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px">
+          <label class="field"><span>Sursa</span><input name="sursa" placeholder="ex. PlasticPortal — LLDPE Europa Centrală"></label>
+          <label class="field"><span>Link</span><input name="url" placeholder="https://…"></label>
+        </div>
+        <label class="field"><span>Cum s-a calculat</span><input name="metoda" placeholder="ex. rășină LLDPE + 0,10–0,25 €/kg procesare"></label>
+        <label class="field"><span>Notă</span><input name="nota" placeholder="ex. preț contract, Europa Centrală; spotul e mai jos"></label>
+        <div class="form-actions"><button class="btn" type="submit">Adaugă estimarea</button></div>
+      </form>
       <h2>Istoricul complet, ofertă cu ofertă</h2>
       ${table(
         ["Data", "Furnizor", "Preț", "Cant. minimă", "Condiții", "Livrare", "Valabilă până", "Sursa", ""],
@@ -458,6 +573,35 @@ function register(router) {
     redirect(ctx.res, `/procurement/articol/${articolId}`);
   });
 
+
+  // O estimare de piață nu înlocuiește pe cea veche: se adaugă. Așa se vede
+  // peste șase luni că folia s-a scumpit, nu doar că azi costă atât.
+  router.post("/procurement/articol/:id/piata", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const b = ctx.body || {};
+    const pret = Number(String(b.pret || "").replace(",", "."));
+    if (!id || !(pret > 0)) return redirect(ctx.res, `/procurement/articol/${id}`);
+    const pretMax = Number(String(b.pret_max || "").replace(",", ".")) || null;
+    await db
+      .prepare(
+        `INSERT INTO ach_piata (articol_id, pret, pret_max, moneda, um, data, sursa, url, metoda, nota, creat_de)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        pret,
+        pretMax && pretMax > pret ? pretMax : null,
+        MONEDE.includes(String(b.moneda)) ? String(b.moneda) : "EUR",
+        String(b.um || "").trim() || null,
+        String(b.data || azi()).slice(0, 10),
+        String(b.sursa || "").trim() || null,
+        String(b.url || "").trim().slice(0, 500) || null,
+        String(b.metoda || "").trim() || null,
+        String(b.nota || "").trim() || null,
+        ctx.user ? ctx.user.id : null
+      );
+    redirect(ctx.res, `/procurement/articol/${id}`);
+  });
   // Scoaterea unei oferte nu șterge rândul: îl dezactivează, ca istoricul să
   // rămână întreg dacă cineva se răzgândește.
   router.post("/procurement/oferta/:id/sterge", async (ctx) => {
