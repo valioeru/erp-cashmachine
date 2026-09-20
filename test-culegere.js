@@ -262,6 +262,99 @@ egal("  rularea întoarce un rezumat", typeof rez.semnaturi.citite, "number");
 egal("  s-a scris în istoric", q(`SELECT COUNT(*) AS n FROM culegere_istoric`)[0].n !== "0", true);
 egal("  ora de rulare e cea cerută", c.ORA_RULARE, 2);
 
+
+// --- 9. ce fel de mesaj e --------------------------------------------------
+console.log("\nfelul mesajului");
+const fel = (subiect, corp, deLa) => c.felulMesajului({ subiect, corp, de_la: deLa || "client@acme.ro" });
+
+egal("  cerere de ofertă", fel("Solicitare ofertă", "Bună ziua, ne puteți trimite o ofertă pentru cutii?"), "cerere");
+egal("  cerere în engleză", fel("RFQ", "Please quote 200 boxes"), "cerere");
+egal("  „ce preț aveți”", fel("Întrebare", "Ce preț aveți la pungi 345x410?"), "cerere");
+egal("  comandă cu cantitate", fel("Comanda", "Vă rugăm să ne livrați 200 buc cutii D10."), "comanda");
+egal("  comandă fără cantitate rămâne cerere",
+  fel("Comanda", "Dorim să comandăm, vă rugăm confirmați disponibilitatea."), "cerere");
+egal("  o simplă mulțumire nu e nici una, nici alta", fel("Re: factura", "Mulțumim, am primit."), null);
+egal("  roboții se sar — expeditor",
+  c.felulMesajului({ subiect: "Solicitare ofertă", corp: "trimiteți ofertă", de_la: "noreply@sistem.ro" }), null);
+egal("  roboții se sar — subiect",
+  fel("Out of office", "Sunt plecat, vă rog trimiteți oferta la colegul meu"), null);
+egal("  e-factura nu e cerere", fel("Factura electronica SPV", "Ce preț aveți"), null);
+
+// --- 10. liniile de comandă din text ---------------------------------------
+console.log("\nliniile de comandă");
+egal("  cantitate + UM + denumire",
+  c.liniiDinText("Vă rugăm:\n200 buc Cutie D10\n15 kg folie neagra"),
+  [
+    { denumire: "Cutie D10", cantitate: 200, um: "buc", linie: "200 buc Cutie D10" },
+    { denumire: "folie neagra", cantitate: 15, um: "kg", linie: "15 kg folie neagra" },
+  ]);
+egal("  un număr fără unitate de măsură nu e linie", c.liniiDinText("Comanda 12345 de la noi"), []);
+egal("  denumirea prea scurtă se sare", c.liniiDinText("200 buc x"), []);
+egal("  mii cu punct", (c.liniiDinText("1.500 buc Punga curier")[0] || {}).cantitate, 1500);
+
+// --- 11. scadența la 24 de ore ---------------------------------------------
+console.log("\nscadența");
+egal("  24 de ore mai târziu", c.scadentaLa24h("2026-09-20 09:14:00").moment, "2026-09-21 09:14:00");
+egal("  și ziua pentru coloana veche", c.scadentaLa24h("2026-09-20 09:14:00").zi, "2026-09-21");
+egal("  peste noapte, trece în ziua următoare", c.scadentaLa24h("2026-09-20 23:50:00").zi, "2026-09-21");
+
+// --- 12. clasificarea pe bază reală ----------------------------------------
+console.log("\nclasificarea");
+exec1(`DELETE FROM utilizatori WHERE id = 99001`);
+const agent = Number(q(`INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol, activ) VALUES (99001,'Agent Test','agent-test@cashmachine.ro','x','y','vanzari',1) RETURNING id`)[0].id);
+const clientAlocat = Number(q(`INSERT INTO parteneri (nume, cui, tip, agent_id) VALUES ('CLIENT ALOCAT SRL','RO-CUL-3','client',${agent}) RETURNING id`)[0].id);
+const produs = q(`SELECT id, denumire FROM produse ORDER BY id LIMIT 1`)[0];
+
+function mesajNou(gid, subiect, corp) {
+  return Number(q(
+    `INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, snippet, corp, directie, partener_id, activ)
+     VALUES (?, ?, ?, 'ion@clientalocat.ro', 'Ion Client', 'clientalocat.ro', ?, ?, ?, 'primit', ?, 1) RETURNING id`,
+    [cont, gid, new Date().toISOString().slice(0, 19).replace("T", " "), subiect, corp.slice(0, 120), corp, clientAlocat]
+  )[0].id);
+}
+
+const idCerere = mesajNou("culegere-test-10", "Solicitare ofertă cutii", "Bună ziua,\n\nNe puteți trimite o ofertă pentru cutii?\n\nMulțumesc");
+const idComanda = mesajNou("culegere-test-11", "Comanda cutii", `Bună ziua,\n\nVă rugăm să ne livrați:\n200 buc ${produs ? produs.denumire : "Cutie"}\n\nMulțumim`);
+const idNimic = mesajNou("culegere-test-12", "Re: multumim", "Am primit factura, mulțumim.");
+
+const k = await c.clasificaMesaje({ zile: 2 });
+egal("  o cerere și o comandă", { cereri: k.cereri, comenzi: k.comenzi }, { cereri: 1, comenzi: 1 });
+egal("  două taskuri", k.taskuri, 2);
+egal("  toate trei au fost citite", k.citite, 3);
+
+const tCerere = q(`SELECT t.* FROM taskuri t JOIN email_mesaje m ON m.task_id = t.id WHERE m.id = ${idCerere}`)[0];
+egal("  taskul e al agentului clientului", Number(tCerere.atribuit_lui), agent);
+egal("  taskul e legat de client", Number(tCerere.partener_id), clientAlocat);
+egal("  tipul e email", tCerere.tip, "email");
+egal("  are scadență la 24 de ore", Boolean(tCerere.scadenta_la && tCerere.scadenta), true);
+egal("  titlul spune ce e", tCerere.titlu.startsWith("Cerere pe email:"), true);
+
+const comanda = q(`SELECT * FROM comenzi WHERE email_mesaj_id = ${idComanda}`)[0];
+egal("  comanda s-a născut", Boolean(comanda), true);
+egal("  și e CIORNĂ, nu nouă", comanda.status, "ciorna");
+egal("  cu agentul clientului pe ea", Number(comanda.agent_id), agent);
+egal("  marcată ca venită din email", comanda.sursa, "email");
+if (produs) {
+  egal("  linia recunoscută a intrat",
+    q(`SELECT cantitate FROM comenzi_linii WHERE comanda_id = ${comanda.id}`).map((x) => Number(x.cantitate)), [200]);
+}
+egal("  mesajul care nu e nici una, nici alta e marcat ca văzut",
+  q(`SELECT fel, clasificat_la FROM email_mesaje WHERE id = ${idNimic}`)[0].clasificat_la !== null, true);
+
+// a doua rulare nu trebuie să facă nimic de două ori
+const k2 = await c.clasificaMesaje({ zile: 2 });
+egal("  a doua rulare nu recitește nimic", k2.citite, 0);
+egal("  și nu face al doilea task", q(`SELECT COUNT(*) AS n FROM taskuri WHERE partener_id = ${clientAlocat}`)[0].n, "2");
+egal("  nici a doua comandă", q(`SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ${clientAlocat}`)[0].n, "1");
+
+exec1(`DELETE FROM comenzi_linii WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id = ${clientAlocat})`);
+exec1(`DELETE FROM taskuri WHERE partener_id = ${clientAlocat}`);
+exec1(`DELETE FROM comenzi WHERE partener_id = ${clientAlocat}`);
+exec1(`DELETE FROM email_mesaje WHERE partener_id = ${clientAlocat}`);
+exec1(`DELETE FROM mk_contacte WHERE partener_id = ${clientAlocat}`);
+exec1(`DELETE FROM parteneri WHERE id = ${clientAlocat}`);
+exec1(`DELETE FROM utilizatori WHERE id = ${agent}`);
+
 // --- curățenie --------------------------------------------------------------
 exec1(`DELETE FROM mk_contacte WHERE partener_id IN (${furnizor},${client})`);
 exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-test-%'`);
