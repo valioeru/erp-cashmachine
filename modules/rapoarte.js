@@ -403,12 +403,20 @@ function esteLunaInchisa(iso) {
   return zi === new Date(Date.UTC(an, luna, 0)).getUTCDate();
 }
 
-// Câte zile acoperă balanța. Contează: o balanță cumulată de la 1 ianuarie
-// până în august are opt luni de rulaje, dar soldurile sunt la o zi. Ca să iasă
-// zile de stoc corecte și un EBITDA anualizat cinstit, trebuie știut intervalul.
-function zileBalanta(deLa, panaLa) {
-  const p = Date.parse(String(panaLa || "") + "T00:00:00Z");
-  const d = Date.parse(String(deLa || String(panaLa || "").slice(0, 4) + "-01-01") + "T00:00:00Z");
+// Câte zile de an acoperă cifrele. Se socotește ÎNTOTDEAUNA de la 1 ianuarie
+// până la data balanței, indiferent ce scrie în antetul ei.
+//
+// De ce: balanțele vin în două feluri. Unele sunt trase cumulat (01.01 → 31.08),
+// altele pe o singură lună (01.08 → 31.08). La cele lunare, coloana „Rulaje
+// perioada" are doar luna aia, dar „Total sume" e cumulat de la începutul
+// anului — și de acolo luăm noi fluxurile (vezi rulaje() mai jos). Deci
+// cifrele sunt cumulate în ambele cazuri, iar perioada lor e de la 1 ianuarie.
+// Dacă am fi luat intervalul din antet, o balanță pe august ar fi ieșit cu
+// 31 de zile și ar fi umflat EBITDA anualizat de opt ori.
+function zileDeLaInceputDeAn(panaLa) {
+  const s = String(panaLa || "");
+  const p = Date.parse(s + "T00:00:00Z");
+  const d = Date.parse(s.slice(0, 4) + "-01-01T00:00:00Z");
   if (!isFinite(p) || !isFinite(d) || p < d) return null;
   return Math.round((p - d) / 86400000) + 1;
 }
@@ -454,30 +462,67 @@ function soldurile(conturi, faza) {
   return b;
 }
 
-// Cum se citește o balanță SmartBill Conta:
-//  - Conta închide LUNAR clasele 6 și 7 prin 121, deci pe 6xx/7xx rulajul
-//    debitor ajunge egal cu cel creditor, iar „venituri − cheltuieli" ar ieși
-//    mereu zero. Partea adevărată e rulajul care NU e închiderea: la venituri
-//    creditul (70x r_c), la cheltuieli debitul (6xx r_d). Profitul e soldul
-//    contului 121 — exact cum îl citește și banca din bilanț.
+// Cum se citește o balanță SmartBill Conta.
+//
+// 1. FLUXURILE se iau din „Total sume" minus „Solduri inițiale", nu din
+//    „Rulaje perioada". Motivul e că balanțele vin în două feluri: unele
+//    cumulat (01.01 → 31.08), altele pe o singură lună (01.08 → 31.08). La cele
+//    lunare, „Rulaje perioada" e doar luna, iar o comparație între opt luni și
+//    o lună n-ar însemna nimic. „Total sume" e cumulat de la 1 ianuarie în
+//    amândouă, deci scăderea soldurilor inițiale dă exact cumulatul anului.
+//    Pentru o balanță deja cumulată, cele două formule dau același număr.
+//    Balanțele vechi, trase prin punte, nu au coloanele de total sume — pentru
+//    ele se cade înapoi pe rulaje, care la ele sunt oricum cumulate.
+//
+// 2. Conta închide LUNAR clasele 6 și 7 prin 121, deci pe 6xx/7xx debitul
+//    ajunge egal cu creditul și „venituri − cheltuieli" ar ieși mereu zero.
+//    Partea adevărată e rulajul care NU e închiderea: la venituri creditul,
+//    la cheltuieli debitul.
+//
+// 3. PROFITUL nu se ia din soldul lui 121, ci din veniturile închise în 121
+//    minus cheltuielile perioadei. Diferența contează: dacă rezultatul anului
+//    trecut e încă nerepartizat în 121 la 1 ianuarie, soldul final îl conține
+//    și el, iar profitul anului iese greșit cu exact suma aia. Pe august 2025,
+//    121 avea 644.939,05 lei din 2024 în sold inițial. Soldul rămâne calculat
+//    separat, pentru verificare, iar dacă cele două nu se potrivesc, raportul
+//    o spune.
+function rulaje(c, areTotaluri) {
+  return areTotaluri
+    ? { d: Number(c.ts_d) - Number(c.si_d), c: Number(c.ts_c) - Number(c.si_c) }
+    : { d: Number(c.r_d), c: Number(c.r_c) };
+}
+
 function analizeazaBalanta(conturi, zile) {
   const F = soldurile(conturi, "final");
   const I = soldurile(conturi, "initial");
+  const areTotaluri = conturi.some((c) => Number(c.ts_d) !== 0 || Number(c.ts_c) !== 0);
 
-  let ca = 0, profit = 0, amortizare = 0, dobanzi = 0, impozit = 0, consumStocuri = 0;
+  let ca = 0, amortizare = 0, dobanzi = 0, impozit = 0, consumStocuri = 0, cheltuieli = 0;
+  let venituriInchise = 0, profitSold = 0, are121 = false;
   for (const c of conturi) {
     const cont = String(c.cont || "");
     const g2 = cont.slice(0, 2);
-    const rD = Number(c.r_d);
-    if (g2 === "70" && !cont.startsWith("709")) ca += Number(c.r_c);
-    if (cont.startsWith("709")) ca -= rD;
-    if (cont === "121") profit = Number(c.sf_c) - Number(c.sf_d);
-    if (cont.startsWith("681")) amortizare += rD;
-    if (cont.startsWith("666")) dobanzi += rD;
-    if (cont.startsWith("691") || cont.startsWith("698")) impozit += rD;
+    const cls = cont.charAt(0);
+    const r = rulaje(c, areTotaluri);
+    if (g2 === "70" && !cont.startsWith("709")) ca += r.c;
+    if (cont.startsWith("709")) ca -= r.d;
+    if (cls === "6") cheltuieli += r.d;
+    if (cont === "121") {
+      are121 = true;
+      venituriInchise = r.c;
+      profitSold = Number(c.sf_c) - Number(c.sf_d);
+    }
+    if (cont.startsWith("681")) amortizare += r.d;
+    if (cont.startsWith("666")) dobanzi += r.d;
+    if (cont.startsWith("691") || cont.startsWith("698")) impozit += r.d;
     // ce trece efectiv prin stoc: materii prime, materiale, mărfuri
-    if (cont.startsWith("601") || cont.startsWith("602") || cont.startsWith("607")) consumStocuri += rD;
+    if (cont.startsWith("601") || cont.startsWith("602") || cont.startsWith("607")) consumStocuri += r.d;
   }
+  // Fără coloane de total sume nu putem despărți veniturile închise de soldul
+  // inițial, deci rămâne soldul lui 121 — corect pentru balanțele cumulate,
+  // care sunt singurele fără totaluri.
+  const profit = are121 && areTotaluri ? venituriInchise - cheltuieli : profitSold;
+  const nepotrivireProfit = are121 ? profit - profitSold : 0;
 
   const totalActiv = F.activeImob + F.activeCirc;
   const totalDatorii = F.datoriiTL + F.datoriiCurente;
@@ -523,7 +568,7 @@ function analizeazaBalanta(conturi, zile) {
     cash: F.cash,
     stocInitial: I.stocuri,
     stocMediu,
-    ca, profit, amortizare, dobanzi, impozit, consumStocuri,
+    ca, profit, profitSold, nepotrivireProfit, cheltuieli, amortizare, dobanzi, impozit, consumStocuri,
     ebitda, ebit, ebitdaAnual,
     totalActiv, totalDatorii,
     capitalLucru: F.activeCirc - F.datoriiCurente,
@@ -557,7 +602,7 @@ async function balanteAnalizate() {
     .all();
   const iesire = [];
   for (const e of etichete) {
-    const conturi = await db.prepare("SELECT cont, si_d, si_c, r_d, r_c, sf_d, sf_c FROM balante_snapshot WHERE eticheta = ?").all(e.eticheta);
+    const conturi = await db.prepare("SELECT cont, si_d, si_c, r_d, r_c, ts_d, ts_c, sf_d, sf_c FROM balante_snapshot WHERE eticheta = ?").all(e.eticheta);
     const pana = String(e.pana || "");
     iesire.push({
       eticheta: e.eticheta,
@@ -567,7 +612,7 @@ async function balanteAnalizate() {
       luna: pana.slice(5, 7),
       nrConturi: Number(e.conturi),
       inchisa: esteLunaInchisa(pana),
-      ...analizeazaBalanta(conturi, zileBalanta(e.de_la, pana)),
+      ...analizeazaBalanta(conturi, zileDeLaInceputDeAn(pana)),
     });
   }
   return iesire;
@@ -2450,8 +2495,23 @@ function register(router) {
         }</p>`
       : "";
 
+    // Al doilea control de bun-simț: profitul calculat din venituri și
+    // cheltuieli față de soldul contului 121. Cele două trebuie să dea același
+    // lucru. Când nu dau, e fiindcă în 121 a rămas rezultatul anului trecut
+    // nerepartizat, sau a trecut prin el ceva care nu e nici venit, nici
+    // cheltuială. Se spune, nu se ascunde.
+    const nepProfit = refLuna ? refLuna.nepotrivireProfit : 0;
+    const notaProfit =
+      refLuna && Math.abs(nepProfit) > Math.max(Math.abs(refLuna.profit) * 0.01, 100)
+        ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">La ${esc(
+            etichetaLuna(refLuna.pana)
+          )}, profitul socotit din venituri minus cheltuieli (${money(refLuna.profit)}) nu se potrivește cu soldul contului 121 (${money(
+            refLuna.profitSold
+          )}) — diferență de ${money(Math.abs(nepProfit))}. De obicei asta înseamnă că în 121 a rămas rezultatul anului trecut nerepartizat, sau că a trecut prin el ceva care nu e nici venit, nici cheltuială. Raportul folosește prima variantă, fiindcă aia e rezultatul PERIOADEI. Merită întrebată contabila.</div>`
+        : "";
+
     const sectiuneBilant = balante.length
-      ? `${sectiuneLuna}${sectiuneAn}${sectiuneLunar}${notaCashFlow}
+      ? `${sectiuneLuna}${sectiuneAn}${sectiuneLunar}${notaProfit}${notaCashFlow}
       <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · equity ratio ≥ 30% · grad de îndatorare ≤ 60–70% · leverage ≤ 2,0 · datorie netă ÷ EBITDA ≤ 3,0 · capitaluri proprii pozitive și în creștere. EBITDA = profit net + impozit + dobânzi + amortizare. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>. Balanțele cu mai puțin de ${PRAG_CONTURI_BALANTA} de conturi sunt sărite — nu sunt balanțe întregi și ar strica comparația.</p>`
       : `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Pentru indicatorii de bilanț REALI (capitaluri proprii, EBITDA, CFO, lichiditate, leverage, gearing — exact ce cere banca), încarcă balanțele din SmartBill Conta la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</div>`;
 

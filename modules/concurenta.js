@@ -108,13 +108,22 @@ async function blocBI(opts) {
 
   const randuri = await db
     .prepare(
-      `SELECT c.*, u.nume AS autor
+      `SELECT c.*, u.nume AS autor, p.nume AS partener
          FROM concurenta_preturi c
          LEFT JOIN utilizatori u ON u.id = c.creat_de
+         LEFT JOIN parteneri p ON p.id = c.partener_id
         WHERE ${unde.join(" AND ")} AND c.activ = 1
         ORDER BY c.data_ofertei DESC, c.id DESC`
     )
     .all(...args);
+
+  // De la CINE am aflat prețul. Pe o ofertare vine gata completat cu
+  // partenerul ofertei, dar se poate schimba: de multe ori prețul
+  // concurenței îl spune alt client decât cel pe care îl ofertezi acum, iar
+  // peste șase luni singurul lucru care contează e de la cine ai auzit-o.
+  const parteneri = await db.prepare("SELECT id, nume FROM parteneri ORDER BY nume LIMIT 3000").all();
+  const optiuniPartener = (ales) =>
+    parteneri.map((p) => `<option value="${p.id}"${Number(ales) === Number(p.id) ? " selected" : ""}>${esc(p.nume)}</option>`).join("");
 
   // prețurile noastre, indexate pe denumire normalizată și pe produs
   const refPeProdus = new Map();
@@ -160,7 +169,7 @@ async function blocBI(opts) {
       }
     </p>
     ${table(
-      ["Produs", "Concurent", "Preț", "în lei", "Față de noi", "UM / cantitate", "Data ofertei", "Sursă", "Adăugat de", ""],
+      ["Produs", "Concurent", "Preț", "în lei", "Față de noi", "UM / cantitate", "Data ofertei", "Aflat de la", "Cum", "Adăugat de", ""],
       randuri.map((r) => [
         esc(r.denumire),
         `<strong>${esc(r.concurent)}</strong>`,
@@ -169,6 +178,7 @@ async function blocBI(opts) {
         celulaDiferenta(r),
         `${esc(r.um || "")}${r.cantitate ? ` · ${Number(r.cantitate).toLocaleString("ro-RO")}` : ""}`,
         esc(String(r.data_ofertei || "")),
+        r.partener ? `<a href="/parteneri/${r.partener_id}">${esc(r.partener)}</a>` : '<span style="color:var(--text-muted)">—</span>',
         esc(ETICHETA_SURSA[r.sursa] || r.sursa || ""),
         esc(r.autor || ""),
         poateSterge(o.user, r)
@@ -180,7 +190,6 @@ async function blocBI(opts) {
       <input type="hidden" name="directie" value="${esc(directie)}">
       ${o.ofertaId ? `<input type="hidden" name="oferta_id" value="${o.ofertaId}">` : ""}
       ${o.achArticolId ? `<input type="hidden" name="ach_articol_id" value="${o.achArticolId}">` : ""}
-      ${o.partenerId ? `<input type="hidden" name="partener_id" value="${o.partenerId}">` : ""}
       <input type="hidden" name="inapoi" value="${esc(o.inapoi || "")}">
       <div class="rand" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
         <label style="flex:2 1 220px">Produs
@@ -205,7 +214,10 @@ async function blocBI(opts) {
         <label style="flex:0 1 150px">Data ofertei
           <input name="data_ofertei" type="date" value="${azi()}" required>
         </label>
-        <label style="flex:0 1 170px">Sursă
+        <label style="flex:2 1 220px">Aflat de la (client / furnizor)
+          <select name="partener_id"><option value="">— nu știu / altcineva —</option>${optiuniPartener(o.partenerId)}</select>
+        </label>
+        <label style="flex:0 1 170px">Cum am aflat
           <select name="sursa">${SURSE.map(([v, e]) => `<option value="${v}"${v === (directie === "achizitie" ? "furnizor" : "client") ? " selected" : ""}>${esc(e)}</option>`).join("")}</select>
         </label>
         <label style="flex:3 1 260px">Observații
@@ -297,6 +309,11 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
     unde.push("lower(c.concurent) = lower(?)");
     args.push(concurent);
   }
+  const partenerFiltru = Number(q.partener) || 0;
+  if (partenerFiltru) {
+    unde.push("c.partener_id = ?");
+    args.push(partenerFiltru);
+  }
   if (deLa) {
     unde.push("c.data_ofertei >= ?");
     args.push(deLa);
@@ -325,6 +342,17 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
     )
     .all(...(directie ? [directie] : []));
 
+  // De la cine am aflat preturi — lista se face din ce s-a scris efectiv, nu
+  // din toti partenerii, ca sa nu cauti un client de la care n-ai nimic.
+  const surseParteneri = await db
+    .prepare(
+      `SELECT p.id, p.nume, COUNT(*) AS n
+         FROM concurenta_preturi c JOIN parteneri p ON p.id = c.partener_id
+        WHERE c.activ = 1 ${directie ? "AND c.directie = ?" : ""}
+        GROUP BY p.id, p.nume ORDER BY n DESC, p.nume ASC LIMIT 60`
+    )
+    .all(...(directie ? [directie] : []));
+
   // Gruparea pe produs: ce mă interesează la un produs nu e lista, ci ultimul
   // preț al fiecărui concurent, cel mai mic și cel mai mare văzut vreodată, și
   // de când n-am mai aflat nimic. Un produs la care ultima informație e de
@@ -333,9 +361,10 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
   for (const r of randuri) {
     const cheie = (r.directie || "") + "|" + (r.produs_id ? "p" + r.produs_id : "n" + normalizeaza(r.denumire));
     if (!grupuri.has(cheie))
-      grupuri.set(cheie, { directie: r.directie, denumire: r.denumire, produsId: r.produs_id, randuri: [], concurenti: new Map() });
+      grupuri.set(cheie, { directie: r.directie, denumire: r.denumire, produsId: r.produs_id, randuri: [], concurenti: new Map(), surse: new Set() });
     const g = grupuri.get(cheie);
     g.randuri.push(r);
+    if (r.partener) g.surse.add(r.partener);
     const lei = inLei(r.pret, r.moneda, c);
     const anterior = g.concurenti.get(r.concurent);
     // rândurile vin deja ordonate descrescător după dată, deci primul e ultimul preț
@@ -376,6 +405,12 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
           ${concurenti.map((x) => `<option value="${esc(x.concurent)}"${x.concurent === concurent ? " selected" : ""}>${esc(x.concurent)} (${x.n})</option>`).join("")}
         </select>
       </label>
+      <label>Aflat de la
+        <select name="partener">
+          <option value="">oricine</option>
+          ${surseParteneri.map((x) => `<option value="${x.id}"${Number(partenerFiltru) === Number(x.id) ? " selected" : ""}>${esc(x.nume)} (${x.n})</option>`).join("")}
+        </select>
+      </label>
       <label>De la <input type="date" name="de_la" value="${esc(deLa)}"></label>
       <label>Până la <input type="date" name="pana_la" value="${esc(panaLa)}"></label>
       ${directieFixa ? "" : `<label>Direcție <select name="directie"><option value="">achiziție și vânzare</option><option value="vanzare"${directie === "vanzare" ? " selected" : ""}>doar vânzare</option><option value="achizitie"${directie === "achizitie" ? " selected" : ""}>doar achiziție</option></select></label>`}
@@ -387,7 +422,7 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
     </form>`;
 
   const tabelProduse = table(
-    ["Produs", directieFixa ? "" : "Direcție", "Concurenți (ultimul preț știut)", "Cel mai mic", "Cel mai mare", "Ultima informație", "Prețuri"].filter((x) => x !== ""),
+    ["Produs", directieFixa ? "" : "Direcție", "Concurenți (ultimul preț știut)", "Aflat de la", "Cel mai mic", "Cel mai mare", "Ultima informație", "Prețuri"].filter((x) => x !== ""),
     randuriGrup.map((x) =>
       [
         `<strong>${esc(x.g.denumire)}</strong>`,
@@ -396,6 +431,7 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
           .sort((a, b) => a[1].lei - b[1].lei)
           .map(([nume, v]) => `${esc(nume)} <strong>${money(v.lei)}</strong> <span style="color:var(--text-muted);font-size:12px">(${v.data})</span>`)
           .join("<br>"),
+        x.g.surse.size ? [...x.g.surse].map((n) => esc(n)).join("<br>") : '<span style="color:var(--text-muted)">—</span>',
         money(x.min),
         money(x.max),
         `${x.ultimaData} ${badgeVechime(x.vechime)}`,
@@ -405,7 +441,7 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
   );
 
   const tabelIstoric = table(
-    ["Data ofertei", directieFixa ? "" : "Direcție", "Produs", "Concurent", "Preț", "în lei", "UM / cantitate", "Partener", "Sursă", "Observații", "Adăugat de", ""].filter((x) => x !== ""),
+    ["Data ofertei", directieFixa ? "" : "Direcție", "Produs", "Concurent", "Preț", "în lei", "UM / cantitate", "Aflat de la", "Cum", "Observații", "Adăugat de", ""].filter((x) => x !== ""),
     randuri.map((r) =>
       [
         esc(String(r.data_ofertei || "")),
@@ -415,7 +451,7 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
         `${Number(r.pret).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${esc(r.moneda)}`,
         money(inLei(r.pret, r.moneda, c)),
         `${esc(r.um || "")}${r.cantitate ? ` · ${Number(r.cantitate).toLocaleString("ro-RO")}` : ""}`,
-        esc(r.partener || ""),
+        r.partener ? `<a href="/parteneri/${r.partener_id}">${esc(r.partener)}</a>` : "",
         esc(ETICHETA_SURSA[r.sursa] || r.sursa || ""),
         `<span style="font-size:12px;color:var(--text-muted)">${esc(r.observatii || "")}</span>`,
         esc(r.autor || ""),
@@ -426,6 +462,7 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
     )
   );
 
+  const totiParteneri = await db.prepare("SELECT id, nume FROM parteneri ORDER BY nume LIMIT 3000").all();
   const adaugaLiber = `
     <h2>Adaugă un preț aflat din piață</h2>
     <p style="color:var(--text-muted);font-size:13px;margin:-4px 0 12px">Pentru prețuri aflate în afara unei ofertări — la telefon, la târg, dintr-o listă primită pe email.</p>
@@ -443,7 +480,10 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
         <label style="flex:0 1 100px">Moneda <select name="moneda">${MONEDE.map((m) => `<option>${m}</option>`).join("")}</select></label>
         <label style="flex:0 1 90px">UM <input name="um" placeholder="kg, buc"></label>
         <label style="flex:0 1 150px">Data ofertei <input name="data_ofertei" type="date" value="${aziStr}" required></label>
-        <label style="flex:0 1 170px">Sursă <select name="sursa">${SURSE.map(([v, e]) => `<option value="${v}">${esc(e)}</option>`).join("")}</select></label>
+        <label style="flex:2 1 220px">Aflat de la <select name="partener_id"><option value="">— nu știu / altcineva —</option>${totiParteneri
+          .map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`)
+          .join("")}</select></label>
+        <label style="flex:0 1 170px">Cum am aflat <select name="sursa">${SURSE.map(([v, e]) => `<option value="${v}">${esc(e)}</option>`).join("")}</select></label>
         <label style="flex:3 1 260px">Observații <input name="observatii"></label>
         <button class="btn" type="submit">Adaugă</button>
       </div>
