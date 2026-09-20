@@ -19,7 +19,7 @@ const cost = require("../lib/cost");
 const grup = require("../lib/grup");
 const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, dataRo } = require("../lib/render");
 const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
@@ -357,6 +357,207 @@ function subnav(activ) {
 
 function pagina(ctx, titlu, activ, continut) {
   return layout({ user: ctx.user, title: titlu, active: "/rapoarte", body: subnav(activ) + continut });
+}
+
+// ===========================================================================
+// Balanțele SmartBill Conta — citire, curățare, analiză, comparație multi-an
+// ===========================================================================
+//
+// Banca nu se uită la o singură balanță, ci la aceeași lună pe mai mulți ani
+// și la finalurile de an. De-aia tot ce ține de balanțe stă aici, o dată, și e
+// folosit de raportul de indicatori — ca să nu diveargă două formule pentru
+// aceeași cifră.
+
+// O balanță adevărată are peste o sută de conturi. În același tabel au rămas
+// însă și loturi de un singur rând, din încercări de sincronizare cu Conta.
+// Dacă intră în comparație, strică toate coloanele (un an ar avea cifra de
+// afaceri zero). Le sărim la citire; rămân în „Balanțe istorice", de unde se
+// pot șterge cu mâna — nu șterg eu date din spatele omului.
+const PRAG_CONTURI_BALANTA = 20;
+
+const LUNI_SCURT = ["ian.", "feb.", "mar.", "apr.", "mai", "iun.", "iul.", "aug.", "sep.", "oct.", "nov.", "dec."];
+
+function lunaScurt(iso) {
+  const l = Number(String(iso || "").slice(5, 7));
+  return l >= 1 && l <= 12 ? LUNI_SCURT[l - 1] : "";
+}
+
+function etichetaLuna(iso) {
+  return `${lunaScurt(iso)} ${String(iso || "").slice(0, 4)}`;
+}
+
+// „Lună închisă" = balanța merge fix până în ultima zi a lunii. O balanță
+// trasă pe 14 septembrie e la zi, dar nu e o lună închisă: n-are ce căuta
+// într-o comparație an/an, fiindcă s-ar compara două săptămâni cu o lună.
+function esteLunaInchisa(iso) {
+  const s = String(iso || "");
+  const an = Number(s.slice(0, 4));
+  const luna = Number(s.slice(5, 7));
+  const zi = Number(s.slice(8, 10));
+  if (!an || !luna || !zi) return false;
+  return zi === new Date(Date.UTC(an, luna, 0)).getUTCDate();
+}
+
+// Cum se citește o balanță SmartBill Conta:
+//  - Conta închide LUNAR clasele 6 și 7 prin 121, deci pe 6xx/7xx rulajul
+//    debitor ajunge egal cu cel creditor, iar „venituri − cheltuieli" ar ieși
+//    mereu zero. De-aia cifra de afaceri e rulajul CREDITOR al grupei 70x
+//    (minus 709, reducerile acordate), iar profitul e soldul contului 121 —
+//    exact cum îl citește și banca din bilanț.
+//  - Soldul net al unui cont = sold final debitor − sold final creditor.
+//    Pozitiv = debitor (activ sau creanță), negativ = creditor (datorie).
+function analizeazaBalanta(conturi) {
+  let capitaluri = 0, datoriiTL = 0, datoriiCurente = 0, activeImob = 0, activeCirc = 0, ca = 0, profit = 0, cash = 0;
+  for (const c of conturi) {
+    const cont = String(c.cont || "");
+    const g2 = cont.slice(0, 2);
+    const cls = cont.charAt(0);
+    const netD = Number(c.sf_d) - Number(c.sf_c);
+    if (["10", "11", "12"].includes(g2)) capitaluri += -netD;
+    else if (g2 === "16") datoriiTL += Math.max(0, -netD);
+    else if (cls === "2") activeImob += Math.max(0, netD);
+    else if (cls === "3") activeCirc += Math.max(0, netD);
+    else if (cls === "4") {
+      if (netD > 0) activeCirc += netD;
+      else datoriiCurente += -netD;
+    } else if (cls === "5") {
+      if (cont.startsWith("519")) datoriiCurente += Math.max(0, -netD);
+      else {
+        activeCirc += Math.max(0, netD);
+        if (["51", "53", "54"].includes(g2)) cash += Math.max(0, netD);
+      }
+    }
+    if (g2 === "70" && !cont.startsWith("709")) ca += Number(c.r_c);
+    if (cont.startsWith("709")) ca -= Number(c.r_d);
+    if (cont === "121") profit = Number(c.sf_c) - Number(c.sf_d);
+  }
+  const totalActiv = activeImob + activeCirc;
+  const totalDatorii = datoriiTL + datoriiCurente;
+  return {
+    capitaluri, datoriiTL, datoriiCurente, activeImob, activeCirc, cash, ca, profit,
+    totalActiv, totalDatorii,
+    capitalLucru: activeCirc - datoriiCurente,
+    marja: ca > 0 ? (profit / ca) * 100 : null,
+    lichiditate: datoriiCurente > 0 ? activeCirc / datoriiCurente : null,
+    indatorare: totalActiv > 0 ? (totalDatorii / totalActiv) * 100 : null,
+  };
+}
+
+async function balanteAnalizate() {
+  const etichete = await db
+    .prepare(
+      `SELECT eticheta, MIN(data_pana) AS pana, MIN(data_de_la) AS de_la, COUNT(*) AS conturi
+         FROM balante_snapshot
+        GROUP BY eticheta
+       HAVING COUNT(*) >= ${PRAG_CONTURI_BALANTA}
+        ORDER BY MIN(data_pana) ASC`
+    )
+    .all();
+  const iesire = [];
+  for (const e of etichete) {
+    const conturi = await db.prepare("SELECT cont, r_d, r_c, sf_d, sf_c FROM balante_snapshot WHERE eticheta = ?").all(e.eticheta);
+    const pana = String(e.pana || "");
+    iesire.push({
+      eticheta: e.eticheta,
+      pana,
+      an: Number(pana.slice(0, 4)),
+      luna: pana.slice(5, 7),
+      nrConturi: Number(e.conturi),
+      inchisa: esteLunaInchisa(pana),
+      ...analizeazaBalanta(conturi),
+    });
+  }
+  return iesire;
+}
+
+// Rândurile comune ale tabelelor multi-an. Scrise o dată, ca tabelul „la
+// aceeași lună" și cel „la final de an" să arate exact aceiași indicatori în
+// aceeași ordine — altfel ochiul nu poate sări de la unul la altul.
+const RANDURI_BILANT = [
+  { cheie: "ca", nume: "Cifra de afaceri (rulaj 70x)", fmt: "bani", sens: 1, tinta: "în creștere" },
+  { cheie: "profit", nume: "Profit / (pierdere) — sold 121", fmt: "semn", sens: 1, tinta: "pozitiv" },
+  { cheie: "marja", nume: "Marja netă", fmt: "proc", sens: 1, tinta: "> 3%" },
+  { cheie: "capitaluri", nume: "Capitaluri proprii", fmt: "semn", sens: 1, tinta: "pozitive, în creștere" },
+  { cheie: "totalActiv", nume: "Total activ", fmt: "bani", sens: 1, tinta: "—" },
+  { cheie: "activeCirc", nume: "Active circulante", fmt: "bani", sens: 1, tinta: "—" },
+  { cheie: "cash", nume: "Cash (51x + 53x)", fmt: "bani", sens: 1, tinta: "—" },
+  { cheie: "datoriiTL", nume: "Datorii bănci / leasing (16x, 519)", fmt: "bani", sens: -1, tinta: "—" },
+  { cheie: "datoriiCurente", nume: "Datorii curente", fmt: "bani", sens: -1, tinta: "—" },
+  { cheie: "capitalLucru", nume: "Capital de lucru (circulante − datorii curente)", fmt: "semn", sens: 1, tinta: "pozitiv" },
+  { cheie: "lichiditate", nume: "Lichiditate curentă", fmt: "lichid", sens: 1, tinta: "≥ 1,20" },
+  { cheie: "indatorare", nume: "Grad de îndatorare", fmt: "indat", sens: -1, tinta: "≤ 60%" },
+];
+
+const GOL = '<span style="color:var(--text-muted)">—</span>';
+
+function celulaBilant(a, r) {
+  if (!a) return GOL;
+  const v = a[r.cheie];
+  if (v === null || v === undefined || !isFinite(v)) return GOL;
+  if (r.fmt === "bani") return money(v);
+  if (r.fmt === "semn") return `<span style="color:${v >= 0 ? "var(--success)" : "var(--danger)"}">${money(v)}</span>`;
+  if (r.fmt === "proc") return `${v.toFixed(1)}%`;
+  if (r.fmt === "lichid")
+    return `${v.toFixed(2)} ${v >= 1.2 ? '<span class="badge verde">bun</span>' : v >= 1 ? '<span class="badge galben">la limită</span>' : '<span class="badge rosu">sub 1</span>'}`;
+  if (r.fmt === "indat")
+    return `${v.toFixed(0)}% ${v <= 60 ? '<span class="badge verde">ok</span>' : v <= 80 ? '<span class="badge galben">ridicat</span>' : '<span class="badge rosu">critic</span>'}`;
+  return String(v);
+}
+
+// Diferența dintre două coloane. Culoarea urmează sensul indicatorului: la
+// datorii, „mai puțin" e verde, nu roșu.
+function deltaBilant(nou, vechi, r) {
+  if (!nou || !vechi) return GOL;
+  const a = nou[r.cheie];
+  const b = vechi[r.cheie];
+  if (a === null || b === null || a === undefined || b === undefined || !isFinite(a) || !isFinite(b) || b === 0) return GOL;
+  const p = ((a - b) / Math.abs(b)) * 100;
+  if (!isFinite(p)) return GOL;
+  const semn = p > 0 ? "+" : "";
+  const bun = r.sens === 0 ? null : r.sens > 0 ? p >= 0 : p <= 0;
+  const culoare = bun === null ? "var(--text-muted)" : bun ? "var(--success)" : "var(--danger)";
+  return `<span style="color:${culoare}">${semn}${p.toFixed(1)}%</span>`;
+}
+
+// Estimarea anului în curs.
+//
+// Nu o fac liniar (realizat ÷ luni × 12): firma nu vinde egal în fiecare lună,
+// iar liniarul minte exact în lunile în care contează. Mă uit în anii trecuți
+// cât din anul întreg se făcuse până la ACEEAȘI lună și aplic media raportului
+// pe realizatul de acum. Dacă n-am cu ce compara (nu există aceeași lună în
+// niciun an încheiat), cad pe liniar și o spun pe față.
+//
+// Profitul nu-l extrapolez cu raportul lui — un profit mic la jumătate de an
+// dă factori aberanți. Îl socotesc ca cifră estimată × marja realizată până
+// acum. Capitalurile proprii de la final de an = cele de la luna închisă plus
+// profitul rămas de făcut (rezultatul intră oricum în capitaluri).
+function estimeazaAnul(ref, finaluri, inchise) {
+  if (!ref) return null;
+  const factori = [];
+  for (const f of finaluri) {
+    const ytd = inchise.find((a) => a.an === f.an && a.luna === ref.luna);
+    if (ytd && ytd.ca > 0 && f.ca > 0) factori.push({ an: f.an, factor: f.ca / ytd.ca });
+  }
+  const liniar = 12 / Math.max(1, Number(ref.luna));
+  const factor = factori.length ? factori.reduce((s, x) => s + x.factor, 0) / factori.length : liniar;
+  const ca = ref.ca * factor;
+  const marja = ref.ca > 0 ? ref.profit / ref.ca : 0;
+  const profit = ca * marja;
+  return {
+    estimat: true,
+    an: ref.an,
+    factor,
+    aniFactor: factori.map((x) => x.an),
+    liniar: factori.length === 0,
+    ca,
+    profit,
+    marja: ca > 0 ? (profit / ca) * 100 : null,
+    capitaluri: ref.capitaluri + (profit - ref.profit),
+    // Restul sunt fotografii la o dată, nu fluxuri. Nu se extrapolează —
+    // un sold de furnizori la 31 decembrie nu se deduce din cel de la august.
+    totalActiv: null, activeCirc: null, cash: null, datoriiTL: null,
+    datoriiCurente: null, capitalLucru: null, lichiditate: null, indatorare: null,
+  };
 }
 
 function register(router) {
@@ -1747,6 +1948,22 @@ function register(router) {
     const top1 = topClienti.length && vanzariNet12 > 0 ? (Number(topClienti[0].net) / vanzariNet12) * 100 : 0;
     const top5 = vanzariNet12 > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariNet12) * 100 : 0;
 
+    // Concentrarea pe furnizori — partea cealaltă a aceluiași risc. Banca se
+    // uită și aici: dacă marfa vine de la un singur om, o ceartă cu el oprește
+    // firma la fel de sigur ca pierderea clientului mare.
+    const topFurnizori = await db
+      .prepare(
+        `SELECT p.nume, COALESCE(SUM(n.net),0) AS net, COUNT(DISTINCT f.id) AS facturi, MAX(f.data_emiterii) AS ultima
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           JOIN parteneri p ON p.id = f.partener_id
+           JOIN ${SUB_NET} n ON n.factura_id = f.id
+          WHERE f.directie = 'achizitie' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
+          GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
+      )
+      .all(acum12);
+    const furn1 = topFurnizori.length && achizitiiNet12 > 0 ? (Number(topFurnizori[0].net) / achizitiiNet12) * 100 : 0;
+    const furn5 = achizitiiNet12 > 0 ? (topFurnizori.reduce((s, c) => s + Number(c.net), 0) / achizitiiNet12) * 100 : 0;
+
     const dso = vanzariNet12 > 0 ? (creanteClienti / (vanzariNet12 * 1.19)) * 365 : null; // creanțele sunt cu TVA
     const dpo = achizitiiNet12 > 0 ? (datoriiFurnizori / (achizitiiNet12 * 1.19)) * 365 : null;
     const crestere = vanzariNetPrec > 0 ? (vanzariNet12 / vanzariNetPrec - 1) * 100 : null;
@@ -1816,6 +2033,13 @@ function register(router) {
         explicatie: "",
       },
       {
+        nume: "Concentrarea pe primul furnizor",
+        valoare: topFurnizori.length ? `${furn1.toFixed(0)}% (${esc(topFurnizori[0].nume)})` : "n/a (fără facturi de achiziție)",
+        tinta: "< 40%",
+        stare: topFurnizori.length ? nota(furn1 < 40, furn1 < 60) : "",
+        explicatie: "Dacă marfa vine de la un singur om, o ceartă cu el oprește firma la fel de sigur ca pierderea clientului mare.",
+      },
+      {
         nume: "Fond de rulment operațional (creanțe − furnizori)",
         valoare: money(creanteClienti - datoriiFurnizori),
         tinta: "pozitiv",
@@ -1837,6 +2061,10 @@ function register(router) {
       sugestii.push(
         `<strong>Diversifică portofoliul.</strong> ${esc(topClienti.length ? topClienti[0].nume : "")} = ${top1.toFixed(0)}% din vânzări. Băncile taie punctajul peste 30%. Pipeline-ul CRM și lead-urile sunt unealta — fiecare client nou mare scade riscul.`
       );
+    if (furn1 > 40)
+      sugestii.push(
+        `<strong>Ai a doua sursă la ${esc(topFurnizori.length ? topFurnizori[0].nume : "")}?</strong> ${furn1.toFixed(0)}% din achizițiile ultimelor 12 luni vin de la el. Analistul de credit întreabă exact asta, iar răspunsul „nu" se plătește în preț la fiecare negociere. Ofertele alternative se strâng în <a href="/procurement">Procurement</a>.`
+      );
     if (!areAchizitii)
       sugestii.push(
         `<strong>Importă facturile de furnizori.</strong> Fără ele, DPO, marja și fondul de rulment sunt incomplete — iar dosarul de credit se face pe cifre complete. Ai pagina <a href="/import">Import</a> pregătită.`
@@ -1850,69 +2078,129 @@ function register(router) {
     );
 
     // --- indicatori REALI din balanțele Conta încărcate (snapshoturi) ------
-    const etichete = await db
-      .prepare("SELECT eticheta, MIN(data_pana) AS pana FROM balante_snapshot GROUP BY eticheta ORDER BY MIN(data_pana) ASC")
-      .all();
-    const analizeBilant = [];
-    for (const e of etichete) {
-      const conturi = await db.prepare("SELECT cont, r_d, r_c, sf_d, sf_c FROM balante_snapshot WHERE eticheta = ?").all(e.eticheta);
-      // Notă de calcul: SmartBill Conta închide LUNAR clasele 6/7 prin 121,
-      // deci rulajele debit=credit pe 6xx/7xx și "venituri - cheltuieli" ar
-      // ieși mereu zero. De-aia: cifra de afaceri = rulajul CREDITOR al
-      // grupei 70x (fără închideri), iar profitul = soldul contului 121
-      // (credit = profit, debit = pierdere) — exact cum îl citește și banca.
-      let capitaluri = 0, datoriiTL = 0, datoriiCurente = 0, activeImob = 0, activeCirc = 0, ca = 0, profit = 0, cash = 0;
-      for (const c of conturi) {
-        const g2 = c.cont.slice(0, 2);
-        const cls = c.cont.charAt(0);
-        const netD = Number(c.sf_d) - Number(c.sf_c);
-        if (["10", "11", "12"].includes(g2)) capitaluri += -netD;
-        else if (["16"].includes(g2)) datoriiTL += Math.max(0, -netD);
-        else if (cls === "2") activeImob += Math.max(0, netD);
-        else if (cls === "3") activeCirc += Math.max(0, netD);
-        else if (cls === "4") {
-          if (netD > 0) activeCirc += netD;
-          else datoriiCurente += -netD;
-        } else if (cls === "5") {
-          if (c.cont.startsWith("519")) datoriiCurente += Math.max(0, -netD);
-          else {
-            activeCirc += Math.max(0, netD);
-            if (["51", "53", "54"].includes(g2) && !c.cont.startsWith("519")) cash += Math.max(0, netD);
-          }
-        }
-        if (g2 === "70" && !c.cont.startsWith("709")) ca += Number(c.r_c);
-        if (c.cont.startsWith("709")) ca -= Number(c.r_d);
-        if (c.cont === "121") profit = Number(c.sf_c) - Number(c.sf_d);
-      }
-      analizeBilant.push({
-        eticheta: e.eticheta,
-        capitaluri, datoriiTL, datoriiCurente, activeImob, activeCirc, cash, ca,
-        profit,
-        totalActiv: activeImob + activeCirc,
-        lichiditate: datoriiCurente > 0 ? activeCirc / datoriiCurente : null,
-        indatorare: activeImob + activeCirc > 0 ? ((datoriiTL + datoriiCurente) / (activeImob + activeCirc)) * 100 : null,
-      });
-    }
-    const ultimBilant = analizeBilant.length ? analizeBilant[analizeBilant.length - 1] : null;
+    //
+    // Banca nu citește o listă de balanțe una sub alta, ci compară: aceeași
+    // lună pe trei ani (ca să vadă trendul fără sezonalitate) și finalurile de
+    // an (ca să vadă bilanțul auditat). De-aia sunt două tabele cu anii pe
+    // coloane, nu unul cu perioadele pe rânduri — iar evoluția lunară a anului
+    // în curs stă separat, ca detaliu, nu amestecată în comparație.
+    const balante = await balanteAnalizate();
+    const inchise = balante.filter((b) => b.inchisa);
+    const refLuna = inchise.length ? inchise[inchise.length - 1] : null; // ultima lună închisă
+    const finaluri = inchise.filter((b) => b.luna === "12");
 
-    const sectiuneBilant = analizeBilant.length
+    // Coloanele comparației „la aceeași lună": anul de referință și cei doi
+    // dinaintea lui. Dacă într-un an nu există fix luna de referință, iau cea
+    // mai apropiată lună închisă DINAINTEA ei din anul acela și scriu pe
+    // coloană care e — o comparație aproximativă spusă pe față e utilă, una
+    // ascunsă e o minciună.
+    const coloaneLuna = [];
+    if (refLuna) {
+      for (const an of [refLuna.an, refLuna.an - 1, refLuna.an - 2]) {
+        const exacta = inchise.find((b) => b.an === an && b.luna === refLuna.luna);
+        let aleasa = exacta || null;
+        if (!aleasa) {
+          const candidate = inchise.filter((b) => b.an === an && b.luna < refLuna.luna);
+          aleasa = candidate.length ? candidate[candidate.length - 1] : null;
+        }
+        coloaneLuna.push({ an, b: aleasa, exacta: !!exacta });
+      }
+    }
+    const lipsaLuni = coloaneLuna.filter((c) => !c.exacta).map((c) => `${lunaScurt(refLuna.pana)} ${c.an}`);
+
+    // Finalurile de an: ultimii trei încheiați, cel mai nou primul, plus
+    // estimarea anului în curs.
+    const estimare = refLuna && !finaluri.some((f) => f.an === refLuna.an) ? estimeazaAnul(refLuna, finaluri, inchise) : null;
+    const coloaneAn = finaluri.slice(-3).reverse();
+
+    function tabelMultiAn(capete, seturi) {
+      return table(
+        ["Indicator", ...capete, "Ținta băncii"],
+        RANDURI_BILANT.map((r) => [
+          `<strong>${esc(r.nume)}</strong>`,
+          ...seturi.map((s) => celulaBilant(s, r)),
+          `<span style="font-size:12px;color:var(--text-muted)">${esc(r.tinta)}</span>`,
+        ])
+      );
+    }
+
+    const sectiuneLuna = refLuna
       ? `
-      <h2>Cifrele reale din balanțele Conta (ce vede banca în bilanț)</h2>
+      <h2>La aceeași lună, pe trei ani — ${esc(etichetaLuna(refLuna.pana))}</h2>
       ${table(
-        ["Perioada", "Cifra de afaceri (rulaj 70x)", "Profit / (pierdere) — sold 121", "Capitaluri proprii", "Datorii bănci/leasing (16x, 519)", "Datorii curente", "Cash (51x+53x)", "Lichiditate curentă", "Grad îndatorare"],
-        analizeBilant.map((a) => [
-          esc(a.eticheta),
-          money(a.ca),
-          `<span style="color:${a.profit >= 0 ? "var(--success)" : "var(--danger)"}">${money(a.profit)}</span>`,
-          money(a.capitaluri),
-          money(a.datoriiTL),
-          money(a.datoriiCurente),
-          money(a.cash),
-          a.lichiditate !== null ? `${a.lichiditate.toFixed(2)} ${a.lichiditate >= 1.2 ? '<span class="badge verde">bun</span>' : a.lichiditate >= 1 ? '<span class="badge galben">la limită</span>' : '<span class="badge rosu">sub 1</span>'}` : "—",
-          a.indatorare !== null ? `${a.indatorare.toFixed(0)}% ${a.indatorare <= 60 ? '<span class="badge verde">ok</span>' : a.indatorare <= 80 ? '<span class="badge galben">ridicat</span>' : '<span class="badge rosu">critic</span>'}` : "—",
+        ["Indicator", ...coloaneLuna.map((c) => (c.b ? etichetaLuna(c.b.pana) : String(c.an))), `Δ ${String(coloaneLuna[0].an).slice(2)}/${String(coloaneLuna[1] ? coloaneLuna[1].an : "").slice(2)}`, "Ținta băncii"],
+        RANDURI_BILANT.map((r) => [
+          `<strong>${esc(r.nume)}</strong>`,
+          ...coloaneLuna.map((c) => celulaBilant(c.b, r)),
+          deltaBilant(coloaneLuna[0] && coloaneLuna[0].b, coloaneLuna[1] && coloaneLuna[1].b, r),
+          `<span style="font-size:12px;color:var(--text-muted)">${esc(r.tinta)}</span>`,
         ])
       )}
-      <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · grad de îndatorare ≤ 60–70% · capitaluri proprii pozitive și în creștere. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</p>`
+      ${
+        lipsaLuni.length
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Nu am balanța pe ${esc(lipsaLuni.join(" și "))} — coloanele alea arată cea mai apropiată lună închisă dinainte, deci comparația e aproximativă. Trage balanțele lipsă din Conta (Import → Punte) sau încarcă-le la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a> și tabelul se face exact.</div>`
+          : `<p style="font-size:12px;color:var(--text-muted)">Toate cele trei coloane sunt pe aceeași lună — comparația e curată, fără efect de sezon.</p>`
+      }`
+      : "";
+
+    const sectiuneAn = coloaneAn.length || estimare
+      ? `
+      <h2>La final de an${estimare ? ` (cu estimat ${estimare.an})` : ""}</h2>
+      ${tabelMultiAn(
+        [...(estimare ? [`${estimare.an} estimat`] : []), ...coloaneAn.map((c) => String(c.an))],
+        [...(estimare ? [estimare] : []), ...coloaneAn]
+      )}
+      ${
+        estimare
+          ? `<p style="font-size:12px;color:var(--text-muted)">Estimarea ${estimare.an}: cifra realizată până la ${esc(etichetaLuna(refLuna.pana))} (${money(refLuna.ca)}) × ${
+              estimare.liniar
+                ? `12 ÷ ${Number(refLuna.luna)} luni — pro-rata liniară, fiindcă n-am aceeași lună în niciun an încheiat cu care să măsor sezonul`
+                : `factorul mediu de sezon ${estimare.factor.toFixed(2)}, măsurat pe ${esc(estimare.aniFactor.join(" și "))} (cât din anul întreg se făcuse până la aceeași lună)`
+            }. Profitul estimat = cifra estimată × marja realizată până acum (${(refLuna.ca > 0 ? (refLuna.profit / refLuna.ca) * 100 : 0).toFixed(1)}%). Capitalurile = cele de la ${esc(
+              etichetaLuna(refLuna.pana)
+            )} plus profitul rămas de făcut. Restul pozițiilor de bilanț sunt fotografii la o dată — nu se extrapolează, de-aia sunt goale.</p>`
+          : ""
+      }`
+      : "";
+
+    // Evoluția lunară a anului în curs — cerută separat, ca detaliu.
+    // „În lună" = diferența față de cumulatul lunii anterioare; balanța din
+    // Conta e cumulată de la 1 ianuarie, nu pe lună.
+    const lunarAnCurent = refLuna ? inchise.filter((b) => b.an === refLuna.an) : [];
+    const partiala = refLuna ? balante.filter((b) => b.an === refLuna.an && !b.inchisa && b.pana > refLuna.pana).slice(-1)[0] : null;
+    const randuriLunar = [];
+    for (let i = 0; i < lunarAnCurent.length; i++) {
+      const b = lunarAnCurent[i];
+      const prec = i > 0 ? lunarAnCurent[i - 1] : null;
+      randuriLunar.push({ b, prec, eticheta: etichetaLuna(b.pana), partial: false });
+    }
+    if (partiala) randuriLunar.push({ b: partiala, prec: lunarAnCurent[lunarAnCurent.length - 1] || null, eticheta: `${etichetaLuna(partiala.pana)} (parțial, la ${dataRo(partiala.pana)})`, partial: true });
+
+    const sectiuneLunar = randuriLunar.length
+      ? `
+      <h2>Evoluția pe luni — ${refLuna.an}</h2>
+      ${table(
+        ["Luna", "Cifra de afaceri cumulată", "din care în lună", "Profit cumulat", "din care în lună", "Marja netă", "Capitaluri proprii", "Cash", "Datorii curente", "Lichiditate", "Îndatorare"],
+        randuriLunar.map((x) => [
+          x.partial ? `<span style="color:var(--text-muted)">${esc(x.eticheta)}</span>` : `<strong>${esc(x.eticheta)}</strong>`,
+          money(x.b.ca),
+          x.prec ? money(x.b.ca - x.prec.ca) : GOL,
+          `<span style="color:${x.b.profit >= 0 ? "var(--success)" : "var(--danger)"}">${money(x.b.profit)}</span>`,
+          x.prec ? `<span style="color:${x.b.profit - x.prec.profit >= 0 ? "var(--success)" : "var(--danger)"}">${money(x.b.profit - x.prec.profit)}</span>` : GOL,
+          x.b.marja !== null ? `${x.b.marja.toFixed(1)}%` : GOL,
+          money(x.b.capitaluri),
+          money(x.b.cash),
+          money(x.b.datoriiCurente),
+          x.b.lichiditate !== null ? x.b.lichiditate.toFixed(2) : GOL,
+          x.b.indatorare !== null ? `${x.b.indatorare.toFixed(0)}%` : GOL,
+        ])
+      )}
+      <p style="font-size:12px;color:var(--text-muted)">Balanța din Conta e cumulată de la 1 ianuarie; coloanele „din care în lună" sunt diferența față de luna dinainte. O lună fără balanță încărcată lipsește din tabel.</p>`
+      : "";
+
+    const sectiuneBilant = balante.length
+      ? `${sectiuneLuna}${sectiuneAn}${sectiuneLunar}
+      <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · grad de îndatorare ≤ 60–70% · capitaluri proprii pozitive și în creștere. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>. Balanțele cu mai puțin de ${PRAG_CONTURI_BALANTA} de conturi sunt sărite — nu sunt balanțe întregi și ar strica comparația.</p>`
       : `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Pentru indicatorii de bilanț REALI (capitaluri proprii, lichiditate, grad de îndatorare — exact ce cere banca), încarcă balanțele anuale din SmartBill Conta la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</div>`;
 
     const continut = `
@@ -1933,8 +2221,27 @@ function register(router) {
       <h2>Top 5 clienți (concentrarea riscului)</h2>
       ${table(
         ["Client", "Vânzări 12 luni (net)", "% din total"],
-        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariNet12 > 0 ? ((Number(c.net) / vanzariNet12) * 100).toFixed(1) + "%" : "—"])
+        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariNet12 > 0 ? ((Number(c.net) / vanzariNet12) * 100).toFixed(1) + "%" : "—"]),
+        { total: ["<strong>Top 5</strong>", `<strong>${money(topClienti.reduce((s, c) => s + Number(c.net), 0))}</strong>`, `<strong>${top5.toFixed(1)}%</strong>`] }
       )}
+
+      <h2>Top 5 furnizori (concentrarea aprovizionării)</h2>
+      ${table(
+        ["Furnizor", "Achiziții 12 luni (net)", "% din total", "Facturi", "Ultima factură"],
+        topFurnizori.map((c) => [
+          esc(c.nume),
+          money(c.net),
+          achizitiiNet12 > 0 ? ((Number(c.net) / achizitiiNet12) * 100).toFixed(1) + "%" : "—",
+          String(c.facturi),
+          esc(String(c.ultima || "")),
+        ]),
+        { total: ["<strong>Top 5</strong>", `<strong>${money(topFurnizori.reduce((s, c) => s + Number(c.net), 0))}</strong>`, `<strong>${furn5.toFixed(1)}%</strong>`, "", ""] }
+      )}
+      <p style="font-size:12px;color:var(--text-muted)">${
+        achizitiiNet12 > 0
+          ? `Din ${money(achizitiiNet12)} achiziții în ultimele 12 luni (fără TVA, fără intercompany).`
+          : `Nu sunt facturi de achiziție în ultimele 12 luni — tabelul se umple după importul facturilor de furnizori de la <a href="/import">Import</a>.`
+      }</p>
 
       <h2>Ce ar îmbunătăți punctajul</h2>
       <ol style="line-height:1.7">${sugestii.map((s) => `<li>${s}</li>`).join("")}</ol>
