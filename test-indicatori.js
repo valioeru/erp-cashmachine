@@ -374,6 +374,61 @@ function fixtureBalante(cuAugustVechi) {
     ["214.921,20 lei", "nu se potrivește cu soldul contului 121"]
   );
 
+  // ---- partea scrisă a dosarului ------------------------------------------
+  // Fixtura are profit pozitiv și structură slabă, deci comentariul trebuie să
+  // conțină și rânduri „bun", și rânduri sub țintă, cu plan de măsuri.
+  rulaj("DELETE FROM setari_app WHERE cheie LIKE 'banca_%'");
+  r = await cer("/rapoarte/indicatori");
+  cere(
+    "comentariul indicatorilor se scrie singur, din cifre",
+    r.corp,
+    [
+      "Comentariul indicatorilor",
+      "EBITDA și marja EBITDA",
+      "Equity ratio (capitaluri proprii ÷ total activ)",
+      "Gradul de îndatorare: leverage, gearing și datorie netă ÷ EBITDA",
+      "Lichiditatea curentă",
+      "Rotația stocurilor",
+      "Cash flow din exploatare (CFO)",
+      "Plan de măsuri",
+      "[de completat",
+      "Pârghii:",
+    ]
+  );
+  cere("editorul de texte apare la admin", r.corp, ["Partea scrisă a dosarului", "Prezentarea firmei", "Ce cerem băncii"]);
+  cere("agentul nu vede editorul", (await cer("/rapoarte/indicatori", { user: { id: 9, nume: "Agent", rol: "vanzari" } })).corp, [], ["Partea scrisă a dosarului"]);
+
+  // dosarul tipărit, fără prezentare scrisă încă
+  let rb2 = await cer("/rapoarte/indicatori/raport-banca");
+  cere(
+    "dosarul spune că prezentarea lipsește, nu o inventează",
+    rb2.corp,
+    ["Prezentarea firmei", "nu e scrisă încă", "Comentariul indicatorilor"]
+  );
+
+  // scriem prezentarea și măsurile
+  await cer("/rapoarte/indicatori/text", { metoda: "post", body: { cheie: "prezentare", valoare: "Firma face saci menajeri din 2010.\n\nClientii sunt retaileri mari." } });
+  await cer("/rapoarte/indicatori/text", { metoda: "post", body: { cheie: "concluzie", valoare: "Cerem o linie de 500.000 lei." } });
+  rb2 = await cer("/rapoarte/indicatori/raport-banca");
+  cere(
+    "textele scrise de om intră în dosar",
+    rb2.corp,
+    ["Firma face saci menajeri din 2010.", "Clientii sunt retaileri mari.", "Ce cerem băncii", "Cerem o linie de 500.000 lei."],
+    ["nu e scrisă încă"]
+  );
+
+  // textul e redat ca text, nu ca HTML
+  await cer("/rapoarte/indicatori/text", { metoda: "post", body: { cheie: "prezentare", valoare: "<script>alert(1)</script> firma noastra" } });
+  rb2 = await cer("/rapoarte/indicatori/raport-banca");
+  if (rb2.corp.includes("&lt;script&gt;") && !rb2.corp.includes("<script>alert(1)</script>")) ok("textul liber e redat ca text, nu executat");
+  else rau("textul liber e redat ca text, nu executat");
+
+  // un agent nu poate scrie textele dosarului
+  await cer("/rapoarte/indicatori/text", { metoda: "post", user: { id: 9, nume: "Agent", rol: "vanzari" }, body: { cheie: "concluzie", valoare: "SCRIS DE AGENT" } });
+  rb2 = await cer("/rapoarte/indicatori/raport-banca");
+  cere("doar adminul scrie textele dosarului", rb2.corp, [], ["SCRIS DE AGENT"]);
+  rulaj("DELETE FROM setari_app WHERE cheie LIKE 'banca_%'");
+
   // ---- etapa 3: fără nicio balanță ----------------------------------------
   rulaj("DELETE FROM balante_snapshot");
   r = await cer("/rapoarte/indicatori");
