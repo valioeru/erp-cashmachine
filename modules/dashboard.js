@@ -569,7 +569,17 @@ function register(router) {
     let stiri = [];
     let stiriLa = null;
     try {
-      stiri = await db.prepare("SELECT titlu, sursa, url, rezumat, zona, relevanta, publicat_la FROM stiri ORDER BY id DESC LIMIT 12").all();
+      // Aceleași știri trei zile la rând nu mai sunt știri. Se ia un bazin
+      // din cele mai recente șaizeci și se aleg douăsprezece amestecate după
+      // ziua curentă: se schimbă în fiecare dimineață, dar rămân aceleași
+      // toată ziua, ca să nu-ți sară de sub ochi la fiecare reîncărcare.
+      stiri = await db
+        .prepare(
+          `SELECT s.titlu, s.sursa, s.url, s.rezumat, s.zona, s.relevanta, s.publicat_la
+             FROM (SELECT * FROM stiri ORDER BY id DESC LIMIT 60) s
+            ORDER BY md5(CAST(s.id AS TEXT) || ?) LIMIT 12`
+        )
+        .all(azi());
       const r = await db.prepare("SELECT MAX(adaugat_la) AS d FROM stiri").get();
       stiriLa = r && r.d ? String(r.d).slice(0, 16) : null;
     } catch (e) {
@@ -596,8 +606,43 @@ function register(router) {
         @media (max-width:640px){ .an-rand { grid-template-columns:74px 1fr 100px; } .an-dif { display:none; } }
       </style>`;
 
+    // ---- 5. Cine își serbează ziua azi ----------------------------------
+    // Regula lui Vali: „de ziua de naștere în dashboard, la manager și la
+    // agentul de vânzări sau la oricine se loghează, apare în fiecare zi
+    // contactele născute azi". Apare la toată lumea, nu doar la vânzări.
+    let aniversari = [];
+    let felicitate = new Set();
+    try {
+      const mk = require("./marketing");
+      aniversari = await mk.aniversariAzi();
+      felicitate = await mk.trimiseAzi();
+    } catch (e) {
+      aniversari = [];
+    }
+    const blocAniversari = aniversari.length
+      ? `<div class="detail-box" style="border-left:4px solid var(--success);max-width:100%;margin-bottom:16px">
+           <div style="display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;align-items:center">
+             <div>
+               <strong>🎂 ${aniversari.length === 1 ? "O aniversare azi" : aniversari.length + " aniversări azi"}</strong>
+               <div style="font-size:13px;margin-top:4px">
+                 ${aniversari
+                   .map(
+                     (c) =>
+                       `<a href="/marketing/contact/${c.id}">${esc(c.nume)}</a>` +
+                       `<span style="color:var(--text-muted)"> — ${esc(c.firma)}</span>` +
+                       (felicitate.has(Number(c.id)) ? ' <span class="badge verde">felicitat</span>' : "")
+                   )
+                   .join(" · ")}
+               </div>
+             </div>
+             <a href="/marketing/aniversari" class="btn">Trimite email</a>
+           </div>
+         </div>`
+      : "";
+
     const body = `
       ${stil}
+      ${blocAniversari}
 
       <div class="hero">
         <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start">

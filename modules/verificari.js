@@ -12,7 +12,7 @@
 // găsit, abia apoi se decide ce se face cu ele.
 const db = require("../lib/db");
 const { esc, money, layout, table } = require("../lib/render");
-const { send } = require("../lib/router");
+const { send, redirect } = require("../lib/router");
 
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
@@ -370,6 +370,16 @@ const VERIFICARI = [
         sumar: `${grupuri.length} numere emise de mai multe ori, ${money(inPlus)} creanțe care nu există`,
         antet: ["Document", "Client", "Data", "De câte ori", "Facturile"],
         randuri: detalii,
+        // Butonul apare doar dacă are ce curăța. Păstrează exemplarul cel mai
+        // vechi al fiecărui număr — ăla e originalul — și le scoate pe
+        // celelalte. Se poate da înapoi.
+        actiune: grupuri.length
+          ? `<form method="post" action="/admin/date/duplicate/curata" style="margin:10px 0"
+                   onsubmit="return confirm('Păstrez primul exemplar al fiecărui număr și le scot pe celelalte. Se poate anula după. Continui?')">
+               <button class="btn" type="submit">Scoate copiile, păstrează originalul</button>
+               <span style="font-size:12px;color:var(--text-muted);margin-left:8px">Nimic nu se șterge din bază — copiile se dezactivează, iar acțiunea se poate anula.</span>
+             </form>`
+          : "",
       };
     },
   },
@@ -1109,9 +1119,36 @@ function register(router) {
         return `
           <h2 id="${r.cheie}">${esc(r.titlu)} ${insigna}</h2>
           <p style="margin:-6px 0 10px;color:var(--text-muted);font-size:13px">${esc(r.de_ce)}</p>
-          ${r.rez.n === 0 ? '<p style="color:var(--success);font-size:13px">Nimic de semnalat.</p>' : `<p style="font-size:13px"><strong>${esc(r.rez.sumar)}</strong></p>${table(r.rez.antet, r.rez.randuri)}${r.rez.n > LIMITA ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${LIMITA} din ${r.rez.n}.</p>` : ""}`}`;
+          ${r.rez.n === 0 ? '<p style="color:var(--success);font-size:13px">Nimic de semnalat.</p>' : `<p style="font-size:13px"><strong>${esc(r.rez.sumar)}</strong></p>${r.rez.actiune || ""}${table(r.rez.antet, r.rez.randuri)}${r.rez.n > LIMITA ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${LIMITA} din ${r.rez.n}.</p>` : ""}`}`;
       })
       .join("");
+
+    // Curățările de duplicate făcute până acum, cu butonul de anulare.
+    let curatariDupl = [];
+    try {
+      curatariDupl = await db
+        .prepare(
+          `SELECT c.*, u.nume AS autor FROM curatari_duplicate c
+             LEFT JOIN utilizatori u ON u.id = c.facut_de ORDER BY c.id DESC LIMIT 10`
+        )
+        .all();
+    } catch (e) {
+      curatariDupl = [];
+    }
+    const blocCuratari = curatariDupl.length
+      ? `<h2>Curățări de duplicate făcute</h2>${table(
+          ["Când", "Cine", "Documente scoase", "Sumă", ""],
+          curatariDupl.map((c) => [
+            esc(String(c.facut_la || "").slice(0, 16)),
+            esc(c.autor || "—"),
+            String(c.nr_documente),
+            money(c.suma),
+            c.anulata_la
+              ? `<span class="badge gri">anulată ${esc(String(c.anulata_la).slice(0, 10))}</span>`
+              : `<form method="post" action="/admin/date/duplicate/${c.id}/anuleaza" class="inline-form" onsubmit="return confirm('Pun la loc cele ${c.nr_documente} documente?')"><button class="link-btn danger" type="submit">Anulează</button></form>`,
+          ])
+        )}`
+      : "";
 
     const curatare = await incasariDeCuratat();
     const curatareSuma = curatare.deScos.reduce((s2, r) => s2 + nr(r.suma), 0);
@@ -1221,8 +1258,76 @@ function register(router) {
       )}
 
       ${sectiuni}
+      ${blocCuratari}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Verificări date", active: "/admin/date", body }));
+  });
+
+  // ---- curățarea facturilor duplicate -------------------------------------
+  // Păstrează exemplarul cu id-ul cel mai mic — primul intrat, adică
+  // originalul — și pune restul pe activ = 0. Id-urile atinse rămân scrise,
+  // deci se poate da înapoi întreg.
+  router.post("/admin/date/duplicate/curata", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const grupuri = await db
+      .prepare(
+        `SELECT COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) AS doc,
+                f.partener_id, COUNT(*) AS n
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata')
+            AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) IS NOT NULL
+          GROUP BY 1, f.partener_id
+         HAVING COUNT(*) > 1`
+      )
+      .all();
+
+    const deScos = [];
+    let suma = 0;
+    for (const g of grupuri) {
+      const f = await db
+        .prepare(
+          `SELECT f.id,
+                  COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva,0)/100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
+            WHERE f.directie = 'vanzare'
+              AND COALESCE(NULLIF(f.document_extern,''), f.serie || CAST(f.numar AS TEXT)) = ?
+              AND f.partener_id ${g.partener_id === null ? "IS NULL" : "= ?"}
+            ORDER BY f.id`
+        )
+        .all(...(g.partener_id === null ? [g.doc] : [g.doc, g.partener_id]));
+      for (const x of f.slice(1)) {
+        deScos.push(Number(x.id));
+        suma += nr(x.total);
+      }
+    }
+    if (!deScos.length) return redirect(ctx.res, "/admin/date#vanzari-duplicate");
+
+    const LOT = 200;
+    for (let i = 0; i < deScos.length; i += LOT) {
+      const lot = deScos.slice(i, i + LOT);
+      await db.prepare(`UPDATE facturi SET activ = 0 WHERE id IN (${lot.map(() => "?").join(",")})`).run(...lot);
+    }
+    await db
+      .prepare("INSERT INTO curatari_duplicate (facut_de, directie, nr_documente, suma, ids) VALUES (?, 'vanzare', ?, ?, ?)")
+      .run(ctx.user.id, deScos.length, suma, JSON.stringify(deScos));
+    redirect(ctx.res, "/admin/date?curatate=" + deScos.length + "#vanzari-duplicate");
+  });
+
+  router.post("/admin/date/duplicate/:id/anuleaza", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const c = await db.prepare("SELECT * FROM curatari_duplicate WHERE id = ?").get(ctx.params.id);
+    if (!c || c.anulata_la) return redirect(ctx.res, "/admin/date");
+    let ids = [];
+    try { ids = JSON.parse(c.ids || "[]"); } catch (e) { ids = []; }
+    const LOT = 200;
+    for (let i = 0; i < ids.length; i += LOT) {
+      const lot = ids.slice(i, i + LOT);
+      await db.prepare(`UPDATE facturi SET activ = 1 WHERE id IN (${lot.map(() => "?").join(",")})`).run(...lot);
+    }
+    await db
+      .prepare("UPDATE curatari_duplicate SET anulata_la = ?, anulata_de = ? WHERE id = ?")
+      .run(new Date().toISOString().slice(0, 19).replace("T", " "), ctx.user.id, c.id);
+    redirect(ctx.res, "/admin/date#vanzari-duplicate");
   });
 }
 
