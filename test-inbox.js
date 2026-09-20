@@ -179,6 +179,13 @@ function curatenie() {
     "UPDATE comenzi SET email_mesaj_id = NULL WHERE id = 93501",
     "DELETE FROM email_mesaje WHERE cont_id IN (SELECT id FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro')",
     "DELETE FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro'",
+    // Blocații se curăță ÎNTOTDEAUNA, nu doar la final, și se curăță TOȚI: dacă
+    // testul crapă la mijloc, un domeniu rămas blocat face ca rularea
+    // următoare să nu mai aducă mesajele fixturii, iar eroarea arată ca
+    // altceva — „prima sincronizare aduce 2 din 6", nicăieri un cuvânt despre
+    // blocare. Un filtru pe nume n-ar ajunge: se blochează domeniul
+    // expeditorului din fixtură, care nu seamănă cu numele testului.
+    "DELETE FROM email_blocate",
     "DELETE FROM comenzi WHERE id = 93501",
     "DELETE FROM taskuri WHERE id = 93401",
     "DELETE FROM oferte_linii WHERE oferta_id = 93201",
@@ -386,6 +393,77 @@ function mesajFals(id, x) {
   cere("lista de atașamente", p.corp, ["oferta.pdf", "stricat.xlsx"]);
   p = await cer("/email/atasamente", { user: VALI, query: { stare: "nereusite" } });
   cere("filtrul pe atașamente nereușite", p.corp, ["stricat.xlsx"], ["oferta.pdf"]);
+
+  // --- expeditorii blocați --------------------------------------------------
+  // Cererea lui Vali: „la orice email sosit să-i împiedicăm pe viitor să mai
+  // intre în ERP; odată marcate așa, în timp scăpăm de reclame".
+  //
+  // Ce păzește testul, în ordinea în care lucrurile s-ar strica:
+  //   • blocatul chiar nu mai intră la sincronizare;
+  //   • blocarea pe domeniu prinde și subdomeniile, altfel fiecare robot și-ar
+  //     face alt subdomeniu și n-am termina niciodată;
+  //   • domeniul NOSTRU nu se poate bloca — o apăsare greșită acolo ar opri
+  //     tot emailul firmei;
+  //   • deblocarea aduce înapoi mesajele scoase. Blocarea e o hotărâre, nu o
+  //     ștergere.
+  console.log("\nexpeditori blocați");
+  rulaj("DELETE FROM email_blocate WHERE valoare LIKE '%test-inbox%' OR valoare LIKE '%reclame-test%'");
+
+  const unMesaj = q("SELECT id, de_la, de_la_domeniu FROM email_mesaje WHERE cont_id = (SELECT id FROM email_conturi WHERE adresa = 'office@test-inbox.ro') ORDER BY id LIMIT 1")[0];
+  p = await cer("/email/:id", { user: VALI, params: { id: String(unMesaj.id) } });
+  cere("fișa mesajului are butonul de blocare", p.corp, ["Nu mai aduce de aici", "Blochează", "Vezi lista blocaților"]);
+
+  // blocare pe domeniu, cu scoaterea mesajelor deja aduse
+  const inainteBlocare = Number(q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE activ = 1 AND lower(de_la_domeniu) = '${String(unMesaj.de_la_domeniu).toLowerCase()}'`)[0].n);
+  await cer("/email/:id/blocheaza", { user: VALI, metoda: "post", params: { id: String(unMesaj.id) }, body: { fel: "domeniu", scoate: "1" } });
+  egal("domeniul e trecut la blocați",
+    q(`SELECT COUNT(*) AS n FROM email_blocate WHERE fel = 'domeniu' AND lower(valoare) = '${String(unMesaj.de_la_domeniu).toLowerCase()}' AND activ = 1`)[0].n, "1");
+  egal("mesajele lui au ieșit din ERP",
+    Number(q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE activ = 1 AND lower(de_la_domeniu) = '${String(unMesaj.de_la_domeniu).toLowerCase()}'`)[0].n), 0);
+  egal("dar rândurile sunt tot în bază",
+    Number(q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE lower(de_la_domeniu) = '${String(unMesaj.de_la_domeniu).toLowerCase()}'`)[0].n) >= inainteBlocare, true);
+
+  egal("blocatul se recunoaște după adresă", inbox.eBlocat(
+    { adrese: new Set(["reclame@reclame-test.ro"]), domenii: new Set() }, "Reclame@Reclame-Test.ro", "reclame-test.ro"), true);
+  egal("și după domeniu", inbox.eBlocat(
+    { adrese: new Set(), domenii: new Set(["reclame-test.ro"]) }, "x@reclame-test.ro", "reclame-test.ro"), true);
+  egal("subdomeniul cade sub domeniul blocat", inbox.eBlocat(
+    { adrese: new Set(), domenii: new Set(["reclame-test.ro"]) }, "x@mail.reclame-test.ro", "mail.reclame-test.ro"), true);
+  egal("un domeniu care doar se termină la fel NU cade", inbox.eBlocat(
+    { adrese: new Set(), domenii: new Set(["clame-test.ro"]) }, "x@reclame-test.ro", "reclame-test.ro"), false);
+  egal("altcineva nu e atins", inbox.eBlocat(
+    { adrese: new Set(["a@b.ro"]), domenii: new Set(["c.ro"]) }, "x@d.ro", "d.ro"), false);
+
+  // la sincronizare, mesajul blocat nici nu intră
+  rulaj("DELETE FROM email_blocate WHERE valoare LIKE '%test-inbox%'");
+  rulaj("UPDATE email_mesaje SET activ = 1 WHERE cont_id IN (SELECT id FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro')");
+  rulaj("INSERT INTO email_blocate (fel, valoare, activ, pus_de) VALUES ('domeniu','reclame-test.ro',1,1)");
+  mesajFals("m-blocat", {
+    de_la: "Reclame SRL <oferte@mail.reclame-test.ro>", catre: "office@test-inbox.ro",
+    subiect: "SUPER REDUCERI", text: "cumpara acum",
+  });
+  GMAIL.listate = ["m-blocat"];
+  rulaj("UPDATE email_conturi SET history_id = NULL WHERE adresa = 'office@test-inbox.ro'");
+  await inbox.sincronizeazaTot();
+  egal("mesajul de la un expeditor blocat nici nu intră",
+    Number(q("SELECT COUNT(*) AS n FROM email_mesaje WHERE gmail_id = 'm-blocat'")[0].n), 0);
+
+  p = await cer("/email/blocate", { user: VALI });
+  cere("pagina de blocați îi arată", p.corp, ["Expeditori blocați", "reclame-test.ro", "tot domeniul"]);
+
+  // deblocarea aduce mesajele înapoi
+  const idBloc = Number(q("SELECT id FROM email_blocate WHERE valoare = 'reclame-test.ro'")[0].id);
+  rulaj(`UPDATE email_blocate SET mesaje_scoase = 1 WHERE id = ${idBloc}`);
+  rulaj(`INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, corp, directie, activ)
+         VALUES ((SELECT id FROM email_conturi WHERE adresa = 'office@test-inbox.ro'), 'm-scos', '2026-09-01',
+                 'oferte@mail.reclame-test.ro', 'Reclame', 'mail.reclame-test.ro', 'scos', 'x', 'primit', 0)`);
+  await cer("/email/blocate/:id/comuta", { user: VALI, metoda: "post", params: { id: String(idBloc) } });
+  egal("deblocat", q(`SELECT activ FROM email_blocate WHERE id = ${idBloc}`)[0].activ, "0");
+  egal("și mesajul scos s-a întors, inclusiv de pe subdomeniu",
+    q("SELECT id, activ FROM email_mesaje WHERE gmail_id = 'm-scos'")[0].activ, "1");
+
+  rulaj("DELETE FROM email_mesaje WHERE gmail_id = 'm-scos'");
+  rulaj("DELETE FROM email_blocate WHERE valoare LIKE '%reclame-test%' OR valoare LIKE '%test-inbox%'");
 
   // --- ștergerea unei căsuțe ------------------------------------------------
   // Un buton care șterge o mie de mesaje trebuie să arate întâi o mie, nu „ești

@@ -214,6 +214,69 @@ egal("  domeniul se scoate din adresă", L.domeniulDin("Comercial <COMERCIAL@Eur
   const dupa = q(`SELECT id, partener_id FROM email_mesaje WHERE gmail_id LIKE 'legtest-%' ORDER BY id`);
   egal("  a doua rulare nu mișcă nimic", JSON.stringify(dupa), JSON.stringify(inainte));
 
+  // --- 4b. ce e „sigur" și ce nu ---------------------------------------------
+  // Butonul „Confirmă potrivirile sigure" apasă o dată pentru zeci de domenii.
+  // Ca să aibă voie s-o facă, „sigur" trebuie să însemne strict două lucruri:
+  // miezul domeniului identic cu numele firmei, ȘI o singură firmă care se
+  // potrivește așa. A doua condiție e cea care contează cu adevărat: în baza
+  // reală sunt șapte fișe Aquila, iar fără ea butonul ar fi ales una pe tăcute,
+  // după ordinea din bază, și nimeni n-ar fi știut de ce emailurile au ajuns la
+  // fișa greșită.
+  console.log("\nce se confirmă singur și ce nu");
+  exec1(`DELETE FROM email_domenii WHERE domeniu LIKE '%legtest%'`);
+  exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'legsig-%'`);
+  exec1(`DELETE FROM parteneri WHERE cui LIKE 'RO-LEGS-%'`);
+
+  const pExact = Number(q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('WAREHOUSESIG LEGTEST SRL','RO-LEGS-1','client') RETURNING id`)[0].id);
+  // Două fișe care se strâng la același nume: exact capcana Aquila.
+  q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('AQUILASIG SRL','RO-LEGS-2','client')`);
+  q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('AQUILASIG S.R.L.','RO-LEGS-3','client')`);
+  // Una care doar seamănă, fără să fie identică.
+  q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('PROFISIG PLASTICS SRL','RO-LEGS-4','client')`);
+
+  const mSig = (gid, domeniu) =>
+    q(`INSERT INTO email_mesaje (cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, corp, directie, activ)
+       VALUES (?,?,'2026-09-10',?,'X',?,'test','text','primit',1) RETURNING id`,
+      [cont, gid, "cineva@" + domeniu, domeniu]);
+  mSig("legsig-1", "warehousesiglegtest.ro");
+  mSig("legsig-2", "warehousesiglegtest.ro");
+  mSig("legsig-3", "aquilasig.ro");
+  mSig("legsig-4", "profisig.ro");
+
+  const s = await L.sugestii({ minim: 1 });
+  const dupaDomeniu = (d) => s.find((x) => x.domeniu === d) || {};
+
+  const wh = dupaDomeniu("warehousesiglegtest.ro");
+  egal("  potrivire identică, o singură firmă → sigur", wh.sigur, true);
+  egal("  și scorul e 100", wh.scor, 100);
+
+  const aq = dupaDomeniu("aquilasig.ro");
+  egal("  două firme cu același nume strâns → NU e sigur", aq.sigur, false);
+  egal("  dar se spune câte sunt", aq.egali, 2);
+  egal("  deși scorul e tot 100", aq.scor, 100);
+
+  const pr = dupaDomeniu("profisig.ro");
+  egal("  doar asemănare, nu identitate → nu e sigur", pr.sigur, false);
+  egal("  și scorul e sub 100", pr.scor < 100, true);
+
+  await rute.post["/email/domenii/confirma-sigure"](
+    { user: VALI, params: {}, query: {}, body: {}, res: res(), req: { url: "/x" } });
+
+  egal("  mesajele de pe domeniul sigur s-au legat",
+    q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE gmail_id IN ('legsig-1','legsig-2') AND partener_id = ${pExact}`)[0].n, "2");
+  egal("  cel ambiguu a rămas nelegat",
+    q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE gmail_id = 'legsig-3' AND partener_id IS NULL`)[0].n, "1");
+  egal("  cel doar asemănător a rămas nelegat",
+    q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE gmail_id = 'legsig-4' AND partener_id IS NULL`)[0].n, "1");
+  egal("  domeniul sigur a rămas învățat",
+    q(`SELECT COUNT(*) AS n FROM email_domenii WHERE lower(domeniu) = 'warehousesiglegtest.ro'`)[0].n, "1");
+  egal("  cel ambiguu NU s-a învățat",
+    q(`SELECT COUNT(*) AS n FROM email_domenii WHERE lower(domeniu) = 'aquilasig.ro'`)[0].n, "0");
+
+  exec1(`DELETE FROM email_domenii WHERE domeniu LIKE '%legtest%' OR domeniu LIKE '%sig.ro'`);
+  exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'legsig-%'`);
+  exec1(`DELETE FROM parteneri WHERE cui LIKE 'RO-LEGS-%'`);
+
   // --- 5. pagina nu are voie să crească cu fiecare firmă ---------------------
   // Prima variantă scria lista întreagă de firme în fiecare rând de tabel.
   // Cu ~1.500 de firme în bază și 120 de domenii pe pagină, ieșeau 2,7 MB:

@@ -267,6 +267,56 @@ function curatenie() {
   r = await cer("/crm/concurenta", { user: AGENT });
   cere("rândul dezactivat dispare din raport", r.corp, [], ["TEST Concurentul Mare"]);
 
+  // ---- ultimele prețuri ale concurenței, pe produs ------------------------
+  // Cererea lui Vali: „când ofertează un anume produs, agentului i se afișează
+  // în timp real ultimele prețuri ofertate de concurenți și la ce dată".
+  // Blocul vechi arăta doar prețurile agățate de oferta CURENTĂ — adică nimic,
+  // la prima ofertă către un client nou. Ăsta se uită la tot ce știm despre
+  // produs, din orice ofertă, de la oricine.
+  console.log("\n── Piața, pe produs ──────────────────────────────────────────");
+  rulaj(`INSERT INTO concurenta_preturi (directie, produs_id, denumire, concurent, pret, moneda, um, data_ofertei, sursa, activ, creat_de)
+         VALUES ('vanzare', 92101, 'TEST Sac menaj 60L', 'TEST Vechiul', 1.10, 'RON', 'buc', '2024-01-15', 'client', 1, 1)`);
+  rulaj(`INSERT INTO concurenta_preturi (directie, produs_id, denumire, concurent, pret, moneda, um, data_ofertei, sursa, activ, creat_de)
+         VALUES ('vanzare', 92101, 'TEST Sac menaj 60L', 'TEST Noul', 0.85, 'RON', 'buc', '2026-08-30', 'client', 1, 1)`);
+  // Un preț scris liber, fără produs din nomenclator: trebuie găsit după nume.
+  rulaj(`INSERT INTO concurenta_preturi (directie, denumire, concurent, pret, moneda, um, data_ofertei, sursa, activ, creat_de)
+         VALUES ('vanzare', 'TEST Sac Menaj  60l', 'TEST Scris liber', 0.95, 'RON', 'buc', '2026-09-01', 'targ', 1, 1)`);
+  // Un preț de achiziție: n-are ce căuta la ofertarea de vânzare.
+  rulaj(`INSERT INTO concurenta_preturi (directie, produs_id, denumire, concurent, pret, moneda, data_ofertei, sursa, activ, creat_de)
+         VALUES ('achizitie', 92101, 'TEST Sac menaj 60L', 'TEST Achizitie', 0.40, 'RON', '2026-09-02', 'furnizor', 1, 1)`);
+
+  const piata = await conc.ultimelePeProdus({ directie: "vanzare", cate: 20 });
+  const peProdus = piata.peProdus["92101"] || [];
+  const aleMele = peProdus.filter((x) => ["TEST Scris liber", "TEST Noul", "TEST Vechiul"].includes(x.concurent));
+  egal("toate trei prețurile ajung la produs", aleMele.length, 3);
+  egal("cel mai nou e primul", aleMele[0].data, "2026-09-01");
+  egal("și e cel scris liber, fără produs ales, găsit după nume", aleMele[0].concurent, "TEST Scris liber");
+  egal("apoi cel din august", aleMele[1].data, "2026-08-30");
+  egal("și la urmă cel vechi", aleMele[2].data, "2024-01-15");
+  egal("prețul de achiziție nu intră la vânzare",
+    peProdus.filter((x) => x.concurent === "TEST Achizitie").length, 0);
+  egal("se găsește și după denumirea normalizată",
+    (piata.peNume[conc.normalizeaza("TEST Sac menaj 60L")] || []).length > 0, true);
+
+  const doarUnul = await conc.ultimelePeProdus({ directie: "vanzare", cate: 1 });
+  egal("limita se respectă", (doarUnul.peProdus["92101"] || []).length, 1);
+
+  const laAchizitie = await conc.ultimelePeProdus({ directie: "achizitie", cate: 3 });
+  egal("pe achiziție se vede doar prețul de achiziție",
+    (laAchizitie.peProdus["92101"] || []).map((x) => x.concurent), ["TEST Achizitie"]);
+
+  r = await cer("/oferte/:id", { params: { id: "92201" }, user: AGENT });
+  // Datele se scriu românește în pagină (dateleInText), deci se caută 01.09.2026.
+  cere("pagina de ofertare arată piața pe linia deja pusă", r.corp,
+    ["Concurența", "TEST Scris liber", "01.09.2026", "TEST Noul"], []);
+  // Scriptul NU se caută prin cere(): acela taie blocurile <script> dinadins,
+  // ca să nu confunde cod cu text vizibil. Aici tocmai codul ne interesează.
+  for (const bucata of ["var PIATA = {", 'id="piata-produs"', 'id="alege-produs"', "Ce a ofertat concurența la produsul ăsta"]) {
+    egal("piața ajunge în pagină ca date: " + bucata, r.corp.includes(bucata), true);
+  }
+  egal("și intră doar produsele despre care chiar știm ceva",
+    r.corp.includes('"92101":[{'), true);
+
   curatenie();
   console.log(`\n${rele ? rele + " probleme" : "Totul curat."}  (${interogari} interogări SQL)\n`);
   process.exit(rele ? 1 : 0);
