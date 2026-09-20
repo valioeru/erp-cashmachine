@@ -672,15 +672,45 @@ async function verifica() {
   if (!folder) {
     adauga("Folderul din Drive", false, "GOOGLE_DRIVE_FOLDER nu e setată în Render", "pasul 4");
   } else {
+    let pot = null;
     try {
       const info = await drive.info(folder);
-      adauga("Folderul din Drive există și e vizibil", true, `${info.name || folder}`, "");
-      const proba = Buffer.from("test ERP " + new Date().toISOString(), "utf8");
-      const urcat = await drive.urca({ nume: `erp-test-${Date.now()}.txt`, mime: "text/plain", continut: proba, parinte: folder });
-      await drive.sterge(urcat.id);
-      adauga("Se poate scrie în folder", true, "am urcat un fișier de probă și l-am șters", "");
+      const cap = info.capabilities || {};
+      pot = cap.canAddChildren;
+      const unde = info.driveId
+        ? `în Drive partajat (${info.driveId})`
+        : "în My Drive, NU într-un Drive partajat";
+      adauga(
+        "Folderul din Drive există și e vizibil",
+        true,
+        `${info.name || folder} — ${unde}; contul tehnic poate adăuga fișiere: ${pot === undefined ? "nu spune Google" : pot ? "da" : "NU"}`,
+        ""
+      );
+      // Dacă Google spune din capul locului că nu se pot adăuga fișiere, nu mai
+      // încercăm urcarea: ne-ar da un 404 care arată ca un id greșit și am
+      // trimite omul să caute unde nu trebuie.
+      if (pot === false) {
+        adauga(
+          "Se poate scrie în folder",
+          false,
+          info.driveId
+            ? "Google spune canAddChildren=false: contul tehnic e membru al Drive-ului partajat, dar rolul lui nu-i dă voie să adauge fișiere. Trebuie Content manager sau Manager — Viewer, Commenter și Contributor nu ajung. Dacă rolul e deja Content manager, atunci Drive-ul partajat are bifa „People outside <firma> can access files” stinsă, iar contul tehnic e, pentru Google, din afara domeniului."
+            : "Folderul e într-un My Drive, nu într-un Drive partajat. Fișierele urcate acolo ar fi ale contului tehnic, iar un cont tehnic are spațiu zero — Google refuză. Mută folderul într-un Drive partajat.",
+          "pasul 3"
+        );
+      } else {
+        const proba = Buffer.from("test ERP " + new Date().toISOString(), "utf8");
+        const urcat = await drive.urca({ nume: `erp-test-${Date.now()}.txt`, mime: "text/plain", continut: proba, parinte: folder });
+        await drive.sterge(urcat.id);
+        adauga("Se poate scrie în folder", true, "am urcat un fișier de probă și l-am șters", "");
+      }
     } catch (e) {
-      adauga("Folderul din Drive", false, mesajul(e), "pasul 3 — ai dat share pe folder către adresa service account-ului?");
+      adauga(
+        "Folderul din Drive",
+        false,
+        mesajul(e) + (pot === true ? " — deși Google spunea că se poate scrie (canAddChildren=true), deci nu e permisiunea" : ""),
+        "pasul 3 — ai dat share pe folder către adresa service account-ului?"
+      );
     }
   }
 
