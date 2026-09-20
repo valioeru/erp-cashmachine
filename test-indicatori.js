@@ -16,7 +16,12 @@
 //      are din ce să măsoare sezonul;
 //   5. evoluția pe luni e tabel separat, cu diferența lunară calculată din
 //      cumulat;
-//   6. top 5 furnizori și concentrarea pe primul furnizor.
+//   6. top 5 furnizori și concentrarea pe primul furnizor;
+//   7. indicatorii pe care banca îi scrie în contract — EBITDA, CFO, equity
+//      ratio, leverage, gearing, datorie netă ÷ EBITDA, rotația stocurilor —
+//      toți cu valori calculate cu mâna din fixtură, nu copiate din ieșire;
+//   8. raportul de tipărit pentru bancă: antet, stil de tipar, aceleași cifre
+//      și fără nimic din interfața ERP-ului.
 const path = require("path");
 const Module = require("module");
 const { execFileSync } = require("child_process");
@@ -110,29 +115,56 @@ const rulaj = (sql) => execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1"
 // ---- balanțele de test ------------------------------------------------------
 // O balanță adevărată are peste o sută de conturi; pragul din raport e 20, așa
 // că fiecare balanță de test primește conturile care contează plus umplutură
-// din clasa 6 (pe care analiza n-o citește oricum — Conta închide lunar 6/7
-// prin 121, de-aia profitul se ia din soldul lui 121).
+// din clasa 6 (pe care analiza n-o citește pentru profit — Conta închide lunar
+// 6/7 prin 121, de-aia profitul se ia din soldul lui 121).
+//
+// IMPORTANT: fixtura se ECHILIBREAZĂ (activ = pasiv), la soldurile inițiale și
+// la cele finale. Nu e cochetărie: identitatea contabilă face ca
+// CFO + CFI + CFF să dea exact variația de cash. Dacă formula de cash flow din
+// raport e greșită, verificarea din pagină nu mai spune „Se leagă" și testul
+// pică — ăsta e tot rostul echilibrării.
+//
+// Soldul furnizorilor nu se dă, se DEDUCE: activ − capital − profit − credit.
+const FINAL = { imob: 400000, marfa: 500000, clienti: 900000, banca: 120000, capital: 200000, credit: 300000 };
+const INITIAL = { imob: 380000, marfa: 400000, clienti: 800000, banca: 100000, capital: 200000, credit: 320000, profit: 0 };
+// rulajele nelegate de profit, la fel în toate balanțele, ca EBITDA să difere
+// doar prin profit și comparația pe ani să rămână citibilă
+const FLUX = { amort: 80000, dob: 30000, imp: 20000, consum: 2000000 };
+
+function furnizoriDedusi(s) {
+  const activ = s.imob + s.marfa + s.clienti + s.banca;
+  return activ - s.capital - (s.profit || 0) - s.credit;
+}
+
 function balanta(eticheta, deLa, panaLa, d) {
+  const F = Object.assign({}, FINAL, { profit: d.profit });
+  const I = INITIAL;
+  const fF = furnizoriDedusi(F);
+  const fI = furnizoriDedusi(I);
   const R = [];
-  const pune = (cont, den, sfD, sfC, rD, rC) =>
-    R.push(`(${lit(eticheta)},${lit(deLa)},${lit(panaLa)},${lit(cont)},${lit(den)},0,0,${rD || 0},${rC || 0},0,0,${sfD || 0},${sfC || 0},'test')`);
-  pune("1012", "Capital social", 0, d.capital);
-  pune("121", "Profit sau pierdere", 0, d.profit);
-  pune("1621", "Credite bancare pe termen lung", 0, d.credit);
-  pune("2131", "Echipamente", d.imob, 0);
-  pune("371", "Mărfuri", d.marfa, 0);
-  pune("4111", "Clienți", d.clienti, 0);
-  pune("401", "Furnizori", 0, d.furnizori);
-  pune("5121", "Conturi la bănci în lei", d.banca, 0);
-  pune("701", "Venituri din vânzarea produselor finite", 0, 0, 0, d.ca);
-  // umplutură: conturi de cheltuieli, ignorate de analiză, dar necesare ca
-  // balanța să treacă pragul de „balanță întreagă"
-  for (let i = 0; i < 14; i++) pune("60" + (10 + i), "Cheltuială " + i, 0, 0, 1000 + i, 1000 + i);
+  const pune = (cont, den, siD, siC, rD, rC, sfD, sfC) =>
+    R.push(
+      `(${lit(eticheta)},${lit(deLa)},${lit(panaLa)},${lit(cont)},${lit(den)},${siD || 0},${siC || 0},${rD || 0},${rC || 0},0,0,${sfD || 0},${sfC || 0},'test')`
+    );
+  pune("1012", "Capital social", 0, I.capital, 0, 0, 0, F.capital);
+  pune("121", "Profit sau pierdere", 0, I.profit, 0, 0, 0, F.profit);
+  pune("1621", "Credite bancare pe termen lung", 0, I.credit, 0, 0, 0, F.credit);
+  pune("2131", "Echipamente", I.imob, 0, 0, 0, F.imob, 0);
+  pune("371", "Mărfuri", I.marfa, 0, 0, 0, F.marfa, 0);
+  pune("4111", "Clienți", I.clienti, 0, 0, 0, F.clienti, 0);
+  pune("401", "Furnizori", 0, fI, 0, 0, 0, fF);
+  pune("5121", "Conturi la bănci în lei", I.banca, 0, 0, 0, F.banca, 0);
+  pune("701", "Venituri din vânzarea produselor finite", 0, 0, 0, d.ca, 0, 0);
+  pune("6811", "Cheltuieli de exploatare privind amortizarea", 0, 0, FLUX.amort, FLUX.amort, 0, 0);
+  pune("666", "Cheltuieli privind dobânzile", 0, 0, FLUX.dob, FLUX.dob, 0, 0);
+  pune("691", "Cheltuieli cu impozitul pe profit", 0, 0, FLUX.imp, FLUX.imp, 0, 0);
+  pune("607", "Cheltuieli privind mărfurile", 0, 0, FLUX.consum, FLUX.consum, 0, 0);
+  // umplutură: alte cheltuieli, ca balanța să treacă pragul de „balanță întreagă"
+  for (let i = 0; i < 12; i++) pune("62" + (10 + i), "Cheltuială " + i, 0, 0, 1000 + i, 1000 + i, 0, 0);
   return `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, si_d, si_c, r_d, r_c, ts_d, ts_c, sf_d, sf_c, fisier) VALUES ${R.join(",")}`;
 }
 
-const BAZA = { capital: 200000, credit: 300000, imob: 400000, marfa: 500000, clienti: 900000, furnizori: 700000, banca: 120000 };
-const cu = (x) => Object.assign({}, BAZA, x);
+const cu = (x) => x;
 
 const azi = new Date().toISOString().slice(0, 10);
 const AN = azi.slice(0, 4);
@@ -252,6 +284,58 @@ function fixtureBalante(cuAugustVechi) {
     ["Top 5 furnizori (concentrarea aprovizionării)", "FURNIZOR MARE SRL", "FURNIZOR MIC SRL", "200.000,00 lei", "Concentrarea pe primul furnizor", "80% (FURNIZOR MARE SRL)", "Ai a doua sursă la FURNIZOR MARE SRL?"]
   );
   cere("top 5 clienți a rămas la locul lui", r.corp, ["Top 5 clienți (concentrarea riscului)", "CLIENT INDICATORI SRL"]);
+
+  // ---- indicatorii ceruți de bancă ---------------------------------------
+  // Valorile de mai jos sunt calculate cu mâna din fixtură, nu copiate din
+  // ieșirea programului — altfel testul ar confirma orice formulă.
+  //
+  // La aug. 2026: capitaluri 420.000 (capital 200.000 + profit 220.000);
+  // activ 1.920.000; datorii 1.500.000 (credit 300.000 + furnizori 1.200.000).
+  //   EBITDA      = 220.000 + 20.000 (impozit) + 30.000 (dobânzi) + 80.000 (amortizare) = 350.000
+  //   marja EBITDA= 350.000 / 4.300.000 = 8,1%
+  //   equity ratio= 420.000 / 1.920.000 = 21,9%
+  //   leverage    = 1.500.000 / 420.000 = 3,57
+  //   datorie netă= 300.000 − 120.000 = 180.000 ⇒ gearing = 180.000/420.000 = 42,9%
+  //   EBITDA anualizat = 350.000 × 365/243 zile = 525.720 ⇒ datorie netă/EBITDA = 0,34
+  //   acoperirea dobânzii = (220.000+20.000+30.000)/30.000 = 9,00
+  //   stoc mediu = (400.000+500.000)/2 = 450.000 ⇒ zile = 450.000/2.000.000 × 243 = 55
+  //                                              ⇒ rotația = 365/55 = 6,68
+  //   CFO = 220.000 + 80.000 − 100.000 (creanțe) − 100.000 (stocuri) + 40.000 (furnizori) = 140.000
+  cere(
+    "EBITDA și marja EBITDA",
+    r.corp,
+    ["EBITDA", "350.000,00 lei", "Marja EBITDA", "8.1%", "Profit net + impozit + dobânzi + amortizare"]
+  );
+  cere(
+    "CFO și verificarea cu variația reală de cash",
+    r.corp,
+    ["Cash flow din exploatare", "140.000,00 lei", "Verificarea cash flow-ului", "Se leagă."]
+  );
+  cere(
+    "equity ratio, leverage, gearing, datorie netă ÷ EBITDA",
+    r.corp,
+    ["Equity ratio (capitaluri ÷ total activ)", "21.9%", "Leverage (total datorii ÷ capitaluri)", "3.57", "Gearing (datorie netă ÷ capitaluri)", "42.9%", "Datorie netă ÷ EBITDA (anualizat)", "0.34"]
+  );
+  cere("acoperirea dobânzii", r.corp, ["Acoperirea dobânzii (EBIT ÷ dobânzi)", "9.00"]);
+  cere("rotația stocurilor și zilele de stoc", r.corp, ["Rotația stocurilor", "6.68", "Zile de stoc", "55 zile"]);
+  cere(
+    "tabelele multi-an sunt împărțite pe capitole",
+    r.corp,
+    ["Rezultate", "Bilanț", "Structura și riscul — ce se uită banca", "Cash flow (metoda indirectă)"]
+  );
+  cere("EBITDA se estimează, indicatorii de structură nu", r.corp, ["539.230,77 lei"]);
+
+  // ---- raportul de tipărit pentru bancă -----------------------------------
+  cere("butonul de raport e pe pagină", r.corp, ["Generează raport pentru bancă", "/rapoarte/indicatori/raport-banca"]);
+  const rb = await cer("/rapoarte/indicatori/raport-banca");
+  cere(
+    "raportul pentru bancă are antet, buton de tipărire și aceleași cifre",
+    rb.corp,
+    ["Dosar financiar — indicatori pentru bancă", "Tipărește / salvează PDF", "Perioada de referință", "350.000,00 lei", "140.000,00 lei", "Top 5 furnizori", "Indicatorii dosarului de credit"],
+    ["subnav", "Toate rapoartele", "Generează raport pentru bancă"]
+  );
+  if (!/@media print/.test(rb.corp) || !/A4 landscape/.test(rb.corp)) rau("raportul pentru bancă are stil de tipar");
+  else ok("raportul pentru bancă are stil de tipar");
 
   // ---- etapa 3: fără nicio balanță ----------------------------------------
   rulaj("DELETE FROM balante_snapshot");

@@ -53,6 +53,8 @@ require("./modules/cutii").register(router);
 require("./modules/dezvoltare").register(router);
 require("./modules/procurement").register(router);
 require("./modules/marketing").register(router);
+require("./modules/concurenta").register(router);
+require("./modules/inbox").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
@@ -189,6 +191,7 @@ async function start() {
   await require("./modules/calculator").seed();
   require("./modules/warehouse").porneste();
   require("./modules/marketing").porneste();
+  require("./modules/inbox").porneste();
   await auth.curataSesiuni();
   setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
   const PORT = process.env.PORT || 3000;
