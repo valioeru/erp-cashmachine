@@ -6,6 +6,7 @@ const db = require("../lib/db");
 const { esc, layout } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const mail = require("../lib/mail");
+const google = require("../lib/google");
 
 function adrese(text) {
   return String(text || "")
@@ -17,6 +18,15 @@ function adrese(text) {
 async function utilizatorComplet(id) {
   if (!id) return null;
   return await db.prepare("SELECT * FROM utilizatori WHERE id = ?").get(id);
+}
+
+// De când există Gmail API, SMTP-ul nu mai e obligatoriu: dacă Google e
+// configurat, oricine de pe domeniu poate trimite fără să aibă nicio parolă pe
+// fișa lui. Poarta de la intrare trebuie să țină cont de amândouă, altfel
+// blocăm oameni pentru lipsa unei configurări de care nu mai au nevoie.
+function poateTrimite(u) {
+  if (mail.configUtilizator(u)) return true;
+  return Boolean(google.cont().ok && String((u && (u.email_expeditor || u.email)) || "").trim());
 }
 
 function register(router) {
@@ -71,8 +81,12 @@ function register(router) {
       </p>
       ${
         ctx.query.rezultat
-          ? `<div class="flash"${ctx.query.rezultat === "ok" ? "" : ' style="background:#f8e5e3;border-color:#e8bdb8;color:var(--danger)"'}>${esc(
-              ctx.query.rezultat === "ok" ? "Emailul de test a plecat. Verifică-ți inboxul." : String(ctx.query.rezultat)
+          ? `<div class="flash"${/^ok/.test(String(ctx.query.rezultat)) ? "" : ' style="background:#f8e5e3;border-color:#e8bdb8;color:var(--danger)"'}>${esc(
+              ctx.query.rezultat === "ok-gmail"
+                ? "Emailul de test a plecat prin Gmail, din căsuța ta. Îl găsești și în Trimise. Nu mai ai nevoie de parolă SMTP aici."
+                : ctx.query.rezultat === "ok"
+                ? "Emailul de test a plecat. Verifică-ți inboxul."
+                : String(ctx.query.rezultat)
             )}</div>`
           : ""
       }
@@ -105,15 +119,14 @@ function register(router) {
     if (!b.test) return redirect(ctx.res, "/profil/email");
 
     const u = await utilizatorComplet(ctx.user.id);
-    const config = mail.configUtilizator(u);
-    if (!config) return redirect(ctx.res, "/profil/email?rezultat=" + encodeURIComponent("Configurația e incompletă."));
+    if (!poateTrimite(u)) return redirect(ctx.res, "/profil/email?rezultat=" + encodeURIComponent("Configurația e incompletă."));
     try {
-      await mail.trimite(config, {
-        catre: [u.email_expeditor],
+      const dus = await mail.trimiteDeLa(u, {
+        catre: [u.email_expeditor || u.email],
         subiect: "Test — ERP Cash Machine",
         corp: "Dacă citești acest mesaj, contul tău de email e configurat corect și poți trimite emailuri direct din CRM.",
       });
-      redirect(ctx.res, "/profil/email?rezultat=ok");
+      redirect(ctx.res, "/profil/email?rezultat=" + encodeURIComponent(dus.prin === "gmail" ? "ok-gmail" : "ok"));
     } catch (e) {
       redirect(ctx.res, "/profil/email?rezultat=" + encodeURIComponent(e.message));
     }
@@ -122,7 +135,7 @@ function register(router) {
   // ---- Compunere -------------------------------------------------------
   router.get("/crm/email/nou", async (ctx) => {
     const u = await utilizatorComplet(ctx.user && ctx.user.id);
-    const config = mail.configUtilizator(u);
+    const config = poateTrimite(u) ? (mail.configUtilizator(u) || { expeditor: u.email_expeditor || u.email, prinGmail: true }) : null;
 
     const partenerId = parseInt(ctx.query.partener_id, 10) || null;
     const leadId = parseInt(ctx.query.lead_id, 10) || null;
@@ -190,8 +203,7 @@ function register(router) {
 
   router.post("/crm/email", async (ctx) => {
     const u = await utilizatorComplet(ctx.user && ctx.user.id);
-    const config = mail.configUtilizator(u);
-    if (!config) return redirect(ctx.res, "/profil/email");
+    if (!poateTrimite(u)) return redirect(ctx.res, "/profil/email");
 
     const b = ctx.body;
     const catre = adrese(b.catre);
@@ -206,7 +218,7 @@ function register(router) {
     let eroare = null;
     try {
       if (!catre.length) throw new Error("Adresa destinatarului nu e validă.");
-      await mail.trimite(config, { catre, cc, subiect, corp });
+      await mail.trimiteDeLa(u, { catre, cc, subiect, corp });
     } catch (e) {
       status = "esuat";
       eroare = e.message;

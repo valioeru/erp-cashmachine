@@ -3,9 +3,9 @@
 // legat de partenerul, oferta sau factura lui.
 //
 // Ce NU face, intenționat:
-//   - nu trimite. Scope-ul e gmail.readonly, deci ERP-ul n-are cum să scrie în
-//     numele nimănui, nici din greșeală, nici dacă cineva sparge aplicația.
-//     Trimiterea rămâne pe SMTP-ul din lib/mail.js, cu contul fiecărui om.
+//   - nu trimite de aici. Citirea are scope-ul gmail.readonly și atât; ce
+//     pleacă din ERP pleacă prin CRM, pe un scope separat (gmail.send), care
+//     la rândul lui nu poate citi nimic. Cele două nu se pot amesteca.
 //   - nu șterge și nu marchează citit. Ce se întâmplă în Gmail rămâne treaba
 //     omului; ERP-ul doar se uită.
 //   - nu ține arhiva. Corpul se păstrează trunchiat, cât să se citească ce s-a
@@ -732,7 +732,22 @@ async function verifica() {
   for (const cont of conturi) {
     try {
       const p = await gmail.profil(cont.adresa);
-      adauga(`Căsuța ${cont.adresa}`, true, `${p.mesaje.toLocaleString("ro-RO")} mesaje, ${p.fire.toLocaleString("ro-RO")} fire`, "");
+      // Trimiterea se verifică cerând doar tokenul cu scope-ul de trimitere.
+      // NU pleacă niciun email de probă: un mesaj de test în inboxul unui
+      // client e mai rău decât o verificare incompletă.
+      let trimitere = "";
+      try {
+        await gmail.poateTrimite(cont.adresa);
+        trimitere = " · poate și trimite";
+      } catch (e2) {
+        trimitere = ` · NU poate trimite (${mesajul(e2).slice(0, 120)}) — lipsește scope-ul gmail.send de la pasul 2`;
+      }
+      adauga(
+        `Căsuța ${cont.adresa}`,
+        true,
+        `${p.mesaje.toLocaleString("ro-RO")} mesaje, ${p.fire.toLocaleString("ro-RO")} fire${trimitere}`,
+        ""
+      );
     } catch (e) {
       adauga(`Căsuța ${cont.adresa}`, false, mesajul(e), "pasul 2 — delegarea cu scope gmail.readonly");
     }
