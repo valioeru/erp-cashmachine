@@ -701,8 +701,21 @@ async function verifica() {
       } else {
         const proba = Buffer.from("test ERP " + new Date().toISOString(), "utf8");
         const urcat = await drive.urca({ nume: `erp-test-${Date.now()}.txt`, mime: "text/plain", continut: proba, parinte: folder });
-        await drive.sterge(urcat.id);
-        adauga("Se poate scrie în folder", true, "am urcat un fișier de probă și l-am șters", "");
+        // Urcarea e ce contează; curățenia de după e treabă separată. Dacă le
+        // ținem într-un singur try, un refuz la ștergere apare ca „nu se poate
+        // scrie" — ceea ce e fals, și trimite omul să repare ce nu e stricat.
+        adauga("Se poate scrie în folder", true, `am urcat un fișier de probă (${urcat.nume})`, "");
+        try {
+          await drive.sterge(urcat.id);
+          adauga("Fișierul de probă s-a curățat", true, "mutat la coș", "");
+        } catch (e2) {
+          adauga(
+            "Fișierul de probă a rămas în folder",
+            false,
+            `${urcat.nume} — urcarea a mers, doar curățarea nu: ${mesajul(e2)}. Nu blochează nimic, dar șterge-l tu din Drive.`,
+            "fără efect asupra atașamentelor"
+          );
+        }
       }
     } catch (e) {
       adauga(
