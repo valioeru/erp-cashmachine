@@ -149,7 +149,14 @@ function balanta(eticheta, deLa, panaLa, d) {
   const fF = furnizoriDedusi(F);
   const fI = furnizoriDedusi(I);
   const cheltuieliTotal = d.ca - d.profit;
-  const umplutura = cheltuieliTotal - (FLUX.amort + FLUX.dob + FLUX.imp + FLUX.consum);
+  // Reducerile comerciale au sold invers față de clasa lor: 609 (primite) e
+  // cheltuială cu sold creditor și se închide pe CREDITUL lui 121, 709
+  // (acordate) e venit cu sold debitor și se închide pe DEBITUL lui 121.
+  // Venitul și cheltuiala brute cresc cu ele, ca netul să rămână d.ca și
+  // d.ca − d.profit, iar soldul lui 121 să rămână exact d.profit.
+  const r609 = d.red609 || 0;
+  const r709 = d.red709 || 0;
+  const umplutura = cheltuieliTotal + r609 - (FLUX.amort + FLUX.dob + FLUX.imp + FLUX.consum);
   const R = [];
   // ts = sold inițial + rulaj cumulat de la 1 ianuarie
   const pune = (cont, den, siD, siC, rD, rC, sfD, sfC) =>
@@ -160,14 +167,16 @@ function balanta(eticheta, deLa, panaLa, d) {
     );
   pune("1012", "Capital social", 0, I.capital, 0, 0, 0, F.capital);
   // 121: veniturile se închid pe credit, cheltuielile pe debit
-  pune("121", "Profit sau pierdere", 0, I.profit, cheltuieliTotal, d.ca, 0, F.profit);
+  pune("121", "Profit sau pierdere", 0, I.profit, cheltuieliTotal + r609 + r709, d.ca + r709 + r609, 0, F.profit);
   pune("1621", "Credite bancare pe termen lung", 0, I.credit, 0, 0, 0, F.credit);
   pune("2131", "Echipamente", I.imob, 0, 0, 0, F.imob, 0);
   pune("371", "Mărfuri", I.marfa, 0, 0, 0, F.marfa, 0);
   pune("4111", "Clienți", I.clienti, 0, 0, 0, F.clienti, 0);
   pune("401", "Furnizori", 0, fI, 0, 0, 0, fF);
   pune("5121", "Conturi la bănci în lei", I.banca, 0, 0, 0, F.banca, 0);
-  pune("701", "Venituri din vânzarea produselor finite", 0, 0, d.ca, d.ca, 0, 0);
+  pune("701", "Venituri din vânzarea produselor finite", 0, 0, d.ca + r709, d.ca + r709, 0, 0);
+  if (r709) pune("709", "Reduceri comerciale acordate", 0, 0, r709, r709, 0, 0);
+  if (r609) pune("609", "Reduceri comerciale primite", 0, 0, r609, r609, 0, 0);
   pune("6811", "Cheltuieli de exploatare privind amortizarea", 0, 0, FLUX.amort, FLUX.amort, 0, 0);
   pune("666", "Cheltuieli privind dobânzile", 0, 0, FLUX.dob, FLUX.dob, 0, 0);
   pune("691", "Cheltuieli cu impozitul pe profit", 0, 0, FLUX.imp, FLUX.imp, 0, 0);
@@ -350,6 +359,20 @@ function fixtureBalante(cuAugustVechi) {
   );
   if (!/@media print/.test(rb.corp) || !/A4 landscape/.test(rb.corp)) rau("raportul pentru bancă are stil de tipar");
   else ok("raportul pentru bancă are stil de tipar");
+
+  // ---- etapa 2b: reducerile comerciale (609 / 709) -------------------------
+  // Cazul real din august 2026: 609 = 5.126,48 lei, 709 = 47,68 lei. Raportul
+  // număra debitul lui 609 (care e închiderea lui) drept cheltuială și
+  // scăpa închiderea lui 709, iar profitul ieșea mai mic cu 5.078,80 lei.
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 31.08'");
+  rulaj(balanta("2026 la 31.08", "2026-01-01", "2026-08-31", cu({ ca: 4300000, profit: 220000, red609: 5126.48, red709: 47.68 })));
+  r = await cer("/rapoarte/indicatori");
+  cere(
+    "reducerile comerciale 609/709 nu strică profitul",
+    r.corp,
+    ["220.000,00 lei", "4.300.000,00 lei"],
+    ["214.921,20 lei", "nu se potrivește cu soldul contului 121"]
+  );
 
   // ---- etapa 3: fără nicio balanță ----------------------------------------
   rulaj("DELETE FROM balante_snapshot");
