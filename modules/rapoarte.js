@@ -506,7 +506,17 @@ function analizeazaBalanta(conturi, zile) {
     const r = rulaje(c, areTotaluri);
     if (g2 === "70" && !cont.startsWith("709")) ca += r.c;
     if (cont.startsWith("709")) ca -= r.d;
-    if (cls === "6") cheltuieli += r.d;
+    // „cheltuieli" = tot ce se închide pe DEBITUL lui 121, ca scăderea din
+    // venituriInchise (creditul lui 121) să dea exact rezultatul perioadei.
+    // Două excepții de cont cu sold invers:
+    //  - 609, reduceri comerciale primite: cont de cheltuieli cu sold
+    //    CREDITOR, se închide prin 121 pe credit. Debitul lui e închiderea,
+    //    nu o cheltuială — numărat aici, profitul ieșea mai mic cu 609.
+    //  - 709, reduceri comerciale acordate: cont de venituri cu sold
+    //    DEBITOR, se închide prin 121 pe debit (creditul lui e închiderea).
+    // Pe august 2026 greșeala era 5.126,48 − 47,68 = 5.078,80 lei.
+    if (cls === "6" && !cont.startsWith("609")) cheltuieli += r.d;
+    if (cont.startsWith("709")) cheltuieli += r.c;
     if (cont === "121") {
       are121 = true;
       venituriInchise = r.c;
