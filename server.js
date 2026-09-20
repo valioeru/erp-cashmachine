@@ -54,9 +54,13 @@ require("./modules/dezvoltare").register(router);
 require("./modules/procurement").register(router);
 require("./modules/marketing").register(router);
 require("./modules/concurenta").register(router);
-require("./modules/inbox").register(router);
+// Culegerea și legarea domeniilor se înregistrează ÎNAINTEA inboxului: acolo
+// există „/email/:id", care altfel ar înghiți „/email/culegere" și
+// „/email/domenii" ca pe niște id-uri de mesaj. (Vezi test-rute.js, care
+// verifică asta pentru toate modulele deodată.)
 require("./modules/culegere").register(router);
 require("./modules/legare").register(router);
+require("./modules/inbox").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
