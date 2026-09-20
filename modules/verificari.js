@@ -65,42 +65,174 @@ function sqlDuplicate(directie) {
      ORDER BY COUNT(*) DESC, 1`;
 }
 
+// ---------------------------------------------------------------------------
+// „Încasat peste factură" — cauzele, separat
+//
+// Prima variantă a verificării arunca 455 de facturi și 5,7 milioane de lei
+// într-un singur număr. Cifra aia nu se putea repara, pentru că nu însemna un
+// singur lucru: un storno de −4.000 lei cu o încasare pe el intra la fel de
+// „roșu" ca o plată importată de două ori. Acum fiecare rând primește o cauză,
+// iar banii se adună pe cauză. Interogarea și clasificarea stau aici, la
+// vedere, ca să poată fi verificate una câte una în test.
+const SQL_INCASARI_PESTE = `
+  SELECT f.id, f.serie, f.numar, f.data_emiterii, f.status, p.nume AS partener,
+         COALESCE(t.total,0) AS total, COALESCE(pl.platit,0) AS platit,
+         COALESCE(l.linii,0) AS linii,
+         (SELECT COUNT(*) FROM (SELECT * FROM plati WHERE activ = 1) x WHERE x.factura_id = f.id) AS nr_plati,
+         COALESCE(d.dublat,0) AS dublat,
+         COALESCE(i.imprastiat,0) AS imprastiat, COALESCE(i.pe_cate,0) AS pe_cate
+    FROM (SELECT * FROM facturi WHERE activ = 1) f
+    JOIN parteneri p ON p.id = f.partener_id
+    LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+    LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
+    LEFT JOIN (SELECT factura_id, COUNT(*) AS linii FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+    LEFT JOIN (SELECT factura_id, SUM((n - 1) * suma) AS dublat
+                 FROM (SELECT factura_id, suma, COUNT(*) AS n
+                         FROM (SELECT * FROM plati WHERE activ = 1) plati
+                        GROUP BY factura_id, suma HAVING COUNT(*) > 1) g
+                GROUP BY factura_id) d ON d.factura_id = f.id
+    LEFT JOIN (
+      -- Aceeași încasare pusă întreagă pe mai multe facturi ale aceluiași
+      -- client. Se vede pe datele reale: 123.126,66 lei stau, la bănuț, pe
+      -- patru facturi diferite de la DELIVERY SOLUTIONS, fiecare cu o singură
+      -- plată. Banii au intrat o dată; importul i-a scris pe fiecare factură
+      -- pe care trebuiau împărțiți. Se cere aceeași sumă ȘI aceeași dată, la
+      -- același partener — două plăți reale nimerite fix la același bănuț, în
+      -- aceeași zi, pe două facturi, nu prea există.
+      -- Scris în două treceri, nu cu subinterogare pe fiecare rând: pe baza
+      -- adevărată sunt mii de plăți, iar varianta corelată ar fi ținut pagina
+      -- minute întregi.
+      SELECT pp.factura_id, SUM(pp.suma) AS imprastiat, MAX(gr.pe_cate) AS pe_cate
+        FROM (SELECT pl.factura_id, pl.suma, pl.data, fx.partener_id
+                FROM (SELECT * FROM plati WHERE activ = 1) pl
+                JOIN (SELECT * FROM facturi WHERE activ = 1) fx ON fx.id = pl.factura_id
+               WHERE fx.directie = 'vanzare') pp
+        JOIN (SELECT fx.partener_id, pl.suma, pl.data, COUNT(DISTINCT pl.factura_id) AS pe_cate
+                FROM (SELECT * FROM plati WHERE activ = 1) pl
+                JOIN (SELECT * FROM facturi WHERE activ = 1) fx ON fx.id = pl.factura_id
+               WHERE fx.directie = 'vanzare'
+               GROUP BY 1, 2, 3
+              HAVING COUNT(DISTINCT pl.factura_id) > 1) gr
+          ON gr.partener_id = pp.partener_id AND gr.suma = pp.suma AND gr.data = pp.data
+       GROUP BY pp.factura_id) i ON i.factura_id = f.id
+   WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
+     AND COALESCE(pl.platit,0) > COALESCE(t.total,0) + 1
+   ORDER BY (COALESCE(pl.platit,0) - COALESCE(t.total,0)) DESC`;
+
+// „bani" e altceva la fiecare cauză, și de-aia se calculează separat. La un
+// storno, „platit − total" e chiar valoarea stornoului, care n-are nicio
+// legătură cu niște bani în plus; a o aduna acolo era jumătate din motivul
+// pentru care cele 5,7 milioane nu însemnau nimic.
+const CAUZE_INCASARI = {
+  "fara-linii": {
+    eticheta: "Factură fără nicio linie",
+    ce_e: "valoarea nu e în bază, nu banii sunt în plus — se repară importând liniile",
+    real: false,
+    bani: (r) => nr(r.platit),
+    bani_zice: "încasări pe facturi care în bază valorează zero",
+  },
+  storno: {
+    eticheta: "Storno (total negativ)",
+    ce_e: "nu e o greșeală: valoarea e negativă prin definiție, iar încasarea aparține facturii stornate",
+    real: false,
+    bani: () => 0,
+    bani_zice: "nimic de recuperat",
+  },
+  "plata-imprastiata": {
+    eticheta: "Aceeași încasare, pusă pe mai multe facturi",
+    ce_e: "un singur bon de bancă scris întreg pe fiecare factură pe care trebuia împărțit — se repară la alocări",
+    real: true,
+    bani: (r) => nr(r.platit) - nr(r.total),
+    bani_zice: "numărați de mai multe ori",
+  },
+  "plati-duplicate": {
+    eticheta: "Plăți identice, importate de două ori",
+    ce_e: "surplusul e explicat exact de plățile duplicate de pe aceeași factură — se repară ștergându-le",
+    real: true,
+    bani: (r) => nr(r.dublat),
+    bani_zice: "de șters",
+  },
+  "incasat-in-plus": {
+    eticheta: "Chiar s-a încasat mai mult",
+    ce_e: "totalul e pozitiv, plățile nu se repetă și nu vin de pe altă factură — se verifică una câte una",
+    real: true,
+    bani: (r) => nr(r.platit) - nr(r.total),
+    bani_zice: "în plus față de facturat",
+  },
+};
+
+// Ordinea contează: se verifică de la cel mai explicativ către cel mai vag, iar
+// un rând primește prima cauză care i se potrivește. O factură fără linii e
+// întâi fără linii, chiar dacă are și plăți duplicate — până nu intră liniile,
+// n-ai de unde ști dacă plata aia chiar e în plus.
+function clasificaIncasare(r) {
+  const total = nr(r.total);
+  const surplus = nr(r.platit) - total;
+  if (!Number(r.linii)) return "fara-linii";
+  if (total < 0) return "storno";
+  // „Explicat exact": dacă scoți ce vine din altă parte, factura nu mai e
+  // încasată peste. Dacă rămâne tot peste, cauza aia nu e explicația.
+  if (nr(r.imprastiat) > 0 && surplus - nr(r.imprastiat) <= 1) return "plata-imprastiata";
+  if (nr(r.dublat) > 0 && surplus - nr(r.dublat) <= 1) return "plati-duplicate";
+  return "incasat-in-plus";
+}
+
 const VERIFICARI = [
   {
     cheie: "plati-peste-factura",
     titlu: "Facturi încasate peste valoarea lor",
     de_ce:
-      "Suma plăților trece de totalul facturii cu mai mult de un leu. De obicei înseamnă că aceeași încasare a intrat de două ori, pe două căi diferite (o dată reconstituită din statusul SmartBill, o dată din raportul de încasări).",
+      "Suma plăților trece de totalul facturii cu mai mult de un leu. Nu toate sunt greșeli: o factură fără linii valorează zero în bază, iar un storno valorează negativ — pe amândouă orice încasare le face să pară „plătite în plus”. Verificarea le desparte pe cauze și numără banii separat, ca să știi care cifră chiar trebuie reparată.",
     gravitate: "rosu",
     async ruleaza() {
-      const randuri = await db
-        .prepare(
-          `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS partener,
-                  COALESCE(t.total,0) AS total, COALESCE(pl.platit,0) AS platit,
-                  (SELECT COUNT(*) FROM (SELECT * FROM plati WHERE activ = 1) x WHERE x.factura_id = f.id) AS nr_plati
-             FROM (SELECT * FROM facturi WHERE activ = 1) f
-             JOIN parteneri p ON p.id = f.partener_id
-             LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
-             LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
-            WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna')
-              AND COALESCE(pl.platit,0) > COALESCE(t.total,0) + 1
-            ORDER BY (COALESCE(pl.platit,0) - COALESCE(t.total,0)) DESC`
-        )
-        .all();
-      const surplus = randuri.reduce((s, r) => s + (nr(r.platit) - nr(r.total)), 0);
+      const randuri = await db.prepare(SQL_INCASARI_PESTE).all();
+      const CAUZE = CAUZE_INCASARI;
+
+      const grupe = new Map();
+      for (const r of randuri) {
+        const c = clasificaIncasare(r);
+        if (!grupe.has(c)) grupe.set(c, { n: 0, bani: 0, exemple: [] });
+        const g = grupe.get(c);
+        g.n++;
+        g.bani += CAUZE[c].bani(r);
+        if (g.exemple.length < 3) g.exemple.push(r);
+      }
+
+      const ordine = ["plata-imprastiata", "plati-duplicate", "incasat-in-plus", "fara-linii", "storno"];
+      const reale = ordine.filter((c) => CAUZE[c].real && grupe.has(c));
+      const nReale = reale.reduce((s, c) => s + grupe.get(c).n, 0);
+      const baniReali = reale.reduce((s, c) => s + grupe.get(c).bani, 0);
+
+      const randuriTabel = [];
+      for (const c of ordine) {
+        const g = grupe.get(c);
+        if (!g) continue;
+        randuriTabel.push([
+          `<strong${CAUZE[c].real ? ' style="color:var(--danger)"' : ""}>${esc(CAUZE[c].eticheta)}</strong>`,
+          String(g.n),
+          `${money(g.bani)}<br><span style="font-size:11px;color:var(--text-muted)">${esc(CAUZE[c].bani_zice)}</span>`,
+          CAUZE[c].real ? "de reparat" : "nu e greșeală",
+          esc(CAUZE[c].ce_e),
+          g.exemple
+            .map(
+              (r) =>
+                `<a href="/facturi/${r.id}">${esc(String(r.serie || "") + String(r.numar || ""))}</a>` +
+                ` <span style="font-size:11px;color:var(--text-muted)">${esc(String(r.partener || "").slice(0, 28))}</span>`
+            )
+            .join("<br>"),
+        ]);
+      }
+
       return {
-        n: randuri.length,
-        sumar: `${randuri.length} facturi, ${money(surplus)} încasați în plus față de cât s-a facturat`,
-        antet: ["Factură", "Data", "Partener", "Facturat", "Încasat", "În plus", "Nr. plăți"],
-        randuri: randuri.slice(0, LIMITA).map((r) => [
-          `<a href="/facturi/${r.id}">${esc(String(r.serie || "") + String(r.numar || ""))}</a>`,
-          esc(String(r.data_emiterii || "").slice(0, 10)),
-          esc(r.partener),
-          money(r.total),
-          money(r.platit),
-          `<strong style="color:var(--danger)">${money(nr(r.platit) - nr(r.total))}</strong>`,
-          r.nr_plati,
-        ]),
+        // „n" hotărăște dacă verificarea apare roșie. Numărăm doar ce chiar e
+        // de reparat: altfel pagina ar striga la tine din cauza stornourilor,
+        // adică exact din cauza lucrurilor corecte.
+        n: nReale,
+        sumar: nReale
+          ? `${nReale} facturi de reparat, ${money(baniReali)} de recuperat — din ${randuri.length} care par încasate peste`
+          : `niciuna de reparat (${randuri.length} par încasate peste, dar toate au explicație)`,
+        antet: ["Cauza", "Facturi", "Banii", "Verdict", "Ce înseamnă", "Exemple"],
+        randuri: randuriTabel,
       };
     },
   },
@@ -410,7 +542,7 @@ const VERIFICARI = [
       return {
         n: randuri.length,
         sumar: `${randuri.length} documente, ${money(total)} în total`,
-        antet: ["Document", "Fel", "Partener", "Data", "Sumă", "Valută"],
+        antet: ["Document", "Fel", "Partener", "Data", "Sumă", "Valută", ""],
         randuri: randuri.slice(0, LIMITA).map((r) => [
           `<a href="/facturi/${r.id}">${esc(r.document_extern || String(r.serie || "") + String(r.numar || ""))}</a>`,
           r.directie === "achizitie" ? "achiziție" : "vânzare",
@@ -418,6 +550,14 @@ const VERIFICARI = [
           esc(String(r.data_emiterii || "").slice(0, 10)),
           `<strong>${money(r.total)}</strong>`,
           r.moneda && r.moneda !== "RON" ? `${esc(r.moneda)} ${money(r.total_valuta)}` : "",
+          // Un document de test se cunoaște din ochi, nu după o regulă: „Fact
+          // 23123123" de 10 milioane de la BSI A/S e greșeală, „Fact
+          // RVM2022000000045" de la Rovenma e utilaj adevărat. Nicio
+          // interogare nu poate face deosebirea, și n-are rost să încerce —
+          // de-aia butonul e pe rând, apăsat de cine recunoaște documentul.
+          // Nu șterge nimic: scoate din calcule (activ = 0) și rămâne în
+          // istoricul de jos, de unde se poate readuce.
+          `<a class="link-btn danger" href="/admin/date/document/${r.id}/scoate">scoate din bază</a>`,
         ]),
       };
     },
@@ -1141,11 +1281,14 @@ function register(router) {
       curatariDupl = [];
     }
     const blocCuratari = curatariDupl.length
-      ? `<h2>Curățări de duplicate făcute</h2>${table(
-          ["Când", "Cine", "Documente scoase", "Sumă", ""],
+      ? `<h2>Documente scoase din bază</h2>${table(
+          ["Când", "Cine", "De ce", "Documente scoase", "Sumă", ""],
           curatariDupl.map((c) => [
             esc(String(c.facut_la || "").slice(0, 16)),
             esc(c.autor || "—"),
+            String(c.directie || "").endsWith("-test")
+              ? '<span class="badge gri">document de test</span>'
+              : '<span class="badge gri">exemplar duplicat</span>',
             String(c.nr_documente),
             money(c.suma),
             c.anulata_la
@@ -1304,6 +1447,74 @@ function register(router) {
     redirect(ctx.res, "/admin/date?curatate=" + deScos.length + "#vanzari-duplicate");
   });
 
+  // ---- scoaterea unui document de test din bază ---------------------------
+  //
+  // Vali a recunoscut două facturi de la BSI A/S, cu numere tastate la
+  // întâmplare, care țineau 19,2 milioane în „de plătit". Nu-s de șters: se
+  // scot din calcule (activ = 0) și rămân în istoric, de unde se pot readuce
+  // cu butonul „Anulează" ca orice curățare. Se trece prin aceeași pagină de
+  // confirmare ca la căsuțe: întâi vezi ce document e și cât ține, apoi apeși.
+  router.get("/admin/date/document/:id/scoate", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const id = Number(ctx.params.id);
+    if (!(id > 0)) return redirect(ctx.res, "/admin/date");
+    const f = await db
+      .prepare(
+        `SELECT f.id, f.directie, f.serie, f.numar, f.document_extern, f.data_emiterii, f.status,
+                p.nume AS partener, COALESCE(t.total,0) AS total,
+                (SELECT COUNT(*) FROM facturi_linii WHERE factura_id = f.id) AS linii,
+                (SELECT COUNT(*) FROM (SELECT * FROM plati WHERE activ = 1) x WHERE x.factura_id = f.id) AS plati
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN parteneri p ON p.id = f.partener_id
+           LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+          WHERE f.id = ?`
+      )
+      .get(id);
+    if (!f) return redirect(ctx.res, "/admin/date#facturi-sume-uriase");
+
+    const nume = esc(f.document_extern || String(f.serie || "") + String(f.numar || ""));
+    const body = `
+      <h2>Scoți documentul ${nume} din bază?</h2>
+      <div class="card" style="max-width:720px;border-left:4px solid var(--danger)">
+        <ul style="margin:0 0 12px 18px">
+          <li><strong>${nume}</strong> — ${f.directie === "achizitie" ? "achiziție" : "vânzare"} de la ${esc(f.partener || "—")}</li>
+          <li>emisă ${esc(String(f.data_emiterii || "").slice(0, 10))}, ${money(f.total)}</li>
+          <li>${Number(f.linii)} linii, ${Number(f.plati)} plăți legate de ea</li>
+        </ul>
+        <p style="margin:0 0 12px">Documentul <strong>nu se șterge</strong>: iese din toate calculele — „de plătit", „de încasat", rapoarte, scadențar — și rămâne în istoricul de jos, de unde îl poți readuce oricând cu „Anulează".</p>
+        <p style="margin:0 0 16px;color:var(--danger)">Fă asta doar dacă recunoști documentul ca fiind de test. Un contract sau un utilaj adevărat, scos de aici, dispare din toate cifrele firmei.</p>
+        <form method="post" action="/admin/date/document/${f.id}/scoate" class="inline-form">
+          <input type="hidden" name="da" value="1">
+          <button class="btn" type="submit" style="background:var(--danger);border-color:var(--danger)">Scoate ${nume} din bază</button>
+          <a class="btn secondary" href="/admin/date#facturi-sume-uriase">Renunță</a>
+        </form>
+      </div>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Scoate un document din bază", active: "/admin/date", body }));
+  });
+
+  router.post("/admin/date/document/:id/scoate", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const id = Number(ctx.params.id);
+    if (!(id > 0) || String((ctx.body || {}).da) !== "1") return redirect(ctx.res, "/admin/date");
+    const f = await db
+      .prepare(
+        `SELECT f.id, f.directie, COALESCE(t.total,0) AS total
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+          WHERE f.id = ?`
+      )
+      .get(id);
+    if (!f) return redirect(ctx.res, "/admin/date#facturi-sume-uriase");
+    await db.prepare("UPDATE facturi SET activ = 0 WHERE id = ?").run(id);
+    // Intră în același istoric ca duplicatele, ca să meargă și readucerea:
+    // butonul „Anulează" de acolo repune activ = 1 după lista de id-uri.
+    await db
+      .prepare("INSERT INTO curatari_duplicate (facut_de, directie, nr_documente, suma, ids) VALUES (?, ?, 1, ?, ?)")
+      .run(ctx.user.id, f.directie === "achizitie" ? "achizitie-test" : "vanzare-test", nr(f.total), JSON.stringify([id]));
+    redirect(ctx.res, "/admin/date#facturi-sume-uriase");
+  });
+
   router.post("/admin/date/duplicate/:id/anuleaza", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
     const c = await db.prepare("SELECT * FROM curatari_duplicate WHERE id = ?").get(ctx.params.id);
@@ -1322,4 +1533,4 @@ function register(router) {
   });
 }
 
-module.exports = { register };
+module.exports = { register, clasificaIncasare, CAUZE_INCASARI, SQL_INCASARI_PESTE };

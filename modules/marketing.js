@@ -237,7 +237,11 @@ function porneste() {
 // contact în plus de verificat decât un om pierdut.
 const normNume = (x) => String(x || "").trim().toLowerCase().replace(/[.,]/g, "").replace(/\s+/g, " ");
 // „SRL", „S.R.L.", „SA", „PFA", „d.o.o.", „GmbH" — sufixe de formă juridică.
-const SUFIX_FIRMA = /\b(s\s?r\s?l|srl|s\.?r\.?l\.?|s\.?a\.?|sa|pfa|ii|inc|ltd|llc|gmbh|bv|nv|ag|spa|d\.?o\.?o\.?)\s*$/i;
+// „\b" nu e bun aici: JavaScript nu socotește ș, ț, ă, â, î drept litere, așa
+// că în „achiziții" vede o graniță de cuvânt chiar înaintea lui „ii" — și
+// „Șef achiziții" ieșea nume de firmă. Se cere explicit ca înaintea sufixului
+// să NU fie literă, cu diacritice cu tot.
+const SUFIX_FIRMA = /(?<![a-zA-Z0-9ăâîșțĂÂÎȘȚ])(s\s?r\s?l|srl|s\.?r\.?l\.?|s\.?a\.?|sa|pfa|ii|inc|ltd|llc|gmbh|bv|nv|ag|spa|d\.?o\.?o\.?)\s*$/i;
 function pareFirma(nume, firma) {
   const n = normNume(nume);
   if (!n) return true;
@@ -256,6 +260,66 @@ function pareFirma(nume, firma) {
   // un domeniu web scris în loc de nume: „vindem-ieftin.ro", „materiale.online"
   if (/\.(ro|com|eu|net|org|online|shop|info|biz)\b/i.test(n)) return true;
   return false;
+}
+
+// ---- contactele care nu sunt oameni ----------------------------------------
+//
+// Din 139 de contacte strânse din ERP, vreo 60 nu erau oameni: numele firmei
+// pus în dreptul persoanei de contact, o funcție scrisă singură („Departament
+// achiziții"), un rând cu cifre, un site. Culegerea din emailuri nu mai adaugă
+// din astea — dar cele vechi au rămas, și fiecare e un om la care crezi că poți
+// suna și nu poți.
+//
+// Regula de aur: NU se propune nimic scris de mână. Dacă un om a tastat
+// contactul ăla, el știe de ce; butonul ăsta curăță doar ce a intrat automat.
+// Nici contactele de rol (office@, comercial@) nu se propun — alea sunt puse
+// dinadins, ca să ai unde trimite oferta când nu știi cine o citește.
+const SURSE_AUTOMATE = new Set(["parteneri", "leaduri", "semnatura"]);
+
+function nuEOm(c) {
+  const nume = String(c.nume || "").trim();
+  if (!SURSE_AUTOMATE.has(String(c.sursa || ""))) return null;
+  if (!nume) return "fără nume";
+  // Un domeniu scris în loc de nume: „vindem-ieftin.ro", „materiale.online".
+  // Se prinde aici, nu în pareFirma: acolo normalizarea taie punctele, iar
+  // „vindem-ieftin.ro" ajunge „vindem-ieftinro" și nu mai seamănă cu nimic.
+  if (/[@]|https?:|www\./i.test(nume) || /\.(ro|com|eu|net|org|online|shop|info|biz)\s*$/i.test(nume))
+    return "adresă sau site în loc de nume";
+  if (/\d/.test(nume)) return "cifre în nume";
+  if (pareFirma(nume, c.firma || c.firma_text || "")) return "e numele firmei, nu al unui om";
+  // O funcție scrisă în dreptul numelui: „Șef achiziții", „Departament
+  // logistică". Se întreabă culegerea, care știe deja să le recunoască —
+  // cerută aici, la apel, nu sus de tot, fiindcă ea cere înapoi modulul ăsta.
+  try {
+    const { functiaDin } = require("./culegere");
+    if (functiaDin([nume]) && nume.split(/\s+/).length <= 4) return "e o funcție, nu un nume";
+  } catch (e) {
+    /* dacă modulul nu e acolo, restul regulilor rămân valabile */
+  }
+  if (nume.split(/\s+/).filter(Boolean).length < 2) return "un singur cuvânt";
+  return null;
+}
+
+async function contacteDeCuratat() {
+  const toate = await db
+    .prepare(
+      `SELECT c.id, c.nume, c.functie, c.email, c.telefon, c.sursa, c.partener_id,
+              COALESCE(p.nume, c.firma_text, '') AS firma,
+              (SELECT COUNT(*) FROM mk_contacte_istoric i WHERE i.contact_id = c.id AND i.camp <> 'sters') AS atins
+         FROM mk_contacte c LEFT JOIN parteneri p ON p.id = c.partener_id
+        WHERE c.activ = 1
+        ORDER BY COALESCE(p.nume, c.firma_text, 'zzz'), c.nume`
+    )
+    .all();
+  const out = [];
+  for (const c of toate) {
+    // Un contact pe care l-a corectat cineva nu se mai atinge: cine a intrat
+    // pe el și i-a schimbat ceva a avut un motiv.
+    if (Number(c.atins) > 0) continue;
+    const motiv = nuEOm(c);
+    if (motiv) out.push({ ...c, motiv });
+  }
+  return out;
 }
 
 // ---- adunarea contactelor din restul ERP-ului ------------------------------
@@ -514,7 +578,11 @@ function register(router) {
           ? `<form method="post" action="/marketing/contacte/aduna" class="filtre" style="margin-bottom:8px">
                <button class="btn secondary small" type="submit">Adună contactele din ERP</button>
                <span style="font-size:12px;color:var(--text-muted)">Ia persoanele de contact de pe parteneri și din leaduri. Nu adaugă de două ori același om.</span>
-             </form>`
+             </form>
+             <p style="margin:0 0 14px;font-size:13px">
+               <a href="/marketing/contacte/curatenie">Contacte care nu par oameni →</a>
+               <span style="color:var(--text-muted)">numele firmei pus în dreptul persoanei, funcții scrise singure, rânduri cu cifre</span>
+             </p>`
           : ""
       }
 
@@ -570,6 +638,72 @@ function register(router) {
     if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
     const n = await adunaContacte(ctx.user ? ctx.user.id : null);
     redirect(ctx.res, `/marketing/contacte?adaugati=${n}`);
+  });
+
+  // ---- curățenia de contacte care nu-s oameni -----------------------------
+  // Se arată întâi lista întreagă, cu motivul lângă fiecare, și abia apoi se
+  // apasă. Ștergerea e cea obișnuită — activ = 0 plus rând în istoric — deci
+  // nimic nu se pierde, doar iese din liste.
+  router.get("/marketing/contacte/curatenie", async (ctx) => {
+    if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
+    const propuse = await contacteDeCuratat();
+    const peMotiv = new Map();
+    for (const c of propuse) peMotiv.set(c.motiv, (peMotiv.get(c.motiv) || 0) + 1);
+
+    const body = `
+      <p style="color:var(--text-muted);font-size:13px;max-width:880px">
+        Contacte strânse automat care nu par oameni: numele firmei pus în dreptul persoanei, o funcție
+        scrisă singură, un rând cu cifre. Fiecare dintre ele e un om la care crezi că poți suna și nu poți.
+        <strong>Nu se propune nimic scris de mână</strong> și nimic ce a corectat cineva — nici adresele de
+        birou (office@, comercial@), care sunt puse dinadins.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">De scos</div><div class="value">${propuse.length}</div></div>
+        ${[...peMotiv.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map((x) => `<div class="card"><div class="label">${esc(x[0])}</div><div class="value">${x[1]}</div></div>`)
+          .join("")}
+      </div>
+      ${
+        propuse.length
+          ? `<form method="post" action="/marketing/contacte/curatenie" class="inline-form" style="margin:14px 0"
+                   onsubmit="return confirm('Scot toate cele ${propuse.length} contacte? Rămân în bază, dezactivate.')">
+               <input type="hidden" name="da" value="1">
+               <button class="btn" type="submit" style="background:var(--danger);border-color:var(--danger)">Scoate toate cele ${propuse.length}</button>
+               <span style="font-size:12px;color:var(--text-muted)">Rămân în bază, dezactivate, cu istoricul lor. Se pot pune la loc din fișa fiecăruia.</span>
+             </form>
+             ${table(
+               ["Nume", "Firma", "Funcție", "Email", "De ce nu pare om", ""],
+               propuse.map((c) => [
+                 `<a href="/marketing/contact/${c.id}">${esc(c.nume || "—")}</a>`,
+                 esc(c.firma || "—"),
+                 esc(c.functie || ""),
+                 esc(c.email || ""),
+                 `<span style="color:var(--danger)">${esc(c.motiv)}</span>`,
+                 `<form method="post" action="/marketing/contact/${c.id}/sterge" class="inline-form"><button class="link-btn danger" type="submit">scoate</button></form>`,
+               ])
+             )}`
+          : "<p>Nimic de scos — toate contactele par oameni.</p>"
+      }`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Contacte care nu par oameni", active: "/marketing/contacte", body }));
+  });
+
+  router.post("/marketing/contacte/curatenie", async (ctx) => {
+    if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
+    if (String((ctx.body || {}).da) !== "1") return redirect(ctx.res, "/marketing/contacte/curatenie");
+    // Se recalculează lista aici, nu se primește din formular: butonul și
+    // raportul trebuie să vadă exact aceleași rânduri, altfel s-ar putea
+    // șterge ceva ce pagina nu a arătat.
+    const propuse = await contacteDeCuratat();
+    for (const c of propuse) {
+      await db.prepare("UPDATE mk_contacte SET activ = 0 WHERE id = ?").run(c.id);
+      await db
+        .prepare(
+          "INSERT INTO mk_contacte_istoric (contact_id, camp, valoare_veche, valoare_noua, schimbat_de, schimbat_la) VALUES (?, 'sters', ?, 'scos — nu pare om', ?, ?)"
+        )
+        .run(c.id, String(c.motiv).slice(0, 100), ctx.user ? ctx.user.id : null, acum());
+    }
+    redirect(ctx.res, `/marketing/contacte?scosi=${propuse.length}`);
   });
 
   // ---- un contact ---------------------------------------------------------
@@ -883,4 +1017,7 @@ module.exports = {
   // ambele locuri, ca să nu se contrazică butonul cu serviciul de noapte.
   pareFirma,
   normNume,
+  // Curățenia de contacte care nu-s oameni: regula și lista, verificate în test.
+  nuEOm,
+  contacteDeCuratat,
 };
