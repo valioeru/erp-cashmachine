@@ -122,6 +122,13 @@ db.prepare = (sql) => ({
   get: async (...p) => q(sql, p)[0] || null,
   run: async (...p) => { const r = q(sql, p); return { lastInsertRowid: r[0] && r[0].id ? Number(r[0].id) : undefined }; },
 });
+// db.exec trimite un lot de comenzi într-o singură interogare simplă — așa îl
+// rulează și pg, ca tranzacție. Fără shim, ștergerea căsuței ar „reuși" în test
+// fără să șteargă nimic, pentru că pool-ul fals răspunde cu rânduri goale.
+db.exec = async (sql) => {
+  interogari++;
+  execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
+};
 
 const google = require(path.join(RAD, "lib", "google.js"));
 const inbox = require(path.join(RAD, "modules", "inbox.js"));
@@ -168,8 +175,12 @@ const rulaj = (sql) => execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1"
 function curatenie() {
   for (const s of [
     "DELETE FROM email_atasamente WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE cont_id IN (SELECT id FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro'))",
+    "DELETE FROM email_oferte WHERE mesaj_id IN (SELECT id FROM email_mesaje WHERE cont_id IN (SELECT id FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro'))",
+    "UPDATE comenzi SET email_mesaj_id = NULL WHERE id = 93501",
     "DELETE FROM email_mesaje WHERE cont_id IN (SELECT id FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro')",
     "DELETE FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro'",
+    "DELETE FROM comenzi WHERE id = 93501",
+    "DELETE FROM taskuri WHERE id = 93401",
     "DELETE FROM oferte_linii WHERE oferta_id = 93201",
     "DELETE FROM oferte WHERE id = 93201",
     "DELETE FROM facturi_linii WHERE factura_id = 93301",
@@ -375,6 +386,54 @@ function mesajFals(id, x) {
   cere("lista de atașamente", p.corp, ["oferta.pdf", "stricat.xlsx"]);
   p = await cer("/email/atasamente", { user: VALI, query: { stare: "nereusite" } });
   cere("filtrul pe atașamente nereușite", p.corp, ["stricat.xlsx"], ["oferta.pdf"]);
+
+  // --- ștergerea unei căsuțe ------------------------------------------------
+  // Un buton care șterge o mie de mesaje trebuie să arate întâi o mie, nu „ești
+  // sigur?". Și trebuie să lase în urmă exact ce a apucat să devină muncă —
+  // taskul și comanda — fără legătură către un mesaj care nu mai e.
+  console.log("\nștergerea unei căsuțe");
+  rulaj("INSERT INTO email_conturi (adresa, eticheta, tip, utilizator_id) VALUES ('degreseala@test-inbox.ro','pusă greșit','comun',NULL)");
+  const deSters = q("SELECT id FROM email_conturi WHERE adresa = 'degreseala@test-inbox.ro'")[0];
+  rulaj(`INSERT INTO taskuri (id, titlu, tip, prioritate, status) VALUES (93401,'Răspuns la cerere','raspuns','normala','deschis') ON CONFLICT (id) DO NOTHING`);
+  rulaj(`INSERT INTO comenzi (id, partener_id, status) VALUES (93501, 93001, 'ciorna') ON CONFLICT (id) DO NOTHING`);
+  rulaj(
+    `INSERT INTO email_mesaje (id, cont_id, gmail_id, data, de_la, de_la_nume, de_la_domeniu, subiect, corp, directie, partener_id, activ, task_id)
+     VALUES (93601, ${deSters.id}, 'g-de-sters-1', '2026-09-15', 'cineva@firma-x.ro', 'Cineva', 'firma-x.ro', 'De șters', 'text', 'primit', 93001, 1, 93401)`
+  );
+  rulaj(`UPDATE comenzi SET email_mesaj_id = 93601 WHERE id = 93501`);
+  rulaj(`INSERT INTO email_atasamente (mesaj_id, nume, marime, duplicat) VALUES (93601, 'de-sters.pdf', 100, 0)`);
+  rulaj(`INSERT INTO email_oferte (mesaj_id, text_produs, pret, stare) VALUES (93601, 'folie test', 12.5, 'de_confirmat')`);
+
+  p = await cer("/email/conturi", { user: VALI });
+  cere("lista de căsuțe are și ștergere", p.corp, [`/email/cont/${deSters.id}/sterge`, "șterge"]);
+  p = await cer("/email/conturi", { user: AGENT });
+  cere("cine nu e admin nu vede ștergerea", p.corp, [], ["/sterge"]);
+
+  p = await cer("/email/cont/:id/sterge", { user: VALI, params: { id: String(deSters.id) } });
+  cere("pagina de confirmare spune ce dispare", p.corp,
+    ["degreseala@test-inbox.ro", "1</strong> mesaj adus în ERP", "1</strong> rânduri de atașamente", "1</strong> oferte"], []);
+  cere("și ce rămâne", p.corp, ["1 taskuri și 1 comenzi", "Nu se poate da înapoi"], []);
+
+  p = await cer("/email/cont/:id/sterge", { user: AGENT, params: { id: String(deSters.id) } });
+  egal("agentul nu ajunge la pagina de ștergere", p.locatie, "/email/conturi");
+
+  await cer("/email/cont/:id/sterge", { user: AGENT, metoda: "post", params: { id: String(deSters.id) }, body: { da: "1" } });
+  egal("agentul nu poate șterge", q(`SELECT COUNT(*) AS n FROM email_conturi WHERE id = ${deSters.id}`)[0].n, "1");
+  await cer("/email/cont/:id/sterge", { user: VALI, metoda: "post", params: { id: String(deSters.id) }, body: {} });
+  egal("nici adminul, fără confirmare", q(`SELECT COUNT(*) AS n FROM email_conturi WHERE id = ${deSters.id}`)[0].n, "1");
+
+  p = await cer("/email/cont/:id/sterge", { user: VALI, metoda: "post", params: { id: String(deSters.id) }, body: { da: "1" } });
+  egal("după ștergere te duce înapoi la listă", p.locatie, "/email/conturi");
+  egal("căsuța nu mai e", q(`SELECT COUNT(*) AS n FROM email_conturi WHERE id = ${deSters.id}`)[0].n, "0");
+  egal("mesajele ei nu mai sunt", q("SELECT COUNT(*) AS n FROM email_mesaje WHERE id = 93601")[0].n, "0");
+  egal("atașamentele nu mai sunt", q("SELECT COUNT(*) AS n FROM email_atasamente WHERE mesaj_id = 93601")[0].n, "0");
+  egal("ofertele culese nu mai sunt", q("SELECT COUNT(*) AS n FROM email_oferte WHERE mesaj_id = 93601")[0].n, "0");
+  egal("taskul rămâne", q("SELECT COUNT(*) AS n FROM taskuri WHERE id = 93401")[0].n, "1");
+  egal("comanda rămâne", q("SELECT COUNT(*) AS n FROM comenzi WHERE id = 93501")[0].n, "1");
+  egal("dar fără legătură către mesajul șters",
+    q("SELECT id, COALESCE(email_mesaj_id::text,'taiata') AS leg FROM comenzi WHERE id = 93501")[0].leg, "taiata");
+  egal("celelalte căsuțe n-au pățit nimic",
+    q("SELECT COUNT(*) AS n FROM email_conturi WHERE adresa LIKE '%@test-inbox.ro'")[0].n, "2");
 
   curatenie();
   console.log(`\n${rele ? rele + " probleme" : "Totul curat."}  (${interogari} interogări SQL)\n`);
