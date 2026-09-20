@@ -497,7 +497,7 @@ function analizeazaBalanta(conturi, zile) {
   const I = soldurile(conturi, "initial");
   const areTotaluri = conturi.some((c) => Number(c.ts_d) !== 0 || Number(c.ts_c) !== 0);
 
-  let ca = 0, amortizare = 0, dobanzi = 0, impozit = 0, consumStocuri = 0, cheltuieli = 0;
+  let ca = 0, amortizare = 0, dobanzi = 0, impozit = 0, consumStocuri = 0, cheltuieli = 0, dividende = 0;
   let venituriInchise = 0, profitSold = 0, are121 = false;
   for (const c of conturi) {
     const cont = String(c.cont || "");
@@ -522,6 +522,10 @@ function analizeazaBalanta(conturi, zile) {
       venituriInchise = r.c;
       profitSold = Number(c.sf_c) - Number(c.sf_d);
     }
+    // Repartizarile din rezultatul reportat: in practica, dividendele. Conteaza
+    // la explicat de ce au scazut capitalurile — una e ca firma a pierdut bani,
+    // alta e ca s-au scos bani din ea. Banca intreaba exact asta.
+    if (cont.startsWith("117")) dividende += r.d;
     if (cont.startsWith("681")) amortizare += r.d;
     if (cont.startsWith("666")) dobanzi += r.d;
     if (cont.startsWith("691") || cont.startsWith("698")) impozit += r.d;
@@ -578,7 +582,7 @@ function analizeazaBalanta(conturi, zile) {
     cash: F.cash,
     stocInitial: I.stocuri,
     stocMediu,
-    ca, profit, profitSold, nepotrivireProfit, cheltuieli, amortizare, dobanzi, impozit, consumStocuri,
+    ca, profit, profitSold, nepotrivireProfit, cheltuieli, amortizare, dobanzi, impozit, consumStocuri, dividende,
     ebitda, ebit, ebitdaAnual,
     totalActiv, totalDatorii,
     capitalLucru: F.activeCirc - F.datoriiCurente,
@@ -767,6 +771,319 @@ function estimeazaAnul(ref, finaluri, inchise) {
   // de la august, iar un „leverage estimat" ar fi o cifră inventată.
   for (const cheie of CHEI_BILANT) if (!(cheie in est)) est[cheie] = null;
   return est;
+}
+
+// ===========================================================================
+// Partea scrisă a dosarului: prezentarea firmei și comentariul indicatorilor
+// ===========================================================================
+//
+// Un dosar de credit are două jumătăți. Tabelele sunt una; cealaltă e ce scrii
+// lângă ele. Analistul de credit vede cifrele oricum — ce nu vede e dacă omul
+// din fața lui le înțelege. De-aia partea asta nu înfrumusețează nimic: spune
+// cifra așa cum e, spune ce se vede în date despre cauza ei, și lasă loc gol
+// exact unde urmează angajamentul, fiindcă ăla nu-l poate scrie decât omul.
+//
+// Regula pe care am ținut-o: NICIO propoziție generată aici nu spune ceva ce
+// nu se poate citi din balanțele încărcate. Unde cauza nu se vede în cifre,
+// scrie „[de completat]", nu o inventez. Un dosar în care banca prinde o
+// înfloritură devine un dosar în care banca verifică tot restul de două ori.
+
+const TEXTE_BANCA = [
+  {
+    cheie: "prezentare",
+    eticheta: "Prezentarea firmei",
+    ajutor: "Ce face firma, de când, pentru cine. Se scrie o dată și rămâne — apare la începutul fiecărui raport.",
+    randuri: 14,
+    implicit: `[NUMELE FIRMEI] este o companie românească cu activitate în [domeniul de activitate], înființată în [anul], cu sediul în [localitate].
+
+CE FACEM
+[Două-trei rânduri: ce produce și ce distribuie firma, pentru ce fel de clienți, pe ce piețe.]
+
+CLIENȚII ȘI PIAȚA
+[Câți clienți activi avem, ce fel de clienți sunt, dacă lucrăm pe contracte-cadru sau pe comenzi punctuale, cum arată cererea în piața noastră.]
+
+CAPACITATE ȘI OAMENI
+[Spații, utilaje, capacitate de producție, număr de angajați, certificări.]
+
+CE NE DIFERENȚIAZĂ
+[De ce cumpără clienții de la noi și nu de la concurență.]
+
+CE S-A ÎNTÂMPLAT ÎN ULTIMII DOI ANI
+[Cu cifre: investiții făcute, contracte câștigate sau pierdute, schimbări de piață, de ce arată indicatorii așa cum arată.]`,
+  },
+  {
+    cheie: "masuri",
+    eticheta: "Măsurile pe care ni le asumăm",
+    ajutor: "Ce faceți concret, cu sume și termene. Tabelul de mai jos vă dă pârghiile uzuale — aici se scrie ce alegeți dintre ele.",
+    randuri: 10,
+    implicit: `[Pentru fiecare indicator sub țintă, scrie ce faceți concret, cu cifră și cu termen. Un plan fără sume și fără date nu convinge pe nimeni.]
+
+Exemplu de formă, nu de conținut:
+— Reducerea stocului cu [sumă] lei până la [dată], prin [ce anume].
+— Aport de capital de [sumă] lei până la [dată], din [sursa].
+— Renegocierea termenului de plată cu [furnizor] de la [x] la [y] zile.`,
+  },
+  {
+    cheie: "concluzie",
+    eticheta: "Ce cerem băncii",
+    ajutor: "Produsul, suma, termenul, garanțiile propuse și la ce folosesc banii.",
+    randuri: 8,
+    implicit: `SOLICITARE
+[Ce produs: linie de capital de lucru / factoring / credit de investiții. Ce sumă. Pe ce termen.]
+
+LA CE FOLOSESC BANII
+[Concret: ce se finanțează și ce efect are asupra cifrelor de mai sus.]
+
+GARANȚII PROPUSE
+[Ce putem pune.]
+
+DE CE NE PUTEM PERMITE RAMBURSAREA
+[Din ce se rambursează, cu cifre.]`,
+  },
+];
+
+async function citesteTexteBanca() {
+  const iesire = {};
+  for (const t of TEXTE_BANCA) {
+    const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = ?").get("banca_" + t.cheie);
+    iesire[t.cheie] = r && r.valoare !== null && r.valoare !== undefined ? String(r.valoare) : "";
+  }
+  return iesire;
+}
+
+// Textul liber scris de om, redat ca text — nu ca HTML. Dacă cineva lipește
+// acolo o etichetă, se vede eticheta, nu se execută.
+function textLiber(t) {
+  const curat = String(t || "").trim();
+  if (!curat) return "";
+  return curat
+    .split(/\n{2,}/)
+    .map((p) => `<p style="white-space:pre-wrap;margin:0 0 10px">${esc(p)}</p>`)
+    .join("");
+}
+
+function procent(v, z) {
+  return v === null || v === undefined || !isFinite(v) ? "—" : v.toFixed(z === undefined ? 1 : z) + "%";
+}
+
+function rata(v) {
+  return v === null || v === undefined || !isFinite(v) ? "—" : v.toFixed(2);
+}
+
+// Cât s-a schimbat față de aceeași lună a anului trecut, în cuvinte.
+function evolutie(acum, inainte, formator) {
+  if (!isFinite(acum) || !isFinite(inainte) || inainte === 0) return "";
+  const p = ((acum - inainte) / Math.abs(inainte)) * 100;
+  const sens = p >= 0 ? "în creștere" : "în scădere";
+  return ` (${formator(inainte)} anul trecut, ${sens} cu ${Math.abs(p).toFixed(1)}%)`;
+}
+
+// Comentariul propriu-zis. Pentru fiecare indicator: ce arată cifra, ce se
+// vede în date despre cauză, ce pârghii există. Angajamentul rămâne gol.
+function comentariulIndicatorilor(ref, prec, perioada, top1, numeTop1) {
+  if (!ref) return [];
+  const c = [];
+  const bani = (v) => money(v);
+  const pune = (x) => c.push(x);
+
+  // --- Rezultate ---------------------------------------------------------
+  pune({
+    nume: "EBITDA și marja EBITDA",
+    valoare: `${bani(ref.ebitda)} · ${procent(ref.marjaEbitda)}`,
+    tinta: "pozitiv, marjă peste 8%",
+    bun: ref.ebitda > 0 && (ref.marjaEbitda === null || ref.marjaEbitda >= 8),
+    ceArata: `La ${perioada}, EBITDA e ${bani(ref.ebitda)}${prec ? evolutie(ref.ebitda, prec.ebitda, bani) : ""}, adică ${procent(
+      ref.marjaEbitda
+    )} din cifra de afaceri. Din EBITDA se plătesc dobânzile și se rambursează creditul, deci ăsta e numărul din care banca dimensionează finanțarea.`,
+    deCe:
+      prec && isFinite(prec.ca) && prec.ca > 0
+        ? Math.abs((ref.ca - prec.ca) / prec.ca) < 0.1 && ref.ebitda < prec.ebitda
+          ? `Cifra de afaceri e practic la fel ca anul trecut (${bani(ref.ca)} față de ${bani(
+              prec.ca
+            )}), deci diferența nu vine din volum, ci din costuri. [De completat: ce anume a crescut — materie primă, energie, transport, personal — și cu cât.]`
+          : ref.ca < prec.ca && ref.ebitda < prec.ebitda
+          ? `Cifra de afaceri a scăzut de la ${bani(prec.ca)} la ${bani(ref.ca)}, iar marja a urmat-o. [De completat: ce clienți sau ce produse au lipsit față de anul trecut.]`
+          : `[De completat: ce a determinat evoluția asta.]`
+        : "[De completat: ce a determinat nivelul actual.]",
+    parghii: "Prețul de vânzare, mixul de produse, costul de achiziție (vezi ofertele comparate în Procurement), cheltuielile fixe.",
+  });
+
+  pune({
+    nume: "Rezultatul perioadei",
+    valoare: bani(ref.profit),
+    tinta: "pozitiv",
+    bun: ref.profit > 0,
+    ceArata: `Rezultatul la ${perioada} e ${bani(ref.profit)}${prec ? evolutie(ref.profit, prec.profit, bani) : ""}, la o cifră de afaceri de ${bani(
+      ref.ca
+    )} și cheltuieli de ${bani(ref.cheltuieli)}.`,
+    deCe:
+      ref.profit < 0
+        ? `Diferența dintre EBITDA (${bani(ref.ebitda)}) și rezultat vine din amortizare ${bani(ref.amortizare)}, dobânzi ${bani(
+            ref.dobanzi
+          )} și impozit ${bani(ref.impozit)}. Amortizarea nu e un ban care pleacă din cont; dobânda, da. [De completat: dacă pierderea e din cauze cu termen — investiție amortizată, contract pierdut, preț de materie primă — spune care și până când.]`
+        : "",
+    parghii: "Marja operațională, costul finanțării, ritmul de amortizare al investițiilor recente.",
+  });
+
+  // --- Structura capitalului ---------------------------------------------
+  const scadereCapital = prec && isFinite(prec.capitaluri) ? prec.capitaluri - ref.capitaluri : null;
+  pune({
+    nume: "Equity ratio (capitaluri proprii ÷ total activ)",
+    valoare: procent(ref.equityRatio),
+    tinta: "≥ 30%",
+    bun: ref.equityRatio !== null && ref.equityRatio >= 30,
+    ceArata: `Capitalurile proprii sunt ${bani(ref.capitaluri)} la un activ total de ${bani(ref.totalActiv)}, adică ${procent(
+      ref.equityRatio
+    )}. Asta arată cât din firmă e finanțat din bani proprii și cât din bani împrumutați.`,
+    deCe:
+      scadereCapital !== null && scadereCapital > 0
+        ? `Față de anul trecut, capitalurile au scăzut cu ${bani(scadereCapital)}.${
+            ref.dividende > 0
+              ? ` Din aceasta, ${bani(
+                  ref.dividende
+                )} sunt repartizări din rezultatul reportat (dividende) făcute în perioada curentă — bani scoși din firmă, nu pierduți de ea. Restul e rezultatul perioadei.`
+              : " [De completat: din ce provine scăderea.]"
+          }`
+        : "",
+    parghii:
+      "Capitalizarea profitului în loc de distribuire, aport de capital de la asociați, împrumut subordonat de la asociați (banca îl tratează aproape ca pe capital dacă e subordonat contractual).",
+  });
+
+  pune({
+    nume: "Gradul de îndatorare: leverage, gearing și datorie netă ÷ EBITDA",
+    valoare: `leverage ${rata(ref.leverage)} · gearing ${procent(ref.gearing, 0)} · datorie netă/EBITDA ${rata(ref.datorieNetaEbitda)}`,
+    tinta: "leverage ≤ 2,0 · gearing ≤ 100% · datorie netă/EBITDA ≤ 3,0",
+    bun: ref.leverage !== null && ref.leverage <= 2 && ref.datorieNetaEbitda !== null && ref.datorieNetaEbitda <= 3,
+    ceArata: `Datoriile financiare sunt ${bani(ref.datoriiFin)}, cash-ul ${bani(ref.cash)}, deci datoria netă e ${bani(
+      ref.datorieNeta
+    )}. Raportată la EBITDA anualizat (${bani(ref.ebitdaAnual)}), dă ${rata(
+      ref.datorieNetaEbitda
+    )}. Ăsta e indicatorul pe care banca îl scrie ca angajament în contract.`,
+    deCe:
+      prec && isFinite(prec.datoriiFin)
+        ? `Datoriile financiare au evoluat de la ${bani(prec.datoriiFin)} la ${bani(ref.datoriiFin)}, iar EBITDA de la ${bani(
+            prec.ebitda
+          )} la ${bani(ref.ebitda)}. Raportul se mișcă din amândouă. [De completat: la ce au folosit banii împrumutați și ce aduc înapoi.]`
+        : "",
+    parghii: "Refacerea EBITDA, rambursare din surplusul de numerar, eliberarea banilor blocați în stocuri și creanțe, reeșalonare pe termen mai lung.",
+  });
+
+  pune({
+    nume: "Acoperirea dobânzii (EBIT ÷ dobânzi)",
+    valoare: rata(ref.acoperireDobanda),
+    tinta: "≥ 3,0",
+    bun: ref.acoperireDobanda !== null && ref.acoperireDobanda >= 3,
+    ceArata:
+      ref.dobanzi > 0
+        ? `Câștigul operațional acoperă de ${rata(ref.acoperireDobanda)} ori dobânzile plătite în perioadă (${bani(ref.dobanzi)}).`
+        : "Nu sunt cheltuieli cu dobânzi în perioadă.",
+    deCe: "",
+    parghii: "Costul creditelor existente, ponderea finanțării în total, nivelul EBITDA.",
+  });
+
+  // --- Capitalul de lucru -------------------------------------------------
+  pune({
+    nume: "Lichiditatea curentă",
+    valoare: rata(ref.lichiditate),
+    tinta: "≥ 1,20",
+    bun: ref.lichiditate !== null && ref.lichiditate >= 1.2,
+    ceArata: `Activele circulante sunt ${bani(ref.activeCirc)}, datoriile curente ${bani(ref.datoriiCurente)}, deci raportul e ${rata(
+      ref.lichiditate
+    )}. Sub 1 înseamnă că ce se încasează și se vinde în următorul an nu acoperă ce e de plătit în același interval.`,
+    deCe:
+      ref.lichiditate !== null && ref.lichiditate < 1.2
+        ? `Capitalul de lucru e ${bani(ref.capitalLucru)}, iar în stocuri stau ${bani(ref.stocuri)}${
+            prec && isFinite(prec.stocuri) ? evolutie(ref.stocuri, prec.stocuri, bani) : ""
+          }. [De completat: ce parte din stoc e marfă care se mișcă și ce parte e blocată.]`
+        : "",
+    parghii: "Reducerea stocului lent, încasarea creanțelor vechi, mutarea unei părți din creditul pe termen scurt pe termen lung.",
+  });
+
+  pune({
+    nume: "Rotația stocurilor",
+    valoare: ref.rotatieStoc !== null ? `${rata(ref.rotatieStoc)} ori/an · ${Math.round(ref.zileStoc)} zile` : "—",
+    tinta: "cât mai multe rotații, cât mai puține zile",
+    bun: prec && isFinite(prec.zileStoc) && isFinite(ref.zileStoc) ? ref.zileStoc <= prec.zileStoc : true,
+    ceArata:
+      ref.zileStoc !== null && ref.zileStoc !== undefined
+        ? `Marfa stă în medie ${Math.round(ref.zileStoc)} de zile${
+            prec && isFinite(prec.zileStoc) ? ` (${Math.round(prec.zileStoc)} anul trecut)` : ""
+          }, pe un stoc mediu de ${bani(ref.stocMediu)} și un consum de ${bani(ref.consumStocuri)} în perioadă.`
+        : "Nu se poate calcula: nu sunt consumuri de materii, materiale sau mărfuri în perioadă.",
+    deCe:
+      prec && isFinite(prec.zileStoc) && isFinite(ref.zileStoc) && ref.zileStoc > prec.zileStoc
+        ? `Zilele de stoc au crescut cu ${Math.round(ref.zileStoc - prec.zileStoc)}. Fiecare zi în plus înseamnă aproximativ ${bani(
+            ref.consumStocuri && ref.zile ? (ref.consumStocuri / ref.zile) : 0
+          )} blocați. [De completat: ce a determinat creșterea — aprovizionare în avans, marfă care nu s-a vândut, schimbare de mix.]`
+        : "",
+    parghii: "Lichidarea stocului lent, comenzi mai mici și mai dese, negocierea termenelor cu furnizorii.",
+  });
+
+  // --- Cash flow -----------------------------------------------------------
+  pune({
+    nume: "Cash flow din exploatare (CFO)",
+    valoare: bani(ref.cfo),
+    tinta: "pozitiv, apropiat de EBITDA",
+    bun: ref.cfo > 0,
+    ceArata: `Activitatea a produs ${bani(ref.cfo)} numerar în perioadă, față de un EBITDA de ${bani(
+      ref.ebitda
+    )}. Diferența dintre cele două arată cât din câștig a rămas blocat în creanțe și stocuri în loc să ajungă în cont.`,
+    deCe: "",
+    parghii: "Termenele de încasare, nivelul stocului, termenele de plată la furnizori.",
+  });
+
+  // --- Concentrarea -------------------------------------------------------
+  if (isFinite(top1) && top1 > 0) {
+    pune({
+      nume: "Concentrarea pe primul client",
+      valoare: procent(top1, 0),
+      tinta: "< 30%",
+      bun: top1 < 30,
+      ceArata: `Primul client${numeTop1 ? ` (${numeTop1})` : ""} înseamnă ${procent(
+        top1,
+        0
+      )} din vânzările ultimelor douăsprezece luni. Dependența de un singur client e primul risc pe care îl notează analistul.`,
+      deCe: "",
+      parghii: "Diversificarea portofoliului, contracte-cadru cu clienții mari, pipeline-ul comercial.",
+    });
+  }
+
+  return c;
+}
+
+function sectiuneComentariu(comentarii) {
+  if (!comentarii.length) return "";
+  const subTinta = comentarii.filter((x) => !x.bun);
+  return `
+    <h2>Comentariul indicatorilor</h2>
+    <p style="font-size:12px;color:var(--text-muted);max-width:900px">Fiecare cifră de mai jos e luată din balanțele contabile încărcate în ERP. Unde cauza se vede în date, e scrisă; unde nu, e lăsat loc marcat cu paranteze drepte — acolo se completează cu ce știe firma, nu cu ce sună bine.</p>
+    ${comentarii
+      .map(
+        (x) => `
+      <div style="border-left:3px solid ${x.bun ? "var(--success)" : "var(--warn)"};padding:2px 0 2px 14px;margin:0 0 18px;max-width:900px">
+        <h3 style="margin:0 0 4px;font-size:14px">${esc(x.nume)} — <span style="font-weight:400">${x.valoare}</span> <span style="font-size:12px;color:var(--text-muted)">(țintă: ${esc(
+          x.tinta
+        )})</span></h3>
+        <p style="margin:0 0 6px">${x.ceArata}</p>
+        ${x.deCe ? `<p style="margin:0 0 6px"><strong>De ce:</strong> ${x.deCe}</p>` : ""}
+        ${x.parghii ? `<p style="margin:0;font-size:13px;color:var(--text-muted)"><strong>Pârghii:</strong> ${esc(x.parghii)}</p>` : ""}
+      </div>`
+      )
+      .join("")}
+    ${
+      subTinta.length
+        ? `<h2>Plan de măsuri</h2>
+    ${table(
+      ["Indicator sub țintă", "Unde suntem", "Ținta băncii", "Ce facem, concret"],
+      subTinta.map((x) => [
+        `<strong>${esc(x.nume)}</strong>`,
+        x.valoare,
+        `<span style="font-size:12px;color:var(--text-muted)">${esc(x.tinta)}</span>`,
+        `<span style="color:var(--text-muted)">[de completat: acțiunea, suma, termenul, cine răspunde]</span>`,
+      ])
+    )}`
+        : ""
+    }`;
 }
 
 function register(router) {
@@ -2571,8 +2888,47 @@ function register(router) {
       <ol style="line-height:1.7">${sugestii.map((s) => `<li>${s}</li>`).join("")}</ol>
       <p style="font-size:12px;color:var(--text-muted)">Nu sunt consultant de credit — raportul arată indicatorii standard pe datele din ERP; dosarul final se face cu banca și contabilul.</p>`;
 
+    // --- partea scrisă a dosarului ----------------------------------------
+    const texte = await citesteTexteBanca();
+    const anulTrecut = coloaneLuna[1] && coloaneLuna[1].b ? coloaneLuna[1].b : null;
+    const comentarii = comentariulIndicatorilor(
+      refLuna,
+      anulTrecut,
+      refLuna ? etichetaLuna(refLuna.pana) : "",
+      top1,
+      topClienti.length ? topClienti[0].nume : ""
+    );
+    const blocComentariu = sectiuneComentariu(comentarii);
+
+    const sectiunePrezentare = texte.prezentare
+      ? `<h2>Prezentarea firmei</h2>${textLiber(texte.prezentare)}`
+      : `<h2>Prezentarea firmei</h2><div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Prezentarea firmei nu e scrisă încă. Se completează o singură dată, din raportul de indicatori, și apare de aici încolo la începutul fiecărui dosar.</div>`;
+    const sectiuneMasuri = texte.masuri ? `<h2>Măsurile pe care ni le asumăm</h2>${textLiber(texte.masuri)}` : "";
+    const sectiuneConcluzie = texte.concluzie ? `<h2>Ce cerem băncii</h2>${textLiber(texte.concluzie)}` : "";
+
+    // Editorul apare doar în ERP, nu în dosarul tipărit.
+    const editorTexte = `
+      <h2>Partea scrisă a dosarului</h2>
+      <p style="color:var(--text-muted);font-size:13px;max-width:900px;margin:-4px 0 12px">
+        Textele de aici intră în raportul pentru bancă, înaintea tabelelor. Comentariul indicatorilor se scrie singur,
+        din cifrele de mai sus — ce e în paranteze drepte rămâne de completat de tine. Ce scrii aici se păstrează și se
+        refolosește la fiecare raport.
+      </p>
+      ${TEXTE_BANCA.map(
+        (t) => `
+        <form method="post" action="/rapoarte/indicatori/text" class="form" style="max-width:900px;margin-bottom:18px">
+          <input type="hidden" name="cheie" value="${t.cheie}">
+          <label class="field"><span>${esc(t.eticheta)}</span>
+            <textarea name="valoare" rows="${t.randuri}" style="font-family:inherit">${esc(texte[t.cheie] || t.implicit)}</textarea>
+          </label>
+          <p style="font-size:12px;color:var(--text-muted);margin:-6px 0 8px">${esc(t.ajutor)}</p>
+          <button class="btn" type="submit">Salvează</button>
+        </form>`
+      ).join("")}`;
+
     return {
       sectiuneBilant, carduri, tabelIndicatori, tabelTopuri, blocSugestii,
+      sectiunePrezentare, blocComentariu, sectiuneMasuri, sectiuneConcluzie, editorTexte,
       refLuna, estimare, aziStr,
       perioada: refLuna ? etichetaLuna(refLuna.pana) : "",
       deLa: refLuna ? refLuna.deLa : null,
@@ -2588,8 +2944,26 @@ function register(router) {
         <a class="link-btn" href="/rapoarte/indicatori/raport-banca" target="_blank" rel="noopener">Generează raport pentru bancă</a>
       </div>
       <p style="font-size:12px;color:var(--text-muted);margin:-8px 0 16px">Butonul deschide aceleași cifre ca o singură pagină de tipărit — antet cu firma și perioada, toate tabelele, fără meniuri și fără butoane. Din ea salvezi PDF-ul pe care îl trimiți la bancă.</p>
-      ${r.sectiuneBilant}${r.carduri}${r.tabelIndicatori}${r.tabelTopuri}${r.blocSugestii}`;
+      ${r.sectiuneBilant}${r.carduri}${r.tabelIndicatori}${r.tabelTopuri}${r.blocSugestii}
+      ${r.blocComentariu}
+      ${ctx.user && ctx.user.rol === "admin" ? r.editorTexte : ""}`;
     send(ctx.res, 200, pagina(ctx, "Indicatori financiari — ochii băncii", "/rapoarte/indicatori", continut));
+  });
+
+  router.post("/rapoarte/indicatori/text", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/rapoarte/indicatori");
+    const b = ctx.body || {};
+    const cheie = String(b.cheie || "");
+    if (!TEXTE_BANCA.some((t) => t.cheie === cheie)) return redirect(ctx.res, "/rapoarte/indicatori");
+    // Textul se salvează ca text. Se redă escapat, deci ce lipește omul acolo
+    // se vede, nu se execută.
+    await db
+      .prepare(
+        `INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?)
+         ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la`
+      )
+      .run("banca_" + cheie, String(b.valoare || "").slice(0, 20000), azi());
+    return redirect(ctx.res, "/rapoarte/indicatori");
   });
 
   // ---- aceleași cifre, ca dosar de tipărit --------------------------------
@@ -2613,7 +2987,12 @@ function register(router) {
         </div>
         <button class="tipar" type="button" onclick="window.print()">Tipărește / salvează PDF</button>
       </div>
-      ${r.sectiuneBilant}${r.carduri}${r.tabelIndicatori}${r.tabelTopuri}${r.blocSugestii}
+      ${r.sectiunePrezentare}
+      ${r.sectiuneBilant}${r.carduri}${r.tabelIndicatori}${r.tabelTopuri}
+      ${r.blocComentariu}
+      ${r.sectiuneMasuri}
+      ${r.sectiuneConcluzie}
+      ${r.blocSugestii}
       <p class="subsol">Cifrele contabile provin din balanțele SmartBill Conta încărcate în ERP; cele comerciale, din facturile din ERP. Documentul e o pregătire de dosar, nu un bilanț semnat și nu o ofertă de creditare.</p>`;
     const html = `<!doctype html>
 <html lang="ro"><head><meta charset="utf-8">
