@@ -112,6 +112,17 @@ function cere(eticheta, corp, bucati, interzise) {
 
 const rulaj = (sql) => execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
 
+// Decupează o secțiune din pagină: de la titlul ei până la finalul primului
+// tabel de după. Fără asta, o verificare „nu trebuie să apară X" se lovește de
+// faptul că X apare corect în ALTĂ secțiune — de pildă cifra pe douăsprezece
+// luni, care are ce căuta în indicatorii dosarului, dar nu în topul anului.
+function sectiune(corp, titlu) {
+  const i = corp.indexOf(titlu);
+  if (i < 0) return "";
+  const j = corp.indexOf("</table>", i);
+  return j < 0 ? corp.slice(i) : corp.slice(i, j + 8);
+}
+
 // ---- balanțele de test ------------------------------------------------------
 // O balanță adevărată are peste o sută de conturi; pragul din raport e 20, așa
 // că fiecare balanță de test primește conturile care contează plus umplutură
@@ -200,11 +211,17 @@ function fixtureFacturi() {
     "INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol) VALUES (1,'Vali','vali@test.ro','x','y','admin') ON CONFLICT (id) DO NOTHING",
   ];
   const zileInUrma = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const AN = azi.slice(0, 4);
+  const anTrecut = String(Number(AN) - 1);
   const F = [
     [91101, "vanzare", 91001, zileInUrma(30), zileInUrma(0), "emisa", 600000],
     [91102, "vanzare", 91001, zileInUrma(400), zileInUrma(370), "platita", 500000],
     [91201, "achizitie", 91002, zileInUrma(40), zileInUrma(10), "emisa", 200000],
     [91202, "achizitie", 91003, zileInUrma(60), zileInUrma(30), "emisa", 50000],
+    // 31 decembrie anul trecut: intră în fereastra de 12 luni, dar NU în anul
+    // în curs. Dacă topul l-ar număra, sumele de mai jos n-ar mai ieși.
+    [91103, "vanzare", 91001, anTrecut + "-12-31", anTrecut + "-12-31", "platita", 111111],
+    [91203, "achizitie", 91002, anTrecut + "-12-31", anTrecut + "-12-31", "platita", 77777],
   ];
   for (const [id, dir, part, em, sc, st, tot] of F) {
     S.push(`INSERT INTO facturi (id, serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, firma_id, intercompany, activ) VALUES (${id},'IND',${id},${part},'${dir}','${em}','${sc}','${st}',NULL,0,1)`);
@@ -304,9 +321,28 @@ function fixtureBalante(cuAugustVechi) {
   cere(
     "top 5 furnizori, cu concentrarea pe primul",
     r.corp,
-    ["Top 5 furnizori (concentrarea aprovizionării)", "FURNIZOR MARE SRL", "FURNIZOR MIC SRL", "200.000,00 lei", "Concentrarea pe primul furnizor", "80% (FURNIZOR MARE SRL)", "Ai a doua sursă la FURNIZOR MARE SRL?"]
+["Top 5 furnizori în ", "(concentrarea aprovizionării)", "FURNIZOR MARE SRL", "FURNIZOR MIC SRL", "200.000,00 lei", "Concentrarea pe primul furnizor", "80% (FURNIZOR MARE SRL)", "Ai a doua sursă la FURNIZOR MARE SRL?"]
   );
-  cere("top 5 clienți a rămas la locul lui", r.corp, ["Top 5 clienți (concentrarea riscului)", "CLIENT INDICATORI SRL"]);
+  // Topurile sunt pe ANUL ÎN CURS, nu pe ultimele 12 luni. Facturile din
+  // 31 decembrie anul trecut sunt în fereastra de 12 luni, dar nu în anul
+  // curent — dacă ar fi numărate, sumele ar fi 711.111 și 277.777.
+  const anul = azi.slice(0, 4);
+  cere(
+    "top 5 clienți e pe anul în curs, nu pe ultimele 12 luni",
+    sectiune(r.corp, `Top 5 clienți în ${anul}`),
+    [`Vânzări ${anul} (net)`, "CLIENT INDICATORI SRL", "600.000,00 lei", "100.0%"],
+    ["711.111,00 lei"]
+  );
+  // cifra pe douăsprezece luni rămâne unde îi e locul: în indicatorii dosarului
+  cere("fereastra de 12 luni rămâne la indicatorii de credit", r.corp, ["Cifra de afaceri (12 luni, fără TVA)", "711.111,00 lei"]);
+  cere(
+    "top 5 furnizori la fel, pe anul în curs",
+    sectiune(r.corp, `Top 5 furnizori în ${anul}`),
+    [`Achiziții ${anul} (net)`, "FURNIZOR MARE SRL", "200.000,00 lei"],
+    ["277.777,00 lei"]
+  );
+  cere("nota spune perioada și totalurile anului", r.corp, [`1 ianuarie ${anul}`, "Total vânzări 600.000,00 lei", "total achiziții 250.000,00 lei"]);
+  cere("concentrarea spune pe ce an e socotită", r.corp, [`Concentrarea pe primul client (${anul})`, `Concentrarea pe primul furnizor (${anul})`]);
 
   // ---- indicatorii ceruți de bancă ---------------------------------------
   // Valorile de mai jos sunt calculate cu mâna din fixtură, nu copiate din
