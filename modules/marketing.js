@@ -247,8 +247,10 @@ function pareFirma(nume, firma) {
   if (f && n === f) return true;
   // „ALTEXPRESS COURIER & E-FULFILLMENT SERVICES S.R.L." vs „… SRL": aceeași
   // firmă scrisă în două feluri. Se compară după ce se scot punctele și
-  // spațiile de tot.
-  const strans = (x) => x.replace(/[^a-z0-9ăâîșț]/gi, "");
+  // spațiile de tot, și după ce se taie forma juridică de la coadă: în antetul
+  // „De la" firma se scrie de obicei fără ea („EUROINK TEST" pentru „EUROINK
+  // TEST SRL"), iar fără tăietura asta numele firmei ar trece drept nume de om.
+  const strans = (x) => x.replace(SUFIX_FIRMA, "").replace(/[^a-z0-9ăâîșț]/gi, "");
   if (f && strans(n) === strans(f)) return true;
   if (SUFIX_FIRMA.test(n)) return true;
   // un domeniu web scris în loc de nume: „vindem-ieftin.ro", „materiale.online"

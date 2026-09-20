@@ -142,27 +142,74 @@ function numeDin(linii) {
   return null;
 }
 
-// Tot ce se poate scoate dintr-un mesaj. Întoarce null când nu e nimic de
-// luat — și e în regulă: majoritatea mesajelor n-au semnătură folositoare.
+// Adresele de rol: scrise de un birou, nu de o persoană anume. Rămân contacte
+// bune — ai unde trimite oferta — dar nu pretindem că e un om cu nume.
+const ROLURI = new Set([
+  "office", "sales", "vanzari", "comercial", "contact", "info", "suport", "support",
+  "achizitii", "aprovizionare", "procurement", "purchasing", "facturi", "facturare",
+  "contabilitate", "financiar", "hr", "resurseumane", "recrutare", "marketing",
+  "secretariat", "receptie", "reception", "admin", "administrare", "logistica",
+  "transport", "export", "import", "export2", "export3", "comenzi", "orders",
+  "service", "tehnic", "productie", "depozit", "birou", "mail", "email", "general",
+]);
+
+// Numele omului scos din adresă, când nu-l avem din antet sau din semnătură.
+// „andreea.cernea@aectra.ro" → „Andreea Cernea". „comercial@euroink.it" →
+// „Comercial", și e marcat ca rol, nu ca persoană.
+function numeDinAdresa(email) {
+  const local = String(email || "").split("@")[0].toLowerCase().replace(/\+.*$/, "");
+  if (!local) return null;
+  const curat = local.replace(/[^a-z0-9._-]/g, "");
+  if (ROLURI.has(curat.replace(/[._-]/g, ""))) {
+    return { nume: curat.charAt(0).toUpperCase() + curat.slice(1), fel: "rol" };
+  }
+  const bucati = curat.split(/[._-]+/).filter((x) => x.length > 1 && !/^\d+$/.test(x));
+  if (bucati.length >= 2) {
+    const nume = bucati.slice(0, 3).map((b) => b.charAt(0).toUpperCase() + b.slice(1)).join(" ");
+    return { nume, fel: "persoana" };
+  }
+  if (bucati.length === 1 && bucati[0].length >= 3) {
+    const b = bucati[0];
+    return { nume: b.charAt(0).toUpperCase() + b.slice(1), fel: ROLURI.has(b) ? "rol" : "persoana" };
+  }
+  return null;
+}
+
+// Tot ce se poate scoate dintr-un mesaj.
+//
+// Regula s-a lărgit, la cererea lui Vali: „în adresa de email ai de obicei
+// compania, așa că alocă mailul la acea companie, contactul la acea companie
+// cu cel puțin adresa de email". Deci nu mai renunțăm când nu găsim un nume de
+// om în semnătură — coborâm la numele din adresă. Un contact cu adresă bună și
+// nume aproximativ e folositor; unul lipsă nu e.
+//
+// Ce NU se schimbă: domeniile publice se sar în continuare (de la gmail.com nu
+// știm a cui e adresa), iar numele care seamănă cu firma nu devine niciodată
+// nume de om — în locul lui se ia numele din adresă.
 function culegeDinMesaj(m) {
   const domeniu = String(m.de_la_domeniu || "").toLowerCase();
   if (!domeniu || DOMENII_PUBLICE.has(domeniu)) return null;
 
+  const email = String(m.de_la || "").trim().toLowerCase() || null;
+  if (!email || !email.includes("@")) return null;
+
   const bloc = bloculSemnaturii(m.corp);
   const textBloc = bloc.join("\n");
 
-  // Numele: întâi cel din antet (cel mai de încredere), apoi din semnătură.
+  // Numele, în ordinea încrederii: antetul „De la", apoi semnătura, apoi
+  // partea dinaintea lui @.
   let nume = String(m.de_la_nume || "").replace(/\s+/g, " ").trim();
+  let fel = "persoana";
   if (!nume || pareFirma(nume, m.partener_nume || "")) nume = numeDin(bloc) || "";
-  if (!nume || pareFirma(nume, m.partener_nume || "")) return null;
+  if (!nume || pareFirma(nume, m.partener_nume || "")) {
+    const dinAdresa = numeDinAdresa(email);
+    if (!dinAdresa) return null;
+    nume = dinAdresa.nume;
+    fel = dinAdresa.fel;
+  }
 
   const { mobil, fix } = telefoaneDin(textBloc);
-  return {
-    nume,
-    email: String(m.de_la || "").trim().toLowerCase() || null,
-    functie: functiaDin(bloc),
-    telefon: mobil || fix,
-  };
+  return { nume, email, functie: functiaDin(bloc), telefon: mobil || fix, fel };
 }
 
 // ---- scrierea în Contacte ---------------------------------------------------
@@ -180,15 +227,23 @@ async function pune(contact, partenerId, rezumat) {
     .prepare("SELECT id, nume, email, telefon, functie FROM mk_contacte WHERE activ = 1 AND partener_id = ? ORDER BY id")
     .all(partenerId);
   const cautat = normNume(contact.nume);
-  const existent = aiCasei.find((x) => normNume(x.nume) === cautat) || null;
+  const adresa = String(contact.email || "").toLowerCase();
+  // ADRESA bate numele. Același om apare ca „Andreea Cernea", „Cernea Andreea"
+  // și „andreea.cernea" în trei mesaje; dacă ne-am lua după nume, l-am scrie de
+  // trei ori. Adresa e aceeași de fiecare dată.
+  const existent =
+    (adresa && aiCasei.find((x) => String(x.email || "").toLowerCase() === adresa)) ||
+    aiCasei.find((x) => normNume(x.nume) === cautat) ||
+    null;
 
   if (!existent) {
     await db
       .prepare(
         `INSERT INTO mk_contacte (partener_id, nume, functie, email, telefon, sursa)
-         VALUES (?, ?, ?, ?, ?, 'semnatura')`
+         VALUES (?, ?, ?, ?, ?, ?)`
       )
-      .run(partenerId, contact.nume, contact.functie, contact.email, contact.telefon);
+      .run(partenerId, contact.nume, contact.functie, contact.email, contact.telefon,
+           contact.fel === "rol" ? "adresa" : "semnatura");
     rezumat.adaugati++;
     return "adăugat";
   }
@@ -1001,5 +1056,6 @@ module.exports = {
   functiaDin,
   numeDin,
   culegeDinMesaj,
+  numeDinAdresa,
   ORA_RULARE,
 };

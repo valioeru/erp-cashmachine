@@ -84,10 +84,15 @@ async function gasestePartener(adrese) {
     const p = await db.prepare("SELECT id, nume FROM parteneri WHERE lower(email) = lower(?) ORDER BY id LIMIT 1").get(a.adresa);
     if (p) return { partener: p, cum: "adresa exactă" };
   }
+  // Harta de domenii învățată din clicurile oamenilor. Bate potrivirea oarbă
+  // pe emailul din fișă, fiindcă acolo a hotărât cineva uitându-se la mesaj.
+  const legare = require("./legare");
   for (const a of adrese) {
     const d = gmail.domeniu(a.adresa);
     if (!d || DOMENII_PUBLICE.has(d)) continue;
-    const p = await db.prepare("SELECT id, nume FROM parteneri WHERE lower(email) LIKE lower(?) ORDER BY id LIMIT 1").get("%@" + d);
+    const id = await legare.dinDomeniu(d);
+    if (!id) continue;
+    const p = await db.prepare("SELECT id, nume FROM parteneri WHERE id = ?").get(id);
     if (p) return { partener: p, cum: "domeniul " + d };
   }
   return { partener: null, cum: "" };
@@ -448,6 +453,7 @@ function subnav(activ) {
     ["/email", "Inbox"],
     ["/email/atasamente", "Atașamente"],
     ["/email/conturi", "Căsuțe"],
+    ["/email/domenii", "Domenii"],
     ["/email/culegere", "Culegere"],
     ["/configurari/email-google", "Conexiunea Google"],
   ];
@@ -747,11 +753,32 @@ function register(router) {
     send(ctx.res, 200, pagina(ctx, m.subiect || "Email", "/email", corp));
   });
 
+  // Un clic aici nu leagă doar mesajul ăsta: ține minte domeniul expeditorului
+  // și leagă TOATE mesajele nelegate de pe el — cele din urmă și cele care vor
+  // veni. Un furnizor se atribuie o dată în viață, nu la fiecare mesaj.
   router.post("/email/:id/leaga", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const id = Number(ctx.params.id);
     const p = Number((ctx.body || {}).partener_id) || null;
     await db.prepare("UPDATE email_mesaje SET partener_id = ?, legat_cum = ? WHERE id = ?").run(p, p ? "pus de om" : null, id);
+
+    if (p) {
+      try {
+        const legare = require("./legare");
+        const m = await db.prepare("SELECT de_la_domeniu FROM email_mesaje WHERE id = ?").get(id);
+        const dom = String((m && m.de_la_domeniu) || "").toLowerCase();
+        if (legare.eFolositor(dom)) {
+          await legare.tineMinte(dom, p, ctx.user.id, "om");
+          await db
+            .prepare(
+              "UPDATE email_mesaje SET partener_id = ?, legat_cum = ? WHERE activ = 1 AND partener_id IS NULL AND lower(COALESCE(de_la_domeniu,'')) = ?"
+            )
+            .run(p, "domeniul " + dom, dom);
+        }
+      } catch (e) {
+        console.error("[email] nu am putut extinde legarea pe domeniu:", e.message);
+      }
+    }
     return redirect(ctx.res, "/email/" + id);
   });
 
