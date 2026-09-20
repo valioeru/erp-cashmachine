@@ -55,6 +55,7 @@ require("./modules/procurement").register(router);
 require("./modules/marketing").register(router);
 require("./modules/concurenta").register(router);
 require("./modules/inbox").register(router);
+require("./modules/culegere").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
@@ -192,6 +193,8 @@ async function start() {
   require("./modules/warehouse").porneste();
   require("./modules/marketing").porneste();
   require("./modules/inbox").porneste();
+  // Culegerea din emailuri: semnături → contacte, în fiecare noapte la 02:00.
+  require("./modules/culegere").porneste();
   await auth.curataSesiuni();
   setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
   const PORT = process.env.PORT || 3000;
