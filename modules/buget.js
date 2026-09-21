@@ -29,6 +29,7 @@
 //    „n-am cheltuit", nu „nu știu".
 const db = require("../lib/db");
 const { esc, money, layout, table } = require("../lib/render");
+const { explicatia } = require("../lib/conturi");
 const { send, redirect } = require("../lib/router");
 
 const nr = (v) => Number(v || 0);
@@ -555,8 +556,10 @@ function register(router) {
                ? r.detalii
                    .map(
                      (x) =>
-                       `<div style="display:flex;gap:8px;justify-content:space-between;padding:2px 0">
-                          <span><strong>${esc(x.cont)}</strong> ${esc(String(x.denumire).slice(0, 40))}</span>
+                       `<div style="display:flex;gap:8px;justify-content:space-between;padding:4px 0;border-top:1px solid var(--border)">
+                          <span><strong>${esc(x.cont)}</strong> ${esc(String(x.denumire).slice(0, 40))}
+                            ${explicatia(x.cont) ? `<br><span style="color:var(--text-muted)">${esc(explicatia(x.cont))}</span>` : ""}
+                          </span>
                           <span style="white-space:nowrap">${money(x.ante1)}
                             <button type="submit" name="scoate" value="${esc(x.cont)}" class="link-btn" style="margin-left:6px">scoate</button>
                           </span>
@@ -682,7 +685,10 @@ function register(router) {
                ["Cont", "Denumire", "Fel", `${d.anii.doiAnteriori}`, `${d.anii.anterior}`, `${an}`, "Pune în"],
                d.neacoperite.slice(0, 60).map((x) => [
                  `<strong>${esc(x.cont)}</strong>`,
-                 esc(String(x.denumire).slice(0, 50)),
+                 esc(String(x.denumire).slice(0, 50)) +
+                   (explicatia(x.cont)
+                     ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(explicatia(x.cont))}</span>`
+                     : ""),
                  x.fel === "venit" ? "venit" : "cheltuială",
                  money(x.ante2),
                  money(x.ante1),
@@ -766,7 +772,12 @@ function register(router) {
       return [
         `<strong>${esc(cont)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${esc(
           String((numeCont.get(cont) || {}).denumire || "").slice(0, 28)
-        )}</span>`,
+        )}</span>` +
+          (explicatia(cont)
+            ? `<br><span style="font-size:11px;color:var(--text-muted);font-style:italic;display:block;max-width:220px;line-height:1.35;margin-top:3px">${esc(
+                explicatia(cont)
+              )}</span>`
+            : ""),
       ]
         .concat(Array.from({ length: 12 }, (_, i) => celula(cont, i + 1)))
         .concat([tt === null ? '<span style="color:var(--text-muted)">—</span>' : `<strong>${money(tt)}</strong>`]);
