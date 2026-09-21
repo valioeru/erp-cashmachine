@@ -159,6 +159,17 @@ const lunaStr = (n) => `${AN}-${String(n).padStart(2, "0")}`;
     rau("„din care realizat” nu e suma lunilor încheiate", `am ${cardRealizat}, așteptam ${realizatAsteptat}`);
   else ok("„din care realizat” = suma reală a lunilor încheiate (" + cardRealizat.trim() + ")");
 
+  // CA (fără TVA) e a doua cifră a paginii, calculată separat — nu prin
+  // împărțirea celei cu TVA la o cotă medie, care n-ar fi adevărată la niciun
+  // produs. Fixtura are 1.000 lei net + 19% pe fiecare lună încheiată.
+  const cardCA = (r.corp.match(/din care realizat ([^<]+)</) || [])[1] || "";
+  const cifraCA = Number(String(cardCA).replace(/[^\d,]/g, "").replace(/\./g, "").replace(",", "."));
+  if (Math.abs(cifraCA - (LUNA - 1) * 1000) > 1)
+    rau("CA realizată nu e suma netă a lunilor încheiate", `am ${cardCA}, așteptam ${(LUNA - 1) * 1000}`);
+  else ok("CA (fără TVA) realizată = suma netă a lunilor încheiate (" + cardCA.trim() + ")");
+  if (!r.corp.includes("CA totală")) rau("lipsește cartonașul de CA totală");
+  else ok("pagina arată CA totală, separat de totalul cu TVA");
+
   // O lună încheiată n-are bandă: pesimist și optimist sunt „—".
   const randInchis = (r.corp.match(new RegExp(lunaStr(1) + "[\\s\\S]{0,400}?</tr>")) || [""])[0];
   if (!/>—</.test(randInchis)) rau("o lună încheiată are bandă pesimist/optimist");
