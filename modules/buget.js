@@ -461,12 +461,20 @@ function register(router) {
       }
 
       <form method="post" action="/buget/${an}/salveaza">
-        <div class="toolbar" style="margin:16px 0 10px">
+        <div class="toolbar" style="margin:16px 0 10px;align-items:center;gap:10px;flex-wrap:wrap">
           <button class="btn" type="submit">Salvează bugetul</button>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+            creștere
+            <input name="crestere" id="crestere" value="0" inputmode="decimal" style="width:70px;text-align:right">
+            <span>%</span>
+          </label>
           <button class="btn secondary" type="submit" name="prepopuleaza" value="1"
-                  onclick="return confirm('Pun în coloana bugetat cifrele din ${d.anii.anterior} anualizate, peste ce e acum?')">
-            Pornește de la ${d.anii.anterior} anualizat
+                  onclick="return confirm('Pun în coloana bugetat cifrele din ${d.anii.anterior} anualizate, crescute cu procentul scris, peste ce e acum?')">
+            Pornește de la ${d.anii.anterior} anualizat <span id="et-crestere"></span>
           </button>
+          <span style="font-size:12px;color:var(--text-muted)">
+            Procentul se aplică la fiecare linie, și la venituri și la cheltuieli. Poate fi și negativ.
+          </span>
         </div>
 
         <h2>Venituri</h2>
@@ -508,6 +516,21 @@ function register(router) {
           : '<p style="color:var(--success)">Toate conturile de venituri și cheltuieli din balanță sunt prinse într-o categorie.</p>'
       }
 
+      <script>
+        (function () {
+          var c = document.getElementById("crestere");
+          var e = document.getElementById("et-crestere");
+          if (!c || !e) return;
+          function arata() {
+            var v = String(c.value || "").replace(",", ".").trim();
+            var n = Number(v);
+            e.textContent = !v || !isFinite(n) || n === 0 ? "" : (n > 0 ? "+" : "") + v + "%";
+          }
+          c.addEventListener("input", arata);
+          arata();
+        })();
+      </script>
+
       <h2>Categorie nouă</h2>
       <form method="post" action="/buget/${an}/categorie" class="filtre">
         <input name="nume" placeholder="numele categoriei" required style="min-width:240px">
@@ -535,9 +558,15 @@ function register(router) {
     }
 
     if (b.prepopuleaza === "1") {
+      // Creșterea se aplică la fiecare linie, nu la total: altfel n-ar mai fi
+      // un punct de plecare pe care să-l poți corecta rând cu rând.
+      const procentCrestere = suma(b.crestere);
+      const factor = 1 + procentCrestere / 100;
       const d = await tabloul(an);
       for (const r of d.venituri.concat(d.cheltuieli))
-        await db.prepare("UPDATE buget_categorii SET bugetat = ? WHERE id = ?").run(r.ante1Anualizat, r.id);
+        await db
+          .prepare("UPDATE buget_categorii SET bugetat = ? WHERE id = ?")
+          .run(Math.round(r.ante1Anualizat * factor * 100) / 100, r.id);
       return redirect(ctx.res, `/buget/${an}?prepopulat=1`);
     }
 
