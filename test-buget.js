@@ -114,22 +114,26 @@ const E26 = "TEST BUGET 2090";
     `DELETE FROM buget_categorii WHERE an = ${AN}`,
     `DELETE FROM balante_snapshot WHERE eticheta IN ('${E25}','${E26}')`,
     // 2089: an încheiat. 2090: opt luni (01.01 → 31.08), ca să testăm anualizarea.
+    // ATENȚIE la fixtura asta: Conta ÎNCHIDE LUNAR clasele 6 și 7 prin 121,
+    // deci pe fiecare cont debitul și creditul ajung EGALE. Dacă fixtura ar
+    // avea doar o parte completată, testul ar trece și cu formula greșită
+    // („credit minus debit"), care pe date reale dă zero peste tot.
     `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c) VALUES
-       ('${E25}','2089-01-01','2089-12-31','607','Cheltuieli marfuri',100000,0),
-       ('${E25}','2089-01-01','2089-12-31','6021','Consumabile',20000,0),
-       ('${E25}','2089-01-01','2089-12-31','641','Salarii',300000,0),
-       ('${E25}','2089-01-01','2089-12-31','666','Dobanzi',50000,0),
-       ('${E25}','2089-01-01','2089-12-31','6588','Cheltuiala rara',7000,0),
-       ('${E25}','2089-01-01','2089-12-31','707','Venituri marfuri',0,900000),
-       ('${E25}','2089-01-01','2089-12-31','6','Total clasa 6',477000,0),
-       ('${E25}','2089-01-01','2089-12-31','60','Total grupa 60',120000,0)`,
+       ('${E25}','2089-01-01','2089-12-31','607','Cheltuieli marfuri',100000,100000),
+       ('${E25}','2089-01-01','2089-12-31','6021','Consumabile',20000,20000),
+       ('${E25}','2089-01-01','2089-12-31','641','Salarii',300000,300000),
+       ('${E25}','2089-01-01','2089-12-31','666','Dobanzi',50000,50000),
+       ('${E25}','2089-01-01','2089-12-31','6588','Cheltuiala rara',7000,7000),
+       ('${E25}','2089-01-01','2089-12-31','707','Venituri marfuri',900000,900000),
+       ('${E25}','2089-01-01','2089-12-31','6','Total clasa 6',477000,477000),
+       ('${E25}','2089-01-01','2089-12-31','60','Total grupa 60',120000,120000)`,
     `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c) VALUES
-       ('${E26}','2090-01-01','2090-08-31','607','Cheltuieli marfuri',80000,0),
-       ('${E26}','2090-01-01','2090-08-31','6021','Consumabile',16000,0),
-       ('${E26}','2090-01-01','2090-08-31','641','Salarii',200000,0),
-       ('${E26}','2090-01-01','2090-08-31','666','Dobanzi',40000,0),
-       ('${E26}','2090-01-01','2090-08-31','6588','Cheltuiala rara',3000,0),
-       ('${E26}','2090-01-01','2090-08-31','707','Venituri marfuri',0,600000)`,
+       ('${E26}','2090-01-01','2090-08-31','607','Cheltuieli marfuri',80000,80000),
+       ('${E26}','2090-01-01','2090-08-31','6021','Consumabile',16000,16000),
+       ('${E26}','2090-01-01','2090-08-31','641','Salarii',200000,200000),
+       ('${E26}','2090-01-01','2090-08-31','666','Dobanzi',40000,40000),
+       ('${E26}','2090-01-01','2090-08-31','6588','Cheltuiala rara',3000,3000),
+       ('${E26}','2090-01-01','2090-08-31','707','Venituri marfuri',600000,600000)`,
   ]) exec(s);
 
   // --- regulile de bază -------------------------------------------------------
@@ -146,8 +150,10 @@ const E26 = "TEST BUGET 2090";
   const r25 = await mod.realizatPeCont(E25);
   egal("rândurile de grup (6, 60) nu se adună peste conturile lor",
     [...r25.keys()].sort(), ["6021", "641", "6588", "666", "607", "707"].sort());
-  egal("cheltuiala e pe debit, venitul pe credit",
+  egal("cheltuiala e pe debit, venitul pe credit — nu diferența dintre ele",
     [r25.get("607").val, r25.get("707").val], [100000, 900000]);
+  if (r25.get("707").val === 0) rau("închiderea lunară prin 121 a anulat veniturile");
+  else ok("închiderea lunară prin 121 nu anulează cifrele");
 
   // --- tabloul ------------------------------------------------------------------
   const d = await mod.tabloul(AN);
