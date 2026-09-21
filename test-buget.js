@@ -110,9 +110,14 @@ const E26 = "TEST BUGET 2090";
     `CREATE TABLE IF NOT EXISTS buget_conturi (
        id SERIAL PRIMARY KEY, categorie_id INTEGER NOT NULL REFERENCES buget_categorii(id), cont TEXT NOT NULL)`,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_buget_conturi_unic ON buget_conturi (categorie_id, cont)",
+    `CREATE TABLE IF NOT EXISTS buget_valori (
+       id SERIAL PRIMARY KEY, an INTEGER NOT NULL, luna INTEGER NOT NULL,
+       categorie_id INTEGER NOT NULL REFERENCES buget_categorii(id), cont TEXT, suma REAL NOT NULL DEFAULT 0)`,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_buget_valori_unic ON buget_valori (an, luna, categorie_id, COALESCE(cont, ''))",
+    `DELETE FROM buget_valori WHERE an = ${AN}`,
     `DELETE FROM buget_conturi WHERE categorie_id IN (SELECT id FROM buget_categorii WHERE an = ${AN})`,
     `DELETE FROM buget_categorii WHERE an = ${AN}`,
-    `DELETE FROM balante_snapshot WHERE eticheta IN ('${E25}','${E26}')`,
+    `DELETE FROM balante_snapshot WHERE eticheta LIKE 'TEST BUGET %'`,
     // 2089: an încheiat. 2090: opt luni (01.01 → 31.08), ca să testăm anualizarea.
     // ATENȚIE la fixtura asta: Conta ÎNCHIDE LUNAR clasele 6 și 7 prin 121,
     // deci pe fiecare cont debitul și creditul ajung EGALE. Dacă fixtura ar
@@ -127,6 +132,22 @@ const E26 = "TEST BUGET 2090";
        ('${E25}','2089-01-01','2089-12-31','707','Venituri marfuri',900000,900000),
        ('${E25}','2089-01-01','2089-12-31','6','Total clasa 6',477000,477000),
        ('${E25}','2089-01-01','2089-12-31','60','Total grupa 60',120000,120000)`,
+    // Balanțe LUNARE cumulate, ca să putem verifica defalcarea pe luni:
+    // „la 31.01" = ianuarie, „la 28.02" = ianuarie + februarie.
+    `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c) VALUES
+       ('${E26} ian','2090-01-01','2090-01-31','607','Cheltuieli marfuri',10000,10000),
+       ('${E26} ian','2090-01-01','2090-01-31','6021','Consumabile',2000,2000),
+       ('${E26} ian','2090-01-01','2090-01-31','641','Salarii',25000,25000),
+       ('${E26} ian','2090-01-01','2090-01-31','666','Dobanzi',5000,5000),
+       ('${E26} ian','2090-01-01','2090-01-31','6588','Cheltuiala rara',400,400),
+       ('${E26} ian','2090-01-01','2090-01-31','707','Venituri marfuri',70000,70000)`,
+    `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c) VALUES
+       ('${E26} feb','2090-01-01','2090-02-28','607','Cheltuieli marfuri',22000,22000),
+       ('${E26} feb','2090-01-01','2090-02-28','6021','Consumabile',4200,4200),
+       ('${E26} feb','2090-01-01','2090-02-28','641','Salarii',50000,50000),
+       ('${E26} feb','2090-01-01','2090-02-28','666','Dobanzi',10000,10000),
+       ('${E26} feb','2090-01-01','2090-02-28','6588','Cheltuiala rara',800,800),
+       ('${E26} feb','2090-01-01','2090-02-28','707','Venituri marfuri',150000,150000)`,
     `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c) VALUES
        ('${E26}','2090-01-01','2090-08-31','607','Cheltuieli marfuri',80000,80000),
        ('${E26}','2090-01-01','2090-08-31','6021','Consumabile',16000,16000),
@@ -204,14 +225,22 @@ const E26 = "TEST BUGET 2090";
     body: { ["b_" + marfuri.id]: "123.456,78" },
   });
   const d4 = await mod.tabloul(AN);
-  egal("cifra scrisă de om ajunge în buget",
-    d4.cheltuieli.find((x) => x.nume === "Mărfuri vândute").bugetat, 123456.78);
+  // Bugetul efectiv e suma celor 12 luni, fiecare = anualul/12 — deci apare
+  // zgomotul obișnuit al virgulei mobile. Se compară cu toleranță de un ban,
+  // nu pe egalitate exactă.
+  const aproape = (eticheta, avut, asteptat, toleranta) => {
+    if (Math.abs(Number(avut) - Number(asteptat)) <= toleranta)
+      ok(eticheta + " = " + Math.round(Number(avut) * 100) / 100);
+    else rau(eticheta, "am " + avut + ", așteptam " + asteptat);
+  };
+  aproape("cifra scrisă de om ajunge în buget",
+    d4.cheltuieli.find((x) => x.nume === "Mărfuri vândute").bugetat, 123456.78, 0.01);
 
   // --- prepopularea din anul anterior anualizat ------------------------------------
   await cer("/buget/:an/salveaza", { metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1" } });
   const d5 = await mod.tabloul(AN);
-  egal("prepopularea pune anualizatul peste tot",
-    rot(d5.totaluri.cheltuieli.bugetat), rot(d5.totaluri.cheltuieli.ante1Anualizat));
+  aproape("prepopularea pune anualizatul peste tot",
+    d5.totaluri.cheltuieli.bugetat, d5.totaluri.cheltuieli.ante1Anualizat, 1);
 
   // --- prepopularea cu creștere ------------------------------------------------------
   // Procentul se aplică pe FIECARE linie. Dacă s-ar aplica pe total, rândurile
@@ -220,29 +249,114 @@ const E26 = "TEST BUGET 2090";
     metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1", crestere: "10" },
   });
   const d6 = await mod.tabloul(AN);
-  egal("creșterea de 10% urcă totalul cu exact 10%",
-    rot(d6.totaluri.cheltuieli.bugetat), rot(d6.totaluri.cheltuieli.ante1Anualizat * 1.1));
-  egal("și se vede pe fiecare linie, nu doar pe total",
-    rot(d6.cheltuieli.find((x) => x.nume === "Salarii").bugetat),
-    rot(d6.cheltuieli.find((x) => x.nume === "Salarii").ante1Anualizat * 1.1));
-  egal("veniturile cresc și ele",
-    rot(d6.totaluri.venituri.bugetat), rot(d6.totaluri.venituri.ante1Anualizat * 1.1));
+  aproape("creșterea de 10% urcă totalul cu exact 10%",
+    d6.totaluri.cheltuieli.bugetat, d6.totaluri.cheltuieli.ante1Anualizat * 1.1, 1);
+  aproape("și se vede pe fiecare linie, nu doar pe total",
+    d6.cheltuieli.find((x) => x.nume === "Salarii").bugetat,
+    d6.cheltuieli.find((x) => x.nume === "Salarii").ante1Anualizat * 1.1, 1);
+  // Fiecare categorie se scrie rotunjită la doi bani; însumate, pot ieși
+  // câțiva bani față de produsul nerotunjit. Un leu toleranță.
+  aproape("veniturile cresc și ele",
+    d6.totaluri.venituri.bugetat, d6.totaluri.venituri.ante1Anualizat * 1.1, 1);
 
   // Procent scris cu virgulă, și unul negativ — amândouă sunt cifre.
   await cer("/buget/:an/salveaza", {
     metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1", crestere: "-7,5" },
   });
   const d7 = await mod.tabloul(AN);
-  egal("un procent negativ scris cu virgulă scade bugetul",
-    rot(d7.totaluri.cheltuieli.bugetat), rot(d7.totaluri.cheltuieli.ante1Anualizat * 0.925));
+  aproape("un procent negativ scris cu virgulă scade bugetul",
+    d7.totaluri.cheltuieli.bugetat, d7.totaluri.cheltuieli.ante1Anualizat * 0.925, 1);
 
   // Gol înseamnă zero la sută, nu „nu aplica” — butonul tot prepopulează.
   await cer("/buget/:an/salveaza", {
     metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1", crestere: "" },
   });
   const d8 = await mod.tabloul(AN);
-  egal("fără procent scris, prepopularea pune exact anualizatul",
-    rot(d8.totaluri.cheltuieli.bugetat), rot(d8.totaluri.cheltuieli.ante1Anualizat));
+  aproape("fără procent scris, prepopularea pune exact anualizatul",
+    d8.totaluri.cheltuieli.bugetat, d8.totaluri.cheltuieli.ante1Anualizat, 1);
+
+  // --- realizatul pe LUNĂ, din balanțe cumulate ---------------------------------------
+  // Balanțele din Conta sunt cumulate de la 1 ianuarie. Dacă s-ar citi direct,
+  // februarie ar apărea cu cifra lui ianuarie inclusă — plauzibil și greșit.
+  const lunar = await mod.realizatLunar(2090);
+  egal("ianuarie e cât zice balanța de ianuarie", rot(lunar.peLuna.get("607")[0]), 10000);
+  egal("februarie e DIFERENȚA, nu cumulatul", rot(lunar.peLuna.get("607")[1]), 12000);
+  egal("la fel la venituri", rot(lunar.peLuna.get("707")[1]), 80000);
+  egal("lunile fără balanță rămân necunoscute, nu zero",
+    [lunar.acoperite[0], lunar.acoperite[1], lunar.acoperite[8], lunar.acoperite[11]],
+    [true, true, false, false]);
+
+  // --- bugetul pe lună și pe subcont ---------------------------------------------------
+  const d9 = await mod.tabloul(AN);
+  const catMarfuri = d9.cheltuieli.find((x) => x.nume === "Mărfuri vândute");
+  const anualMarfuri = catMarfuri.bugetatAnual;
+
+  let v = await mod.valorileBuget(AN);
+  egal("fără nimic scris, luna vine din anualul împărțit la 12",
+    [rot(mod.bugetLuna(catMarfuri, 3, v).suma), mod.bugetLuna(catMarfuri, 3, v).din],
+    [rot(anualMarfuri / 12), "anual/12"]);
+
+  // Scris pe categorie, pentru o lună anume.
+  await cer("/buget/:an/categorie/:id", {
+    metoda: "post", params: { an: String(AN), id: String(catMarfuri.id) },
+    body: { ["v__3"]: "9.000" },
+  });
+  v = await mod.valorileBuget(AN);
+  egal("cifra scrisă pe categorie bate anualul împărțit la 12",
+    [mod.bugetLuna(catMarfuri, 3, v).suma, mod.bugetLuna(catMarfuri, 3, v).din], [9000, "categorie"]);
+
+  // Scris pe subcont: bate cifra de categorie.
+  await cer("/buget/:an/categorie/:id", {
+    metoda: "post", params: { an: String(AN), id: String(catMarfuri.id) },
+    body: { ["v_607_3"]: "4.500" },
+  });
+  v = await mod.valorileBuget(AN);
+  egal("suma subconturilor bate cifra de categorie",
+    [mod.bugetLuna(catMarfuri, 3, v).suma, mod.bugetLuna(catMarfuri, 3, v).din], [4500, "subconturi"]);
+
+  // Golirea celulei o șterge, iar nivelul de deasupra redevine cel care contează.
+  await cer("/buget/:an/categorie/:id", {
+    metoda: "post", params: { an: String(AN), id: String(catMarfuri.id) },
+    body: { ["v_607_3"]: "" },
+  });
+  v = await mod.valorileBuget(AN);
+  egal("golind subcontul, cifra de categorie redevine cea care contează",
+    [mod.bugetLuna(catMarfuri, 3, v).suma, mod.bugetLuna(catMarfuri, 3, v).din], [9000, "categorie"]);
+
+  // Un subcont care nu aparține categoriei e ignorat, nu scris aiurea.
+  await cer("/buget/:an/categorie/:id", {
+    metoda: "post", params: { an: String(AN), id: String(catMarfuri.id) },
+    body: { ["v_641_4"]: "1000" },
+  });
+  v = await mod.valorileBuget(AN);
+  egal("un subcont străin de categorie nu se scrie", v.has(catMarfuri.id + "|641|4"), false);
+
+  // „Împarte pe 12" întinde o sumă anuală egal pe luni, pe rândul de categorie.
+  await cer("/buget/:an/categorie/:id", {
+    metoda: "post", params: { an: String(AN), id: String(catMarfuri.id) },
+    body: { actiune: "imparte", imparte: "120.000" },
+  });
+  v = await mod.valorileBuget(AN);
+  egal("împărțirea pe 12 pune aceeași cifră pe fiecare lună",
+    [mod.bugetLuna(catMarfuri, 1, v).suma, mod.bugetLuna(catMarfuri, 7, v).suma, mod.bugetLuna(catMarfuri, 12, v).suma],
+    [10000, 10000, 10000]);
+  const d10 = await mod.tabloul(AN);
+  aproape("iar totalul anual al categoriei devine suma lor",
+    d10.cheltuieli.find((x) => x.nume === "Mărfuri vândute").bugetat, 120000, 1);
+
+  // --- pagina de categorie ----------------------------------------------------------
+  const pc = await cer("/buget/:an/categorie/:id", { params: { an: String(AN), id: String(catMarfuri.id) } });
+  const faraPc = pc.corp.replace(/<script[\s\S]*?<\/script>/g, "");
+  if (pc.cod !== 200) rau("pagina de categorie nu se deschide", String(pc.cod));
+  else if (/NaN|Infinity|undefined</.test(faraPc)) rau("NaN/undefined în pagina de categorie");
+  else {
+    const lipsa = ["Intră în buget", "Realizat", "Diferență", "ian", "dec", "Pe categorie", 'name="v_607_1"']
+      .filter((x) => !faraPc.includes(x));
+    if (lipsa.length) rau("lipsește din pagina de categorie", lipsa.join(", "));
+    else ok("pagina de categorie arată lunile, subconturile și realizatul (" + pc.corp.length + " octeți)");
+  }
+  const pcg = await cer("/buget/:an/categorie/:id", { user: GABI, params: { an: String(AN), id: String(catMarfuri.id) } });
+  egal("un agent nu vede pagina de categorie", pcg.cod, 403);
 
   // --- pagina -----------------------------------------------------------------------
   const p = await cer("/buget/:an", { params: { an: String(AN) } });
@@ -262,9 +376,10 @@ const E26 = "TEST BUGET 2090";
 
   // --- curățenie după noi ----------------------------------------------------------
   for (const s of [
+    `DELETE FROM buget_valori WHERE an = ${AN}`,
     `DELETE FROM buget_conturi WHERE categorie_id IN (SELECT id FROM buget_categorii WHERE an = ${AN})`,
     `DELETE FROM buget_categorii WHERE an = ${AN}`,
-    `DELETE FROM balante_snapshot WHERE eticheta IN ('${E25}','${E26}')`,
+    "DELETE FROM balante_snapshot WHERE eticheta LIKE 'TEST BUGET %'",
   ]) execFileSync("psql", ["-X", "-q", "-c", s], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
 
   console.log("\n" + interogari + " interogări SQL reale.");
