@@ -286,6 +286,47 @@ const E26 = "TEST BUGET 2090";
     [lunar.acoperite[0], lunar.acoperite[1], lunar.acoperite[8], lunar.acoperite[11]],
     [true, true, false, false]);
 
+  // --- BALANȚA VECHE CU PERIOADĂ LUNGĂ -------------------------------------------------
+  // Cazul real din 09.2026: pe 14.09 s-a tras „01.01 → 14.09", dar august nu era
+  // postat, deci conținea cifrele până la 31.07. Pe 19.09 s-a tras „01.01 → 31.08",
+  // cu august închis. Sortate după perioadă, cea de pe 14.09 pare cea mai proaspătă,
+  // și scădea din septembrie exact cât adusese august — un storno care nu există.
+  for (const s of [
+    `UPDATE balante_snapshot SET incarcat_la = '2090-02-01 08:00:00' WHERE eticheta = '${E26} ian'`,
+    `UPDATE balante_snapshot SET incarcat_la = '2090-03-01 08:00:00' WHERE eticheta = '${E26} feb'`,
+    `UPDATE balante_snapshot SET incarcat_la = '2090-09-19 15:15:00' WHERE eticheta = '${E26}'`,
+    // Balanța veche: perioadă mai lungă (14.09), trasă mai devreme (14.09 < 19.09),
+    // cu cifrele rămase la nivelul lui februarie.
+    `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c, incarcat_la) VALUES
+       ('${E26} veche','2090-01-01','2090-09-14','607','Cheltuieli marfuri',22000,22000,'2090-09-14 05:30:00'),
+       ('${E26} veche','2090-01-01','2090-09-14','6021','Consumabile',4200,4200,'2090-09-14 05:30:00'),
+       ('${E26} veche','2090-01-01','2090-09-14','641','Salarii',50000,50000,'2090-09-14 05:30:00'),
+       ('${E26} veche','2090-01-01','2090-09-14','666','Dobanzi',10000,10000,'2090-09-14 05:30:00'),
+       ('${E26} veche','2090-01-01','2090-09-14','6588','Cheltuiala rara',800,800,'2090-09-14 05:30:00'),
+       ('${E26} veche','2090-01-01','2090-09-14','707','Venituri marfuri',150000,150000,'2090-09-14 05:30:00')`,
+  ]) exec(s);
+
+  const snap = await mod.snapshoturileAnului(2090);
+  egal("balanța veche cu perioadă lungă e sărită",
+    [snap.bune.map((x) => x.eticheta), snap.ignorate.map((x) => x.eticheta)],
+    [[`${E26} ian`, `${E26} feb`, E26], [`${E26} veche`]]);
+  egal("și se spune de ce, cu datele la vedere",
+    /trasă din Conta pe 14\.09\.2090, înaintea balanței mai scurte de pe 19\.09\.2090/.test(snap.ignorate[0].motiv),
+    true);
+  egal("balanța de referință rămâne cea de la 31.08, nu cea de la 14.09",
+    (await mod.balantaAnului(2090)).eticheta, E26);
+
+  const lunar2 = await mod.realizatLunar(2090);
+  egal("septembrie NU inventează un storno de -450.000",
+    [lunar2.peLuna.get("707")[8], lunar2.acoperite[8]], [null, false]);
+  egal("august rămâne întreg", rot(lunar2.peLuna.get("707")[7]), 450000);
+  egal("iar totalul anului e cel din balanța bună", rot(mod.LUNI.reduce((s, _, i) => {
+    const v = lunar2.peLuna.get("707")[i];
+    return v == null ? s : s + v;
+  }, 0)), 600000);
+
+  exec(`DELETE FROM balante_snapshot WHERE eticheta = '${E26} veche'`);
+
   // --- bugetul pe lună și pe subcont ---------------------------------------------------
   const d9 = await mod.tabloul(AN);
   const catMarfuri = d9.cheltuieli.find((x) => x.nume === "Mărfuri vândute");
