@@ -213,13 +213,45 @@ const E26 = "TEST BUGET 2090";
   egal("prepopularea pune anualizatul peste tot",
     rot(d5.totaluri.cheltuieli.bugetat), rot(d5.totaluri.cheltuieli.ante1Anualizat));
 
+  // --- prepopularea cu creștere ------------------------------------------------------
+  // Procentul se aplică pe FIECARE linie. Dacă s-ar aplica pe total, rândurile
+  // n-ar mai însuma totalul și corectarea rând cu rând ar deveni imposibilă.
+  await cer("/buget/:an/salveaza", {
+    metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1", crestere: "10" },
+  });
+  const d6 = await mod.tabloul(AN);
+  egal("creșterea de 10% urcă totalul cu exact 10%",
+    rot(d6.totaluri.cheltuieli.bugetat), rot(d6.totaluri.cheltuieli.ante1Anualizat * 1.1));
+  egal("și se vede pe fiecare linie, nu doar pe total",
+    rot(d6.cheltuieli.find((x) => x.nume === "Salarii").bugetat),
+    rot(d6.cheltuieli.find((x) => x.nume === "Salarii").ante1Anualizat * 1.1));
+  egal("veniturile cresc și ele",
+    rot(d6.totaluri.venituri.bugetat), rot(d6.totaluri.venituri.ante1Anualizat * 1.1));
+
+  // Procent scris cu virgulă, și unul negativ — amândouă sunt cifre.
+  await cer("/buget/:an/salveaza", {
+    metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1", crestere: "-7,5" },
+  });
+  const d7 = await mod.tabloul(AN);
+  egal("un procent negativ scris cu virgulă scade bugetul",
+    rot(d7.totaluri.cheltuieli.bugetat), rot(d7.totaluri.cheltuieli.ante1Anualizat * 0.925));
+
+  // Gol înseamnă zero la sută, nu „nu aplica” — butonul tot prepopulează.
+  await cer("/buget/:an/salveaza", {
+    metoda: "post", params: { an: String(AN) }, body: { prepopuleaza: "1", crestere: "" },
+  });
+  const d8 = await mod.tabloul(AN);
+  egal("fără procent scris, prepopularea pune exact anualizatul",
+    rot(d8.totaluri.cheltuieli.bugetat), rot(d8.totaluri.cheltuieli.ante1Anualizat));
+
   // --- pagina -----------------------------------------------------------------------
   const p = await cer("/buget/:an", { params: { an: String(AN) } });
   const fara = p.corp.replace(/<script[\s\S]*?<\/script>/g, "");
   if (p.cod !== 200) rau("pagina nu se deschide", String(p.cod));
   else if (/NaN|Infinity|undefined</.test(fara)) rau("NaN/undefined în pagină");
   else {
-    const lipsa = ["Buget " + AN, "Venituri", "Cheltuieli", "Mărfuri vândute", "Salarii", "Conturi neprinse"]
+    const lipsa = ["Buget " + AN, "Venituri", "Cheltuieli", "Mărfuri vândute", "Salarii", "Conturi neprinse",
+      'name="crestere"', "Salvează bugetul"]
       .filter((x) => !fara.includes(x));
     if (lipsa.length) rau("lipsește din pagină", lipsa.join(", "));
     else ok("pagina se deschide curat (" + p.corp.length + " octeți)");
