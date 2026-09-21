@@ -310,8 +310,8 @@ const E26 = "TEST BUGET 2090";
   egal("balanța veche cu perioadă lungă e sărită",
     [snap.bune.map((x) => x.eticheta), snap.ignorate.map((x) => x.eticheta)],
     [[`${E26} ian`, `${E26} feb`, E26], [`${E26} veche`]]);
-  egal("și se spune de ce, cu datele la vedere",
-    /trasă din Conta pe 14\.09\.2090, înaintea balanței mai scurte de pe 19\.09\.2090/.test(snap.ignorate[0].motiv),
+  egal("și se spune de ce, cu cifrele la vedere",
+    /rulaj cumulat .* la 14\.09\.2090, sub cel de la 31\.08\.2090/.test(snap.ignorate[0].motiv),
     true);
   egal("balanța de referință rămâne cea de la 31.08, nu cea de la 14.09",
     (await mod.balantaAnului(2090)).eticheta, E26);
@@ -325,7 +325,32 @@ const E26 = "TEST BUGET 2090";
     return v == null ? s : s + v;
   }, 0)), 600000);
 
-  exec(`DELETE FROM balante_snapshot WHERE eticheta = '${E26} veche'`);
+  // …dar ORA tragerii nu e criteriu. Balanța anuală pe un an încheiat e trasă o
+  // dată și gata; dacă după ea se mai trage una scurtă, anuala rămâne cea bună.
+  // (Prima variantă a regulii compara orele și arunca anuala pe 2025 — 9,3
+  // milioane în loc de 18,6.)
+  for (const s of [
+    `UPDATE balante_snapshot SET incarcat_la = '2090-08-20 09:00:00' WHERE eticheta = '${E25}'`,
+    `INSERT INTO balante_snapshot (eticheta, data_de_la, data_pana, cont, denumire, r_d, r_c, incarcat_la) VALUES
+       ('${E25} scurt','2089-01-01','2089-06-30','607','Cheltuieli marfuri',40000,40000,'2090-09-20 09:00:00'),
+       ('${E25} scurt','2089-01-01','2089-06-30','6021','Consumabile',9000,9000,'2090-09-20 09:00:00'),
+       ('${E25} scurt','2089-01-01','2089-06-30','641','Salarii',140000,140000,'2090-09-20 09:00:00'),
+       ('${E25} scurt','2089-01-01','2089-06-30','666','Dobanzi',22000,22000,'2090-09-20 09:00:00'),
+       ('${E25} scurt','2089-01-01','2089-06-30','6588','Cheltuiala rara',3000,3000,'2090-09-20 09:00:00'),
+       ('${E25} scurt','2089-01-01','2089-06-30','707','Venituri marfuri',400000,400000,'2090-09-20 09:00:00')`,
+  ]) exec(s);
+
+  const snap89 = await mod.snapshoturileAnului(2089);
+  egal("balanța anuală trasă mai devreme decât una scurtă NU e aruncată",
+    [snap89.bune.map((x) => x.eticheta), snap89.ignorate.length],
+    [[`${E25} scurt`, E25], 0]);
+  egal("și ea rămâne balanța de referință pe anul încheiat",
+    (await mod.balantaAnului(2089)).eticheta, E25);
+
+  for (const s of [
+    `DELETE FROM balante_snapshot WHERE eticheta = '${E26} veche'`,
+    `DELETE FROM balante_snapshot WHERE eticheta = '${E25} scurt'`,
+  ]) exec(s);
 
   // --- bugetul pe lună și pe subcont ---------------------------------------------------
   const d9 = await mod.tabloul(AN);
