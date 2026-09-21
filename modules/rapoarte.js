@@ -3647,7 +3647,70 @@ function register(router) {
   router.get("/rapoarte/forecast", async (ctx) => {
     const aziStr = azi();
     const lunaCurenta = aziStr.slice(0, 7);
-    const nrLuniForecast = Math.min(12, Math.max(3, parseInt(ctx.query.luni || "6", 10) || 6));
+
+    // ---- orizontul prognozei ---------------------------------------------
+    //
+    // Cererea lui Vali: „standard să-mi arate până la final de an în curs, și
+    // să am tot timpul filtru pentru interval custom pe lângă cele existente".
+    //
+    // Până acum se putea alege doar „următoarele N luni", pornind mereu din
+    // luna curentă. Asta răspunde la „cum merge trimestrul", dar nu la
+    // întrebarea pe care o pune oricine în septembrie: „cu ce închei anul".
+    //
+    // De-aia sunt acum patru feluri de a alege, iar implicit e primul:
+    //   • până la final de an  — luna curentă → decembrie. Cât mai e de făcut.
+    //   • anul întreg          — ianuarie → decembrie, cu lunile încheiate
+    //                            afișate CU CIFRA REALĂ, nu cu o prognoză.
+    //                            Ăsta e numărul „cum închei anul".
+    //   • următoarele N luni   — ce era și până acum.
+    //   • interval la alegere  — două luni, mereu la vedere.
+    //
+    // O lună deja încheiată nu se prognozează: se știe cât a fost. Dacă am
+    // prezice-o, totalul ar fi o ficțiune peste o realitate cunoscută.
+    const lunaPlus = (luna, n) => {
+      const a = Number(luna.slice(0, 4));
+      const m = Number(luna.slice(5, 7));
+      const d = new Date(Date.UTC(a, m - 1 + n, 1));
+      return d.toISOString().slice(0, 7);
+    };
+    const eLuna = (v) => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(v || ""));
+    const anCurent = Number(aziStr.slice(0, 4));
+    const lunaCurentaNr = Number(aziStr.slice(5, 7));
+
+    const ORIZONTURI = [
+      ["an_curent", "până la final de an"],
+      ["an_intreg", `anul ${anCurent} întreg (realizat + prognoză)`],
+      ["3", "următoarele 3 luni"],
+      ["6", "următoarele 6 luni"],
+      ["9", "următoarele 9 luni"],
+      ["12", "următoarele 12 luni"],
+      ["custom", "interval la alegere"],
+    ];
+    // „luni" rămâne acceptat din adresă, ca linkurile vechi să nu se rupă.
+    let orizont = String(ctx.query.orizont || (ctx.query.luni ? String(ctx.query.luni) : "an_curent"));
+    if (!ORIZONTURI.some(([k]) => k === orizont)) orizont = "an_curent";
+
+    const lunaDeLa = eLuna(ctx.query.de_la) ? String(ctx.query.de_la) : lunaCurenta;
+    const lunaPanaLa = eLuna(ctx.query.pana_la) ? String(ctx.query.pana_la) : `${anCurent}-12`;
+
+    let primaLuna = lunaCurenta;
+    let ultimaLuna = `${anCurent}-12`;
+    if (orizont === "an_intreg") {
+      primaLuna = `${anCurent}-01`;
+    } else if (orizont === "custom") {
+      primaLuna = lunaDeLa <= lunaPanaLa ? lunaDeLa : lunaPanaLa;
+      ultimaLuna = lunaDeLa <= lunaPanaLa ? lunaPanaLa : lunaDeLa;
+    } else if (orizont !== "an_curent") {
+      ultimaLuna = lunaPlus(lunaCurenta, Number(orizont) - 1);
+    }
+    // „până la final de an" în decembrie ar da zero luni; atunci arătăm măcar
+    // luna curentă, altfel pagina e goală fix în luna în care contează.
+    if (ultimaLuna < primaLuna) ultimaLuna = primaLuna;
+
+    const lunileForecast = [];
+    for (let l = primaLuna; l <= ultimaLuna && lunileForecast.length < 60; l = lunaPlus(l, 1))
+      lunileForecast.push(l);
+    const nrLuniForecast = lunileForecast.length;
 
     const istoric = await db
       .prepare(
@@ -3678,15 +3741,12 @@ function register(router) {
 
     // Forecast pe lunile următoare (inclusiv restul lunii curente).
     const randuri = [];
-    const anCurent = Number(aziStr.slice(0, 4));
-    const lunaCurentaNr = Number(aziStr.slice(5, 7));
-    for (let i = 0; i < nrLuniForecast; i++) {
-      const d = new Date(Date.UTC(anCurent, lunaCurentaNr - 1 + i, 1));
-      const luna = d.toISOString().slice(0, 7);
+    for (const luna of lunileForecast) {
       const mm = luna.slice(5, 7);
+      const anLunii = Number(luna.slice(0, 4));
       // Sezonalitate: media aceleiași luni calendaristice din ultimii 3 ani.
       const istoriceAceeasiLuna = [];
-      for (let an = anCurent - 1; an >= anCurent - 3; an--) {
+      for (let an = anLunii - 1; an >= anLunii - 3; an--) {
         const v = valoarePeLuna.get(`${an}-${mm}`);
         if (v && v > 0) istoriceAceeasiLuna.push(v);
       }
@@ -3699,7 +3759,14 @@ function register(router) {
         : "media ultimelor 12 luni (fără istoric pe luna asta)";
 
       let realizat = null;
-      if (luna === lunaCurenta) {
+      let incheiata = false;
+      if (luna < lunaCurenta) {
+        // Lună încheiată: nu se prognozează ce s-a întâmplat deja.
+        realizat = valoarePeLuna.get(luna) || 0;
+        probabil = realizat;
+        incheiata = true;
+        nota = "lună încheiată — cifra reală, nu o prognoză";
+      } else if (luna === lunaCurenta) {
         realizat = valoarePeLuna.get(lunaCurenta) || 0;
         const zileTrecute = Number(aziStr.slice(8, 10));
         const zileTotal = new Date(Date.UTC(anCurent, lunaCurentaNr, 0)).getUTCDate();
@@ -3714,15 +3781,22 @@ function register(router) {
       randuri.push({
         luna,
         realizat,
+        incheiata,
+        // O lună încheiată n-are bandă: cifra e cunoscută, nu estimată.
         probabil: Math.max(0, probabil),
-        pesimist: Math.max(0, probabil * (1 - banda)),
-        optimist: probabil * (1 + banda),
+        pesimist: incheiata ? Math.max(0, probabil) : Math.max(0, probabil * (1 - banda)),
+        optimist: incheiata ? Math.max(0, probabil) : probabil * (1 + banda),
         nota,
       });
     }
     const totalProbabil = randuri.reduce((s, r) => s + r.probabil, 0);
     const totalPesimist = randuri.reduce((s, r) => s + r.pesimist, 0);
     const totalOptimist = randuri.reduce((s, r) => s + r.optimist, 0);
+    // Cât din total e deja în bancă și cât mai e de făcut. Fără despărțirea
+    // asta, „anul întreg" arată un număr mare care pare prognoză, când de
+    // fapt cea mai mare parte s-a întâmplat deja.
+    const totalIncheiat = randuri.filter((r) => r.incheiata).reduce((s, r) => s + r.probabil, 0);
+    const luniIncheiate = randuri.filter((r) => r.incheiata).length;
 
     // Pipeline-ul CRM, ponderat pe stadiu.
     const PROBABILITATI = { lead: 0.1, calificat: 0.25, oferta: 0.5, negociere: 0.75 };
@@ -3736,15 +3810,39 @@ function register(router) {
     const pipelineBrut = pipeline.reduce((s, r) => s + Number(r.valoare), 0);
 
     const maxV = Math.max(1, ...randuri.map((r) => r.optimist));
-    const optiuni = [3, 6, 9, 12].map((n) => `<option value="${n}"${nrLuniForecast === n ? " selected" : ""}>următoarele ${n} luni</option>`).join("");
+    const optiuni = ORIZONTURI.map(
+      ([k, t]) => `<option value="${k}"${orizont === k ? " selected" : ""}>${esc(t)}</option>`
+    ).join("");
+    const eticheta =
+      orizont === "custom"
+        ? `${primaLuna} → ${ultimaLuna}`
+        : (ORIZONTURI.find(([k]) => k === orizont) || [, ""])[1];
 
     const continut = `
-      <form class="filtre" method="get" action="/rapoarte/forecast">
-        <select name="luni" onchange="this.form.submit()">${optiuni}</select>
+      <form class="filtre" method="get" action="/rapoarte/forecast" style="align-items:flex-end;gap:10px">
+        <label>Orizont
+          <select name="orizont" onchange="this.form.submit()">${optiuni}</select>
+        </label>
+        <label>De la luna <input type="month" name="de_la" value="${esc(lunaDeLa)}"></label>
+        <label>Până la luna <input type="month" name="pana_la" value="${esc(lunaPanaLa)}"></label>
+        <button class="btn secondary small" type="submit" name="orizont" value="custom">Arată intervalul</button>
       </form>
+      <p style="margin:-4px 0 14px;font-size:12px;color:var(--text-muted)">
+        Cele două luni se aplică apăsând „Arată intervalul" — restul opțiunilor pornesc din luna curentă.
+        ${luniIncheiate ? `Lunile încheiate din interval (${luniIncheiate}) intră cu cifra reală, nu cu o prognoză.` : ""}
+      </p>
 
       <div class="cards">
-        <div class="card"><div class="label">Forecast probabil (${nrLuniForecast} luni)</div><div class="value">${money(totalProbabil)}</div></div>
+        <div class="card"><div class="label">Total ${esc(eticheta)}</div><div class="value">${money(totalProbabil)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${nrLuniForecast} ${nrLuniForecast === 1 ? "lună" : "luni"}</div></div>
+        ${
+          luniIncheiate
+            ? `<div class="card"><div class="label">Din care realizat</div><div class="value">${money(totalIncheiat)}</div>
+                 <div style="font-size:12px;color:var(--text-muted)">${luniIncheiate} ${luniIncheiate === 1 ? "lună încheiată" : "luni încheiate"}</div></div>
+               <div class="card"><div class="label">Rămas de făcut</div><div class="value" style="color:var(--warn)">${money(totalProbabil - totalIncheiat)}</div>
+                 <div style="font-size:12px;color:var(--text-muted)">prognoză</div></div>`
+            : ""
+        }
         <div class="card"><div class="label">Scenariu pesimist</div><div class="value" style="color:var(--warn)">${money(totalPesimist)}</div></div>
         <div class="card"><div class="label">Scenariu optimist</div><div class="value" style="color:var(--success)">${money(totalOptimist)}</div></div>
         <div class="card"><div class="label">Trend an/an (ultimele 12 luni)</div><div class="value" style="color:${crestere >= 1 ? "var(--success)" : "var(--danger)"}">${((crestere - 1) * 100).toFixed(1)}%</div></div>
@@ -3771,10 +3869,15 @@ function register(router) {
       ${table(
         ["Luna", "Pesimist", "Probabil", "Optimist", "Cum e calculat"],
         randuri.map((r) => [
-          esc(r.luna) + (r.luna === lunaCurenta ? ' <span class="badge galben">în curs</span>' : ""),
-          money(r.pesimist),
+          esc(r.luna) +
+            (r.luna === lunaCurenta
+              ? ' <span class="badge galben">în curs</span>'
+              : r.incheiata
+              ? ' <span class="badge">încheiată</span>'
+              : ""),
+          r.incheiata ? "—" : money(r.pesimist),
           `<strong>${money(r.probabil)}</strong>`,
-          money(r.optimist),
+          r.incheiata ? "—" : money(r.optimist),
           `<span style="font-size:12px;color:var(--text-muted)">${esc(r.nota)}</span>`,
         ])
       )}
