@@ -112,5 +112,52 @@ for (const r of rute) {
 if (!duble) ok("niciun modul nu calcă pe ruta altuia");
 if (acoperite.length) console.log("  notă     pagini scrise de mână peste lista generică: " + acoperite.join(", "));
 
+// --- și fiecare rută cade sub o intrare din meniu ---------------------------
+// Accesul se dă pe cele opt intrări din bara de sus. O rută care nu cade sub
+// niciuna e invizibilă pentru toți cei cărora li s-au bifat secțiuni: nu apare
+// nicăieri, nu dă eroare la pornire, se vede abia când omul dă de „Nu ai acces
+// la această secțiune" pe o pagină la care ar trebui să aibă acces.
+const auth = require(path.join(RAD, "lib", "auth.js"));
+const ZONE = new Set(auth.ZONE.map((z) => z.cheie));
+// Rute care nu trec prin gardul de secțiuni: publice (login), punte cu token,
+// sau permise oricui e logat (profil, ghid, marketing).
+const INAFARA = ["/login", "/logout", "/healthz", "/api", "/punte", "/profil", "/ghid", "/dezvoltare", "/marketing", "/concurenta", "/email"];
+const orfane = new Map();
+for (const r of rute) {
+  const p = r.cale;
+  if (INAFARA.some((x) => p === x || p.startsWith(x + "/"))) continue;
+  if (auth.zoneleRutei(p).some((z) => ZONE.has(z))) continue;
+  if (!orfane.has(p)) orfane.set(p, r.modul);
+}
+if (orfane.size) {
+  for (const [p, m] of orfane)
+    rau(`${p} (${m}) nu cade sub nicio intrare din meniu`, "adaug-o în SECTIUNI din lib/auth.js, altfel n-o vede nimeni în afară de admin");
+} else ok(`toate rutele cad sub o intrare din meniu (${rute.length} verificate)`);
+
+// --- și clientul agentului se deschide --------------------------------------
+// Fișa unui partener stă sub „Financiar" ca să se aprindă butonul potrivit în
+// bara de sus, dar pentru agent e clientul LUI. Până la ZONE_IN_PLUS, agenții
+// cu „Vânzări" bifat luau 403 exact pe clienții lor.
+const agent = { rol: "vanzari", sectiuni: "/crm" };
+const cazuri = [
+  [agent, "/parteneri/919", true, "agentul își deschide clientul"],
+  [agent, "/parteneri", true, "și lista de parteneri"],
+  [agent, "/crm/birou", true, "biroul lui rămâne deschis"],
+  [agent, "/financiar", false, "dar Financiarul rămâne închis"],
+  [agent, "/salarii", false, "și salariile la fel"],
+  [agent, "/buget/2027", false, "și bugetul"],
+  [{ rol: "financiar", sectiuni: "/financiar" }, "/parteneri/919", true, "financiarul deschide același partener"],
+  [{ rol: "depozit", sectiuni: "/depozit" }, "/warehouse", true, "depozitul ajunge la vechiul /warehouse"],
+  [{ rol: "vanzari" }, "/parteneri/919", true, "fără nicio bifă, rămâne împărțirea veche pe roluri"],
+];
+for (const [u, cale, asteptat, eticheta] of cazuri) {
+  const avut = auth.poateAccesa(u, cale);
+  if (avut === asteptat) ok(eticheta);
+  else rau(eticheta, `${cale} → ${avut}, așteptam ${asteptat}`);
+}
+// Navigarea nu se schimbă: un singur buton aprins în bara de sus.
+if (auth.sectiune("/parteneri/919") === "/financiar") ok("în bara de sus se aprinde tot Financiar, nu două butoane");
+else rau("s-a mutat partenerul din bara de sus", auth.sectiune("/parteneri/919"));
+
 console.log(`\n${rele ? rele + " probleme." : "Totul curat."}\n`);
 process.exit(rele ? 1 : 0);
