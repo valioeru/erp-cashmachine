@@ -3712,17 +3712,29 @@ function register(router) {
       lunileForecast.push(l);
     const nrLuniForecast = lunileForecast.length;
 
+    // Două serii din aceeași interogare, fiindcă sunt două întrebări diferite:
+    //   • CU TVA — cât intră pe factură, adică ce se încasează;
+    //   • FĂRĂ TVA — cifra de afaceri. TVA-ul nu e al nostru, e al statului,
+    //     iar când Vali se uită la „cât fac anul ăsta", asta e cifra.
+    // Se prognozează amândouă, cu același model, ca să nu apară tentația de a
+    // împărți una la 1,19 — cotele diferă de la produs la produs.
     const istoric = await db
       .prepare(
-        `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna, COALESCE(SUM(l.total), 0) AS valoare, COUNT(*) AS nr
+        `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna,
+                COALESCE(SUM(l.total), 0) AS valoare,
+                COALESCE(SUM(n.net), 0) AS net,
+                COUNT(*) AS nr
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS net
+                      FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
          WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
          GROUP BY SUBSTR(f.data_emiterii, 1, 7)
          ORDER BY luna`
       )
       .all();
     const valoarePeLuna = new Map(istoric.map((r) => [r.luna, Number(r.valoare)]));
+    const netPeLuna = new Map(istoric.map((r) => [r.luna, Number(r.net)]));
 
     // Trend: ultimele 12 luni ÎNTREGI vs. precedentele 12.
     const luniIntregi = istoric.filter((r) => r.luna < lunaCurenta).map((r) => r.luna);
@@ -3738,6 +3750,43 @@ function register(router) {
     const abateri = ultimele12.map((l) => Math.abs((valoarePeLuna.get(l) || 0) - media12));
     const abatereMedie = abateri.length ? abateri.reduce((a, b) => a + b, 0) / abateri.length : 0;
     const banda = media12 > 0 ? Math.min(0.5, abatereMedie / media12) : 0.2;
+
+    // Aceeași metodă, aplicată seriei fără TVA. E scrisă o dată și folosită
+    // pentru cifra de afaceri, ca prognoza de CA să fie construită la fel ca
+    // cea cu TVA — nu dedusă din ea printr-o împărțire la o cotă medie care
+    // n-ar fi adevărată la niciun produs.
+    function prognozaSerie(harta) {
+      const luni = [...harta.keys()].filter((l) => l < lunaCurenta).sort();
+      const u12 = luni.slice(-12);
+      const p12 = luni.slice(-24, -12);
+      const sum = (list) => list.reduce((s, l) => s + (harta.get(l) || 0), 0);
+      const a = sum(u12);
+      const b = sum(p12);
+      const cr = p12.length >= 6 && b > 0 ? a / b : 1;
+      const med = u12.length ? a / u12.length : 0;
+      return function pentru(luna) {
+        if (luna < lunaCurenta) return harta.get(luna) || 0;
+        const mm = luna.slice(5, 7);
+        const anL = Number(luna.slice(0, 4));
+        const vechi = [];
+        for (let an = anL - 1; an >= anL - 3; an--) {
+          const v = harta.get(`${an}-${mm}`);
+          if (v && v > 0) vechi.push(v);
+        }
+        const baza = vechi.length ? vechi.reduce((x, y) => x + y, 0) / vechi.length : med;
+        let val = baza * cr;
+        if (luna === lunaCurenta) {
+          const realizat = harta.get(luna) || 0;
+          const zileTrecute = Number(aziStr.slice(8, 10));
+          const zileTotal = new Date(Date.UTC(anCurent, lunaCurentaNr, 0)).getUTCDate();
+          const ritm = zileTrecute >= 3 ? (realizat / zileTrecute) * zileTotal : val;
+          const pondere = zileTrecute / zileTotal;
+          val = ritm * pondere + val * (1 - pondere);
+        }
+        return Math.max(0, val);
+      };
+    }
+    const netPentru = prognozaSerie(netPeLuna);
 
     // Forecast pe lunile următoare (inclusiv restul lunii curente).
     const randuri = [];
@@ -3782,6 +3831,7 @@ function register(router) {
         luna,
         realizat,
         incheiata,
+        net: netPentru(luna),
         // O lună încheiată n-are bandă: cifra e cunoscută, nu estimată.
         probabil: Math.max(0, probabil),
         pesimist: incheiata ? Math.max(0, probabil) : Math.max(0, probabil * (1 - banda)),
@@ -3797,6 +3847,10 @@ function register(router) {
     // fapt cea mai mare parte s-a întâmplat deja.
     const totalIncheiat = randuri.filter((r) => r.incheiata).reduce((s, r) => s + r.probabil, 0);
     const luniIncheiate = randuri.filter((r) => r.incheiata).length;
+    // Cifra de afaceri — fără TVA. E numărul cu care te compari cu anul trecut,
+    // cu concurența și cu pragurile din contabilitate.
+    const totalNet = randuri.reduce((s, r) => s + Number(r.net || 0), 0);
+    const netIncheiat = randuri.filter((r) => r.incheiata).reduce((s, r) => s + Number(r.net || 0), 0);
 
     // Pipeline-ul CRM, ponderat pe stadiu.
     const PROBABILITATI = { lead: 0.1, calificat: 0.25, oferta: 0.5, negociere: 0.75 };
@@ -3833,14 +3887,19 @@ function register(router) {
       </p>
 
       <div class="cards">
-        <div class="card"><div class="label">Total ${esc(eticheta)}</div><div class="value">${money(totalProbabil)}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${nrLuniForecast} ${nrLuniForecast === 1 ? "lună" : "luni"}</div></div>
+        <div class="card"><div class="label">CA totală ${esc(eticheta)}</div>
+          <div class="value">${money(totalNet)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">fără TVA · ${nrLuniForecast} ${nrLuniForecast === 1 ? "lună" : "luni"}${
+      luniIncheiate ? ` · din care realizat ${money(netIncheiat)}` : ""
+    }</div></div>
+        <div class="card"><div class="label">Total facturat ${esc(eticheta)}</div><div class="value">${money(totalProbabil)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">cu TVA</div></div>
         ${
           luniIncheiate
             ? `<div class="card"><div class="label">Din care realizat</div><div class="value">${money(totalIncheiat)}</div>
-                 <div style="font-size:12px;color:var(--text-muted)">${luniIncheiate} ${luniIncheiate === 1 ? "lună încheiată" : "luni încheiate"}</div></div>
+                 <div style="font-size:12px;color:var(--text-muted)">cu TVA · ${luniIncheiate} ${luniIncheiate === 1 ? "lună încheiată" : "luni încheiate"}</div></div>
                <div class="card"><div class="label">Rămas de făcut</div><div class="value" style="color:var(--warn)">${money(totalProbabil - totalIncheiat)}</div>
-                 <div style="font-size:12px;color:var(--text-muted)">prognoză</div></div>`
+                 <div style="font-size:12px;color:var(--text-muted)">cu TVA · prognoză</div></div>`
             : ""
         }
         <div class="card"><div class="label">Scenariu pesimist</div><div class="value" style="color:var(--warn)">${money(totalPesimist)}</div></div>
@@ -3867,7 +3926,7 @@ function register(router) {
       <p style="font-size:12px;color:var(--text-muted)">Bară verde = forecast probabil; bară roșie = cât s-a facturat deja în luna curentă.</p>
 
       ${table(
-        ["Luna", "Pesimist", "Probabil", "Optimist", "Cum e calculat"],
+        ["Luna", "CA (fără TVA)", "Pesimist", "Probabil (cu TVA)", "Optimist", "Cum e calculat"],
         randuri.map((r) => [
           esc(r.luna) +
             (r.luna === lunaCurenta
@@ -3875,8 +3934,9 @@ function register(router) {
               : r.incheiata
               ? ' <span class="badge">încheiată</span>'
               : ""),
+          `<strong>${money(r.net)}</strong>`,
           r.incheiata ? "—" : money(r.pesimist),
-          `<strong>${money(r.probabil)}</strong>`,
+          money(r.probabil),
           r.incheiata ? "—" : money(r.optimist),
           `<span style="font-size:12px;color:var(--text-muted)">${esc(r.nota)}</span>`,
         ])
