@@ -178,6 +178,91 @@ async function realizatPeCont(eticheta) {
   return harta;
 }
 
+const LUNI = ["ian", "feb", "mar", "apr", "mai", "iun", "iul", "aug", "sep", "oct", "nov", "dec"];
+
+// ---- realizatul pe LUNĂ, pe cont --------------------------------------------
+//
+// Balanțele din Conta sunt CUMULATE de la 1 ianuarie: „la 31.03" conține și
+// ianuarie, și februarie. Luna în sine e diferența față de balanța precedentă.
+// Dacă s-ar citi direct, martie ar apărea de trei ori mai mare decât e, și ar
+// arăta perfect plauzibil.
+//
+// O lună fără balanță rămâne null, nu zero: „n-am încărcat balanța" și „n-am
+// cheltuit nimic" sunt două lucruri diferite, iar confundate ar strica și
+// graficul, și diferența față de buget.
+async function realizatLunar(an) {
+  const etichete = await db
+    .prepare(
+      `SELECT eticheta, MIN(data_de_la) AS de_la, MAX(data_pana) AS pana, COUNT(*) AS conturi
+         FROM balante_snapshot
+        WHERE SUBSTR(data_de_la, 1, 4) = ?
+        GROUP BY eticheta
+        ORDER BY MAX(data_pana) ASC`
+    )
+    .all(String(an))
+    .catch(() => []);
+  const bune = etichete.filter((x) => Number(x.conturi) > 5);
+  const peLuna = new Map(); // cont -> [12] (null = lună fără balanță)
+  const acoperite = new Array(12).fill(false);
+  let cumulatAnterior = new Map();
+  let lunaAnterioara = 0;
+
+  for (const e of bune) {
+    const luna = Number(String(e.pana).slice(5, 7));
+    if (!luna || luna < 1 || luna > 12) continue;
+    // Două balanțe pentru aceeași lună: contează ultima, deja sortate crescător.
+    const cumulat = await realizatPeCont(e.eticheta);
+    for (const [cont, x] of cumulat) {
+      if (!peLuna.has(cont)) peLuna.set(cont, new Array(12).fill(null));
+      const anterior = cumulatAnterior.has(cont) ? cumulatAnterior.get(cont).val : 0;
+      peLuna.get(cont)[luna - 1] = x.val - anterior;
+    }
+    // Un cont care exista înainte și lipsește acum n-a mai mișcat: zero, nu gol.
+    for (const [cont] of cumulatAnterior) {
+      if (cumulat.has(cont)) continue;
+      if (!peLuna.has(cont)) peLuna.set(cont, new Array(12).fill(null));
+      peLuna.get(cont)[luna - 1] = 0;
+    }
+    for (let l = lunaAnterioara + 1; l <= luna; l++) acoperite[l - 1] = true;
+    cumulatAnterior = cumulat;
+    lunaAnterioara = luna;
+  }
+  // Lunile dintre două balanțe (ex. avem 31.01 și 31.03, lipsește februarie)
+  // primesc diferența pe ultima lună acoperită — nu se poate despărți mai fin.
+  return { peLuna, acoperite };
+}
+
+// ---- cifrele scrise de om, pe lună și pe subcont -----------------------------
+async function valorileBuget(an) {
+  const randuri = await db
+    .prepare("SELECT categorie_id, cont, luna, suma FROM buget_valori WHERE an = ?")
+    .all(an)
+    .catch(() => []);
+  const h = new Map();
+  for (const r of randuri)
+    h.set(`${Number(r.categorie_id)}|${r.cont == null ? "" : String(r.cont)}|${Number(r.luna)}`, nr(r.suma));
+  return h;
+}
+
+// Bugetul efectiv al unei categorii pe o lună, și DE UNDE vine.
+// Ordinea nu e o preferință de stil: e singura care face ca detaliul scris de
+// om să nu fie înghițit de o cifră mai veche, mai grosieră.
+function bugetLuna(cat, luna, valori) {
+  let dinConturi = 0;
+  let areConturi = false;
+  for (const cont of cat.conturi) {
+    const v = valori.get(`${cat.id}|${cont}|${luna}`);
+    if (v !== undefined) {
+      dinConturi += v;
+      areConturi = true;
+    }
+  }
+  if (areConturi) return { suma: dinConturi, din: "subconturi" };
+  const peCategorie = valori.get(`${cat.id}||${luna}`);
+  if (peCategorie !== undefined) return { suma: peCategorie, din: "categorie" };
+  return { suma: nr(cat.bugetat) / 12, din: "anual/12" };
+}
+
 // ---- categoriile anului -----------------------------------------------------
 async function categoriile(an) {
   const cat = await db
@@ -257,8 +342,15 @@ async function tabloul(an) {
       else apartenenta.set(cont, c);
     }
 
+  const valori = await valorileBuget(an);
   const val = (h, cont) => (h.has(cont) ? h.get(cont).val : 0);
   const randuri = cat.map((c) => {
+    // Bugetul efectiv: suma celor 12 luni, fiecare luată de la nivelul cel mai
+    // detaliat la care s-a scris ceva. Coloana anuală rămâne editabilă, dar
+    // nu mai e singurul adevăr — de-aia se arată alături și de unde vine.
+    const peLuni = Array.from({ length: 12 }, (_, i) => bugetLuna({ ...c, id: Number(c.id) }, i + 1, valori));
+    const bugetatEfectiv = peLuni.reduce((x, y) => x + y.suma, 0);
+    const surse = [...new Set(peLuni.map((x) => x.din))];
     const a2 = c.conturi.reduce((s, x) => s + val(rAnte2, x), 0);
     const a1 = c.conturi.reduce((s, x) => s + val(rAnte1, x), 0);
     const ac = c.conturi.reduce((s, x) => s + val(rCurent, x), 0);
@@ -268,8 +360,11 @@ async function tabloul(an) {
       ante1: a1,
       ante1Anualizat: a1 * factorAnte1,
       realizat: ac,
-      bugetat: nr(c.bugetat),
-      diferenta: ac - nr(c.bugetat),
+      bugetat: bugetatEfectiv,
+      bugetatAnual: nr(c.bugetat),
+      surse,
+      detaliat: surse.some((x) => x !== "anual/12"),
+      diferenta: ac - bugetatEfectiv,
       detalii: c.conturi.map((cont) => ({
         cont,
         denumire: (toate.get(cont) || {}).denumire || "",
@@ -339,6 +434,23 @@ function suma(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+async function scrieValoare(an, categorieId, cont, luna, valoare) {
+  await db
+    .prepare(
+      `INSERT INTO buget_valori (an, luna, categorie_id, cont, suma) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (an, luna, categorie_id, COALESCE(cont, '')) DO UPDATE SET suma = EXCLUDED.suma`
+    )
+    .run(an, luna, categorieId, cont, valoare);
+}
+
+async function stergeValoare(an, categorieId, cont, luna) {
+  await db
+    .prepare(
+      `DELETE FROM buget_valori WHERE an = ? AND luna = ? AND categorie_id = ? AND COALESCE(cont, '') = ?`
+    )
+    .run(an, luna, categorieId, cont == null ? "" : cont);
+}
+
 const procent = (parte, tot) => (Number(tot) ? (Number(parte) / Number(tot)) * 100 : 0);
 const pct = (parte, tot) =>
   `<span style="color:var(--text-muted);font-size:12px">${procent(parte, tot).toFixed(1).replace(".", ",")}%</span>`;
@@ -369,7 +481,15 @@ function register(router) {
       money(r.ante2),
       `${money(r.ante1)}<br>${pct(r.ante1, totalFel.ante1)}`,
       money(r.ante1Anualizat),
-      `<input name="b_${r.id}" value="${nr(r.bugetat) ? String(Math.round(nr(r.bugetat) * 100) / 100).replace(".", ",") : ""}" inputmode="decimal" style="width:120px;text-align:right">`,
+      `<input name="b_${r.id}" value="${nr(r.bugetatAnual) ? String(Math.round(nr(r.bugetatAnual) * 100) / 100).replace(".", ",") : ""}" inputmode="decimal" style="width:120px;text-align:right">
+         <div style="font-size:11px;margin-top:3px">
+           <a href="/buget/${an}/categorie/${r.id}">pe luni și subconturi →</a>
+         </div>
+         ${
+           r.detaliat
+             ? `<div style="font-size:11px;color:var(--success)">intră ${money(r.bugetat)} (${esc(r.surse.join(", "))})</div>`
+             : ""
+         }`,
       money(r.realizat),
       nr(r.bugetat)
         ? `<span style="color:${r.diferenta > 0 ? "var(--warn)" : "var(--success)"}">${money(r.diferenta)}</span>`
@@ -541,6 +661,165 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: `Buget ${an}`, active: "/buget", body }));
   });
 
+  // ---- o categorie, pe luni și pe subconturi ------------------------------
+  // Ruta asta stă DUPĂ „/buget/:an" ca literal, dar are patru segmente, deci
+  // nu se ciocnesc (routerul compară pe număr de segmente). test-rute.js
+  // verifică oricum la fiecare rulare.
+  router.get("/buget/:an/categorie/:id", async (ctx) => {
+    if (!eAdmin(ctx.user)) return send(ctx.res, 403, "Doar administratorul.");
+    const an = parseInt(ctx.params.an, 10);
+    const id = parseInt(ctx.params.id, 10);
+    if (!an || !id) return redirect(ctx.res, `/buget/${AN_IMPLICIT}`);
+    const cat = (await categoriile(an)).find((c) => c.id === id);
+    if (!cat) return redirect(ctx.res, `/buget/${an}`);
+
+    const valori = await valorileBuget(an);
+    const { peLuna, acoperite } = await realizatLunar(an);
+    const anterior = await realizatLunar(an - 1);
+    const numeCont = await realizatPeCont((await balantaAnului(an - 1) || {}).eticheta);
+
+    const lunaCap = LUNI.map((l, i) => `${l}${acoperite[i] ? "" : " *"}`);
+    const capete = ["Rând"].concat(lunaCap).concat(["Total an"]);
+
+    const celula = (cont, luna) => {
+      const cheie = `${cat.id}|${cont || ""}|${luna}`;
+      const v = valori.get(cheie);
+      return `<input name="v_${cont || "_"}_${luna}" value="${v === undefined ? "" : String(Math.round(v * 100) / 100).replace(".", ",")}" inputmode="decimal" style="width:82px;text-align:right">`;
+    };
+    const totalScris = (cont) => {
+      let t = 0;
+      let are = false;
+      for (let l = 1; l <= 12; l++) {
+        const v = valori.get(`${cat.id}|${cont || ""}|${l}`);
+        if (v !== undefined) { t += v; are = true; }
+      }
+      return are ? t : null;
+    };
+
+    const randConturi = cat.conturi.map((cont) => {
+      const tt = totalScris(cont);
+      return [
+        `<strong>${esc(cont)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${esc(
+          String((numeCont.get(cont) || {}).denumire || "").slice(0, 28)
+        )}</span>`,
+      ]
+        .concat(Array.from({ length: 12 }, (_, i) => celula(cont, i + 1)))
+        .concat([tt === null ? '<span style="color:var(--text-muted)">—</span>' : `<strong>${money(tt)}</strong>`]);
+    });
+
+    const ttCat = totalScris(null);
+    const randCategorie = [
+      `<strong>Pe categorie</strong><br><span style="font-size:11px;color:var(--text-muted)">fără defalcare</span>`,
+    ]
+      .concat(Array.from({ length: 12 }, (_, i) => celula(null, i + 1)))
+      .concat([ttCat === null ? '<span style="color:var(--text-muted)">—</span>' : `<strong>${money(ttCat)}</strong>`]);
+
+    // Bugetul care intră efectiv în total, lună cu lună, cu sursa lui.
+    const efectiv = Array.from({ length: 12 }, (_, i) => bugetLuna(cat, i + 1, valori));
+    const randEfectiv = ["<strong>Intră în buget</strong>"]
+      .concat(
+        efectiv.map(
+          (e) =>
+            `<strong>${money(e.suma)}</strong><br><span style="font-size:10px;color:var(--text-muted)">${esc(e.din)}</span>`
+        )
+      )
+      .concat([`<strong>${money(efectiv.reduce((a, b) => a + b.suma, 0))}</strong>`]);
+
+    const realizatLuni = Array.from({ length: 12 }, (_, i) =>
+      cat.conturi.reduce((s, cont) => {
+        const v = (peLuna.get(cont) || [])[i];
+        return v === null || v === undefined ? s : s + v;
+      }, 0)
+    );
+    const randRealizat = ["<strong>Realizat</strong>"]
+      .concat(realizatLuni.map((v, i) => (acoperite[i] ? money(v) : '<span style="color:var(--text-muted)">—</span>')))
+      .concat([`<strong>${money(realizatLuni.reduce((a, b) => a + b, 0))}</strong>`]);
+
+    const randDiferenta = ["<strong>Diferență</strong>"]
+      .concat(
+        realizatLuni.map((v, i) => {
+          if (!acoperite[i]) return '<span style="color:var(--text-muted)">—</span>';
+          const dif = v - efectiv[i].suma;
+          return `<span style="color:${dif > 0 ? "var(--warn)" : "var(--success)"}">${money(dif)}</span>`;
+        })
+      )
+      .concat([""]);
+
+    const anteriorLuni = Array.from({ length: 12 }, (_, i) =>
+      cat.conturi.reduce((s, cont) => {
+        const v = (anterior.peLuna.get(cont) || [])[i];
+        return v === null || v === undefined ? s : s + v;
+      }, 0)
+    );
+    const randAnterior = [`<strong>${an - 1} realizat</strong>`]
+      .concat(anteriorLuni.map((v) => money(v)))
+      .concat([`<strong>${money(anteriorLuni.reduce((a, b) => a + b, 0))}</strong>`]);
+
+    const body = `
+      <div class="toolbar" style="margin-bottom:10px">
+        <a class="btn secondary" href="/buget/${an}">← Înapoi la bugetul ${an}</a>
+      </div>
+      <h1 style="margin:6px 0 2px">${esc(cat.nume)} · ${an}</h1>
+      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:900px">
+        Scrii în celule: pe subcont și pe lună, sau pe categorie dacă nu vrei să defalci.
+        <strong>Suma subconturilor bate cifra de categorie</strong>, iar cifra de categorie bate anualul împărțit la 12 —
+        rândul „Intră în buget" arată, pentru fiecare lună, ce cifră contează și de unde vine.
+        ${acoperite.includes(false) ? "Lunile cu * n-au balanță încărcată, deci realizatul lor e necunoscut, nu zero." : ""}
+      </p>
+
+      <form method="post" action="/buget/${an}/categorie/${cat.id}">
+        <div class="toolbar" style="margin:0 0 10px;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn" type="submit">Salvează</button>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+            împarte pe 12 suma
+            <input name="imparte" inputmode="decimal" style="width:120px;text-align:right">
+          </label>
+          <button class="btn secondary" type="submit" name="actiune" value="imparte">Pune pe toate lunile</button>
+          <span style="font-size:12px;color:var(--text-muted)">Scrie o sumă anuală și o întinde egal pe cele 12 luni, pe rândul „Pe categorie".</span>
+        </div>
+        ${table(capete, randConturi.concat([randCategorie, randEfectiv, randRealizat, randDiferenta, randAnterior]))}
+        <div class="form-actions"><button class="btn" type="submit">Salvează</button></div>
+      </form>
+
+      <p style="font-size:12px;color:var(--text-muted);max-width:900px">
+        Realizatul pe lună se calculează ca diferența dintre balanța cumulată a lunii și cea a lunii precedente —
+        balanțele din Conta sunt cumulate de la 1 ianuarie. Dacă lipsește o lună de la mijloc, diferența ei
+        se adună la prima lună cu balanță de după.
+      </p>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: `${cat.nume} · ${an}`, active: "/buget", body }));
+  });
+
+  router.post("/buget/:an/categorie/:id", async (ctx) => {
+    if (!eAdmin(ctx.user)) return send(ctx.res, 403, "Doar administratorul.");
+    const an = parseInt(ctx.params.an, 10);
+    const id = parseInt(ctx.params.id, 10);
+    const cat = (await categoriile(an)).find((c) => c.id === id);
+    if (!cat) return redirect(ctx.res, `/buget/${an}`);
+    const b = ctx.body || {};
+
+    if (b.actiune === "imparte") {
+      const peLuna = Math.round((suma(b.imparte) / 12) * 100) / 100;
+      for (let l = 1; l <= 12; l++) await scrieValoare(an, cat.id, null, l, peLuna);
+      return redirect(ctx.res, `/buget/${an}/categorie/${cat.id}`);
+    }
+
+    for (const cheie of Object.keys(b)) {
+      if (!cheie.startsWith("v_")) continue;
+      const bucati = cheie.slice(2).split("_");
+      const luna = parseInt(bucati.pop(), 10);
+      const cont = bucati.join("_");
+      if (!luna || luna < 1 || luna > 12) continue;
+      const brut = String(b[cheie] == null ? "" : b[cheie]).trim();
+      const contReal = cont === "" ? null : cont;
+      if (contReal !== null && !cat.conturi.includes(contReal)) continue;
+      // Gol înseamnă „n-am scris nimic aici", nu zero: rândul dispare, iar
+      // nivelul de deasupra redevine cel care contează.
+      if (brut === "") await stergeValoare(an, cat.id, contReal, luna);
+      else await scrieValoare(an, cat.id, contReal, luna, suma(brut));
+    }
+    redirect(ctx.res, `/buget/${an}/categorie/${cat.id}`);
+  });
+
   router.post("/buget/:an/salveaza", async (ctx) => {
     if (!eAdmin(ctx.user)) return send(ctx.res, 403, "Doar administratorul.");
     const an = parseInt(ctx.params.an, 10);
@@ -567,6 +846,8 @@ function register(router) {
         await db
           .prepare("UPDATE buget_categorii SET bugetat = ? WHERE id = ?")
           .run(Math.round(r.ante1Anualizat * factor * 100) / 100, r.id);
+      // Prepopularea atinge DOAR cifra anuală. Ce ai scris pe luni sau pe
+      // subconturi rămâne — și rămâne și mai tare decât ea, cum scrie regula.
       return redirect(ctx.res, `/buget/${an}?prepopulat=1`);
     }
 
@@ -620,6 +901,10 @@ module.exports = {
   register,
   tabloul,
   rulajul,
+  realizatLunar,
+  valorileBuget,
+  bugetLuna,
+  LUNI,
   categoriile,
   categoriaImplicita,
   felulContului,
