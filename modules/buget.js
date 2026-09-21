@@ -771,14 +771,21 @@ function register(router) {
     const randConturi = cat.conturi.map((cont) => {
       const tt = totalScris(cont);
       return [
-        `<strong>${esc(cont)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${esc(
-          String((numeCont.get(cont) || {}).denumire || "").slice(0, 28)
-        )}</span>` +
-          (explicatia(cont)
-            ? `<br><span style="font-size:11px;color:var(--text-muted);font-style:italic;display:block;max-width:220px;line-height:1.35;margin-top:3px">${esc(
-                explicatia(cont)
-              )}</span>`
-            : ""),
+        // Coloana întâi are lățime minimă: fără ea, cele 12 casete de lună o
+        // strâng la un cuvânt pe rând și explicația devine o coloană de litere.
+        `<div style="min-width:230px">
+           <strong>${esc(cont)}</strong>
+           <span style="font-size:11px;color:var(--text-muted)">${esc(
+             String((numeCont.get(cont) || {}).denumire || "").slice(0, 34)
+           )}</span>
+           ${
+             explicatia(cont)
+               ? `<div style="font-size:11px;color:var(--text-muted);font-style:italic;line-height:1.35;margin-top:2px">${esc(
+                   explicatia(cont)
+                 )}</div>`
+               : ""
+           }
+         </div>`,
       ]
         .concat(Array.from({ length: 12 }, (_, i) => celula(cont, i + 1)))
         .concat([tt === null ? '<span style="color:var(--text-muted)">—</span>' : `<strong>${money(tt)}</strong>`]);
