@@ -621,8 +621,9 @@ function register(router) {
                Sărită: ${d.balanteIgnorate
                  .map((b) => `<strong>${esc(b.eticheta)}</strong> — ${esc(b.motiv)}`)
                  .join(" · ")}.
-               O balanță trasă înaintea alteia mai scurte conține date mai vechi decât ea; luată în calcul,
-               ar scădea din lunile deja închise sume care n-au fost stornate niciodată.
+               Într-un an, rulajul cumulat pe cheltuieli și venituri nu poate să scadă. Când o balanță cu
+               perioadă mai lungă are totalul mai mic, e trasă din Conta înainte să fie postate lunile care
+               lipsesc — luată în calcul, ar scădea din lunile închise sume care n-au fost stornate niciodată.
                <a href="/rapoarte/balanta/istoric">Vezi balanțele</a>.</p>`
           : ""
       }
