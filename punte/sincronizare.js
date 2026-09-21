@@ -375,24 +375,45 @@
   // ---- totul, pe rând -----------------------------------------------------
   // Un pas căzut nu-i oprește pe ceilalți: fiecare are try/catch, iar ce n-a
   // mers rămâne scris în jurnal cu motivul.
+  //
+  // FIECARE PAS SE ÎNCEARCĂ DE DOUĂ ORI. Rapoartele SmartBill sunt leneșe la
+  // prima deschidere din sesiune — pe 21.09.2026 raportul de facturi a dat
+  // „n-a răspuns în timp util", iar la a doua încercare a mers din prima și a
+  // adus 32 de rânduri. Fără reîncercare, sincronizarea raporta „gata" cu
+  // facturile lipsă, ceea ce e mai rău decât o eroare: pare că a mers.
+  //
+  // La final se întoarce un rezumat, nu jurnalul brut: dacă a căzut ceva,
+  // trebuie să se vadă de la prima privire, nu după ce citești zece rânduri.
   S.tot = async function (zile) {
     const z = zile || 14;
     S.jurnal = [];
     log("pornit", { firma: S.firma(), zile: z });
+    const rezultat = { firma: S.firma(), zile: z, reusite: {}, esuate: {} };
     for (const [nume, f] of [
       ["facturi", () => S.facturi(z)],
       ["incasari", () => S.incasari(z)],
       ["productie", () => S.productie(Math.max(z, 30))],
       ["costuri", () => S.costuri()],
     ]) {
-      try {
-        await f();
-      } catch (e) {
-        log(`${nume}: EȘUAT`, { motiv: String((e && e.message) || e).slice(0, 200) });
+      let ultimaEroare = null;
+      for (let incercare = 1; incercare <= 2; incercare++) {
+        try {
+          rezultat.reusite[nume] = await f();
+          ultimaEroare = null;
+          break;
+        } catch (e) {
+          ultimaEroare = String((e && e.message) || e).slice(0, 200);
+          if (incercare === 1) log(`${nume}: a picat, mai încerc o dată`, { motiv: ultimaEroare });
+        }
+      }
+      if (ultimaEroare) {
+        rezultat.esuate[nume] = ultimaEroare;
+        log(`${nume}: EȘUAT`, { motiv: ultimaEroare });
       }
     }
-    log("gata");
-    return S.jurnal;
+    const cazute = Object.keys(rezultat.esuate);
+    log(cazute.length ? `gata, DAR a picat: ${cazute.join(", ")}` : "gata, tot a mers");
+    return rezultat;
   };
 
   S.stare = () => S.jurnal;
