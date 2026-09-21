@@ -65,6 +65,7 @@ db.prepare = (sql) => ({
 });
 
 const mod = require(path.join(RAD, "modules", "buget.js"));
+const { explicatia } = require(path.join(RAD, "lib", "conturi.js"));
 const rute = { get: {}, post: {} };
 mod.register({
   get: (p, h) => { if (!rute.get[p]) rute.get[p] = h; },
@@ -351,6 +352,22 @@ const E26 = "TEST BUGET 2090";
     `DELETE FROM balante_snapshot WHERE eticheta = '${E26} veche'`,
     `DELETE FROM balante_snapshot WHERE eticheta = '${E25} scurt'`,
   ]) exec(s);
+
+  // --- explicația fiecărui subcont ----------------------------------------------------
+  // Denumirea din balanță („Alte cheltuieli de exploatare") nu spune ce pui acolo.
+  // Lista de mai jos sunt conturile REALE din balanța firmei, la 09.2026: dacă
+  // vreunul rămâne fără explicație, pagina îl lasă gol și degeaba e defalcat.
+  const conturiReale = ("601 6021 6022 6024 6028 603 604 6051 6052 6058 607 609 611 6123 613 615 617 622 6231 " +
+    "6232 624 625 626 627 628 635 641 6421 6422 6451 6453 6458 6461 6581 6583 6584 6588 6651 666 668 6811 691 " +
+    "7015 703 704 706 707 708 709 711 7583 7588 7651").split(" ");
+  const faraExplicatie = conturiReale.filter((c) => !explicatia(c));
+  egal("fiecare cont din balanța reală are explicație", faraExplicatie, []);
+  egal("prefixul cel mai lung câștigă și la explicații",
+    [explicatia("6022").slice(0, 8), explicatia("6027").slice(0, 8)],
+    ["Motorină", "Ce se co"]);
+  egal("un analitic inventat de contabilă tot primește explicația grupei",
+    explicatia("60712345") === explicatia("607"), true);
+  egal("un cont care nu e nici 6 nici 7 n-are ce explica", explicatia("401"), "");
 
   // --- bugetul pe lună și pe subcont ---------------------------------------------------
   const d9 = await mod.tabloul(AN);
