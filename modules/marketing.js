@@ -361,7 +361,9 @@ async function contacteDeCuratat() {
     .prepare(
       `SELECT c.id, c.nume, c.functie, c.email, c.telefon, c.sursa, c.partener_id,
               COALESCE(p.nume, c.firma_text, '') AS firma,
-              (SELECT COUNT(*) FROM mk_contacte_istoric i WHERE i.contact_id = c.id AND i.camp <> 'sters') AS atins
+              (SELECT COUNT(*) FROM mk_contacte_istoric i
+                WHERE i.contact_id = c.id
+                  AND i.camp NOT IN ('sters', 'legat-automat', 'legat-automat-desfacut')) AS atins
          FROM mk_contacte c LEFT JOIN parteneri p ON p.id = c.partener_id
         WHERE c.activ = 1
         ORDER BY COALESCE(p.nume, c.firma_text, 'zzz'), c.nume`
@@ -370,12 +372,179 @@ async function contacteDeCuratat() {
   const out = [];
   for (const c of toate) {
     // Un contact pe care l-a corectat cineva nu se mai atinge: cine a intrat
-    // pe el și i-a schimbat ceva a avut un motiv.
+    // pe el și i-a schimbat ceva a avut un motiv. Legarea automată de firmă NU
+    // se pune la socoteală — altfel butonul de legat ar face nevăzute exact
+    // contactele care nu-s oameni, iar curățenia n-ar mai avea ce propune.
     if (Number(c.atins) > 0) continue;
     const motiv = nuEOm(c);
     if (motiv) out.push({ ...c, motiv });
   }
   return out;
+}
+
+// ---- legarea contactelor de firma lor --------------------------------------
+//
+// DE CE: pe fișa AGORA PLAST blocul „Oameni la firma asta" era gol, deși în
+// Contacte exista logistica@agoraplast.ro. Contactul avea firma scrisă ca text,
+// nu legată de partener — așa că nu apărea nicăieri unde agentul se uită.
+//
+// Regula e aceeași cu cea de la emailuri: în adresă stă de obicei firma. Dar
+// aici nu ghicim din domeniu, ci ne sprijinim pe ce se știe deja, în ordinea
+// asta, și prima potrivire câștigă:
+//
+//   1. DOMENIU CONFIRMAT — harta pe care a confirmat-o un om la emailuri
+//      (email_domenii). E cea mai tare dovadă: cineva s-a uitat și a zis da.
+//   2. ALT OM DE LA ACELAȘI DOMENIU, deja legat de o firmă.
+//   3. ADRESA DE PE FIȘA FIRMEI — partenerul are email pe acel domeniu.
+//   4. NUMELE FIRMEI SCRIS PE CONTACT — firma_text se potrivește exact cu
+//      numele unui partener (fără formă juridică, fără punctuație).
+//
+// Ce NU se leagă niciodată:
+//   • domeniile publice (gmail, yahoo) — acolo adresa nu spune nimic despre
+//     firmă, doi oameni de la firme diferite au amândoi gmail;
+//   • domeniile noastre — un coleg nu e omul unui client;
+//   • un domeniu care duce la DOUĂ firme diferite. Mai bine nelegat decât
+//     legat greșit: un contact pus la firma greșită trimite oferta aiurea.
+//
+// Totul e reversibil: fiecare legare scrie un rând în istoric, iar butonul
+// „desfă" le scoate înapoi pe cele pe care nu le-a mai schimbat nimeni între timp.
+const DOMENII_PUBLICE_CONTACTE = new Set([
+  "gmail.com", "googlemail.com", "yahoo.com", "yahoo.ro", "yahoo.co.uk", "hotmail.com",
+  "hotmail.ro", "outlook.com", "live.com", "msn.com", "icloud.com", "me.com",
+  "protonmail.com", "proton.me", "aol.com", "gmx.com", "gmx.net", "mail.ru", "yandex.ru",
+]);
+
+const TEMEIURI = {
+  domeniu: "domeniu confirmat la emailuri",
+  coleg: "alt om de la același domeniu",
+  fisa: "adresa de pe fișa firmei",
+  nume: "numele firmei, scris pe contact",
+};
+
+// O hartă în care o cheie care duce la două firme diferite se strică dinadins:
+// valoarea devine null și nu se mai propune nimic pe ea.
+function pune(harta, cheie, partenerId) {
+  if (!cheie || !partenerId) return;
+  if (!harta.has(cheie)) return void harta.set(cheie, Number(partenerId));
+  const vechi = harta.get(cheie);
+  if (vechi !== null && vechi !== Number(partenerId)) harta.set(cheie, null);
+}
+
+async function contacteDeLegat() {
+  const firme = require("../lib/firme");
+  const { domeniulDin, numeStrans } = require("./legare");
+  await firme.domenii(); // ca eAlNostruAcum să aibă ce răspunde
+
+  const eDomeniuBun = (d) =>
+    !!d && d.includes(".") && !DOMENII_PUBLICE_CONTACTE.has(d) && !firme.eAlNostruAcum(d);
+
+  const parteneri = await db.prepare("SELECT id, nume, email FROM parteneri").all();
+  const numeDupaId = new Map(parteneri.map((p) => [Number(p.id), p.nume]));
+
+  // 1. harta confirmată la emailuri
+  const dinEmailuri = new Map();
+  for (const r of await db
+    .prepare("SELECT lower(domeniu) AS domeniu, partener_id FROM email_domenii")
+    .all()
+    .catch(() => []))
+    if (numeDupaId.has(Number(r.partener_id))) dinEmailuri.set(String(r.domeniu), Number(r.partener_id));
+
+  // 2. domeniile oamenilor deja legați
+  const dinColegi = new Map();
+  for (const c of await db
+    .prepare("SELECT email, partener_id FROM mk_contacte WHERE activ = 1 AND partener_id IS NOT NULL AND COALESCE(email,'') <> ''")
+    .all()) {
+    const d = domeniulDin(c.email);
+    if (eDomeniuBun(d)) pune(dinColegi, d, c.partener_id);
+  }
+
+  // 3. domeniile de pe fișele firmelor  4. numele firmelor
+  const dinFise = new Map();
+  const dupaNume = new Map();
+  for (const p of parteneri) {
+    const d = domeniulDin(p.email);
+    if (eDomeniuBun(d)) pune(dinFise, d, p.id);
+    const n = numeStrans(p.nume);
+    if (n && n.length >= 4) pune(dupaNume, n, p.id);
+  }
+
+  const fara = await db
+    .prepare(
+      `SELECT id, nume, functie, email, telefon, firma_text, sursa
+         FROM mk_contacte
+        WHERE activ = 1 AND partener_id IS NULL
+        ORDER BY COALESCE(firma_text, 'zzz'), nume`
+    )
+    .all();
+
+  const out = [];
+  for (const c of fara) {
+    const d = domeniulDin(c.email);
+    const bun = eDomeniuBun(d);
+    let partenerId = null;
+    let temei = null;
+    if (bun && dinEmailuri.has(d)) (partenerId = dinEmailuri.get(d)), (temei = "domeniu");
+    else if (bun && dinColegi.get(d)) (partenerId = dinColegi.get(d)), (temei = "coleg");
+    else if (bun && dinFise.get(d)) (partenerId = dinFise.get(d)), (temei = "fisa");
+    else {
+      const n = numeStrans(c.firma_text);
+      if (n && n.length >= 4 && dupaNume.get(n)) (partenerId = dupaNume.get(n)), (temei = "nume");
+    }
+    if (!partenerId || !numeDupaId.has(partenerId)) continue;
+    out.push({
+      ...c,
+      domeniu: d || "",
+      partener_id: partenerId,
+      partener_nume: numeDupaId.get(partenerId),
+      temei,
+      temei_zice: TEMEIURI[temei],
+    });
+  }
+  return out;
+}
+
+// Leagă efectiv. Lista se recalculează aici, nu se primește din formular: ce
+// se apasă trebuie să fie exact ce s-a arătat. `doarId` leagă un singur rând.
+async function leagaContacte(utilizatorId, doarId) {
+  const propuse = await contacteDeLegat();
+  const alese = doarId ? propuse.filter((c) => Number(c.id) === Number(doarId)) : propuse;
+  for (const c of alese) {
+    await db.prepare("UPDATE mk_contacte SET partener_id = ? WHERE id = ? AND partener_id IS NULL").run(c.partener_id, c.id);
+    await db
+      .prepare(
+        `INSERT INTO mk_contacte_istoric (contact_id, camp, valoare_veche, valoare_noua, schimbat_de, schimbat_la)
+         VALUES (?, 'legat-automat', ?, ?, ?, ?)`
+      )
+      .run(c.id, String(c.temei_zice || c.temei || "").slice(0, 100), `${c.partener_id}|${c.partener_nume}`, utilizatorId || null, acum());
+  }
+  return alese.length;
+}
+
+// Desface legăturile puse de buton — dar numai pe cele pe care nu le-a mai
+// mutat nimeni între timp: dacă un om a schimbat firma după aceea, rămâne cum
+// a pus el.
+async function desfaLegarea(utilizatorId) {
+  const puse = await db
+    .prepare(
+      `SELECT i.contact_id, i.valoare_noua, c.partener_id
+         FROM mk_contacte_istoric i JOIN mk_contacte c ON c.id = i.contact_id
+        WHERE i.camp = 'legat-automat' AND c.partener_id IS NOT NULL`
+    )
+    .all();
+  let n = 0;
+  for (const r of puse) {
+    const idPus = parseInt(String(r.valoare_noua || "").split("|")[0], 10);
+    if (!idPus || Number(r.partener_id) !== idPus) continue;
+    await db.prepare("UPDATE mk_contacte SET partener_id = NULL WHERE id = ?").run(r.contact_id);
+    await db
+      .prepare(
+        `INSERT INTO mk_contacte_istoric (contact_id, camp, valoare_veche, valoare_noua, schimbat_de, schimbat_la)
+         VALUES (?, 'legat-automat-desfacut', ?, '', ?, ?)`
+      )
+      .run(r.contact_id, String(r.valoare_noua || "").slice(0, 100), utilizatorId || null, acum());
+    n++;
+  }
+  return n;
 }
 
 // ---- adunarea contactelor din restul ERP-ului ------------------------------
@@ -635,6 +804,10 @@ function register(router) {
                <button class="btn secondary small" type="submit">Adună contactele din ERP</button>
                <span style="font-size:12px;color:var(--text-muted)">Ia persoanele de contact de pe parteneri și din leaduri. Nu adaugă de două ori același om.</span>
              </form>
+             <p style="margin:0 0 6px;font-size:13px">
+               <a href="/marketing/contacte/legare">Contacte fără firmă →</a>
+               <span style="color:var(--text-muted)">le leagă de partener după domeniul din adresă, ca la emailuri</span>
+             </p>
              <p style="margin:0 0 14px;font-size:13px">
                <a href="/marketing/contacte/curatenie">Contacte care nu par oameni →</a>
                <span style="color:var(--text-muted)">numele firmei pus în dreptul persoanei, funcții scrise singure, rânduri cu cifre</span>
@@ -694,6 +867,108 @@ function register(router) {
     if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
     const n = await adunaContacte(ctx.user ? ctx.user.id : null);
     redirect(ctx.res, `/marketing/contacte?adaugati=${n}`);
+  });
+
+  // ---- legarea contactelor de firma lor -----------------------------------
+  // Se arată întâi propunerile, cu temeiul lângă fiecare, și abia apoi se
+  // apasă. Rutele literale („legare", „legare/tot", „legare/unul", „legare/desfa")
+  // n-au niciun /:param înaintea lor pe „/marketing/contacte/…", deci nu are ce
+  // le înghiți — test-rute.js verifică asta la fiecare rulare.
+  router.get("/marketing/contacte/legare", async (ctx) => {
+    if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
+    const propuse = await contacteDeLegat();
+    const faraNimic = Number(
+      (await db
+        .prepare("SELECT COUNT(*) AS n FROM mk_contacte WHERE activ = 1 AND partener_id IS NULL")
+        .get()).n
+    );
+    const deDesfacut = Number(
+      (await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM mk_contacte_istoric i JOIN mk_contacte c ON c.id = i.contact_id
+            WHERE i.camp = 'legat-automat' AND c.partener_id IS NOT NULL`
+        )
+        .get()).n
+    );
+    const peTemei = new Map();
+    for (const c of propuse) peTemei.set(c.temei_zice, (peTemei.get(c.temei_zice) || 0) + 1);
+
+    const body = `
+      <p style="color:var(--text-muted);font-size:13px;max-width:900px">
+        În adresa de email stă de obicei firma. Butonul ăsta ia contactele care n-au firmă legată
+        și le pune la partenerul potrivit, sprijinindu-se pe ce se știe deja: harta de domenii
+        confirmată la emailuri, ceilalți oameni de la același domeniu, adresa de pe fișa firmei
+        sau numele firmei scris pe contact. <strong>Nu ghicește</strong>: gmail și yahoo nu se
+        leagă niciodată, domeniile noastre nici atât, iar un domeniu care duce la două firme
+        diferite e lăsat în pace.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">Fără firmă</div><div class="value">${faraNimic}</div></div>
+        <div class="card"><div class="label">Se pot lega acum</div><div class="value">${propuse.length}</div></div>
+        ${[...peTemei.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map((x) => `<div class="card"><div class="label">${esc(x[0])}</div><div class="value">${x[1]}</div></div>`)
+          .join("")}
+      </div>
+      ${
+        propuse.length
+          ? `<form method="post" action="/marketing/contacte/legare/tot" class="inline-form" style="margin:14px 0"
+                   onsubmit="return confirm('Leg toate cele ${propuse.length} contacte de firmele propuse?')">
+               <input type="hidden" name="da" value="1">
+               <button class="btn" type="submit">Leagă toate cele ${propuse.length}</button>
+               <span style="font-size:12px;color:var(--text-muted)">Se poate desface — fiecare legare rămâne în istoricul contactului.</span>
+             </form>
+             ${table(
+               ["Nume", "Funcție", "Email", "Firma scrisă pe contact", "Se leagă de", "De unde știm", ""],
+               propuse.map((c) => [
+                 `<a href="/marketing/contact/${c.id}">${esc(c.nume || "—")}</a>`,
+                 esc(c.functie || ""),
+                 esc(c.email || ""),
+                 esc(c.firma_text || "—"),
+                 `<a href="/parteneri/${c.partener_id}"><strong>${esc(c.partener_nume)}</strong></a>`,
+                 `<span style="font-size:12px;color:var(--text-muted)">${esc(c.temei_zice)}${
+                   c.domeniu && c.temei !== "nume" ? ` — ${esc(c.domeniu)}` : ""
+                 }</span>`,
+                 `<form method="post" action="/marketing/contacte/legare/unul" class="inline-form">
+                    <input type="hidden" name="id" value="${Number(c.id)}">
+                    <button class="link-btn" type="submit">leagă</button>
+                  </form>`,
+               ])
+             )}`
+          : `<p>Nimic de legat automat${
+              faraNimic ? ` — cele ${faraNimic} contacte fără firmă n-au de unde fi deduse` : ""
+            }.</p>`
+      }
+      ${
+        deDesfacut
+          ? `<form method="post" action="/marketing/contacte/legare/desfa" class="inline-form" style="margin-top:22px"
+                   onsubmit="return confirm('Desfac cele ${deDesfacut} legături puse automat?')">
+               <button class="btn secondary small" type="submit">Desfă cele ${deDesfacut} legate automat</button>
+               <span style="font-size:12px;color:var(--text-muted)">Rămân cum sunt cele pe care le-a mutat un om după aceea.</span>
+             </form>`
+          : ""
+      }`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Contacte fără firmă", active: "/marketing/contacte", body }));
+  });
+
+  router.post("/marketing/contacte/legare/tot", async (ctx) => {
+    if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
+    if (String((ctx.body || {}).da) !== "1") return redirect(ctx.res, "/marketing/contacte/legare");
+    const n = await leagaContacte(ctx.user ? ctx.user.id : null);
+    redirect(ctx.res, `/marketing/contacte?legate=${n}`);
+  });
+
+  router.post("/marketing/contacte/legare/unul", async (ctx) => {
+    if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
+    const id = parseInt((ctx.body || {}).id, 10);
+    if (id) await leagaContacte(ctx.user ? ctx.user.id : null, id);
+    redirect(ctx.res, "/marketing/contacte/legare");
+  });
+
+  router.post("/marketing/contacte/legare/desfa", async (ctx) => {
+    if (!eAdmin(ctx.user)) return redirect(ctx.res, "/marketing/contacte");
+    const n = await desfaLegarea(ctx.user ? ctx.user.id : null);
+    redirect(ctx.res, `/marketing/contacte/legare?desfacute=${n}`);
   });
 
   // ---- curățenia de contacte care nu-s oameni -----------------------------
@@ -1077,4 +1352,8 @@ module.exports = {
   blocContacte,
   nuEOm,
   contacteDeCuratat,
+  // Legarea contactelor de firma lor, după domeniul din adresă.
+  contacteDeLegat,
+  leagaContacte,
+  desfaLegarea,
 };

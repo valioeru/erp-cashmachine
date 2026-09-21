@@ -302,9 +302,21 @@ const VERIFICARI = [
         )
         .all();
       const platit = randuri.reduce((s, r) => s + nr(r.platit), 0);
+      // Pe ce luni stau. Contează: dacă sunt împrăștiate, e o scurgere care
+      // continuă; dacă sunt strânse pe două luni, e un import prost dintr-o
+      // singură rundă — și atunci se repară cu puntea, într-o singură trecere.
+      const peLuna = new Map();
+      for (const r of randuri) {
+        const l = String(r.data_emiterii || "").slice(0, 7);
+        if (l) peLuna.set(l, (peLuna.get(l) || 0) + 1);
+      }
+      const varf = [...peLuna.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+      const unde = varf.length ? `; mai ales ${varf.map((x) => `${x[0]} (${x[1]})`).join(", ")}` : "";
       return {
         n: randuri.length,
-        sumar: `${randuri.length} facturi fără linii, pe care s-au înregistrat ${money(platit)} încasări`,
+        sumar:
+          `${randuri.length} facturi fără linii, pe care s-au înregistrat ${money(platit)} încasări${unde}. ` +
+          `Se completează din SmartBill cu puntea: /punte/facturi-linii.js, apoi await __punte.totul(2026).`,
         antet: ["Factură", "Data", "Partener", "Încasat pe ea"],
         randuri: randuri.slice(0, LIMITA).map((r) => [
           `<a href="/facturi/${r.id}">${esc(String(r.serie || "") + String(r.numar || ""))}</a>`,
@@ -965,10 +977,24 @@ function register(router) {
     return deReparat;
   }
 
+  // Reparările făcute până acum, cu cele netrase încă înapoi. Butonul de
+  // desfăcut se arată numai dacă există ceva de desfăcut.
+  async function reparariUm() {
+    return await db
+      .prepare(
+        `SELECT r.id, r.facut_la, r.nr_produse, r.anulata_la, u.nume AS autor
+           FROM reparatii_um r LEFT JOIN utilizatori u ON u.id = r.facut_de
+          ORDER BY r.id DESC`
+      )
+      .all()
+      .catch(() => []);
+  }
+
   router.get("/admin/date/um-strambe", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
     const d = await umStrambe();
     const dinDovada = d.filter((x) => x.sursa !== "implicit").length;
+    const facute = await reparariUm();
 
     const body = `
       <div class="toolbar"><a class="btn secondary" href="/admin/date">← Înapoi la verificări</a></div>
@@ -1007,8 +1033,33 @@ function register(router) {
           ? `<form method="post" action="/admin/date/repara-um" style="margin-top:18px"
                    onsubmit="return confirm('Se schimbă unitatea de măsură la ${d.length} produse. Nimic altceva nu se atinge. Continui?')">
                <button class="btn" type="submit">Repară unitățile la cele ${d.length} produse</button>
+               <span style="font-size:12px;color:var(--text-muted);margin-left:8px">Se poate da înapoi — ce era înainte rămâne scris.</span>
              </form>`
           : `<p style="color:var(--success)">Nu e nimic de reparat.</p>`
+      }
+
+      ${
+        facute.length
+          ? `<h2 style="margin-top:26px">Reparări făcute</h2>
+             ${table(
+               ["Când", "Cine", "Produse", "Stare", ""],
+               facute.map((r) => [
+                 esc(r.facut_la || ""),
+                 esc(r.autor || "—"),
+                 String(r.nr_produse),
+                 r.anulata_la
+                   ? `<span style="color:var(--text-muted)">dată înapoi ${esc(r.anulata_la)}</span>`
+                   : '<span style="color:var(--success)">în vigoare</span>',
+                 r.anulata_la
+                   ? ""
+                   : `<form method="post" action="/admin/date/repara-um/desfa" class="inline-form"
+                            onsubmit="return confirm('Pun unitățile înapoi cum erau înainte de reparare?')">
+                        <input type="hidden" name="id" value="${Number(r.id)}">
+                        <button class="link-btn" type="submit">dă înapoi</button>
+                      </form>`,
+               ])
+             )}`
+          : ""
       }`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Unități de măsură", active: "/admin/date", body }));
   });
@@ -1016,6 +1067,15 @@ function register(router) {
   router.post("/admin/date/repara-um", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
     const d = await umStrambe();
+    if (!d.length) return redirect(ctx.res, "/admin/date/um-strambe");
+
+    // Ce era înainte se scrie PRIMUL. Dacă scrierea asta pică, nu se schimbă
+    // nimic: mai bine o reparare nefăcută decât una fără drum de întoarcere.
+    const vechi = d.map((p) => [Number(p.id), String(p.um || ""), String(p.nou || "")]);
+    const r = await db
+      .prepare("INSERT INTO reparatii_um (facut_de, nr_produse, vechi) VALUES (?, ?, ?) RETURNING id")
+      .run(ctx.user.id || null, d.length, JSON.stringify(vechi));
+
     let n = 0;
     for (const p of d) {
       await db.prepare("UPDATE produse SET unitate_masura = ? WHERE id = ?").run(p.nou, p.id);
@@ -1026,9 +1086,51 @@ function register(router) {
       <h2>Reparat</h2>
       <p>Am pus unitatea de măsură la <strong>${n}</strong> ${n === 1 ? "produs" : "produse"}:
       ${dinDovada} cu unitatea luată de la același produs de pe alt rând, ${n - dinDovada} pe „buc".</p>
-      <p style="color:var(--text-muted);font-size:13px">Nimic altceva nu s-a schimbat — nici prețuri, nici stocuri, nici linii de factură.</p>
+      <p style="color:var(--text-muted);font-size:13px">Nimic altceva nu s-a schimbat — nici prețuri, nici stocuri, nici linii de factură.
+      Ce era înainte e scris: se poate da înapoi din pagina de unități${r && r.lastInsertRowid ? ` (reparare #${r.lastInsertRowid})` : ""}.</p>
+      <a class="btn secondary" href="/admin/date/um-strambe">Înapoi la unități</a>
       <a class="btn secondary" href="/admin/date">Înapoi la verificări</a>`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Reparare unități", active: "/admin/date", body }));
+  });
+
+  // Drumul de întoarcere. Se pune înapoi DOAR acolo unde unitatea curentă e
+  // încă cea pusă de buton — un produs pe care l-a corectat un om între timp
+  // rămâne cum l-a lăsat el.
+  router.post("/admin/date/repara-um/desfa", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return send(ctx.res, 403, "Doar administratorul.");
+    const id = parseInt((ctx.body || {}).id, 10);
+    if (!id) return redirect(ctx.res, "/admin/date/um-strambe");
+    const rep = await db.prepare("SELECT id, vechi, anulata_la FROM reparatii_um WHERE id = ?").get(id);
+    if (!rep || rep.anulata_la) return redirect(ctx.res, "/admin/date/um-strambe");
+
+    let randuri = [];
+    try {
+      randuri = JSON.parse(rep.vechi || "[]");
+    } catch (e) {
+      randuri = [];
+    }
+    let pusiInapoi = 0;
+    let lasati = 0;
+    for (const [pid, umVeche, umNoua] of randuri) {
+      const p = await db.prepare("SELECT unitate_masura FROM produse WHERE id = ?").get(pid);
+      if (!p) continue;
+      if (String(p.unitate_masura || "") !== String(umNoua || "")) {
+        lasati++;
+        continue;
+      }
+      await db.prepare("UPDATE produse SET unitate_masura = ? WHERE id = ?").run(umVeche, pid);
+      pusiInapoi++;
+    }
+    await db
+      .prepare("UPDATE reparatii_um SET anulata_la = ?, anulata_de = ? WHERE id = ?")
+      .run(new Date().toISOString().slice(0, 19).replace("T", " "), ctx.user.id || null, id);
+
+    const body = `
+      <h2>Dat înapoi</h2>
+      <p>Am pus unitatea veche la <strong>${pusiInapoi}</strong> ${pusiInapoi === 1 ? "produs" : "produse"}.
+      ${lasati ? `${lasati} ${lasati === 1 ? "a rămas" : "au rămas"} cum ${lasati === 1 ? "e" : "sunt"} — ${lasati === 1 ? "i-a" : "le-a"} schimbat cineva între timp.` : ""}</p>
+      <a class="btn secondary" href="/admin/date/um-strambe">Înapoi la unități</a>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Dat înapoi", active: "/admin/date", body }));
   });
 
   router.get("/admin/date/cantitati-strambe", async (ctx) => {

@@ -227,7 +227,11 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări — comenzi", active: "/comenzi", body }));
   });
 
-  router.get("/comenzi/nou", async (ctx) => {
+  // Formularul de comandă nouă, redat și la deschidere și când salvarea a fost
+  // oprită. Ce a scris omul se întoarce cu el: o comandă cu zece linii nu se
+  // tastează de două ori pentru că a uitat clientul.
+  async function formularComandaNoua(ctx, { eroare, valori } = {}) {
+    const v = valori || {};
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'furnizor' ORDER BY nume").all();
     const produse = await db.prepare("SELECT id, denumire, pret_vanzare FROM produse ORDER BY denumire").all();
     if (parteneri.length === 0 || produse.length === 0) {
@@ -241,30 +245,52 @@ function register(router) {
         })
       );
     }
-    const produsOptions = produse
-      .map((p) => `<option value="${p.id}" data-pret="${p.pret_vanzare}">${esc(p.denumire)}</option>`)
-      .join("");
+    const optiuniProdus = (ales) =>
+      produse
+        .map(
+          (p) =>
+            `<option value="${p.id}" data-pret="${p.pret_vanzare}"${String(ales) === String(p.id) ? " selected" : ""}>${esc(p.denumire)}</option>`
+        )
+        .join("");
 
-    const body = `<form method="post" action="/comenzi" class="form" style="max-width:820px">
+    // Liniile scrise deja, dacă salvarea a fost oprită. Altfel, un rând gol.
+    const linii = Array.isArray(v.linii) && v.linii.length ? v.linii : [{}];
+
+    const body = `
+    ${
+      eroare
+        ? `<p class="alerta" style="max-width:820px;color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 12px">${esc(eroare)}</p>`
+        : ""
+    }
+    <form method="post" action="/comenzi" class="form" style="max-width:820px">
       <label class="field"><span>Client</span>
-        <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
+        <select name="partener_id" required>
+          <option value="">— alege clientul —</option>
+          ${parteneri
+            .map((p) => `<option value="${p.id}"${String(v.partener_id) === String(p.id) ? " selected" : ""}>${esc(p.nume)}</option>`)
+            .join("")}
+        </select>
       </label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-        <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar"></label>
-        <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta"></label>
+        <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
+        <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta" value="${esc(v.data_livrare_ceruta || "")}"></label>
       </div>
-      <label class="field"><span>Observații</span><textarea name="observatii" rows="2"></textarea></label>
+      <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
       <h2>Produse comandate</h2>
       <table class="table lines-table">
         <thead><tr><th>Produs</th><th>Cantitate</th><th>Preț unitar</th><th></th></tr></thead>
         <tbody id="linii-body">
-          <tr>
-            <td><select name="produs_id[]" onchange="comenziFillPret(this)">${produsOptions}</select></td>
-            <td><input type="number" step="0.01" name="cantitate[]"></td>
-            <td><input type="number" step="0.01" name="pret_unitar[]"></td>
+          ${linii
+            .map(
+              (l) => `<tr>
+            <td><select name="produs_id[]" onchange="comenziFillPret(this)">${optiuniProdus(l.produs_id)}</select></td>
+            <td><input type="number" step="0.01" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
+            <td><input type="number" step="0.01" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
             <td><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
-          </tr>
+          </tr>`
+            )
+            .join("")}
         </tbody>
       </table>
       <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>
@@ -276,6 +302,10 @@ function register(router) {
     </form>
     ${lineRowsScript()}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
+  }
+
+  router.get("/comenzi/nou", async (ctx) => {
+    await formularComandaNoua(ctx);
   });
 
   router.post("/comenzi", async (ctx) => {
@@ -283,6 +313,42 @@ function register(router) {
     const produsIds = asArray(ctx.body["produs_id[]"]);
     const cantitati = asArray(ctx.body["cantitate[]"]);
     const preturi = asArray(ctx.body["pret_unitar[]"]);
+
+    // ---- clientul e obligatoriu ------------------------------------------
+    //
+    // Cererea lui Vali. Până acum lista de clienți n-avea rând gol, deci
+    // PRIMUL client din alfabet era ales din start: un agent care uita să
+    // aleagă nu primea nicio eroare — comanda pleca, corectă în toate privințele
+    // în afară de firma pe care era trecută. Iar dacă lipsea de tot
+    // (formular trimis din altă parte), inserarea crăpa cu 500, fiindcă
+    // partener_id e NOT NULL în bază.
+    //
+    // Acum lista începe cu „— alege clientul —", iar aici se verifică din nou:
+    // ce vine prin HTTP nu se crede pe cuvânt, oricât de strict ar fi
+    // formularul. Ce a scris omul se întoarce cu el, ca să nu retasteze.
+    const valori = {
+      partener_id,
+      numar,
+      observatii,
+      data_livrare_ceruta: ctx.body.data_livrare_ceruta,
+      linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i] })),
+    };
+    const idClient = parseInt(partener_id, 10);
+    if (!idClient) {
+      return await formularComandaNoua(ctx, { eroare: "Alege clientul — o comandă nu poate exista fără el.", valori });
+    }
+    const client = await db.prepare("SELECT id FROM parteneri WHERE id = ?").get(idClient);
+    if (!client) {
+      return await formularComandaNoua(ctx, { eroare: "Clientul ales nu mai există în ERP. Alege altul.", valori });
+    }
+    // O comandă fără nicio linie cu cantitate e tot o comandă goală: intră în
+    // lista depozitului și nu are ce se potrivi cu stocul.
+    if (!produsIds.some((id, i) => Number(cantitati[i] || 0) > 0)) {
+      return await formularComandaNoua(ctx, {
+        eroare: "Scrie cel puțin o linie cu cantitate — altfel comanda ajunge goală la depozit.",
+        valori,
+      });
+    }
 
     // Client pe roșu = fără comenzi noi de la agent. Adminul poate trece
     // peste, dar conștient — nu din reflex.

@@ -74,6 +74,11 @@ const CATEGORII = [
         desc: "Cash Machine + Warehouse All adunate, cu facturile dintre ele eliminate. Vânzări, costuri, marjă, solduri — pe firme și pe total grup.",
       },
       {
+        href: "/rapoarte/clienti-cheie",
+        nume: "Clienți cheie vs. restul",
+        desc: "Cât s-a facturat fără TVA, lună cu lună, la Delivery + Cargus, eMAG Retail și Poșta Română față de toți ceilalți — cu sumele și procentele. Fără Negru and Negru, fără BCR Leasing, fără facturile de peste 100.000 de la Warehouse All.",
+      },
+      {
         href: "/rapoarte/scadentar-grup",
         nume: "Scadențar grup — de încasat & de plătit",
         desc: "Tot ce ai de încasat și de plătit, pe ambele firme, într-o singură fereastră, cu poziția netă pe fiecare zi.",
