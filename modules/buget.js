@@ -105,23 +105,63 @@ function categoriaImplicita(cont) {
 
 // ---- balanțele: ce s-a realizat, pe cont -----------------------------------
 //
-// Pentru un an se ia balanța cu perioada cea mai lungă din anul ăla: dacă
-// există și „la 31.07" și „la 14.09", contează a doua. Pe anii încheiați e
-// balanța anuală, pe anul în curs e cea mai recentă.
-async function balantaAnului(an) {
+// Balanțele unui an, în ordinea perioadei, curățate de două feluri de gunoi:
+//
+// 1. „Balanța" cu un singur cont — o rulare eșuată a punții, nu o balanță.
+//
+// 2. BALANȚA VECHE CU PERIOADĂ LUNGĂ. Capcana adevărată, plătită pe date reale:
+//    pe 14.09 s-a tras din Conta „01.01 → 14.09", dar contabila nu postase încă
+//    august, așa că balanța aia conținea de fapt cifrele până la 31.07. Pe 19.09
+//    s-a tras „01.01 → 31.08", cu august închis. Sortate după perioadă, cea de
+//    pe 14.09 vine ULTIMA și pare cea mai proaspătă — și scădea 526.024,58 lei
+//    din septembrie, ca și cum s-ar fi stornat vânzări.
+//
+//    Regula: parcurse în ordinea perioadei, o balanță trasă ÎNAINTE de una deja
+//    acceptată care acoperă o perioadă mai scurtă e date vechi — n-avea de unde
+//    să știe ce s-a înregistrat între timp. Se sare peste ea.
+//    (Balanțele importate în același minut — cum vin lunile vechi, toate odată —
+//    au aceeași oră, iar comparația e strictă, deci rămân toate.)
+async function snapshoturileAnului(an) {
   const r = await db
     .prepare(
-      `SELECT eticheta, MIN(data_de_la) AS de_la, MAX(data_pana) AS pana, COUNT(*) AS conturi
+      `SELECT eticheta, MIN(data_de_la) AS de_la, MAX(data_pana) AS pana,
+              COUNT(*) AS conturi, MAX(incarcat_la) AS incarcat
          FROM balante_snapshot
         WHERE SUBSTR(data_de_la, 1, 4) = ?
         GROUP BY eticheta
-        ORDER BY MAX(data_pana) DESC, COUNT(*) DESC`
+        ORDER BY MAX(data_pana) ASC, COUNT(*) ASC`
     )
     .all(String(an))
     .catch(() => []);
-  // O „balanță" cu un singur cont e o rulare eșuată a punții, nu o balanță.
-  const bune = r.filter((x) => Number(x.conturi) > 5);
-  return bune.length ? bune[0] : null;
+  const bune = [];
+  const ignorate = [];
+  let ultimaIncarcare = "";
+  for (const x of r) {
+    if (Number(x.conturi) <= 5) {
+      ignorate.push({ ...x, motiv: `are doar ${x.conturi} ${Number(x.conturi) === 1 ? "cont" : "conturi"}` });
+      continue;
+    }
+    const incarcat = String(x.incarcat || "");
+    if (incarcat && ultimaIncarcare && incarcat < ultimaIncarcare) {
+      ignorate.push({ ...x, motiv: `trasă din Conta pe ${zi(incarcat)}, înaintea balanței mai scurte de pe ${zi(ultimaIncarcare)}` });
+      continue;
+    }
+    if (incarcat > ultimaIncarcare) ultimaIncarcare = incarcat;
+    bune.push(x);
+  }
+  return { bune, ignorate };
+}
+
+function zi(t) {
+  const m = String(t || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : String(t || "");
+}
+
+// Balanța de referință a unui an: ultima rămasă după curățenia de mai sus. Pe
+// anii încheiați e balanța anuală, pe anul în curs e cea mai recentă VALIDĂ.
+async function balantaAnului(an) {
+  const { bune } = await snapshoturileAnului(an);
+  return bune.length ? bune[bune.length - 1] : null;
 }
 
 // Rulajul pe cont, pentru conturile de venituri și cheltuieli.
@@ -191,17 +231,7 @@ const LUNI = ["ian", "feb", "mar", "apr", "mai", "iun", "iul", "aug", "sep", "oc
 // cheltuit nimic" sunt două lucruri diferite, iar confundate ar strica și
 // graficul, și diferența față de buget.
 async function realizatLunar(an) {
-  const etichete = await db
-    .prepare(
-      `SELECT eticheta, MIN(data_de_la) AS de_la, MAX(data_pana) AS pana, COUNT(*) AS conturi
-         FROM balante_snapshot
-        WHERE SUBSTR(data_de_la, 1, 4) = ?
-        GROUP BY eticheta
-        ORDER BY MAX(data_pana) ASC`
-    )
-    .all(String(an))
-    .catch(() => []);
-  const bune = etichete.filter((x) => Number(x.conturi) > 5);
+  const { bune, ignorate } = await snapshoturileAnului(an);
   const peLuna = new Map(); // cont -> [12] (null = lună fără balanță)
   const acoperite = new Array(12).fill(false);
   let cumulatAnterior = new Map();
@@ -229,7 +259,7 @@ async function realizatLunar(an) {
   }
   // Lunile dintre două balanțe (ex. avem 31.01 și 31.03, lipsește februarie)
   // primesc diferența pe ultima lună acoperită — nu se poate despărți mai fin.
-  return { peLuna, acoperite };
+  return { peLuna, acoperite, ignorate };
 }
 
 // ---- cifrele scrise de om, pe lună și pe subcont -----------------------------
@@ -314,9 +344,18 @@ async function seamanaAn(an, conturiCunoscute) {
 // ---- tabloul întreg ---------------------------------------------------------
 async function tabloul(an) {
   const anii = { doiAnteriori: an - 2, anterior: an - 1, curent: an };
-  const bAnte2 = await balantaAnului(anii.doiAnteriori);
-  const bAnte1 = await balantaAnului(anii.anterior);
-  const bCurent = await balantaAnului(anii.curent);
+  const sAnte2 = await snapshoturileAnului(anii.doiAnteriori);
+  const sAnte1 = await snapshoturileAnului(anii.anterior);
+  const sCurent = await snapshoturileAnului(anii.curent);
+  const ultima = (s) => (s.bune.length ? s.bune[s.bune.length - 1] : null);
+  const bAnte2 = ultima(sAnte2);
+  const bAnte1 = ultima(sAnte1);
+  const bCurent = ultima(sCurent);
+  // Balanțele sărite peste (vechi sau rupte) se spun pe față: altfel cifra pare
+  // pur și simplu alta decât în Conta și nu se înțelege de ce.
+  const ignorate = []
+    .concat(sAnte2.ignorate, sAnte1.ignorate, sCurent.ignorate)
+    .filter((x) => !String(x.motiv).startsWith("are doar"));
 
   const rAnte2 = await realizatPeCont(bAnte2 && bAnte2.eticheta);
   const rAnte1 = await realizatPeCont(bAnte1 && bAnte1.eticheta);
@@ -400,6 +439,7 @@ async function tabloul(an) {
     an,
     anii,
     balante: { ante2: bAnte2, ante1: bAnte1, curent: bCurent },
+    balanteIgnorate: ignorate,
     luniAnte1,
     factorAnte1,
     venituri,
@@ -558,6 +598,17 @@ function register(router) {
             : ""
         }
       </p>
+      ${
+        d.balanteIgnorate.length
+          ? `<p style="font-size:12px;color:var(--warn);margin:-8px 0 14px">
+               Sărită: ${d.balanteIgnorate
+                 .map((b) => `<strong>${esc(b.eticheta)}</strong> — ${esc(b.motiv)}`)
+                 .join(" · ")}.
+               O balanță trasă înaintea alteia mai scurte conține date mai vechi decât ea; luată în calcul,
+               ar scădea din lunile deja închise sume care n-au fost stornate niciodată.
+               <a href="/rapoarte/balanta/istoric">Vezi balanțele</a>.</p>`
+          : ""
+      }
 
       <div class="cards">
         <div class="card"><div class="label">Venituri bugetate ${an}</div><div class="value">${money(t.venituri.bugetat)}</div>
@@ -751,9 +802,17 @@ function register(router) {
         return v === null || v === undefined ? s : s + v;
       }, 0)
     );
+    // Aceeași regulă ca pe anul curent: o lună fără balanță e necunoscută, nu
+    // zero. Pe anul trecut se vede cel mai des — balanțele se încarcă din mers.
     const randAnterior = [`<strong>${an - 1} realizat</strong>`]
-      .concat(anteriorLuni.map((v) => money(v)))
-      .concat([`<strong>${money(anteriorLuni.reduce((a, b) => a + b, 0))}</strong>`]);
+      .concat(
+        anteriorLuni.map((v, i) =>
+          anterior.acoperite[i] ? money(v) : '<span style="color:var(--text-muted)">—</span>'
+        )
+      )
+      .concat([
+        `<strong>${money(anteriorLuni.reduce((a, b, i) => (anterior.acoperite[i] ? a + b : a), 0))}</strong>`,
+      ]);
 
     const body = `
       <div class="toolbar" style="margin-bottom:10px">
@@ -765,6 +824,7 @@ function register(router) {
         <strong>Suma subconturilor bate cifra de categorie</strong>, iar cifra de categorie bate anualul împărțit la 12 —
         rândul „Intră în buget" arată, pentru fiecare lună, ce cifră contează și de unde vine.
         ${acoperite.includes(false) ? "Lunile cu * n-au balanță încărcată, deci realizatul lor e necunoscut, nu zero." : ""}
+        ${anterior.acoperite.includes(false) ? `La fel pe ${an - 1}: lunile fără balanță apar „—", iar totalul anului le sare.` : ""}
       </p>
 
       <form method="post" action="/buget/${an}/categorie/${cat.id}">
@@ -910,6 +970,7 @@ module.exports = {
   felulContului,
   realizatPeCont,
   balantaAnului,
+  snapshoturileAnului,
   luniAcoperite,
   suma,
   seamanaAn,
