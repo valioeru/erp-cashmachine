@@ -28,6 +28,7 @@ require("./modules/sincronizare").register(router);
 require("./modules/taskuri").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
+require("./modules/clienti-cheie").register(router);
 require("./modules/balanta").register(router);
 require("./modules/cashflow").register(router);
 require("./modules/costuri").register(router);
