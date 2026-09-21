@@ -159,5 +159,33 @@ for (const [u, cale, asteptat, eticheta] of cazuri) {
 if (auth.sectiune("/parteneri/919") === "/financiar") ok("în bara de sus se aprinde tot Financiar, nu două butoane");
 else rau("s-a mutat partenerul din bara de sus", auth.sectiune("/parteneri/919"));
 
+// --- butonul de Dezvoltare se vede de toată lumea ---------------------------
+// Dreptul de a scrie o cerere de modificare îl are oricine e logat, dar cât
+// timp intrarea stătea doar sub Management, agenții aveau dreptul și n-aveau
+// pe unde intra. Testul verifică BARA, nu dreptul: butonul trebuie să apară.
+const render = require(path.join(RAD, "lib", "render.js"));
+const dezv = render.NAV.find((x) => x.href === "/dezvoltare");
+if (!dezv) rau("butonul de Dezvoltare a dispărut din bara de sus");
+else {
+  const oameni = [
+    ["agent de vânzări", { rol: "vanzari", sectiuni: "/crm" }],
+    ["achiziții", { rol: "depozit", sectiuni: "/depozit" }],
+    ["producție", { rol: "productie", sectiuni: "/productie" }],
+    ["financiar", { rol: "financiar", sectiuni: "/financiar" }],
+    ["om fără nicio bifă", { rol: "vanzari", sectiuni: "" }],
+    ["administrator", { rol: "admin", sectiuni: "" }],
+  ];
+  const orbi = oameni.filter(([, u]) => !auth.poateAccesa(u, dezv.href)).map(([e]) => e);
+  if (orbi.length) rau("nu văd butonul de Dezvoltare", orbi.join(", "));
+  else ok(`butonul „${dezv.label}” se vede de toate rolurile (${oameni.length} verificate)`);
+}
+// Și nu se aprind două butoane deodată când omul e pe pagina de cereri.
+const aprinse = render.NAV.filter((x) => {
+  const z = auth.sectiune("/dezvoltare");
+  return x.zone ? x.zone.concat(x.evidentiaza || []).includes(z) : z === (x.zona || x.href);
+});
+if (aprinse.length === 1) ok("pe pagina de cereri se aprinde un singur buton: " + aprinse[0].label);
+else rau("se aprind mai multe butoane deodată", aprinse.map((x) => x.label).join(", ") || "niciunul");
+
 console.log(`\n${rele ? rele + " probleme." : "Totul curat."}\n`);
 process.exit(rele ? 1 : 0);
