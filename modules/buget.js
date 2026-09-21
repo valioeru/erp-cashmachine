@@ -124,14 +124,34 @@ async function balantaAnului(an) {
   return bune.length ? bune[0] : null;
 }
 
-// Rulajul net pe cont: cheltuielile cresc pe debit, veniturile pe credit.
+// Rulajul pe cont, pentru conturile de venituri și cheltuieli.
+//
+// DOUĂ CAPCANE, amândouă deja plătite o dată în raportul de indicatori (vezi
+// `rulaje` din modules/rapoarte.js — aceeași regulă, scrisă acolo întâi):
+//
+// 1. SmartBill Conta ÎNCHIDE LUNAR clasele 6 și 7 prin 121. Pe un cont de
+//    venituri, creditul (venitul) și debitul (închiderea) ajung egale — deci
+//    „credit minus debit" dă ZERO pe toată balanța. Partea adevărată e rulajul
+//    care NU e închiderea: la venituri CREDITUL, la cheltuieli DEBITUL, fără
+//    scădere. Prima versiune a paginii ăsteia scădea, și arăta un buget cu
+//    toate veniturile pe zero — credibil la prima vedere, complet greșit.
+//
+// 2. Unele balanțe au coloana „rulaj" goală și doar „total sume" completată.
+//    Atunci rulajul perioadei e total sume minus soldul inițial.
+function rulajul(x, areTotaluri) {
+  return areTotaluri
+    ? { d: nr(x.ts_d) - nr(x.si_d), c: nr(x.ts_c) - nr(x.si_c) }
+    : { d: nr(x.r_d), c: nr(x.r_c) };
+}
+
 async function realizatPeCont(eticheta) {
   const harta = new Map();
   if (!eticheta) return harta;
   const randuri = await db
-    .prepare("SELECT cont, denumire, r_d, r_c FROM balante_snapshot WHERE eticheta = ?")
+    .prepare("SELECT cont, denumire, si_d, si_c, r_d, r_c, ts_d, ts_c FROM balante_snapshot WHERE eticheta = ?")
     .all(eticheta)
     .catch(() => []);
+  const areTotaluri = randuri.some((x) => nr(x.ts_d) !== 0 || nr(x.ts_c) !== 0);
   for (const x of randuri) {
     const cont = String(x.cont || "").trim();
     const fel = felulContului(cont);
@@ -139,7 +159,10 @@ async function realizatPeCont(eticheta) {
     // Doar conturile de detaliu: balanța conține și rândurile de grup („60",
     // „6"), iar adunându-le pe toate am număra de două-trei ori aceeași sumă.
     if (cont.length < 3) continue;
-    const val = fel === "cheltuiala" ? nr(x.r_d) - nr(x.r_c) : nr(x.r_c) - nr(x.r_d);
+    const r = rulajul(x, areTotaluri);
+    // 709 („reduceri comerciale acordate") e un cont de venituri cu sold
+    // debitor: scade din cifra de afaceri, nu se adună la ea.
+    const val = fel === "cheltuiala" ? r.d : cont.startsWith("709") ? -r.d : r.c;
     harta.set(cont, { cont, denumire: x.denumire || "", fel, val });
   }
   // Un cont sintetic rămas (ex. „607") când există și analiticele lui
@@ -567,6 +590,7 @@ function register(router) {
 module.exports = {
   register,
   tabloul,
+  rulajul,
   categoriile,
   categoriaImplicita,
   felulContului,
