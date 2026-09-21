@@ -116,11 +116,16 @@ function categoriaImplicita(cont) {
 //    pe 14.09 vine ULTIMA și pare cea mai proaspătă — și scădea 526.024,58 lei
 //    din septembrie, ca și cum s-ar fi stornat vânzări.
 //
-//    Regula: parcurse în ordinea perioadei, o balanță trasă ÎNAINTE de una deja
-//    acceptată care acoperă o perioadă mai scurtă e date vechi — n-avea de unde
-//    să știe ce s-a înregistrat între timp. Se sare peste ea.
-//    (Balanțele importate în același minut — cum vin lunile vechi, toate odată —
-//    au aceeași oră, iar comparația e strictă, deci rămân toate.)
+//    Regula e o proprietate a cifrelor, nu o ghicitoare despre cine când a tras:
+//    ÎNTR-UN AN, RULAJUL CUMULAT PE CLASELE 6 ȘI 7 NU POATE SĂ SCADĂ. Dacă o
+//    balanță cu perioadă mai lungă are totalul mai mic decât una mai scurtă,
+//    n-are cum să fie mai nouă — e o tragere făcută înainte să fie postate
+//    lunile care lipsesc. Se sare peste ea.
+//
+//    (Prima variantă compara ORA tragerii. Mergea pe cazul din septembrie și
+//    arunca balanța anuală pe 2025, trasă în august și urmată de una scurtă
+//    trasă în septembrie — 9,3 milioane în loc de 18,6. Ora spune cine a venit
+//    primul, nu cine știe mai mult.)
 async function snapshoturileAnului(an) {
   const r = await db
     .prepare(
@@ -135,19 +140,26 @@ async function snapshoturileAnului(an) {
     .catch(() => []);
   const bune = [];
   const ignorate = [];
-  let ultimaIncarcare = "";
+  let maxim = 0;
+  let deUnde = null;
   for (const x of r) {
     if (Number(x.conturi) <= 5) {
       ignorate.push({ ...x, motiv: `are doar ${x.conturi} ${Number(x.conturi) === 1 ? "cont" : "conturi"}` });
       continue;
     }
-    const incarcat = String(x.incarcat || "");
-    if (incarcat && ultimaIncarcare && incarcat < ultimaIncarcare) {
-      ignorate.push({ ...x, motiv: `trasă din Conta pe ${zi(incarcat)}, înaintea balanței mai scurte de pe ${zi(ultimaIncarcare)}` });
+    const cumulat = await realizatPeCont(x.eticheta);
+    const total = [...cumulat.values()].reduce((s, y) => s + Math.abs(nr(y.val)), 0);
+    if (deUnde && total < maxim - 0.01) {
+      ignorate.push({
+        ...x,
+        motiv:
+          `rulaj cumulat ${money(total)} la ${zi(x.pana)}, sub cel de la ${zi(deUnde.pana)} (${money(maxim)})` +
+          (x.incarcat ? ` — trasă din Conta pe ${zi(x.incarcat)}, înainte să fie postat tot` : ""),
+      });
       continue;
     }
-    if (incarcat > ultimaIncarcare) ultimaIncarcare = incarcat;
-    bune.push(x);
+    if (total >= maxim) { maxim = total; deUnde = x; }
+    bune.push({ ...x, cumulat, total });
   }
   return { bune, ignorate };
 }
@@ -241,7 +253,8 @@ async function realizatLunar(an) {
     const luna = Number(String(e.pana).slice(5, 7));
     if (!luna || luna < 1 || luna > 12) continue;
     // Două balanțe pentru aceeași lună: contează ultima, deja sortate crescător.
-    const cumulat = await realizatPeCont(e.eticheta);
+    // Cifrele s-au citit deja când s-a ales balanța — nu se mai citesc o dată.
+    const cumulat = e.cumulat || (await realizatPeCont(e.eticheta));
     for (const [cont, x] of cumulat) {
       if (!peLuna.has(cont)) peLuna.set(cont, new Array(12).fill(null));
       const anterior = cumulatAnterior.has(cont) ? cumulatAnterior.get(cont).val : 0;
@@ -357,9 +370,10 @@ async function tabloul(an) {
     .concat(sAnte2.ignorate, sAnte1.ignorate, sCurent.ignorate)
     .filter((x) => !String(x.motiv).startsWith("are doar"));
 
-  const rAnte2 = await realizatPeCont(bAnte2 && bAnte2.eticheta);
-  const rAnte1 = await realizatPeCont(bAnte1 && bAnte1.eticheta);
-  const rCurent = await realizatPeCont(bCurent && bCurent.eticheta);
+  // Cifrele au fost citite la alegerea balanței (acolo se compară totalurile).
+  const rAnte2 = (bAnte2 && bAnte2.cumulat) || new Map();
+  const rAnte1 = (bAnte1 && bAnte1.cumulat) || new Map();
+  const rCurent = (bCurent && bCurent.cumulat) || new Map();
 
   const luniAnte1 = bAnte1 ? luniAcoperite(bAnte1.de_la, bAnte1.pana) : 12;
   const factorAnte1 = luniAnte1 >= 11.5 ? 1 : 12 / luniAnte1;
@@ -727,7 +741,7 @@ function register(router) {
     const valori = await valorileBuget(an);
     const { peLuna, acoperite } = await realizatLunar(an);
     const anterior = await realizatLunar(an - 1);
-    const numeCont = await realizatPeCont((await balantaAnului(an - 1) || {}).eticheta);
+    const numeCont = (await balantaAnului(an - 1) || {}).cumulat || new Map();
 
     const lunaCap = LUNI.map((l, i) => `${l}${acoperite[i] ? "" : " *"}`);
     const capete = ["Rând"].concat(lunaCap).concat(["Total an"]);
