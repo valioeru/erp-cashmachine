@@ -61,6 +61,68 @@ function butonulVerificarii(actiune) {
           </form>`;
 }
 
+// Același număr de factură de vânzare, la aceeași firmă.
+//
+// Verificarea strictă de mai sus cere și suma egală la bănuț, și tocmai de-aia
+// a scăpat cazul care contează: CSHMUPA-40 a intrat o dată din fișier (cu
+// liniile de produse: 3.353,39 lei) și o dată prin punte (cu o singură linie
+// „conform document", cu TVA-ul reconstituit: 3.353,40 lei). UN BAN diferență,
+// și cele două exemplare nu se mai grupau.
+//
+// La vânzări numerotarea e a noastră și e unică prin lege, deci un număr
+// repetat la aceeași firmă e întotdeauna o greșeală. Curățarea se face însă
+// doar acolo unde e sigur că e același document: același client și aceeași
+// dată. Restul rămân în listă, de citit cu ochiul.
+const SQL_NUMAR_REFOLOSIT = `
+  SELECT COALESCE(f.firma_id, 0) AS firma_id, UPPER(f.serie) AS serie, f.numar,
+         COUNT(*) AS n,
+         COUNT(DISTINCT f.partener_id) AS clienti_diferiti,
+         COUNT(DISTINCT SUBSTR(COALESCE(f.data_emiterii, ''), 1, 10)) AS date_diferite,
+         string_agg(CAST(f.id AS TEXT), ',' ORDER BY f.id) AS ids,
+         string_agg(DISTINCT COALESCE(p.nume, '?'), ' · ') AS clienti,
+         string_agg(DISTINCT SUBSTR(COALESCE(f.data_emiterii, ''), 1, 10), ' · ') AS date,
+         string_agg(DISTINCT COALESCE(f.sursa_import, 'scrisă de mână'), ' · ') AS surse
+    FROM (SELECT * FROM facturi WHERE activ = 1) f
+    LEFT JOIN parteneri p ON p.id = f.partener_id
+   WHERE f.directie = 'vanzare' AND f.numar IS NOT NULL AND f.serie IS NOT NULL
+     AND f.sursa_import IS NOT NULL
+   GROUP BY 1, 2, 3
+  HAVING COUNT(*) > 1
+   ORDER BY COUNT(*) DESC, 2, 3`;
+
+// Din fiecare grup rămâne exemplarul cu CELE MAI MULTE LINII — adică cel cu
+// detaliul pe produse, nu cel cu „conform document". La egalitate, cel mai
+// vechi id. Invers ar fi însemnat să păstrăm rândul mai sărac și să aruncăm
+// produsele.
+async function exemplareDeScosDinNumereRefolosite() {
+  const grupuri = await db.prepare(SQL_NUMAR_REFOLOSIT).all().catch(() => []);
+  const sigure = grupuri.filter((g) => Number(g.clienti_diferiti) === 1 && Number(g.date_diferite) === 1);
+  if (!sigure.length) return { deScos: [], grupuri: sigure };
+
+  const toateIds = [];
+  for (const g of sigure) for (const id of String(g.ids || "").split(",").filter(Boolean)) toateIds.push(Number(id));
+  if (!toateIds.length) return { deScos: [], grupuri: sigure };
+
+  const linii = await db
+    .prepare(
+      `SELECT f.id, COALESCE(l.n, 0) AS linii
+         FROM facturi f
+         LEFT JOIN (SELECT factura_id, COUNT(*) AS n FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+        WHERE f.id IN (${toateIds.map(() => "?").join(",")})`
+    )
+    .all(...toateIds);
+  const cateLinii = new Map(linii.map((x) => [Number(x.id), Number(x.linii)]));
+
+  const deScos = [];
+  for (const g of sigure) {
+    const ids = String(g.ids || "").split(",").map(Number).filter((x) => x > 0);
+    if (ids.length < 2) continue;
+    const pastrat = ids.slice().sort((a, b) => (cateLinii.get(b) || 0) - (cateLinii.get(a) || 0) || a - b)[0];
+    for (const id of ids) if (id !== pastrat) deScos.push(id);
+  }
+  return { deScos, grupuri: sigure };
+}
+
 function sqlDuplicate(directie) {
   const doc =
     directie === "achizitie"
@@ -570,27 +632,15 @@ const VERIFICARI = [
       "Verificarea de deasupra cere ca exemplarele să fie identice în tot — număr, client, dată și sumă. Asta lasă pe dinafară cazul mai urât: același număr, la aceeași firmă, dar cu client sau sumă diferite. La vânzări numerotarea e a noastră și e unică prin lege, deci nu există „două facturi CSHM-3168”: ori una e greșit numerotată, ori una e intrată de două ori și ceva s-a schimbat pe drum. Sunt și rândurile care împiedică baza să-și pună paza automată împotriva dublurilor.",
     gravitate: "rosu",
     async ruleaza() {
-      const randuri = await db
-        .prepare(
-          `SELECT COALESCE(f.firma_id, 0) AS firma_id, UPPER(f.serie) AS serie, f.numar,
-                  COUNT(*) AS n,
-                  string_agg(CAST(f.id AS TEXT), ',' ORDER BY f.id) AS ids,
-                  string_agg(DISTINCT COALESCE(p.nume, '?'), ' · ') AS clienti,
-                  string_agg(DISTINCT SUBSTR(COALESCE(f.data_emiterii, ''), 1, 10), ' · ') AS date,
-                  string_agg(DISTINCT COALESCE(f.sursa_import, 'scrisă de mână'), ' · ') AS surse
-             FROM (SELECT * FROM facturi WHERE activ = 1) f
-             LEFT JOIN parteneri p ON p.id = f.partener_id
-            WHERE f.directie = 'vanzare' AND f.numar IS NOT NULL AND f.serie IS NOT NULL
-              AND f.sursa_import IS NOT NULL
-            GROUP BY 1, 2, 3
-           HAVING COUNT(*) > 1
-            ORDER BY COUNT(*) DESC, 2, 3`
-        )
-        .all()
-        .catch(() => []);
+      const randuri = await db.prepare(SQL_NUMAR_REFOLOSIT).all().catch(() => []);
+      const { deScos } = await exemplareDeScosDinNumereRefolosite();
+      const nesigure = randuri.filter((x) => Number(x.clienti_diferiti) > 1 || Number(x.date_diferite) > 1);
       return {
         n: randuri.length,
         sumar: `${randuri.length} numere folosite de mai multe ori`,
+        nota: nesigure.length
+          ? `${nesigure.length} dintre ele au client sau dată diferite — alea nu se curăță cu butonul, se citesc cu ochiul: ori sunt două facturi chiar diferite, prost numerotate, ori s-a schimbat ceva între importuri.`
+          : "Toate au același client și aceeași dată, deci sunt sigur același document — butonul păstrează exemplarul cu detaliul pe produse și îl scoate pe celălalt.",
         antet: ["Serie și număr", "Exemplare", "Clienți", "Date", "Venite din", "Facturile"],
         randuri: randuri.slice(0, LIMITA).map((x) => [
           `<strong>${esc(x.serie)}-${esc(x.numar)}</strong>`,
@@ -604,6 +654,14 @@ const VERIFICARI = [
             .map((id) => `<a href="/facturi/${id}">#${esc(id)}</a>`)
             .join(" "),
         ]),
+        actiune: deScos.length
+          ? {
+              href: "/admin/date/numar-refolosit/curata",
+              eticheta: `Scoate cele ${deScos.length} exemplare sigure`,
+              confirmare:
+                "Se dezactivează doar exemplarele din grupurile cu ACELAȘI client și ACEEAȘI dată. Din fiecare grup rămâne cel cu detaliul pe produse (cele mai multe linii), la egalitate cel mai vechi. Nu se șterge nimic — se poate anula din istoricul de curățări. Continui?",
+            }
+          : null,
       };
     },
   },
@@ -1623,6 +1681,35 @@ function register(router) {
       .prepare("INSERT INTO curatari_duplicate (facut_de, directie, nr_documente, suma, ids) VALUES (?, 'vanzare', ?, ?, ?)")
       .run(ctx.user.id, deScos.length, suma, JSON.stringify(deScos));
     redirect(ctx.res, "/admin/date?curatate=" + deScos.length + "#vanzari-duplicate");
+  });
+
+  // ---- curățarea numerelor de factură refolosite --------------------------
+  // Folosește EXACT aceeași funcție ca raportul, deci nu poate atinge alt rând
+  // decât cel numărat în eticheta butonului. Intră în același istoric ca
+  // duplicatele stricte, ca să meargă și readucerea.
+  router.post("/admin/date/numar-refolosit/curata", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const { deScos } = await exemplareDeScosDinNumereRefolosite();
+    if (!deScos.length) return redirect(ctx.res, "/admin/date#numar-refolosit");
+
+    const sume = await db
+      .prepare(
+        `SELECT COALESCE(SUM(t.total), 0) AS suma
+           FROM facturi f
+           LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+          WHERE f.id IN (${deScos.map(() => "?").join(",")})`
+      )
+      .get(...deScos);
+
+    const LOT = 200;
+    for (let i = 0; i < deScos.length; i += LOT) {
+      const lot = deScos.slice(i, i + LOT);
+      await db.prepare(`UPDATE facturi SET activ = 0 WHERE id IN (${lot.map(() => "?").join(",")})`).run(...lot);
+    }
+    await db
+      .prepare("INSERT INTO curatari_duplicate (facut_de, directie, nr_documente, suma, ids) VALUES (?, 'vanzare', ?, ?, ?)")
+      .run(ctx.user.id, deScos.length, nr(sume && sume.suma), JSON.stringify(deScos));
+    redirect(ctx.res, "/admin/date?curatate=" + deScos.length + "#numar-refolosit");
   });
 
   // ---- scoaterea unui document de test din bază ---------------------------
