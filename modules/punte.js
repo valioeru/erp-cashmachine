@@ -22,6 +22,7 @@
 const db = require("../lib/db");
 const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const { cheiaFacturii } = require("../lib/documente");
 
 const MAX_OCTETI = 6 * 1024 * 1024; // ~6 MB per lot
 const MAX_RANDURI = 5000;
@@ -466,9 +467,23 @@ async function ingestFacturi(randuri) {
   }
 
   // cheile facturilor deja existente, ca reimportul aceluiași raport să nu dubleze
+  //
+  // ZEROURILE DIN FAȚA NUMĂRULUI. Capcana care a costat 315.159 lei de vânzări
+  // fantomă: SmartBill dă seria CSHMUPA cu numărul scris „0052", iar coloana
+  // din bază e INTEGER, deci la inserare devine 52. Cheia construită din textul
+  // brut („CSHMUPA|0052") nu se potrivea niciodată cu cea recitită din bază
+  // („CSHMUPA|52"), așa că factura intra DIN NOU la fiecare sincronizare —
+  // de trei ori pe unele, cât timp au stat în fereastra raportului.
+  //
+  // Nu se vedea în log (puntea raporta „create", ceea ce era adevărat) și nici
+  // în seria CSHM, care nu e cu zerouri. Se vedea doar pe fișa clientului, ca
+  // trei rânduri identice.
+  //
+  // Deci numărul se normalizează la fel pe amândouă părțile: „0052", „52" și
+  // 52 sunt același număr de factură.
   const existente = new Set();
   for (const f of await db.prepare("SELECT serie, numar, firma_id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
-    existente.add(`${String(f.serie || "").toUpperCase()}|${f.numar}|${f.firma_id || ""}`);
+    existente.add(cheiaFacturii(f.serie, f.numar, f.firma_id));
   }
 
   const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
@@ -494,7 +509,7 @@ async function ingestFacturi(randuri) {
       implicita.id ||
       null;
 
-    const cheie = `${String(serie).toUpperCase()}|${numar}|${firmaId || ""}`;
+    const cheie = cheiaFacturii(serie, numar, firmaId);
     if (existente.has(cheie)) { sarite++; continue; }
 
     // partenerul: întâi după CUI, apoi după nume; comun pe tot grupul
@@ -557,7 +572,17 @@ async function ingestFacturi(randuri) {
       existente.add(cheie);
       create++;
     } catch (e) {
-      erori.push(`${serie}${numar}: ${String((e && e.message) || e).slice(0, 120)}`);
+      // Indexul unic de sub facturile de import a prins un duplicat pe care
+      // cheia din memorie l-a scăpat. Se spune pe românește, nu în limba
+      // PostgreSQL — altfel logul pare o defecțiune, când de fapt paza și-a
+      // făcut treaba și factura era deja în bază.
+      const mesaj = String((e && e.message) || e);
+      erori.push(
+        /duplicate key|unique constraint/i.test(mesaj)
+          ? `${serie}${numar}: era deja în bază (a prins-o paza împotriva dublurilor) — nu s-a mai adăugat`
+          : `${serie}${numar}: ${mesaj.slice(0, 120)}`
+      );
+      existente.add(cheie);
     }
   }
 

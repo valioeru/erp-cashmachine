@@ -41,6 +41,26 @@ const LIMITA = 25;
 // Raman false pozitive posibile: doua livrari identice catre acelasi client,
 // in aceeasi zi, la aceeasi suma. Sunt rare, se vad in lista, iar curatarea
 // nu porneste niciodata singura.
+// Butonul de reparare al unei verificări.
+//
+// „actiune" e un obiect: {href, eticheta, confirmare}. Pagina îl punea direct
+// în șablon — `${r.rez.actiune || ""}` — și un obiect pus într-un șablon se
+// scrie „[object Object]". Adică butonul de curățare a facturilor duplicate
+// era scris în cod, testat în cap, și NU A EXISTAT NICIODATĂ pe ecran: în
+// locul lui stătea textul ăla, pe care ochiul îl citește ca pe un artefact.
+// Curățarea din 20.09 s-a făcut lovind ruta direct, nu apăsând butonul.
+//
+// De-aia randarea stă acum într-o funcție, cu un test care cere ca fiecare
+// verificare cu acțiune să scoată un formular adevărat către ruta ei.
+function butonulVerificarii(actiune) {
+  if (!actiune || !actiune.href) return "";
+  const confirmare = String(actiune.confirmare || "Continui?").replace(/'/g, "\\'");
+  return `<form method="post" action="${esc(actiune.href)}" style="margin:8px 0 12px"
+            onsubmit="return confirm('${esc(confirmare)}')">
+            <button class="btn danger" type="submit">${esc(actiune.eticheta || "Repară")}</button>
+          </form>`;
+}
+
 function sqlDuplicate(directie) {
   const doc =
     directie === "achizitie"
@@ -1366,7 +1386,7 @@ function register(router) {
         return `
           <h2 id="${r.cheie}">${esc(r.titlu)} ${insigna}</h2>
           <p style="margin:-6px 0 10px;color:var(--text-muted);font-size:13px">${esc(r.de_ce)}</p>
-          ${r.rez.n === 0 ? '<p style="color:var(--success);font-size:13px">Nimic de semnalat.</p>' : `<p style="font-size:13px"><strong>${esc(r.rez.sumar)}</strong></p>${r.rez.actiune || ""}${table(r.rez.antet, r.rez.randuri)}${r.rez.n > LIMITA ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${LIMITA} din ${r.rez.n}.</p>` : ""}`}`;
+          ${r.rez.n === 0 ? '<p style="color:var(--success);font-size:13px">Nimic de semnalat.</p>' : `<p style="font-size:13px"><strong>${esc(r.rez.sumar)}</strong></p>${butonulVerificarii(r.rez.actiune)}${table(r.rez.antet, r.rez.randuri)}${r.rez.n > LIMITA ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${LIMITA} din ${r.rez.n}.</p>` : ""}`}`;
       })
       .join("");
 

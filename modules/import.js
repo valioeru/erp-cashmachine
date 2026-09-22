@@ -17,6 +17,7 @@ const { send, redirect } = require("../lib/router");
 const smartbill = require("../lib/smartbill");
 const grup = require("../lib/grup");
 const { xlsxDisponibil, normalizeHeader, gasesteColoana, gasesteRandHeader, parseFisier, parseNumar, parseData } = require("../lib/import-utils");
+const { cheiaFacturii, cheiaDocumentExtern } = require("../lib/documente");
 
 const ALIASE = {
   serie: ["serie", "seria"],
@@ -679,7 +680,11 @@ function register(router) {
     // "FF 2026/00123" și "FF2026-00123" sunt același document scris diferit —
     // normalizarea (majuscule, fără spații/punctuație) le face egale, deci
     // reimportul aceluiași fișier sau al unui export refăcut nu creează dubluri.
-    const normDoc = (d) => String(d || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    // Și aici numărul se normalizează: „0052" din fișier și 52 din bază sunt
+    // același număr. Fără asta, seriile cu zerouri în față (CSHMUPA) nu se
+    // recunosc niciodată ca fiind deja intrate — vezi lib/documente.js, unde
+    // stă și povestea celor 315.159 lei de vânzări fantomă.
+    const normDoc = (d) => cheiaDocumentExtern(d);
     // La achiziții, cheile de dedup includ și DATA: numerele de bon fiscal și
     // numerotarea furnizorilor mici se RECICLEAZĂ (același "Bon fiscal 27" de
     // la METROREX apare în luni diferite = documente diferite, nu dubluri).
@@ -691,7 +696,7 @@ function register(router) {
     const existente = new Set();
     const cheiPentru = (serie, numar, partenerId, docExtern, data) => {
       const sufix = cuData ? `|${String(data || "").slice(0, 10)}` : "";
-      return [`${serie}|${numar}|${partenerId}${sufix}`, `DOC|${normDoc(docExtern)}|${partenerId}${sufix}`];
+      return [cheiaFacturii(serie, numar, partenerId) + sufix, `DOC|${normDoc(docExtern)}|${partenerId}${sufix}`];
     };
     for (const f of existenteRanduri) {
       const [c1, c2] = cheiPentru(f.serie, f.numar, f.partener_id, f.document_extern, f.data_emiterii);
