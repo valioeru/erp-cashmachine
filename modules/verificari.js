@@ -518,6 +518,14 @@ const VERIFICARI = [
     gravitate: "rosu",
     async ruleaza() {
       const grupuri = await db.prepare(sqlDuplicate("vanzare")).all();
+      // Paza din bază se pune abia când nu mai sunt duplicate (un index unic nu
+      // se poate crea peste rânduri care îl încalcă), deci starea ei nu se poate
+      // ghici din cod — se întreabă baza și se scrie pe pagină. Altfel nu se
+      // poate ști dacă plasa e întinsă sau doar scrisă în comentarii.
+      const paza = await db
+        .prepare("SELECT 1 AS da FROM pg_indexes WHERE indexname = 'idx_facturi_vanzare_import_unic'")
+        .get()
+        .catch(() => null);
       let inPlus = 0;
       const detalii = [];
       for (const g of grupuri) {
@@ -539,6 +547,9 @@ const VERIFICARI = [
       return {
         n: grupuri.length,
         sumar: `${grupuri.length} facturi intrate de mai multe ori, ${money(inPlus)} creanțe care nu există`,
+        nota: paza
+          ? "Baza are pusă paza: aceeași factură de vânzare, adusă din import, nu mai poate intra de două ori la aceeași firmă. Dacă puntea încearcă, refuză baza și scrie în log."
+          : "Paza din bază NU e pusă încă — indexul unic se creează la prima pornire de după ce nu mai există niciun duplicat. Curăță exemplarele în plus, apoi repornește aplicația.",
         antet: ["Document", "Client", "Data", "Suma", "Exemplare", "Facturile"],
         randuri: detalii,
         actiune: grupuri.length
@@ -1386,7 +1397,8 @@ function register(router) {
         return `
           <h2 id="${r.cheie}">${esc(r.titlu)} ${insigna}</h2>
           <p style="margin:-6px 0 10px;color:var(--text-muted);font-size:13px">${esc(r.de_ce)}</p>
-          ${r.rez.n === 0 ? '<p style="color:var(--success);font-size:13px">Nimic de semnalat.</p>' : `<p style="font-size:13px"><strong>${esc(r.rez.sumar)}</strong></p>${butonulVerificarii(r.rez.actiune)}${table(r.rez.antet, r.rez.randuri)}${r.rez.n > LIMITA ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${LIMITA} din ${r.rez.n}.</p>` : ""}`}`;
+          ${r.rez.n === 0 ? '<p style="color:var(--success);font-size:13px">Nimic de semnalat.</p>' : `<p style="font-size:13px"><strong>${esc(r.rez.sumar)}</strong></p>${butonulVerificarii(r.rez.actiune)}${table(r.rez.antet, r.rez.randuri)}${r.rez.n > LIMITA ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${LIMITA} din ${r.rez.n}.</p>` : ""}`}
+          ${r.rez.nota ? `<p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">${esc(r.rez.nota)}</p>` : ""}`;
       })
       .join("");
 
