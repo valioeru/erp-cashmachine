@@ -564,6 +564,50 @@ const VERIFICARI = [
     },
   },
   {
+    cheie: "numar-refolosit",
+    titlu: "Același număr de factură de vânzare, folosit de două ori",
+    de_ce:
+      "Verificarea de deasupra cere ca exemplarele să fie identice în tot — număr, client, dată și sumă. Asta lasă pe dinafară cazul mai urât: același număr, la aceeași firmă, dar cu client sau sumă diferite. La vânzări numerotarea e a noastră și e unică prin lege, deci nu există „două facturi CSHM-3168”: ori una e greșit numerotată, ori una e intrată de două ori și ceva s-a schimbat pe drum. Sunt și rândurile care împiedică baza să-și pună paza automată împotriva dublurilor.",
+    gravitate: "rosu",
+    async ruleaza() {
+      const randuri = await db
+        .prepare(
+          `SELECT COALESCE(f.firma_id, 0) AS firma_id, UPPER(f.serie) AS serie, f.numar,
+                  COUNT(*) AS n,
+                  string_agg(CAST(f.id AS TEXT), ',' ORDER BY f.id) AS ids,
+                  string_agg(DISTINCT COALESCE(p.nume, '?'), ' · ') AS clienti,
+                  string_agg(DISTINCT SUBSTR(COALESCE(f.data_emiterii, ''), 1, 10), ' · ') AS date,
+                  string_agg(DISTINCT COALESCE(f.sursa_import, 'scrisă de mână'), ' · ') AS surse
+             FROM (SELECT * FROM facturi WHERE activ = 1) f
+             LEFT JOIN parteneri p ON p.id = f.partener_id
+            WHERE f.directie = 'vanzare' AND f.numar IS NOT NULL AND f.serie IS NOT NULL
+              AND f.sursa_import IS NOT NULL
+            GROUP BY 1, 2, 3
+           HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC, 2, 3`
+        )
+        .all()
+        .catch(() => []);
+      return {
+        n: randuri.length,
+        sumar: `${randuri.length} numere folosite de mai multe ori`,
+        antet: ["Serie și număr", "Exemplare", "Clienți", "Date", "Venite din", "Facturile"],
+        randuri: randuri.slice(0, LIMITA).map((x) => [
+          `<strong>${esc(x.serie)}-${esc(x.numar)}</strong>`,
+          x.n,
+          esc(String(x.clienti || "").slice(0, 80)),
+          esc(String(x.date || "")),
+          esc(String(x.surse || "")),
+          String(x.ids || "")
+            .split(",")
+            .filter(Boolean)
+            .map((id) => `<a href="/facturi/${id}">#${esc(id)}</a>`)
+            .join(" "),
+        ]),
+      };
+    },
+  },
+  {
     cheie: "facturi-sume-uriase",
     titlu: "Facturi de peste un milion de lei",
     de_ce:
