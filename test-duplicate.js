@@ -224,6 +224,40 @@ function sectiune(corp, cheie) {
   const dupaADoua = q(`SELECT id FROM facturi WHERE serie = 'DUPTEST' AND activ = 0 ORDER BY id`).map((x) => Number(x.id));
   egal("a doua curățare scoate tot exemplarele în plus, nimic altceva", dupaADoua, inPlus);
 
+  // --- 7. ZEROURILE DIN FAȚA NUMĂRULUI ------------------------------------
+  // Cauza celor 315.159 lei de vânzări fantomă: SmartBill dă „CSHMUPA 0052",
+  // coloana din bază e INTEGER și reține 52, iar cheia de dedup construită din
+  // text nu se mai potrivea cu cea recitită din bază. Factura reintra la
+  // FIECARE sincronizare. Seria CSHM (fără zerouri) mergea, de-aia nu s-a văzut.
+  const doc = require(path.join(RAD, "lib", "documente.js"));
+  egal("„0052”, „52” și 52 sunt același număr",
+    [doc.numarDocument("0052"), doc.numarDocument("52"), doc.numarDocument(52), doc.numarDocument(" 0052 ")],
+    ["52", "52", "52", "52"]);
+  egal("cheia din fișier bate cheia recitită din bază",
+    doc.cheiaFacturii("CSHMUPA", "0052", 1) === doc.cheiaFacturii("cshmupa", 52, 1), true);
+  egal("dar două firme diferite rămân două facturi",
+    doc.cheiaFacturii("CSHMUPA", "0052", 1) === doc.cheiaFacturii("CSHMUPA", "0052", 2), false);
+  egal("și două numere diferite rămân diferite",
+    doc.cheiaFacturii("CSHMUPA", "0052", 1) === doc.cheiaFacturii("CSHMUPA", "0053", 1), false);
+  egal("documentul extern se normalizează la fel",
+    [doc.cheiaDocumentExtern("CSHMUPA0052"), doc.cheiaDocumentExtern("cshmupa-52"), doc.cheiaDocumentExtern("CSHMUPA 0052")],
+    ["CSHMUPA52", "CSHMUPA52", "CSHMUPA52"]);
+  egal("un număr care nu e numeric rămâne cum e, nu inventăm o valoare",
+    doc.numarDocument("2026/A17"), "2026/A17");
+
+  // --- 8. butonul de curățare EXISTĂ pe ecran ------------------------------
+  // A fost scris în cod ca obiect {href, eticheta, confirmare} și pus direct în
+  // șablon, unde un obiect se scrie „[object Object]". Adică butonul n-a existat
+  // niciodată: curățarea din 20.09 s-a făcut lovind ruta direct.
+  // Pașii de dinainte au lăsat exemplarele în plus dezactivate, deci raportul e
+  // curat și n-ar avea de ce să scoată vreun buton. Le punem la loc ca să avem
+  // ce repara.
+  exec1(`UPDATE facturi SET activ = 1 WHERE serie = 'DUPTEST'`);
+  const pagina = await cer("/admin/date");
+  cere("pagina de verificări are butonul de curățare, nu „[object Object]”", pagina.corp,
+    ['action="/admin/date/duplicate/curata"', "Scoate exemplarele în plus"],
+    ["[object Object]"]);
+
   // --- curățenie ----------------------------------------------------------
   exec1(`DELETE FROM facturi_linii WHERE factura_id IN (SELECT id FROM facturi WHERE serie = 'DUPTEST')`);
   exec1(`DELETE FROM facturi WHERE serie = 'DUPTEST'`);
