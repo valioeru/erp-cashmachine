@@ -634,7 +634,33 @@ async function balanteAnalizate() {
       ...analizeazaBalanta(conturi, zileDeLaInceputDeAn(pana)),
     });
   }
-  return iesire;
+
+  // BALANȚA TRASĂ ÎNAINTE DE VREME. Aceeași capcană reparată în Buget, pe alt
+  // drum: pe 14.09 s-a tras din Conta „01.01 → 14.09", dar august nu era postat,
+  // deci conținea cifrele până la 31.07. Pe 19.09 s-a tras „01.01 → 31.08", cu
+  // august închis. Sortate după perioadă, cea de pe 14.09 vine ultima și pare
+  // cea mai proaspătă — iar tabelul lunar arăta un septembrie cu −1.502.072 lei
+  // cifră de afaceri și −311.023 lei profit, adică exact cât adusese august, dat
+  // înapoi. Un raport de bancă în care ultima lună e pe minus fără motiv.
+  //
+  // Regula e o proprietate a cifrelor, nu o ghicitoare: ÎNTR-UN AN, CIFRA DE
+  // AFACERI CUMULATĂ DE LA 1 IANUARIE NU POATE SĂ SCADĂ. Când scade, balanța e
+  // o tragere prematură și se sare peste ea.
+  const ignorate = [];
+  const bune = [];
+  const maximPeAn = new Map();
+  for (const b of iesire) {
+    const caB = Number(b.ca || 0);
+    const maxim = maximPeAn.get(b.an);
+    if (maxim && caB < Number(maxim.ca || 0) - 0.01) {
+      ignorate.push({ ...b, fataDe: maxim });
+      continue;
+    }
+    if (!maxim || caB >= Number(maxim.ca || 0)) maximPeAn.set(b.an, b);
+    bune.push(b);
+  }
+  bune.ignorate = ignorate;
+  return bune;
 }
 
 // Rândurile comune ale tabelelor multi-an. Scrise o dată, ca tabelul „la
@@ -2853,8 +2879,25 @@ function register(router) {
           )}) — diferență de ${money(Math.abs(nepProfit))}. De obicei asta înseamnă că în 121 a rămas rezultatul anului trecut nerepartizat, sau că a trecut prin el ceva care nu e nici venit, nici cheltuială. Raportul folosește prima variantă, fiindcă aia e rezultatul PERIOADEI. Merită întrebată contabila.</div>`
         : "";
 
+    // Balanțele sărite se spun pe față. Altfel raportul pare că a pierdut o
+    // lună, iar cine se uită la el nu are cum să afle de ce.
+    const sarite = balante.ignorate || [];
+    const notaBalanteSarite = sarite.length
+      ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
+           ${sarite
+             .map(
+               (b) =>
+                 `Balanța <strong>${esc(b.eticheta)}</strong> (până la ${esc(String(b.pana).slice(0, 10))}) e sărită: are cifra de afaceri cumulată ${money(
+                   b.ca
+                 )}, sub cea de la ${esc(String(b.fataDe.pana).slice(0, 10))} (${money(b.fataDe.ca)}).`
+             )
+             .join(" ")}
+           Într-un an cifra cumulată nu poate să scadă, deci balanța a fost trasă din Conta înainte să fie postată luna dinainte. Luată în calcul, ar arăta o lună pe minus exact cât a adus luna precedentă. Trage din nou raportul din Conta ca să intre și luna care lipsește.
+         </div>`
+      : "";
+
     const sectiuneBilant = balante.length
-      ? `${sectiuneLuna}${sectiuneAn}${sectiuneLunar}${notaProfit}${notaCashFlow}
+      ? `${sectiuneLuna}${sectiuneAn}${sectiuneLunar}${notaProfit}${notaCashFlow}${notaBalanteSarite}
       <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · equity ratio ≥ 30% · grad de îndatorare ≤ 60–70% · leverage ≤ 2,0 · datorie netă ÷ EBITDA ≤ 3,0 · capitaluri proprii pozitive și în creștere. EBITDA = profit net + impozit + dobânzi + amortizare. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>. Balanțele cu mai puțin de ${PRAG_CONTURI_BALANTA} de conturi sunt sărite — nu sunt balanțe întregi și ar strica comparația.</p>`
       : `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Pentru indicatorii de bilanț REALI (capitaluri proprii, EBITDA, CFO, lichiditate, leverage, gearing — exact ce cere banca), încarcă balanțele din SmartBill Conta la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</div>`;
 
