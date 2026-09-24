@@ -410,6 +410,31 @@ function fixtureBalante(cuAugustVechi) {
     ["214.921,20 lei", "nu se potrivește cu soldul contului 121"]
   );
 
+  // ---- etapa 2c: BALANȚA TRASĂ ÎNAINTE DE VREME ----------------------------
+  // Cazul real din 09.2026: pe 14.09 s-a tras din Conta „01.01 → 14.09", dar
+  // august nu era postat, deci balanța conținea cifrele până la 31.07. Are
+  // perioada cea mai lungă, deci vine ultima și pare cea mai proaspătă — iar
+  // tabelul lunar arăta un septembrie cu cifra de afaceri NEGATIVĂ, exact cât
+  // adusese august, dat înapoi. Într-un raport care pleacă la bancă.
+  //
+  // Regula: într-un an, cifra cumulată de la 1 ianuarie nu poate să scadă.
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 14.09'");
+  rulaj(balanta("2026 la 14.09", "2026-01-01", "2026-09-14", cu({ ca: 3800000, profit: 190000 })));
+  r = await cer("/rapoarte/indicatori");
+  cere(
+    "balanța trasă înainte de vreme e sărită, nu bagă o lună pe minus",
+    r.corp,
+    ["e sărită", "4.300.000,00 lei"],
+    ["-500.000,00 lei", "−500.000,00 lei"]
+  );
+  cere("și se spune care și de ce", r.corp, ["2026 la 14.09", "cifra de afaceri cumulată", "3.800.000,00 lei"]);
+
+  // Iar una legitimă, cu cifra mai mare, rămâne în raport.
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 14.09'");
+  rulaj(balanta("2026 la 14.09", "2026-01-01", "2026-09-14", cu({ ca: 4600000, profit: 230000 })));
+  r = await cer("/rapoarte/indicatori");
+  cere("o balanță mai nouă cu cifra mai mare rămâne", r.corp, ["4.600.000,00 lei"], ["e sărită"]);
+
   // ---- partea scrisă a dosarului ------------------------------------------
   // Fixtura are profit pozitiv și structură slabă, deci comentariul trebuie să
   // conțină și rânduri „bun", și rânduri sub țintă, cu plan de măsuri.
