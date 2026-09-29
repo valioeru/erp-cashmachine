@@ -230,7 +230,45 @@ function register(router) {
     if (!partener) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/parteneri", body: "<p>Partener inexistent.</p>" }));
 
     const comenzi = await db.prepare("SELECT id, numar, status, data FROM comenzi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
-    const facturi = await db.prepare("SELECT id, serie, numar, directie, status, data_emiterii FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
+    // Scadența și restul de încasat intră în listă: fișa clientului e locul de
+    // unde agentul sună, iar „emisă" fără scadență nu-i spune dacă are de ce.
+    const facturi = await db
+      .prepare(
+        `SELECT f.id, f.serie, f.numar, f.document_extern, f.directie, f.status, f.data_emiterii, f.data_scadenta,
+                COALESCE(t.total,0) - COALESCE(pl.platit,0) AS rest
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total
+                        FROM facturi_linii GROUP BY factura_id) t ON t.factura_id = f.id
+           LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) x
+                        GROUP BY factura_id) pl ON pl.factura_id = f.id
+          WHERE f.partener_id = ?
+          ORDER BY f.id DESC`
+      )
+      .all(partener.id);
+
+    const aziISO = new Date().toISOString().slice(0, 10);
+    const eIntarziata = (f) => {
+      const s = String(f.data_scadenta || "").slice(0, 10);
+      return (
+        !!s &&
+        s < aziISO &&
+        Number(f.rest || 0) > 0.5 &&
+        f.status !== "anulata" &&
+        f.status !== "platita" &&
+        f.status !== "ciorna"
+      );
+    };
+    const intarziateleLui = facturi.filter(eIntarziata);
+    const scadentaCelula = (f) => {
+      const s = String(f.data_scadenta || "").slice(0, 10);
+      if (!s) return '<span style="color:var(--text-muted)">—</span>';
+      if (!eIntarziata(f)) return esc(s);
+      const zile = Math.max(1, Math.round((Date.parse(aziISO) - Date.parse(s)) / 86400000));
+      const culoare = zile > 90 ? "var(--danger)" : zile > 7 ? "var(--warn)" : "var(--text)";
+      return `<span style="color:${culoare}">${esc(s)}<br><span style="font-size:11px">${zile} ${
+        zile === 1 ? "zi" : "zile"
+      } întârziere</span></span>`;
+    };
     const oportunitati = await db.prepare("SELECT * FROM oportunitati WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     const taskuriPartener = await db.prepare(`${tsk.SELECT_TASK} WHERE t.partener_id = ? ORDER BY t.id DESC LIMIT 50`).all(partener.id);
     const emailuriPartener = await db.prepare("SELECT id, subiect, catre, status, trimis_la FROM emailuri WHERE partener_id = ? ORDER BY id DESC LIMIT 50").all(partener.id);
@@ -341,14 +379,22 @@ function register(router) {
         comenzi.map((c) => [`<a href="/comenzi/${c.id}">${esc(c.numar || "#" + c.id)}</a>`, esc(c.status), esc(c.data)])
       )}
 
-      <h2>Facturi (${facturi.length})</h2>
+      <h2>Facturi (${facturi.length})${
+        intarziateleLui.length
+          ? ` <span class="badge rosu">${intarziateleLui.length} întârziate</span> <span style="font-size:14px;font-weight:400;color:var(--danger)">${money(
+              intarziateleLui.reduce((s, f) => s + Number(f.rest || 0), 0)
+            )}</span>`
+          : ""
+      }</h2>
       ${table(
-        ["Document", "Direcție", "Status", "Data"],
+        ["Document", "Direcție", "Status", "Data", "Scadența", "Rest"],
         facturi.map((f) => [
-          `<a href="/facturi/${f.id}">${esc(f.serie)}-${f.numar ?? f.id}</a>`,
+          `<a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar ?? f.id}`)}</a>`,
           f.directie === "achizitie" ? "Achiziție" : "Vânzare",
           esc(f.status),
           esc(f.data_emiterii),
+          scadentaCelula(f),
+          Number(f.rest || 0) > 0.5 ? money(f.rest) : '<span style="color:var(--text-muted)">—</span>',
         ])
       )}
 

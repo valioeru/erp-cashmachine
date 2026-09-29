@@ -469,13 +469,52 @@ async function blocScadente(user, agentId) {
        </p>`
     : "";
 
+  // TOATE facturile cu scadența trecută, într-un singur număr.
+  //
+  // Pagina le arăta în două tabele — „Restanțe" și, mai jos, „Sold vechi,
+  // neconfirmat" — despărțite de data de la care e activ scadențarul. Despărțirea
+  // e corectă pentru AUTOMATIZARE (pe cele vechi nu trimitem emailuri singuri),
+  // dar agentul care se uită la pagina lui vede două cifre și niciun total, deci
+  // nu știe cât are de încasat. Iar lista de restanțe era tăiată la 120 de
+  // rânduri fără ca nimic să spună câte au rămas pe dinafară.
+  //
+  // Acum: un total sus, peste amândouă, și nicio listă tăiată în tăcere.
+  const totalRestante = restante.reduce((s, f) => s + f.sold, 0);
+  const totalNeverificate = neverificate.reduce((s, f) => s + f.sold, 0);
+  const vechiIntarziate = neverificate.filter((f) => f.zile > 0);
+  const toateIntarziate = restante.length + vechiIntarziate.length;
+  const totalIntarziat = totalRestante + vechiIntarziate.reduce((s, f) => s + f.sold, 0);
+  const PE_PAGINA_RESTANTE = 400;
+
   return `
     <h2>Scadențe și încasări <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— o săptămână întârziere e galben, mai mult e roșu</span></h2>
+    ${
+      toateIntarziate
+        ? `<p style="margin:6px 0 12px;font-size:14px">
+             <strong>Facturi cu scadența trecută: ${toateIntarziate}</strong>, în total
+             <strong style="color:var(--danger)">${money(totalIntarziat)}</strong>
+             ${
+               vechiIntarziate.length
+                 ? `<span style="color:var(--text-muted);font-size:13px">
+                      (${restante.length} în scadențarul activ${
+                        totalRestante ? ` · ${money(totalRestante)}` : ""
+                      }, plus ${vechiIntarziate.length} din soldul vechi${
+                        vechiIntarziate.length ? ` · ${money(totalIntarziat - totalRestante)}` : ""
+                      }, în tabelul de jos)
+                    </span>`
+                 : ""
+             }
+           </p>`
+        : '<p style="margin:6px 0 12px;color:var(--success)">Nicio factură cu scadența trecută.</p>'
+    }
     ${avertisment}
-    <h3 style="margin-top:14px">Restanțe (${restante.length}) — total ${money(restante.reduce((s, f) => s + f.sold, 0))}</h3>
+    <h3 style="margin-top:14px">Restanțe (${restante.length}) — total ${money(totalRestante)}</h3>
     ${
       restante.length
-        ? table(capete, restante.slice(0, 120).map((f) => randFactura(f, stari.get(f.partener_id), user)))
+        ? table(capete, restante.slice(0, PE_PAGINA_RESTANTE).map((f) => randFactura(f, stari.get(f.partener_id), user))) +
+          (restante.length > PE_PAGINA_RESTANTE
+            ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${PE_PAGINA_RESTANTE} din ${restante.length}, cele mai vechi primele.</p>`
+            : "")
         : `<p style="color:var(--text-muted)">Nicio factură restantă. </p>`
     }
     <h3 style="margin-top:18px">Urmează la încasare — următoarele ${Math.min(URMATOARELE, urmeaza.length)} din ${urmeaza.length}</h3>
@@ -486,7 +525,9 @@ async function blocScadente(user, agentId) {
     }
     ${
       neverificate.length
-        ? `<h3 style="margin-top:22px">Sold vechi, neconfirmat (${neverificate.length}) — total ${money(neverificate.reduce((s, f) => s + f.sold, 0))}</h3>
+        ? `<h3 style="margin-top:22px">Sold vechi, neconfirmat (${neverificate.length}) — total ${money(totalNeverificate)}${
+             vechiIntarziate.length ? `, din care ${vechiIntarziate.length} deja cu scadența trecută` : ""
+           }</h3>
            <p style="font-size:13px;color:var(--text-muted);max-width:780px">
              Facturi emise înainte de <strong>${esc(deLa || "—")}</strong>, data de la care e activ scadențarul.
              Din SmartBill au venit 3.000 de facturi și doar 1.400 de încasări, deci multe dintre astea apar
@@ -495,7 +536,12 @@ async function blocScadente(user, agentId) {
              Se pot notifica manual, una câte una, după ce verifici soldul. Când ai încredere în date,
              adminul poate muta data de start înapoi și intră și ele în regimul normal.
            </p>
-           ${table(capete, neverificate.slice(0, 60).map((f) => randFactura(f, stari.get(f.partener_id), user)))}`
+           ${table(capete, neverificate.slice(0, PE_PAGINA_RESTANTE).map((f) => randFactura(f, stari.get(f.partener_id), user)))}
+           ${
+             neverificate.length > PE_PAGINA_RESTANTE
+               ? `<p style="font-size:12px;color:var(--text-muted)">Se arată primele ${PE_PAGINA_RESTANTE} din ${neverificate.length}.</p>`
+               : ""
+           }`
         : ""
     }
     <p style="font-size:12px;color:var(--text-muted);margin-top:8px">

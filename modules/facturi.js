@@ -124,10 +124,30 @@ function register(router) {
       )
       .all(...args);
 
+    // Scadența, cu zilele de întârziere la vedere.
+    //
+    // Lista aducea deja data_scadenta din bază, dar n-o arăta — și fără ea
+    // „emisă / neîncasată" nu spune nimic: nu știi dacă e de ieri sau de acum
+    // patru luni. Coloana se colorează doar când factura chiar are bani
+    // neîncasați; una plătită cu întârziere nu mai e o problemă.
+    const aziISO = new Date().toISOString().slice(0, 10);
+    const scadentaCelula = (f) => {
+      const s = String(f.data_scadenta || "").slice(0, 10);
+      if (!s) return '<span style="color:var(--text-muted)">—</span>';
+      const rest = Number(f.total || 0) - Number(f.platit || 0);
+      if (s >= aziISO || rest <= 0.5 || f.status === "anulata" || f.status === "platita") return esc(s);
+      const zile = Math.max(1, Math.round((Date.parse(aziISO) - Date.parse(s)) / 86400000));
+      const culoare = zile > 90 ? "var(--danger)" : zile > 7 ? "var(--warn)" : "var(--text)";
+      return `<span style="color:${culoare}">${esc(s)}<br><span style="font-size:11px">${zile} ${
+        zile === 1 ? "zi" : "zile"
+      } întârziere</span></span>`;
+    };
+
     const rows = facturi.map((f) => [
       `<a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar ?? f.id}`)}</a>`,
       esc(f.partener_nume),
       esc((f.data_emiterii || "").slice(0, 10)),
+      scadentaCelula(f),
       STATUS_LABEL[f.status] || esc(f.status),
       money(f.total) + (f.moneda && f.moneda !== "RON" ? ` <span class="badge gri">${esc(f.moneda)} ${Number(f.total_valuta || 0).toLocaleString("ro-RO")}</span>` : ""),
       money(f.platit),
@@ -176,7 +196,10 @@ function register(router) {
           </span>
         </span>
       </form>
-      ${table(["Document", directie === "achizitie" ? "Furnizor" : "Client", "Data", "Status", "Total", directie === "achizitie" ? "Plătit" : "Încasat", "Acțiuni"], rows)}
+      ${table(
+        ["Document", directie === "achizitie" ? "Furnizor" : "Client", "Data", "Scadența", "Status", "Total", directie === "achizitie" ? "Plătit" : "Încasat", "Acțiuni"],
+        rows
+      )}
       ${paginare}
     `,
     };
