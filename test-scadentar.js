@@ -250,6 +250,59 @@ function fixture() {
     "DELETE FROM parteneri WHERE cui IN ('RO-TEST-C','RO-TEST-F')",
   ]) execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", s], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
 
+  // --- scadența la vedere, în listele de facturi ---------------------------
+  //
+  // „Emisă / neîncasată" nu spune nimic fără scadență: nu știi dacă e de ieri
+  // sau de acum patru luni. Data era adusă din bază de amândouă listele și
+  // nu se arăta în niciuna — agentul trebuia să deschidă factura ca s-o vadă.
+  // Testele de dinainte închid și redeschid istoricul; refacem fixtura ca să
+  // pornim de la o stare cunoscută.
+  fixture();
+  const fact = require(path.join(RAD, "modules", "facturi.js"));
+  const part = require(path.join(RAD, "modules", "parteneri.js"));
+  const rF = { get: {}, post: {} };
+  const puneF = (o) => ({
+    get: (p, h) => { if (!o.get[p]) o.get[p] = h; },
+    post: (p, h) => { if (!o.post[p]) o.post[p] = h; },
+  });
+  fact.register(puneF(rF));
+  part.register(puneF(rF));
+  const cerF = async (cale, opt = {}) => {
+    const h = rF[opt.metoda || "get"][cale];
+    if (!h) throw new Error("ruta lipsește: " + cale);
+    const r = res();
+    await h({ user: VALI, params: opt.params || {}, query: opt.query || {}, body: {}, res: r, req: { url: cale } });
+    return r;
+  };
+
+  // „tot" ca perioadă: fixtura are facturi din 2022, iar lista filtrează
+  // implicit pe luna curentă.
+  const lista = await cerF("/facturi", { query: { perioada: "tot" } });
+  cere("lista de facturi are coloana Scadența", lista.corp, ["Scadența"]);
+  // 90103 e scadentă de 3 zile și neîncasată → trebuie să scrie întârzierea.
+  cere("și marchează întârzierea pe facturile neîncasate", lista.corp, ["3 zile întârziere"]);
+
+  const fisa = await cerF("/parteneri/:id", { params: { id: "90001" } });
+  cere("fișa clientului arată scadența și restul", fisa.corp, ["Scadența", "Rest", "3 zile întârziere"]);
+  cere("și numără facturile întârziate ale clientului în titlu", fisa.corp, ["întârziate"]);
+
+  // --- toate întârziatele, într-un singur număr ----------------------------
+  // Pagina agentului le arăta în două tabele despărțite de data de start a
+  // scadențarului, fără niciun total peste amândouă — deci agentul vedea două
+  // cifre și nu știa cât are de încasat. 90101 (din 2022) e în soldul vechi,
+  // 90103 și 90104 sunt în scadențarul activ; toate trei sunt întârziate.
+  const scad = require(path.join(RAD, "modules", "scadente.js"));
+  const bloc = await scad.blocScadente(VALI, null);
+  cere("scadențarul dă un singur total pentru tot ce e întârziat", bloc, [
+    "Facturi cu scadența trecută:",
+    "din soldul vechi",
+  ]);
+  if (/Facturi cu scadența trecută: (\d+)/.test(bloc)) {
+    const n = Number(RegExp.$1);
+    if (n >= 3) ok("numără și facturile vechi, nu doar pe cele din scadențarul activ = " + n);
+    else rau("nu numără facturile vechi", "a zis " + n + ", așteptam cel puțin 3");
+  } else rau("lipsește totalul de facturi întârziate");
+
   console.log("\n" + interogari + " interogări SQL reale.");
   console.log(rele ? rele + " probleme." : "Totul curat.");
   process.exit(rele ? 1 : 0);
