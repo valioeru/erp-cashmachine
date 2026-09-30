@@ -329,7 +329,16 @@ module.exports = function registerRute(router, deps) {
       <div class="toolbar">
         ${
           l.aplicat_la
-            ? ""
+            ? // Re-aplicarea unui lot deja aplicat: nu e o scăpare, e nevoia
+              // care apare de fiecare dată când se repară un handler. Lotul
+              // e tot acolo, cu rândurile lui; fără butonul ăsta singura cale
+              // era să se recitească tot din SmartBill. Dublurile sunt oprite
+              // de amprentele din handler, deci re-aplicarea aduce doar ce
+              // lipsea.
+              `<form method="post" action="/import/punte/${l.id}/aplica" class="inline-form"
+                     onsubmit="return confirm('Lotul a fost deja aplicat. Îl mai treci o dată? Rândurile care au intrat deja se sar — intră doar ce lipsește.')">
+                 <button class="btn secondary" type="submit">Aplică din nou</button>
+               </form>`
             : `<form method="post" action="/import/punte/${l.id}/aplica" class="inline-form"><button class="btn" type="submit">Aplică lotul</button></form>
                <form method="post" action="/import/punte/${l.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi lotul?')"><button class="btn secondary" type="submit">Șterge</button></form>`
         }
@@ -350,11 +359,15 @@ module.exports = function registerRute(router, deps) {
     const l = await db.prepare("SELECT * FROM punte_staging WHERE id = ?").get(ctx.params.id);
     if (!l) return redirect(ctx.res, "/import/punte");
     const rez = await aplicaLot(l);
+    // Acelasi pas ca la „aplica tot": daca au intrat incasari, statusul
+    // facturilor trebuie sa urce, altfel raman pe „emisa" desi sunt platite.
+    const statusuri = await require("../lib/statusuri").recalculeazaStatusFacturi();
     const body = `
       <div class="detail-box"><div class="detail-grid">
         ${Object.entries(rez)
           .map(([k, v]) => `<div><div class="k">${esc(k)}</div>${esc(String(v))}</div>`)
           .join("")}
+        <div><div class="k">Statusuri urcate</div>${Number(statusuri.trecute_pe_incasat)} pe încasată, ${Number(statusuri.trecute_pe_partial)} pe parțial</div>
       </div></div>
       <a class="btn secondary" href="/import/punte">Înapoi la punte</a>
     `;

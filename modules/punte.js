@@ -1053,17 +1053,28 @@ async function ingestIncasari(randuri) {
     .prepare("SELECT id, serie, numar, document_extern, inchis_istoric FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
     .all();
   const dupaCheie = new Map();
-  // Facturile inchise ca istorie veche nu mai primesc incasari. Vezi tabelul
-  // inchideri_istoric din lib/db.js: soldurile vechi au fost inchise dintr-o
-  // data, ca ERP-ul sa arate cat arata balanta, iar o incasare care soseste
-  // acum pe o factura din 2022 ar redeschide exact ce s-a inchis.
-  const cheiInchise = new Set();
+  // Incasarile care cad pe facturi inchise ca istorie veche.
+  //
+  // Inainte erau pur si simplu aruncate, ca sa nu redeschida soldurile
+  // inchise pe 19.09.2026 (vezi inchideri_istoric din lib/db.js). Teama era
+  // nefondata: `deschisa()` din lib/solduri.js scoate din calcul orice
+  // factura cu inchis_istoric, oricate plati ar avea pe ea, deci soldul NU
+  // se poate redeschide. Ce se pierdea era altceva — factura ramanea cu
+  // „Incasat 0,00" desi banii intrasera, si nu se vedea nicaieri cat s-a
+  // incasat pe istoricul vechi. Pe Warehouse All erau 31 de plati,
+  // 2.575.136,18 lei, toate pe Marine Branding.
+  //
+  // Acum plata se scrie, dar marcata cu pe_factura_inchisa = 1: factura arata
+  // adevarul, soldul ramane inchis, iar marcajul e acolo ca sa se poata
+  // decide separat daca banii aia produc sau nu comision. (Pentru facturile
+  // intre firmele grupului nu se pune problema — sunt oricum scoase.)
+  const inchiseDupaCheie = new Map();
   const pune = (cheie, id, inchisa) => {
     const k = String(cheie || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!k) return;
-    if (inchisa) { cheiInchise.add(k); return; }
-    if (!dupaCheie.has(k)) dupaCheie.set(k, []);
-    if (!dupaCheie.get(k).includes(id)) dupaCheie.get(k).push(id);
+    const harta = inchisa ? inchiseDupaCheie : dupaCheie;
+    if (!harta.has(k)) harta.set(k, []);
+    if (!harta.get(k).includes(id)) harta.get(k).push(id);
   };
   for (const f of facturi) {
     pune(`${f.serie || ""}${f.numar || ""}`, f.id, Boolean(f.inchis_istoric));
@@ -1113,16 +1124,24 @@ async function ingestIncasari(randuri) {
       .map((x) => x.trim())
       .filter(Boolean);
     const tinte = [];
-    let atinsInchisa = false;
+    const tinteInchise = [];
     for (const c of chei) {
       const k = c.toUpperCase().replace(/[^A-Z0-9]/g, "");
       const ids = dupaCheie.get(k);
-      if (ids && ids.length) tinte.push(ids[0]);
-      else if (cheiInchise.has(k)) atinsInchisa = true;
+      if (ids && ids.length) {
+        tinte.push(ids[0]);
+        continue;
+      }
+      const inchise = inchiseDupaCheie.get(k);
+      if (inchise && inchise.length) tinteInchise.push(inchise[0]);
     }
-    if (!tinte.length && atinsInchisa) {
+    // Daca randul atinge numai facturi inchise, plata se scrie pe ele, dar
+    // marcata. Daca atinge si deschise, si inchise, banul se imparte doar
+    // intre cele deschise: acolo mai e sold de stins.
+    const peInchise = !tinte.length && tinteInchise.length > 0;
+    if (peInchise) {
+      tinte.push(...tinteInchise);
       inchiseVechi++;
-      continue;
     }
     if (!tinte.length) {
       negasite++;
@@ -1175,15 +1194,33 @@ async function ingestIncasari(randuri) {
         surogateSterse++;
       }
       await db
-        .prepare("INSERT INTO plati (factura_id, suma, data, metoda, observatii, amprenta) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(tinte[i], parte, zi, curat(r.metoda) || "transfer bancar", NOTA_INCASARE, amprenta);
+        .prepare(
+          `INSERT INTO plati (factura_id, suma, data, metoda, observatii, amprenta, pe_factura_inchisa)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          tinte[i],
+          parte,
+          zi,
+          curat(r.metoda) || "transfer bancar",
+          peInchise ? `${NOTA_INCASARE} — pe factură închisă ca istoric vechi` : NOTA_INCASARE,
+          amprenta,
+          peInchise ? 1 : 0
+        );
       existente.add(amprenta);
       solduri.set(tinte[i], (solduri.get(tinte[i]) || 0) - parte);
       scrise++;
     }
   }
 
-  return { incasari_scrise: scrise, dubluri_sarite: dubluri, surogate_sterse: surogateSterse, facturi_negasite: negasite, inchise_istoric_ignorate: inchiseVechi, exemple_negasite: exemple.slice(0, 10) };
+  return {
+    incasari_scrise: scrise,
+    dubluri_sarite: dubluri,
+    surogate_sterse: surogateSterse,
+    facturi_negasite: negasite,
+    pe_facturi_inchise: inchiseVechi,
+    exemple_negasite: exemple.slice(0, 10),
+  };
 }
 
 // ---- lista de clienți și furnizori, citită de pe ecran ---------------------
