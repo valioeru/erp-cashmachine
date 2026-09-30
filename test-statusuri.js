@@ -200,7 +200,9 @@ const statusul = (fid) => (q(`SELECT status FROM facturi WHERE id = ?`, [fid])[0
   bine("facturile apar separat de încasări",
     peTip.get("facturi").noi === 16 && peTip.get("incasari").noi === 34,
     JSON.stringify([...peTip]));
-  bine("sărite: 129 facturi + 122 încasări", total.sarite === 129 + 122, `sarite=${total.sarite}`);
+  // 129 facturi sărite + 91 încasări duplicate. Cele 31 căzute pe facturi
+  // închise NU mai sunt „sărite": acum se scriu, doar marcate.
+  bine("sărite: 129 facturi + 91 încasări duplicate", total.sarite === 129 + 91, `sarite=${total.sarite}`);
   bine("un lot cu eroare se numără ca eroare",
     aplicare.rezumat([{ id: 1, tip: "facturi", rez: { eroare: "ceva" } }]).total.erori === 1);
   bine("un tip necunoscut nu crapă rezumatul",
@@ -208,6 +210,51 @@ const statusul = (fid) => (q(`SELECT status FROM facturi WHERE id = ?`, [fid])[0
   bine("toate tipurile din HANDLERE au o linie în tabelul de chei",
     Object.keys(require(path.join(RAD, "modules", "punte.js")).HANDLERE).every((t) => aplicare.CHEI[t]),
     Object.keys(require(path.join(RAD, "modules", "punte.js")).HANDLERE).filter((t) => !aplicare.CHEI[t]).join(", "));
+
+  // ---- încasări pe facturi închise ca istoric vechi ---------------------
+  //
+  // Erau aruncate, ca să nu „redeschidă" soldurile închise pe 19.09.2026.
+  // Teama era nefondată: deschisa() scoate din calcul orice factură cu
+  // inchis_istoric, oricâte plăți ar avea. Ce se pierdea era adevărul —
+  // factura rămânea cu Încasat 0,00 deși banii intraseră. 31 de plăți,
+  // 2.575.136,18 lei, toate pe Marine Branding.
+  console.log("\nîncasările pe facturi închise ca istoric:");
+  exec1(`ALTER TABLE plati ADD COLUMN IF NOT EXISTS pe_factura_inchisa INTEGER NOT NULL DEFAULT 0`);
+  const punte = require(path.join(RAD, "modules", "punte.js"));
+  const inchisa2 = factura(partenerId, 8010, "emisa", "2025-12-31");
+  const deschisa2 = factura(partenerId, 8011, "emisa");
+
+  const rez = await punte.HANDLERE.incasari([
+    { factura: "TS8010", data: "2026-09-25", suma: 1210, metoda: "Ordin plata" },
+    { factura: "TS8011", data: "2026-09-25", suma: 1210, metoda: "Ordin plata" },
+  ]);
+  const platiInchisa = q(`SELECT suma, pe_factura_inchisa FROM plati WHERE factura_id = ?`, [inchisa2]);
+  const platiDeschisa = q(`SELECT suma, pe_factura_inchisa FROM plati WHERE factura_id = ?`, [deschisa2]);
+
+  bine("plata pe factura închisă se scrie, nu se mai aruncă", platiInchisa.length === 1, JSON.stringify(rez));
+  bine("și e marcată ca fiind pe factură închisă",
+    platiInchisa.length === 1 && Number(platiInchisa[0].pe_factura_inchisa) === 1, JSON.stringify(platiInchisa));
+  bine("plata pe factura deschisă NU e marcată",
+    platiDeschisa.length === 1 && Number(platiDeschisa[0].pe_factura_inchisa) === 0, JSON.stringify(platiDeschisa));
+  bine("raportează câte au căzut pe facturi închise", Number(rez.pe_facturi_inchise) === 1, JSON.stringify(rez));
+  bine("nu mai raportează cheia veche „inchise_istoric_ignorate”", rez.inchise_istoric_ignorate === undefined);
+
+  // soldul NU se redeschide: inchis_istoric bate plățile
+  const { deschisa: clauzaDeschisa } = require(path.join(RAD, "lib", "solduri.js"));
+  const inca = q(
+    `SELECT COUNT(*) AS n FROM (SELECT * FROM facturi WHERE activ = 1) f WHERE f.id = ? AND ${clauzaDeschisa("f")}`,
+    [inchisa2]
+  );
+  bine("factura închisă rămâne în afara soldurilor, deși are acum plată", Number(inca[0].n) === 0);
+
+  // a doua trecere nu dublează
+  await punte.HANDLERE.incasari([{ factura: "TS8010", data: "2026-09-25", suma: 1210, metoda: "Ordin plata" }]);
+  bine("re-aplicarea aceluiași rând nu dublează plata",
+    q(`SELECT COUNT(*) AS n FROM plati WHERE factura_id = ?`, [inchisa2])[0].n === "1");
+
+  const sursaRute = fs.readFileSync(path.join(RAD, "modules", "punte-rute.js"), "utf8");
+  bine("un lot deja aplicat se poate trece din nou", /Aplică din nou/.test(sursaRute));
+  bine("previzualizarea poate arăta toate rândurile", /ctx\.query\.tot/.test(sursaRute));
 
   curata();
   console.log(picate ? `\n${picate} verificări au picat.` : "\nToate verificările au trecut.");
