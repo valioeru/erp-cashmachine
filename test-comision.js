@@ -81,12 +81,13 @@ function verifica(nume, gasit, asteptat, tol) {
 // explicit (așa intră datele din backup). Fără asta, primul INSERT al testului
 // pică pe cheie duplicată, iar mesajul nu spune nimic despre cauză.
 function sincronizeazaSecvente() {
-  for (const tabel of ["utilizatori", "parteneri", "facturi", "facturi_linii", "plati", "alocari_clienti"]) {
+  for (const tabel of ["utilizatori", "parteneri", "facturi", "facturi_linii", "plati", "alocari_clienti", "comision_manual"]) {
     exec1(`SELECT setval(pg_get_serial_sequence('${tabel}', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM ${tabel}), 0), 1))`);
   }
 }
 
 function curata() {
+  exec1(`DELETE FROM comision_manual WHERE factura_id IN (SELECT id FROM facturi WHERE observatii = '${MARCA}')`);
   exec1(`DELETE FROM plati WHERE factura_id IN (SELECT id FROM facturi WHERE observatii = '${MARCA}')`);
   exec1(`DELETE FROM facturi_linii WHERE factura_id IN (SELECT id FROM facturi WHERE observatii = '${MARCA}')`);
   exec1(`DELETE FROM alocari_clienti WHERE partener_id IN (SELECT id FROM parteneri WHERE nume LIKE '${MARCA}%')`);
@@ -279,6 +280,66 @@ const incaseaza = (fid, suma, data) =>
       picate++;
       console.log(`  PICAT ${cale} a crăpat: ${String(e.message).split("\n")[0].slice(0, 160)}`);
     }
+  }
+
+  // ---- adăugarea manuală a unei facturi la comision ----------------------
+  console.log("\nadăugarea manuală a unei facturi la comisionul lunii:");
+  const lunaAcum = aziTxt.slice(0, 7);
+  // f6: factură neîncasată, deci n-a intrat niciodată în comisionul nimănui
+  const f6 = factura(partenerId, 9006, aziTxt, [[10, 70, 21]]); // 700 net
+  const cauta = rute.get["/crm/comision"];
+  const ADMIN2 = { id: agentId, nume: MARCA + " Agent", rol: "admin", comision_procent: 2 };
+
+  async function pagina(intrebari) {
+    const rr = res();
+    await cauta({ user: ADMIN2, params: {}, query: intrebari || {}, body: {}, res: rr, req: { headers: {} } });
+    // Numerele de factură apar și în lista lunii, nu doar în rezultatele
+    // căutării. Ca să nu ne mințim singuri, decupăm doar panoul de adăugare.
+    const de = rr.corp.indexOf("<details");
+    rr.panou = de >= 0 ? rr.corp.slice(de, rr.corp.indexOf("</details>", de)) : "";
+    return rr;
+  }
+  let pg = await pagina({ adauga: MARCA.slice(0, 6) });
+  if (/9006/.test(pg.panou)) console.log("  ok   căutarea găsește factura neîncasată");
+  else { picate++; console.log("  PICAT căutarea nu găsește factura neîncasată"); }
+  if (/9005/.test(pg.panou)) { picate++; console.log("  PICAT căutarea propune o factură care e deja în comision (9005)"); }
+  else console.log("  ok   nu propune facturi care au produs deja comision");
+
+  const adauga = rute.post["/crm/comision/adauga"];
+  const scoate = rute.post["/crm/comision/scoate"];
+  if (!adauga || !scoate) { picate++; console.log("  PICAT lipsesc rutele de adăugare/scoatere"); }
+  else {
+    const r1 = res();
+    await adauga({ user: ADMIN2, params: {}, query: {}, body: { factura: String(f6.id), agent: String(agentId), motiv: "test" }, res: r1, req: { headers: {} } });
+    const linii = q(`SELECT * FROM comision_manual WHERE factura_id = ? AND activ = 1`, [f6.id]);
+    if (linii.length === 1 && Math.abs(Number(linii[0].baza) - 700) < 0.01) console.log("  ok   linia s-a scris cu baza fără TVA (700,00)");
+    else { picate++; console.log(`  PICAT linia manuală: ${JSON.stringify(linii)}`); }
+
+    // a doua oară nu se mai poate
+    const r2 = res();
+    await adauga({ user: ADMIN2, params: {}, query: {}, body: { factura: String(f6.id), agent: String(agentId) }, res: r2, req: { headers: {} } });
+    const dupa = q(`SELECT COUNT(*) AS n FROM comision_manual WHERE factura_id = ? AND activ = 1`, [f6.id]);
+    if (Number(dupa[0].n) === 1) console.log("  ok   aceeași factură nu intră de două ori");
+    else { picate++; console.log(`  PICAT factura a intrat de ${dupa[0].n} ori`); }
+
+    pg = await pagina({});
+    if (/adăugată manual/.test(pg.corp)) console.log("  ok   linia apare marcată în listă");
+    else { picate++; console.log("  PICAT linia adăugată nu apare marcată în listă"); }
+    if (/Atenție: lista dă/.test(pg.corp)) { picate++; console.log("  PICAT totalul nu se mai potrivește după adăugare"); }
+    else console.log("  ok   totalul listei se potrivește și după adăugare");
+
+    // nu mai apare în căutare
+    pg = await pagina({ adauga: MARCA.slice(0, 6) });
+    if (/9006/.test(pg.panou)) { picate++; console.log("  PICAT factura adăugată apare încă în căutare"); }
+    else console.log("  ok   factura adăugată nu mai apare în căutare");
+
+    // scoaterea o dezactivează, nu o șterge
+    const lin = q(`SELECT id FROM comision_manual WHERE factura_id = ?`, [f6.id])[0];
+    const r3 = res();
+    await scoate({ user: ADMIN2, params: {}, query: {}, body: { id: String(lin.id), agent: String(agentId) }, res: r3, req: { headers: {} } });
+    const st = q(`SELECT activ, scos_de FROM comision_manual WHERE id = ?`, [lin.id])[0];
+    if (Number(st.activ) === 0 && st.scos_de) console.log("  ok   scoaterea dezactivează linia și reține cine a scos-o");
+    else { picate++; console.log(`  PICAT scoaterea: ${JSON.stringify(st)}`); }
   }
 
   curata();
