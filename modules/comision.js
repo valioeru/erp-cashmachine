@@ -394,6 +394,16 @@ const CAUTARE_FACTURI = `
         : randuri.length + (randuri.length === 1 ? " factură" : " facturi");
     }
   }
+  // Rândurile puse cu mâna primesc un fundal, ca să se vadă că nu vin din
+  // încasări. Se face din script, fiindcă ajutorul de tabel nu știe să pună
+  // atribute pe rând.
+  for (var k = 0; k < randuri.length; k++) {
+    var marca = randuri[k].querySelector("[data-manual]");
+    if (!marca) continue;
+    randuri[k].style.background = marca.getAttribute("data-manual") === "avans"
+      ? "rgba(200,60,60,0.08)"
+      : "rgba(196,127,23,0.10)";
+  }
   camp.addEventListener("input", filtreaza);
   camp.addEventListener("search", filtreaza);
 })();
@@ -449,8 +459,12 @@ function register(router) {
       baza: nr(x.baza),
       comision: (nr(x.baza) * pct) / 100,
     }));
-    for (const m of adaugateManual) bazaFacturi.push(m);
+    // Cele din încasări se sortează după valoare; cele puse cu mâna stau la
+    // sfârșit, evidențiate, ca să se vadă dintr-o privire ce e automat și ce
+    // a fost adăugat de om.
     bazaFacturi.sort((a, b) => b.baza - a.baza);
+    adaugateManual.sort((a, b) => b.baza - a.baza);
+    for (const m of adaugateManual) bazaFacturi.push(m);
     const bazaFacturiTotal = bazaFacturi.reduce((s, x) => s + x.baza, 0);
     const bazaFacturiComision = bazaFacturi.reduce((s, x) => s + x.comision, 0);
     // Dacă lista nu dă exact cât arată capul paginii, o spunem — mai bine o
@@ -546,21 +560,87 @@ function register(router) {
 
         <div class="com-cerere">
           <div class="label">Cerere de plată</div>
+          <div class="nota" style="margin:0 0 8px">
+            Acum poți cere <strong>${lei(cerutMax)}</strong>.
+            ${
+              viitorTotal > 0
+                ? `Peste asta, mai poți lua în avans până la <strong>${lei(viitorTotal * (1 - RETINERE_AVANS / 100))}</strong>
+                   (${lei(viitorTotal)} brut, minus reținerea de ${RETINERE_AVANS}%) din facturile emise și neîncasate —
+                   secțiunea „Ia comisionul mai devreme", mai jos.
+                   <br><strong>Maxim total: ${lei(cerutMax + viitorTotal * (1 - RETINERE_AVANS / 100))}</strong>.`
+                : "N-ai facturi neîncasate, deci nu poți lua nimic în avans."
+            }
+          </div>
           ${
             f.deschisa
               ? cerutMax > 0
-                ? `<form method="post" action="/crm/comision/cerere">
+                ? `<form method="post" action="/crm/comision/cerere" id="formCerere">
                      <input type="hidden" name="agent" value="${agentId}">
                      <label class="field">Cât ceri (lei)
-                       <input type="number" name="suma" min="0.01" max="${cerutMax}" step="0.01" value="${cerutMax}" required>
+                       <input type="number" id="sumaCeruta" name="suma" min="0.01" max="${cerutMax}" step="0.01" value="${cerutMax}" required>
                      </label>
+                     <p id="aviziereCerere" class="nota" style="display:none;color:var(--danger);margin:4px 0 0"></p>
                      <label class="field">Observații (opțional)<input name="observatii" placeholder="ex: jumătate acum, restul luna viitoare"></label>
-                     <button class="btn" type="submit">Cer plata comisionului</button>
+                     <button class="btn" type="submit" id="butonCerere">Cer plata comisionului</button>
                      <p class="nota">Poți cere și mai puțin — diferența îți rămâne și se reportează în ${numeLuna(lunaMinus(lunaAcum, -1))}.
                         Cererea pleacă pe mail la ${esc(EMAIL_COMISION)}.</p>
-                   </form>`
+                   </form>
+                   <script>
+                   (function () {
+                     var camp = document.getElementById("sumaCeruta");
+                     var avert = document.getElementById("aviziereCerere");
+                     var buton = document.getElementById("butonCerere");
+                     var forma = document.getElementById("formCerere");
+                     if (!camp || !avert || !forma) return;
+                     var maxim = ${cerutMax};
+                     var avans = ${Math.round(viitorTotal * (1 - RETINERE_AVANS / 100) * 100) / 100};
+                     function bani(v) {
+                       return v.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+                     }
+                     function arata(text) {
+                       avert.textContent = text;
+                       avert.style.display = text ? "block" : "none";
+                       if (buton) buton.disabled = !!text;
+                     }
+                     // Nu-l lăsăm să scrie mai mult: valoarea se taie înapoi la
+                     // maxim și i se spune de ce, pe loc. Butonul stă blocat cât
+                     // timp cifra din câmp n-are acoperire.
+                     function verifica(taie) {
+                       var v = Number(String(camp.value).replace(",", "."));
+                       if (!camp.value) { arata("Scrie cât ceri."); return; }
+                       if (isNaN(v) || v <= 0) { arata("Suma trebuie să fie mai mare decât zero."); return; }
+                       if (v > maxim + 0.005) {
+                         if (taie) camp.value = maxim.toFixed(2);
+                         arata(
+                           "Nu poți cere mai mult de " + bani(maxim) + " — atât ai disponibil acum." +
+                           (avans > 0
+                             ? " Dacă vrei mai mult, ia comisionul în avans din facturile neîncasate, mai jos — încă până la " + bani(avans) + "."
+                             : "")
+                         );
+                         if (taie) setTimeout(function () { arata(""); }, 4000);
+                         return;
+                       }
+                       arata("");
+                     }
+                     camp.addEventListener("input", function () { verifica(false); });
+                     camp.addEventListener("change", function () { verifica(true); });
+                     camp.addEventListener("blur", function () { verifica(true); });
+                     forma.addEventListener("submit", function (e) {
+                       var v = Number(String(camp.value).replace(",", "."));
+                       if (isNaN(v) || v <= 0 || v > maxim + 0.005) { e.preventDefault(); verifica(true); }
+                     });
+                     verifica(false);
+                   })();
+                   <\/script>`
                 : `<p class="nota">Nu ai nimic de cerut acum${cerutLunaAsta > 0 ? ` — ai cerut deja ${lei(cerutLunaAsta)} luna asta` : ""}.
-                     Ce se mai încasează până pe ${esc(f.seInchideLa)} se adaugă aici; ce rămâne necerut trece în ${numeLuna(lunaMinus(lunaAcum, -1))}.</p>`
+                     Ce se mai încasează până pe ${esc(f.seInchideLa)} se adaugă aici; ce rămâne necerut trece în ${numeLuna(lunaMinus(lunaAcum, -1))}.
+                     ${
+                       viitorTotal > 0
+                         ? `Dacă îți trebuie bani acum, poți lua în avans până la <strong>${lei(
+                             viitorTotal * (1 - RETINERE_AVANS / 100)
+                           )}</strong> din facturile neîncasate — secțiunea „Ia comisionul mai devreme", mai jos.`
+                         : ""
+                     }</p>`
               : `<p class="nota">Butonul se deschide pe <strong>${esc(f.seDeschideLa)}</strong> și stă deschis până pe ${esc(f.seInchideLa)}.
                    Azi e ${esc(aziISO)}. Până atunci cifra de sus doar crește, pe măsură ce intră banii.</p>`
           }
@@ -643,7 +723,7 @@ function register(router) {
                   nr(x.nr_plati) > 1 ? ` <span class="badge gri">${nr(x.nr_plati)} plăți</span>` : ""
                 }${
                   x.manual
-                    ? ` <span class="badge" style="background:${
+                    ? ` <span data-manual="${x.fel === "avans" ? "avans" : "adaugat"}" class="badge" style="background:${
                         x.fel === "avans" ? "var(--danger)" : "var(--warn,#c47f17)"
                       };color:#fff" title="${
                         x.fel === "avans"
@@ -928,12 +1008,17 @@ function register(router) {
     if (!f) return redirect(ctx.res, cuMesaj("eroare", "Factura nu există sau a fost ștearsă."));
     if (f.directie !== "vanzare" || ["anulata", "ciorna", "necunoscut"].includes(String(f.status)) || nr(f.intercompany))
       return redirect(ctx.res, cuMesaj("eroare", "Factura asta nu poate intra în comision."));
+    // Zero înseamnă că lipsesc liniile. Negativ înseamnă storno — ăla e
+    // valid și trebuie să se poată adăuga, ca să scadă comisionul lunii.
+    // Condiția a fost întâi „> 0" și respingea tocmai stornourile.
     const baza = Math.round(nr(f.net) * 100) / 100;
-    if (!(baza > 0))
+    if (!baza)
       return redirect(ctx.res, cuMesaj("eroare", "Factura n-are valoare fără TVA în ERP (probabil îi lipsesc liniile), deci n-am din ce socoti comision."));
 
     const deja = await db.prepare("SELECT id FROM comision_manual WHERE factura_id = ? AND activ = 1").get(facturaId);
     if (deja) return redirect(ctx.res, cuMesaj("eroare", "Factura e deja adăugată la un comision."));
+    const agentPt = await db.prepare("SELECT comision_procent FROM utilizatori WHERE id = ?").get(agentId);
+    const pctAgent = nr(agentPt && agentPt.comision_procent);
 
     const numar = f.document_extern || `${f.serie || ""}${f.numar || ""}`;
     await db
@@ -942,7 +1027,15 @@ function register(router) {
          VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
       )
       .run(agentId, facturaId, lunaLui(azi()), baza, String(ctx.body.motiv || "").trim().slice(0, 200) || null, ctx.user.id, azi());
-    return redirect(ctx.res, cuMesaj("mesaj", `${numar} (${money(baza)} fără TVA) a intrat în comisionul lunii.`));
+    return redirect(
+      ctx.res,
+      cuMesaj(
+        "mesaj",
+        baza < 0
+          ? `${numar} (storno, ${money(baza)} fără TVA) a intrat în comisionul lunii și îl SCADE cu ${money(Math.abs((baza * pctAgent) / 100))}.`
+          : `${numar} (${money(baza)} fără TVA) a intrat în comisionul lunii.`
+      )
+    );
   });
 
   // Avans din comisionul viitor. Agentul bifează facturi emise și neîncasate
@@ -1065,7 +1158,14 @@ function register(router) {
     let suma = Math.round(nr(ctx.body.suma) * 100) / 100;
     if (!(suma > 0)) return redirect(ctx.res, cuMesaj("eroare", "Scrie o sumă mai mare decât zero."));
     if (suma > disponibil + 0.01)
-      return redirect(ctx.res, cuMesaj("eroare", `Ai disponibil ${money(disponibil)}, nu poți cere ${money(suma)}.`));
+      return redirect(
+        ctx.res,
+        cuMesaj(
+          "eroare",
+          `Ai disponibil ${money(disponibil)}, nu poți cere ${money(suma)}. ` +
+            `Dacă îți trebuie mai mult, ia comisionul în avans din facturile neîncasate, din secțiunea „Ia comisionul mai devreme".`
+        )
+      );
     if (suma > disponibil) suma = disponibil;
 
     const r = await db
