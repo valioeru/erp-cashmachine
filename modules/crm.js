@@ -640,6 +640,7 @@ function register(router) {
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND u.rol = 'vanzari' AND u.activ = 1
            AND pl.data BETWEEN ? AND ?
+           AND ${cb.faraManual("f")}
          GROUP BY al.utilizator_id, u.nume, u.comision_procent
          ORDER BY incasat DESC`
       )
@@ -661,6 +662,7 @@ function register(router) {
          ${cb.joinRaport("f")}
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND al.utilizator_id = ?
+           AND ${cb.faraManual("f")}
          GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 12`
       )
       .all(agentId);
@@ -689,6 +691,7 @@ function register(router) {
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND al.utilizator_id = ? AND pl.data BETWEEN ? AND ?
+           AND ${cb.faraManual("f")}
          GROUP BY p.id, p.nume`
       )
       .all(agentId, de, la);
@@ -754,6 +757,7 @@ function register(router) {
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
            AND al.utilizator_id = ? AND pl.data BETWEEN ? AND ?
+           AND ${cb.faraManual("f")}
          GROUP BY f.id, f.serie, f.numar, f.data_emiterii, p.nume
          ORDER BY data_incasare DESC, incasat DESC
          LIMIT 400`

@@ -2129,12 +2129,18 @@ function register(router) {
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
            AND pl.data >= ? AND pl.data <= ?
+           AND ${cb.faraManual("f")}
          GROUP BY al.utilizator_id`
       )
       .all(deLa, panaLa);
     const incasatPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s)]));
     // baza de comision: partea fără TVA din ce a intrat efectiv
     const bazaPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s_net)]));
+    // plus facturile puse la comision cu mâna, din /crm/comision. Fără ele,
+    // raportul adminului ar arăta mai puțin decât pagina agentului.
+    const manual = await db.prepare(cb.MANUAL_PE_INTERVAL).all(String(deLa).slice(0, 7), String(panaLa).slice(0, 7));
+    for (const m of manual)
+      bazaPeAgent.set(m.utilizator_id, (bazaPeAgent.get(m.utilizator_id) || 0) + Number(m.baza || 0));
 
     // costul lunar al fiecărui agent (salariu + CAM + mașină + carburant),
     // ca să se vadă nu doar ce încasează, ci și cât costă

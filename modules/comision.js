@@ -74,6 +74,7 @@ async function incasariPeLuni(agentId, deLaLuna) {
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
           AND f.intercompany = 0 AND al.utilizator_id = ? AND pl.data >= ?
+          AND ${cb.faraManual("f")}
         GROUP BY SUBSTR(pl.data, 1, 7)
         ORDER BY luna`
     )
@@ -105,10 +106,88 @@ async function facturiCareAuAdusComision(agentId, luna) {
          LEFT JOIN parteneri p ON p.id = f.partener_id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
           AND f.intercompany = 0 AND al.utilizator_id = ? AND SUBSTR(pl.data, 1, 7) = ?
+          AND ${cb.faraManual("f")}
         GROUP BY f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, p.nume
         ORDER BY baza DESC, ultima_plata DESC`
     )
     .all(agentId, luna);
+}
+
+// Ce s-a adăugat cu mâna la comision, pe luni. Se pune peste baza venită din
+// încasări, ca ledgerul să numere și una, și alta.
+async function manualPeLuni(agentId, deLaLuna) {
+  return db.prepare(cb.MANUAL_PE_LUNA).all(agentId, deLaLuna);
+}
+
+// Baza lunară completă: ce a venit din încasări plus ce s-a pus cu mâna.
+// Se cheamă și din pagină, și din ruta de cerere de plată — dacă ar fi
+// socotite diferit, agentul ar vedea o sumă pe ecran și ar putea cere alta.
+async function bazaPeLuni(agentId, deLaLuna) {
+  const incasari = await incasariPeLuni(agentId, deLaLuna);
+  const manuale = await manualPeLuni(agentId, deLaLuna);
+  const peLuna = new Map(manuale.map((m) => [String(m.luna), Number(m.baza || 0)]));
+  for (const r of incasari) {
+    const plus = peLuna.get(String(r.luna)) || 0;
+    if (plus) { r.baza = Number(r.baza || 0) + plus; peLuna.delete(String(r.luna)); }
+  }
+  // Lunile care au DOAR adăugiri manuale, nicio încasare, n-ar avea rând deloc.
+  for (const [luna, baza] of peLuna) incasari.push({ luna, incasat: 0, baza, facturi: 0 });
+  return incasari;
+}
+
+// Liniile adăugate manual în luna curentă, ca să apară în listă lângă
+// celelalte, marcate ca atare.
+async function facturiManualeLuna(agentId, luna) {
+  return db
+    .prepare(
+      `SELECT m.id AS manual_id, m.baza, m.motiv, m.adaugat_la, m.adaugat_de,
+              u.nume AS adaugat_de_nume,
+              f.id, f.serie, f.numar, f.document_extern, f.data_emiterii,
+              p.nume AS client
+         FROM comision_manual m
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = m.factura_id
+         LEFT JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN utilizatori u ON u.id = m.adaugat_de
+        WHERE m.activ = 1 AND m.utilizator_id = ? AND m.luna = ?
+        ORDER BY m.baza DESC`
+    )
+    .all(agentId, luna);
+}
+
+// Facturile care pot fi adăugate la comision: ale clientului căutat, care
+// n-au intrat niciodată în comisionul cuiva. „N-au intrat" înseamnă că n-au
+// linie manuală ȘI că încasările lor (dacă există) n-au mers la agentul
+// pentru care căutăm — adică fie n-au fost plătite, fie plata a produs
+// comision altcuiva. Pe fiecare rând scrie de ce e eligibilă.
+async function facturiDeAdaugat(agentId, cauta) {
+  const q = `%${String(cauta || "").trim().toLowerCase()}%`;
+  return db
+    .prepare(
+      `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii,
+              p.nume AS client,
+              COALESCE(n.net, 0) AS net,
+              COALESCE(t.total, 0) AS total,
+              COALESCE(pl.platit, 0) AS platit,
+              (SELECT u2.nume FROM ${ALOC_FACTURA} a2 JOIN utilizatori u2 ON u2.id = a2.utilizator_id
+                WHERE a2.factura_id = f.id ORDER BY a2.procent DESC LIMIT 1) AS agent_curent
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN ${cb.SUB_NET} n ON n.factura_id = f.id
+         LEFT JOIN ${cb.SUB_TOTAL} t ON t.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) x
+                     GROUP BY factura_id) pl ON pl.factura_id = f.id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
+          AND f.intercompany = 0
+          AND LOWER(p.nume) LIKE ?
+          AND ${cb.faraManual("f")}
+          AND NOT EXISTS (
+                SELECT 1 FROM (SELECT * FROM plati WHERE activ = 1) p2
+                  JOIN ${ALOC_FACTURA} a3 ON a3.factura_id = f.id
+                 WHERE p2.factura_id = f.id AND a3.utilizator_id = ?)
+        ORDER BY f.data_emiterii DESC
+        LIMIT 60`
+    )
+    .all(q, agentId);
 }
 
 // Facturile emise și neîncasate integral: comisionul care urmează să vină.
@@ -129,6 +208,7 @@ async function facturiNeincasate(agentId) {
                      GROUP BY factura_id) pl ON pl.factura_id = f.id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
           AND f.intercompany = 0 AND al.utilizator_id = ?
+          AND ${cb.faraManual("f")}
           AND COALESCE(t.total, 0) - COALESCE(pl.platit, 0) > 1
         ORDER BY COALESCE(f.data_scadenta, f.data_emiterii)`
     )
@@ -335,7 +415,7 @@ function register(router) {
     const luni = [];
     for (let i = 11; i >= 0; i--) luni.push(lunaMinus(lunaAcum, i));
 
-    const incasari = await incasariPeLuni(agentId, primaLuna);
+    const incasari = await bazaPeLuni(agentId, primaLuna);
     const cereri = await db.prepare("SELECT * FROM cereri_comision WHERE utilizator_id = ? ORDER BY luna").all(agentId);
     const start = startLedger(cereri, lunaAcum);
     const rand = socoteala(luni, incasari, cereri, pct, start);
@@ -351,6 +431,20 @@ function register(router) {
       baza: nr(x.baza),
       comision: (nr(x.baza) * pct) / 100,
     }));
+    // Căutarea pentru „adaugă o factură": merge prin adresă, nu prin AJAX —
+    // se vede ce ai căutat, poți da refresh și poți trimite linkul mai departe.
+    const cautaAdauga = String(ctx.query.adauga || "").trim();
+    const gasiteDeAdaugat = cautaAdauga.length >= 2 ? await facturiDeAdaugat(agentId, cautaAdauga) : [];
+
+    const adaugateManual = (await facturiManualeLuna(agentId, lunaAcum)).map((x) => ({
+      ...x,
+      manual: true,
+      incasat_partea_mea: 0,
+      baza: nr(x.baza),
+      comision: (nr(x.baza) * pct) / 100,
+    }));
+    for (const m of adaugateManual) bazaFacturi.push(m);
+    bazaFacturi.sort((a, b) => b.baza - a.baza);
     const bazaFacturiTotal = bazaFacturi.reduce((s, x) => s + x.baza, 0);
     const bazaFacturiComision = bazaFacturi.reduce((s, x) => s + x.comision, 0);
     // Dacă lista nu dă exact cât arată capul paginii, o spunem — mai bine o
@@ -475,6 +569,52 @@ function register(router) {
       </div>
 
       <h2 style="margin-top:22px">Facturile din care iese comisionul lunii</h2>
+      <details class="detail-box" style="margin:0 0 14px" ${cautaAdauga ? "open" : ""}>
+        <summary style="cursor:pointer;font-weight:600">＋ Adaugă o factură la comisionul lunii</summary>
+        <p class="explic" style="margin-top:10px">
+          Caută clientul și alege factura. Apar doar facturile care n-au intrat niciodată în comisionul nimănui —
+          fie n-au fost încasate, fie încasarea a mers la alt agent. Ce adaugi aici intră în baza lunii
+          ${esc(numeLuna(lunaAcum))} cu valoarea ei fără TVA, iar factura nu va mai produce comision a doua oară
+          când intră banii.
+        </p>
+        <form class="filtre" method="get" action="/crm/comision" style="margin-bottom:10px">
+          ${esteAdmin ? `<input type="hidden" name="agent" value="${agentId}">` : ""}
+          <input name="adauga" value="${esc(cautaAdauga)}" placeholder="Numele clientului (ex: rocast)" autofocus
+                 style="min-width:280px;padding:7px 10px;border:1px solid var(--border);border-radius:6px">
+          <button class="btn secondary" type="submit">Caută</button>
+          ${cautaAdauga ? `<a class="link-btn" href="/crm/comision${esteAdmin ? `?agent=${agentId}` : ""}">renunță</a>` : ""}
+        </form>
+        ${
+          !cautaAdauga
+            ? ""
+            : gasiteDeAdaugat.length
+              ? table(
+                  ["Factura", "Data", "Client", "Fără TVA", "Stare", "De ce se poate adăuga", ""],
+                  gasiteDeAdaugat.map((x) => {
+                    const rest = nr(x.total) - nr(x.platit);
+                    const motiv = nr(x.platit) > 0
+                      ? `încasată, dar comisionul a mers la ${esc(String(x.agent_curent || "nimeni"))}`
+                      : "neîncasată încă";
+                    return [
+                      `<a href="/facturi/${x.id}">${esc(x.document_extern || `${x.serie || ""}${x.numar || ""}`)}</a>`,
+                      esc(String(x.data_emiterii || "").slice(0, 10)),
+                      esc(String(x.client || "—").slice(0, 40)),
+                      `<strong>${lei(x.net)}</strong>`,
+                      nr(x.platit) > 0 ? (rest > 1 ? `plătită parțial · rest ${lei(rest)}` : "plătită") : "neplătită",
+                      `<span style="color:var(--text-muted)">${motiv}</span>`,
+                      `<form method="post" action="/crm/comision/adauga" style="display:flex;gap:6px;align-items:center">
+                         <input type="hidden" name="factura" value="${x.id}">
+                         <input type="hidden" name="agent" value="${agentId}">
+                         <input name="motiv" placeholder="de ce (opțional)" style="width:150px;padding:5px 7px;border:1px solid var(--border);border-radius:5px">
+                         <button class="btn" type="submit">adaugă</button>
+                       </form>`,
+                    ];
+                  })
+                )
+              : `<p class="nota">Niciun rezultat pentru „${esc(cautaAdauga)}". Ori clientul se scrie altfel, ori toate
+                   facturile lui au intrat deja în comisionul cuiva.</p>`
+        }
+      </details>
       <p class="explic">
         Încasările intrate în ${numeLuna(lunaAcum)}, factură cu factură. Comisionul se dă din valoarea
         <strong>fără TVA</strong>: TVA-ul e banul statului, doar trece prin contul firmei.
@@ -495,12 +635,26 @@ function register(router) {
               bazaFacturi.map((x) => [
                 `<a href="/facturi/${x.id}">${esc(x.document_extern || `${x.serie || ""}${x.numar || ""}`)}</a>${
                   nr(x.nr_plati) > 1 ? ` <span class="badge gri">${nr(x.nr_plati)} plăți</span>` : ""
+                }${
+                  x.manual
+                    ? ` <span class="badge" style="background:var(--warn,#c47f17);color:#fff" title="Adăugată manual de ${esc(
+                        String(x.adaugat_de_nume || "cineva")
+                      )} pe ${esc(String(x.adaugat_la || "").slice(0, 10))}${x.motiv ? " · " + esc(String(x.motiv)) : ""}">adăugată manual</span>
+                       <form method="post" action="/crm/comision/scoate" style="display:inline"
+                             onsubmit="return confirm('Scoți factura din comisionul lunii?')">
+                         <input type="hidden" name="id" value="${x.manual_id}">
+                         <input type="hidden" name="agent" value="${agentId}">
+                         <button class="link-btn" type="submit" title="Scoate din comision">scoate</button>
+                       </form>`
+                    : ""
                 }`,
                 esc(String(x.data_emiterii || "").slice(0, 10)),
                 esc(String(x.client || "—").slice(0, 44)),
                 esc(String(x.ultima_plata || "").slice(0, 10)),
                 `${nr(x.cota_agent).toLocaleString("ro-RO")}%`,
-                `<span data-cv="inc" data-v="${nr(x.incasat_partea_mea)}">${lei(x.incasat_partea_mea)}</span>`,
+                x.manual
+                  ? `<span data-cv="inc" data-v="0" style="color:var(--text-muted)">neîncasată</span>`
+                  : `<span data-cv="inc" data-v="${nr(x.incasat_partea_mea)}">${lei(x.incasat_partea_mea)}</span>`,
                 `<span data-cv="baza" data-v="${nr(x.baza)}">${lei(x.baza)}</span>`,
                 `<strong data-cv="com" data-v="${nr(x.comision)}">${lei(x.comision)}</strong>`,
               ]),
@@ -670,6 +824,72 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comisionul meu", active: "/crm/comision", body }));
   });
 
+  // Adaugă o factură la comisionul lunii curente. Poate și agentul, pe pagina
+  // lui — rămâne scris cine a adăugat și când, iar linia se vede marcată în
+  // listă, deci nimic nu se strecoară neobservat.
+  router.post("/crm/comision/adauga", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const esteAdmin = ctx.user.rol === "admin";
+    const agentId = esteAdmin && nr(ctx.body.agent) ? nr(ctx.body.agent) : ctx.user.id;
+    if (!esteAdmin && agentId !== ctx.user.id) return redirect(ctx.res, "/crm/comision");
+    const inapoi = `/crm/comision${esteAdmin ? `?agent=${agentId}` : ""}`;
+    const cuMesaj = (cheie, text) => `${inapoi}${esteAdmin ? "&" : "?"}${cheie}=${encodeURIComponent(text)}`;
+
+    const facturaId = nr(ctx.body.factura);
+    if (!facturaId) return redirect(ctx.res, cuMesaj("eroare", "N-am înțeles ce factură să adaug."));
+
+    // Verificăm din nou aici tot ce verifica și căutarea. Între afișarea
+    // listei și apăsarea butonului, factura poate să fi fost adăugată de
+    // altcineva sau încasată.
+    const f = await db
+      .prepare(
+        `SELECT f.id, f.serie, f.numar, f.document_extern, f.status, f.directie, f.intercompany,
+                COALESCE(n.net, 0) AS net, p.nume AS client
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN parteneri p ON p.id = f.partener_id
+           LEFT JOIN ${cb.SUB_NET} n ON n.factura_id = f.id
+          WHERE f.id = ?`
+      )
+      .get(facturaId);
+    if (!f) return redirect(ctx.res, cuMesaj("eroare", "Factura nu există sau a fost ștearsă."));
+    if (f.directie !== "vanzare" || ["anulata", "ciorna", "necunoscut"].includes(String(f.status)) || nr(f.intercompany))
+      return redirect(ctx.res, cuMesaj("eroare", "Factura asta nu poate intra în comision."));
+    const baza = Math.round(nr(f.net) * 100) / 100;
+    if (!(baza > 0))
+      return redirect(ctx.res, cuMesaj("eroare", "Factura n-are valoare fără TVA în ERP (probabil îi lipsesc liniile), deci n-am din ce socoti comision."));
+
+    const deja = await db.prepare("SELECT id FROM comision_manual WHERE factura_id = ? AND activ = 1").get(facturaId);
+    if (deja) return redirect(ctx.res, cuMesaj("eroare", "Factura e deja adăugată la un comision."));
+
+    const numar = f.document_extern || `${f.serie || ""}${f.numar || ""}`;
+    await db
+      .prepare(
+        `INSERT INTO comision_manual (utilizator_id, factura_id, luna, baza, motiv, adaugat_de, adaugat_la, activ)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
+      )
+      .run(agentId, facturaId, lunaLui(azi()), baza, String(ctx.body.motiv || "").trim().slice(0, 200) || null, ctx.user.id, azi());
+    return redirect(ctx.res, cuMesaj("mesaj", `${numar} (${money(baza)} fără TVA) a intrat în comisionul lunii.`));
+  });
+
+  // Scoaterea nu șterge rândul, îl dezactivează: rămâne urma cine l-a pus,
+  // cine l-a scos și când. La bani, istoricul contează mai mult decât un
+  // tabel curat.
+  router.post("/crm/comision/scoate", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const esteAdmin = ctx.user.rol === "admin";
+    const agentId = esteAdmin && nr(ctx.body.agent) ? nr(ctx.body.agent) : ctx.user.id;
+    const inapoi = `/crm/comision${esteAdmin ? `?agent=${agentId}` : ""}`;
+    const cuMesaj = (cheie, text) => `${inapoi}${esteAdmin ? "&" : "?"}${cheie}=${encodeURIComponent(text)}`;
+    const id = nr(ctx.body.id);
+    const linie = await db.prepare("SELECT * FROM comision_manual WHERE id = ? AND activ = 1").get(id);
+    if (!linie) return redirect(ctx.res, cuMesaj("eroare", "Linia nu mai există."));
+    if (!esteAdmin && nr(linie.utilizator_id) !== ctx.user.id) return redirect(ctx.res, "/crm/comision");
+    await db
+      .prepare("UPDATE comision_manual SET activ = 0, scos_de = ?, scos_la = ? WHERE id = ?")
+      .run(ctx.user.id, azi(), id);
+    return redirect(ctx.res, cuMesaj("mesaj", "Factura a ieșit din comisionul lunii."));
+  });
+
   router.post("/crm/comision/cerere", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const esteAdmin = ctx.user.rol === "admin";
@@ -694,7 +914,7 @@ function register(router) {
     const luni = [];
     for (let i = 11; i >= 0; i--) luni.push(lunaMinus(lunaAcum, i));
     const cereriTot = await db.prepare("SELECT * FROM cereri_comision WHERE utilizator_id = ? ORDER BY luna").all(agentId);
-    const rand = socoteala(luni, await incasariPeLuni(agentId, primaLuna), cereriTot, pct, startLedger(cereriTot, lunaAcum));
+    const rand = socoteala(luni, await bazaPeLuni(agentId, primaLuna), cereriTot, pct, startLedger(cereriTot, lunaAcum));
     const acum = rand[rand.length - 1];
     const disponibil = Math.round(acum.disponibil * 100) / 100;
 
