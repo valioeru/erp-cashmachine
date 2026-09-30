@@ -289,7 +289,14 @@ module.exports = function registerRute(router, deps) {
     } catch (e) {
       randuri = [];
     }
-    const primele = randuri.slice(0, 25);
+    // Previzualizarea arăta primele 25 de rânduri și atât. Când un lot e
+    // aplicat doar pe jumătate — încasări care n-au găsit factura, sau care
+    // au căzut pe facturi închise ca istoric — restul rândurilor sunt exact
+    // ce trebuie citit ca să știi ce s-a pierdut, iar ele nu se vedeau
+    // nicăieri. „?tot=1" le arată pe toate.
+    const totul = String(ctx.query.tot || "") === "1";
+    const PLAFON = 2000;
+    const primele = randuri.slice(0, totul ? PLAFON : 25);
     const chei = [...new Set(primele.flatMap((r) => Object.keys(r || {})))].slice(0, 12);
     const body = `
       <div class="detail-box"><div class="detail-grid">
@@ -298,7 +305,13 @@ module.exports = function registerRute(router, deps) {
         <div><div class="k">Primit</div>${esc(String(l.primit_la || "").slice(0, 19))}</div>
         <div><div class="k">Stare</div>${l.aplicat_la ? `aplicat la ${esc(String(l.aplicat_la).slice(0, 19))}` : "în așteptare"}</div>
       </div></div>
-      <h2>Primele ${primele.length} rânduri</h2>
+      <h2>${totul ? `Toate cele ${primele.length} rânduri` : `Primele ${primele.length} rânduri`}
+        ${
+          randuri.length > primele.length
+            ? `<a class="link-btn" style="font-size:13px;font-weight:400" href="/import/punte/${l.id}?tot=1">arată-le pe toate (${randuri.length})</a>`
+            : ""
+        }
+      </h2>
       ${
         chei.length
           ? table(
