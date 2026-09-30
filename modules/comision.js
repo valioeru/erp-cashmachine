@@ -21,6 +21,7 @@
 // putea ieși din sincron cu realitatea, ăsta nu poate.
 const db = require("../lib/db");
 const { ALOC_FACTURA } = require("./alocari");
+const cb = require("../lib/comision-baza");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -63,10 +64,13 @@ function lei(v) {
 async function incasariPeLuni(agentId, deLaLuna) {
   return db
     .prepare(
-      `SELECT SUBSTR(pl.data, 1, 7) AS luna, COALESCE(SUM(pl.suma * al.procent / 100.0), 0) AS incasat,
+      `SELECT SUBSTR(pl.data, 1, 7) AS luna,
+              COALESCE(SUM(pl.suma * al.procent / 100.0), 0) AS incasat,
+              COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0), 0) AS baza,
               COUNT(DISTINCT f.id) AS facturi
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
+         ${cb.joinRaport("f")}
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
           AND f.intercompany = 0 AND al.utilizator_id = ? AND pl.data >= ?
@@ -76,6 +80,37 @@ async function incasariPeLuni(agentId, deLaLuna) {
     .all(agentId, deLaLuna + "-01");
 }
 
+// Facturile din care a ieșit comisionul lunii, una câte una.
+//
+// De ce există: pagina arăta doar totalul lunii, iar agentul n-avea cum să
+// verifice cifra — trebuia să creadă pe cuvânt un număr din care îi iese
+// salariul. Aici sunt chiar facturile pe care au intrat banii în luna
+// curentă, cu partea lui din fiecare. Suma coloanei de comision este exact
+// cifra de sus; dacă nu e, se vede imediat pe ce factură se rupe socoteala.
+async function facturiCareAuAdusComision(agentId, luna) {
+  return db
+    .prepare(
+      `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii,
+              p.nume AS client,
+              MAX(al.procent) AS cota_agent,
+              COUNT(pl.id) AS nr_plati,
+              MAX(pl.data) AS ultima_plata,
+              COALESCE(SUM(pl.suma), 0) AS incasat_factura,
+              COALESCE(SUM(pl.suma * al.procent / 100.0), 0) AS incasat_partea_mea,
+              COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0), 0) AS baza
+         FROM (SELECT * FROM plati WHERE activ = 1) pl
+         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
+         ${cb.joinRaport("f")}
+         JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
+         LEFT JOIN parteneri p ON p.id = f.partener_id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
+          AND f.intercompany = 0 AND al.utilizator_id = ? AND SUBSTR(pl.data, 1, 7) = ?
+        GROUP BY f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, p.nume
+        ORDER BY baza DESC, ultima_plata DESC`
+    )
+    .all(agentId, luna);
+}
+
 // Facturile emise și neîncasate integral: comisionul care urmează să vină.
 async function facturiNeincasate(agentId) {
   return db
@@ -83,12 +118,13 @@ async function facturiNeincasate(agentId) {
       `SELECT f.id, f.serie, f.numar, f.data_emiterii, f.data_scadenta, p.nume AS partener,
               al.procent,
               COALESCE(t.total, 0) AS total,
+              COALESCE(n.net, 0) AS net,
               COALESCE(pl.platit, 0) AS platit
          FROM (SELECT * FROM facturi WHERE activ = 1) f
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          LEFT JOIN parteneri p ON p.id = f.partener_id
-         LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total
-                      FROM facturi_linii GROUP BY factura_id) t ON t.factura_id = f.id
+         LEFT JOIN ${cb.SUB_TOTAL} t ON t.factura_id = f.id
+         LEFT JOIN ${cb.SUB_NET} n ON n.factura_id = f.id
          LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati
                      GROUP BY factura_id) pl ON pl.factura_id = f.id
         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata', 'ciorna', 'necunoscut')
@@ -196,6 +232,9 @@ function fereastra(dataISO) {
 // să se adune.
 function socoteala(luni, incasari, cereri, pct, startLedger) {
   const hInc = new Map(incasari.map((r) => [r.luna, nr(r.incasat)]));
+  // Încasatul e cu TVA (atât plătește clientul); comisionul se dă din partea
+  // fără TVA. Ținem ambele: una se arată, cealaltă se înmulțește cu procentul.
+  const hBaza = new Map(incasari.map((r) => [r.luna, nr(r.baza)]));
   const hCer = new Map();
   for (const c of cereri) hCer.set(c.luna, (hCer.get(c.luna) || 0) + nr(c.suma_ceruta));
 
@@ -205,10 +244,11 @@ function socoteala(luni, incasari, cereri, pct, startLedger) {
     const conteaza = !startLedger || luna >= startLedger;
     const reportEfectiv = conteaza ? report : 0;
     const incasat = hInc.get(luna) || 0;
-    const castigat = (incasat * pct) / 100;
+    const baza = hBaza.get(luna) || 0;
+    const castigat = (baza * pct) / 100;
     const cerut = hCer.get(luna) || 0;
     const disponibil = reportEfectiv + castigat - cerut;
-    rez.push({ luna, incasat, castigat, cerut, report: reportEfectiv, disponibil, conteaza });
+    rez.push({ luna, incasat, baza, castigat, cerut, report: reportEfectiv, disponibil, conteaza });
     report = conteaza ? disponibil : 0;
   }
   return rez;
@@ -252,11 +292,25 @@ function register(router) {
     const cereriLunaAsta = cereri.filter((c) => c.luna === lunaAcum);
     const cerutLunaAsta = cereriLunaAsta.reduce((s, c) => s + nr(c.suma_ceruta), 0);
 
+    // ---- facturile din care iese comisionul lunii -------------------------
+    const bazaFacturi = (await facturiCareAuAdusComision(agentId, lunaAcum)).map((x) => ({
+      ...x,
+      incasat_partea_mea: nr(x.incasat_partea_mea),
+      baza: nr(x.baza),
+      comision: (nr(x.baza) * pct) / 100,
+    }));
+    const bazaFacturiTotal = bazaFacturi.reduce((s, x) => s + x.baza, 0);
+    const bazaFacturiComision = bazaFacturi.reduce((s, x) => s + x.comision, 0);
+    // Dacă lista nu dă exact cât arată capul paginii, o spunem — mai bine o
+    // notă vizibilă decât un total care nu se potrivește și nu explică de ce.
+    const bazaSePotriveste = Math.abs(bazaFacturiTotal - nr(acum.baza)) < 0.01;
+
     // ---- comisionul viitor, din facturile neîncasate ----------------------
     const neincasate = await facturiNeincasate(agentId);
     const viitor = neincasate.map((x) => {
       const rest = nr(x.total) - nr(x.platit);
-      return { ...x, rest, comision: (rest * nr(x.procent) / 100) * (pct / 100) };
+      const restNet = rest * cb.raportNetJs(x.net, x.total, x.data_emiterii);
+      return { ...x, rest, restNet, comision: (restNet * nr(x.procent) / 100) * (pct / 100) };
     });
     const viitorTotal = viitor.reduce((s, x) => s + x.comision, 0);
 
@@ -333,7 +387,7 @@ function register(router) {
           <div class="suma">${lei(acum.disponibil)}</div>
           <div class="formula">
             report din ${numeLuna(lunaMinus(lunaAcum, 1))} <strong>${lei(acum.report)}</strong>
-            + ${pct}% din ${lei(acum.incasat)} încasați luna asta <strong>${lei(acum.castigat)}</strong>
+            + ${pct}% din ${lei(acum.baza)} (baza fără TVA a lunii) <strong>${lei(acum.castigat)}</strong>
             − cerut luna asta <strong>${lei(acum.cerut)}</strong>
           </div>
         </div>
@@ -368,6 +422,47 @@ function register(router) {
         </div>
       </div>
 
+      <h2 style="margin-top:22px">Facturile din care iese comisionul lunii</h2>
+      <p class="explic">
+        Încasările intrate în ${numeLuna(lunaAcum)}, factură cu factură. Comisionul se dă din valoarea
+        <strong>fără TVA</strong>: TVA-ul e banul statului, doar trece prin contul firmei.
+        Pe fiecare rând: <code>bază fără TVA × ${pct}%</code>. Totalul coloanei e chiar cifra de sus.
+      </p>
+      ${
+        bazaFacturi.length
+          ? table(
+              ["Factura", "Client", "Ultima încasare", "Cota mea", "Încasat (cu TVA)", "Bază (fără TVA)", "Comision"],
+              bazaFacturi.map((x) => [
+                `<a href="/facturi/${x.id}">${esc(x.document_extern || `${x.serie || ""}${x.numar || ""}`)}</a>${
+                  nr(x.nr_plati) > 1 ? ` <span class="badge gri">${nr(x.nr_plati)} plăți</span>` : ""
+                }`,
+                esc(String(x.client || "—").slice(0, 44)),
+                esc(String(x.ultima_plata || "").slice(0, 10)),
+                `${nr(x.cota_agent).toLocaleString("ro-RO")}%`,
+                lei(x.incasat_partea_mea),
+                lei(x.baza),
+                `<strong>${lei(x.comision)}</strong>`,
+              ]),
+              {
+                total: [
+                  `Total · ${bazaFacturi.length} ${bazaFacturi.length === 1 ? "factură" : "facturi"}`,
+                  "",
+                  "",
+                  "",
+                  lei(acum.incasat),
+                  `<strong>${lei(bazaFacturiTotal)}</strong>`,
+                  `<strong>${lei(bazaFacturiComision)}</strong>`,
+                ],
+              }
+            ) +
+            (bazaSePotriveste
+              ? ""
+              : `<p class="nota" style="color:var(--danger)">Atenție: lista dă ${lei(bazaFacturiTotal)} bază, iar capul paginii
+                   ${lei(acum.baza)}. Diferența de ${lei(Math.abs(bazaFacturiTotal - nr(acum.baza)))} înseamnă că undeva e o
+                   încasare care nu se leagă de o factură alocată ție — spune-i lui Vali.</p>`)
+          : `<p class="nota">Luna asta n-a intrat încă niciun ban pe facturile tale. Când intră, apar aici una câte una.</p>`
+      }
+
       <div class="cards">
         <div class="card"><div class="label">Comision viitor (facturi emise, neîncasate)</div><div class="value">${lei(viitorTotal)}</div>
           <div class="mic">${viitor.length} facturi · ${pct}% din partea ta din ce a mai rămas de încasat</div></div>
@@ -376,14 +471,16 @@ function register(router) {
             comenziFaraTemei ? ` (${comenziFaraTemei} fără valoare, deci nesocotite)` : ""
           } · ${lei(potentialPonderat)} din ${potential.length} ${potential.length === 1 ? "oportunitate" : "oportunități"}</div></div>
         <div class="card"><div class="label">Încasat luna asta pe facturile mele</div><div class="value">${lei(acum.incasat)}</div>
-          <div class="mic">baza din care iese comisionul lunii</div></div>
+          <div class="mic">cu TVA, cât a intrat efectiv în cont</div></div>
+        <div class="card"><div class="label">Baza de comision a lunii</div><div class="value">${lei(acum.baza)}</div>
+          <div class="mic">aceleași încasări, fără TVA — din asta iese comisionul</div></div>
       </div>
 
       <h2>Prognoza comisionului, după scadențe</h2>
       <p class="explic">
         Fiecare factură emisă și neîncasată aduce comision când intră banii. Aici sunt puse pe luna în care ar
         trebui să intre, după scadența lor. Formula pe fiecare factură:
-        <code>(total − încasat) × cota ta din factură × ${pct}%</code>.
+        <code>(total − încasat, fără TVA) × cota ta din factură × ${pct}%</code>.
       </p>
       ${table(
         ["Când", "Facturi", "Comision așteptat"],
@@ -548,7 +645,7 @@ function register(router) {
         `INSERT INTO cereri_comision (utilizator_id, luna, baza, procent, disponibil, suma_ceruta, observatii, creata_la)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
-      .run(agentId, lunaAcum, acum.incasat, pct, disponibil, suma, String(ctx.body.observatii || "").trim() || null, aziISO);
+      .run(agentId, lunaAcum, acum.baza, pct, disponibil, suma, String(ctx.body.observatii || "").trim() || null, aziISO);
 
     // Mailul către Vali. Dacă nu se poate trimite, cererea rămâne în bază —
     // banii nu depind de un server SMTP.
@@ -580,7 +677,8 @@ function register(router) {
             `Rămâne:      ${money(disponibil - suma)} (se reportează în ${numeLuna(lunaMinus(lunaAcum, -1))})`,
             ``,
             `Din ce iese:`,
-            `  încasat luna asta pe facturile lui: ${money(acum.incasat)}`,
+            `  încasat luna asta pe facturile lui: ${money(acum.incasat)} (cu TVA)`,
+            `  baza de comision (fără TVA):        ${money(acum.baza)}`,
             `  procent comision:                   ${pct}%`,
             `  câștigat luna asta:                 ${money(acum.castigat)}`,
             `  report din ${numeLuna(lunaMinus(lunaAcum, 1))}: ${money(acum.report)}`,

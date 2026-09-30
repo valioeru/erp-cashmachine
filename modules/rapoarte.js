@@ -19,6 +19,7 @@ const cost = require("../lib/cost");
 const grup = require("../lib/grup");
 const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
+const cb = require("../lib/comision-baza");
 const { esc, money, layout, table, dataRo, dateleInText } = require("../lib/render");
 const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
@@ -2119,9 +2120,12 @@ function register(router) {
     // încasat efectiv pe agent (baza corectă pentru comision, de regulă)
     const incasat = await db
       .prepare(
-        `SELECT al.utilizator_id AS agent, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS s
+        `SELECT al.utilizator_id AS agent,
+                COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS s,
+                COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0),0) AS s_net
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id
+         ${cb.joinRaport("f")}
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0
            AND pl.data >= ? AND pl.data <= ?
@@ -2129,6 +2133,8 @@ function register(router) {
       )
       .all(deLa, panaLa);
     const incasatPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s)]));
+    // baza de comision: partea fără TVA din ce a intrat efectiv
+    const bazaPeAgent = new Map(incasat.map((r) => [r.agent, Number(r.s_net)]));
 
     // costul lunar al fiecărui agent (salariu + CAM + mașină + carburant),
     // ca să se vadă nu doar ce încasează, ci și cât costă
@@ -2152,7 +2158,9 @@ function register(router) {
       .filter((a) => Number(a.facturat_net) > 0 || Number(a.pct) > 0)
       .map((a) => {
         const inc = incasatPeAgent.get(a.id) || 0;
-        const baza = bazaIncasat === "incasat" ? inc : Number(a.facturat_total);
+        // Comisionul se dă din valoarea FĂRĂ TVA, deci baza nu e nici suma
+        // încasată brut, nici facturatul cu TVA — vezi lib/comision-baza.js.
+        const baza = bazaIncasat === "incasat" ? bazaPeAgent.get(a.id) || 0 : Number(a.facturat_net);
         const comision = (baza * Number(a.pct)) / 100;
         const cost = costPeAgent.get(a.id) || 0;
         return { ...a, incasat: inc, baza, comision, cost, costTotal: cost + comision, net: inc - cost - comision };
@@ -2165,8 +2173,8 @@ function register(router) {
         "/rapoarte/comisioane",
         interval,
         `<select name="baza" onchange="this.form.submit()">
-           <option value="incasat"${bazaIncasat === "incasat" ? " selected" : ""}>comision la ÎNCASAT</option>
-           <option value="facturat"${bazaIncasat === "facturat" ? " selected" : ""}>comision la FACTURAT</option>
+           <option value="incasat"${bazaIncasat === "incasat" ? " selected" : ""}>comision la ÎNCASAT (fără TVA)</option>
+           <option value="facturat"${bazaIncasat === "facturat" ? " selected" : ""}>comision la FACTURAT (fără TVA)</option>
          </select>`
       )}
 
@@ -2179,13 +2187,14 @@ function register(router) {
       </div>
 
       ${table(
-        ["Agent", "Clienți", "Facturi", "Facturat (net)", "Încasat", "Comision %", "Comision", "Cost lunar (sal.+CAM+mașină)", "Încasat − cost − comision"],
+        ["Agent", "Clienți", "Facturi", "Facturat (fără TVA)", "Încasat (cu TVA)", "Bază comision (fără TVA)", "Comision %", "Comision", "Cost lunar (sal.+CAM+mașină)", "Încasat − cost − comision"],
         randuri.map((r) => [
           `<a href="/crm/birou?agent=${r.id}">${esc(r.nume)}</a>`,
           r.nr_clienti,
           r.nr_facturi,
           money(r.facturat_net),
           money(r.incasat),
+          money(r.baza),
           Number(r.pct) > 0 ? `${Number(r.pct).toFixed(2)}%` : '<span class="badge gri">nesetat</span>',
           `<strong>${money(r.comision)}</strong>`,
           r.cost ? money(r.cost) : `<a class="link-btn" href="/costuri/nou?utilizator_id=${r.id}">setează</a>`,
@@ -2198,6 +2207,7 @@ function register(router) {
         agenții lucrează pentru ambele firme, deci portofoliul lor e unul singur. Procentul fiecărui agent se setează în
         <a href="/admin/utilizatori">Utilizatori</a>; cât timp e 0, comisionul iese 0 (nu ghicesc procente).
         Recomandarea uzuală e comisionul la încasat, nu la facturat — altfel plătești comision pe bani care n-au intrat încă.
+        Oricare ar fi baza, procentul se aplică pe valoarea <strong>fără TVA</strong>: TVA-ul e banul statului, nu venitul firmei.
       </p>
     `;
     send(ctx.res, 200, pagina(ctx, "Comisioane agenți — pe grup", "/rapoarte/comisioane", continut));

@@ -14,6 +14,7 @@ const { deschisa } = require("../lib/solduri");
 // produs sau fără preț ieșeau cu cost zero, adică marjă 100%.
 const cost = require("../lib/cost");
 const { ALOC, ALOC_FACTURA } = require("./alocari");
+const cb = require("../lib/comision-baza");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
@@ -628,9 +629,11 @@ function register(router) {
       .prepare(
         `SELECT al.utilizator_id AS agent, u.nume AS agent_nume, COALESCE(u.comision_procent,2) AS pct,
                 COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat,
+                COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0),0) AS baza,
                 COUNT(DISTINCT f.id) AS nr_facturi, COUNT(DISTINCT p.id) AS nr_clienti
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
+         ${cb.joinRaport("f")}
          JOIN parteneri p ON p.id = f.partener_id
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          JOIN utilizatori u ON u.id = al.utilizator_id
@@ -645,13 +648,17 @@ function register(router) {
     const alMeu = incasariPerioada.find((r) => r.agent === agentId);
     const pctMeu = alMeu ? Number(alMeu.pct) : Number(agent.comision_procent ?? 2) || 2;
     const incasatMeu = alMeu ? Number(alMeu.incasat) : 0;
-    const comisionMeu = (incasatMeu * pctMeu) / 100;
+    // Comisionul se dă din valoarea fără TVA — vezi lib/comision-baza.js.
+    const bazaMea = alMeu ? Number(alMeu.baza) : 0;
+    const comisionMeu = (bazaMea * pctMeu) / 100;
 
     // Evoluția pe ultimele 12 luni (independentă de perioada aleasă).
     const evolutie = await db
       .prepare(
-        `SELECT SUBSTR(pl.data,1,7) AS luna, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat
+        `SELECT SUBSTR(pl.data,1,7) AS luna,
+                COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0),0) AS incasat
          FROM (SELECT * FROM plati WHERE activ = 1) pl JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id=pl.factura_id JOIN parteneri p ON p.id=f.partener_id
+         ${cb.joinRaport("f")}
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0 AND al.utilizator_id = ?
          GROUP BY SUBSTR(pl.data,1,7) ORDER BY luna DESC LIMIT 12`
@@ -659,7 +666,12 @@ function register(router) {
       .all(agentId);
     const evolutieOrd = evolutie.slice().reverse();
     const maxEvo = Math.max(1, ...evolutieOrd.map((e) => Number(e.incasat)));
-    const liniiEchipa = incasariPerioada.map((r) => ({ ...r, incasat: Number(r.incasat), comision: (Number(r.incasat) * Number(r.pct)) / 100 }));
+    const liniiEchipa = incasariPerioada.map((r) => ({
+      ...r,
+      incasat: Number(r.incasat),
+      baza: Number(r.baza),
+      comision: (Number(r.baza) * Number(r.pct)) / 100,
+    }));
     const maxEchipa = Math.max(1, ...liniiEchipa.map((l) => l.incasat));
     const totalEchipa = liniiEchipa.reduce((s, l) => s + l.comision, 0);
 
@@ -667,10 +679,12 @@ function register(router) {
     const incasatPeClient = await db
       .prepare(
         `SELECT p.id, p.nume, COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat,
+                COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0),0) AS baza,
                 MAX(al.procent) AS procent_alocat,
                 COUNT(DISTINCT f.id) AS nr_facturi, MAX(pl.data) AS ultima_incasare
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
+         ${cb.joinRaport("f")}
          JOIN parteneri p ON p.id = f.partener_id
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
@@ -715,13 +729,14 @@ function register(router) {
       for (const r of incasatPeClient) {
         const g = m.get(r.id) || { id: r.id, nume: r.nume, facturat: 0, nr_emise: 0, incasat: 0, nr_facturi: 0, ultima_incasare: null };
         g.incasat = Number(r.incasat);
+        g.baza = Number(r.baza);
         g.procent = Number(r.procent_alocat ?? 100);
         g.nr_facturi = Number(r.nr_facturi);
         g.ultima_incasare = r.ultima_incasare;
         m.set(r.id, g);
       }
       return [...m.values()]
-        .map((g) => ({ ...g, comision: (g.incasat * pctMeu) / 100, sold: soldMap.get(g.id) || 0 }))
+        .map((g) => ({ ...g, comision: ((g.baza || 0) * pctMeu) / 100, sold: soldMap.get(g.id) || 0 }))
         .sort((a, b) => b.incasat - a.incasat || b.facturat - a.facturat);
     })();
 
@@ -729,9 +744,12 @@ function register(router) {
     const facturiIncasate = await db
       .prepare(
         `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client,
-                COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat, MAX(pl.data) AS data_incasare
+                COALESCE(SUM(pl.suma * al.procent / 100.0),0) AS incasat,
+                COALESCE(SUM(${cb.incasatNet("pl", "f")} * al.procent / 100.0),0) AS baza,
+                MAX(pl.data) AS data_incasare
          FROM (SELECT * FROM plati WHERE activ = 1) pl
          JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = pl.factura_id
+         ${cb.joinRaport("f")}
          JOIN parteneri p ON p.id = f.partener_id
          JOIN ${ALOC_FACTURA} al ON al.factura_id = f.id
          WHERE f.directie='vanzare' AND f.status NOT IN ('anulata','necunoscut') AND f.intercompany = 0
