@@ -225,8 +225,8 @@ const incaseaza = (fid, suma, data) =>
   require(path.join(RAD, "modules", "comision.js")).register(inreg);
   require(path.join(RAD, "modules", "rapoarte.js")).register(inreg);
   const res = () => {
-    const o = { cod: 0, corp: "" };
-    o.writeHead = (c) => { o.cod = c; return o; };
+    const o = { cod: 0, corp: "", antet: null };
+    o.writeHead = (c, h) => { o.cod = c; o.antet = h || null; return o; };
     o.setHeader = () => {};
     o.end = (b) => { o.corp = b || ""; };
     return o;
@@ -340,6 +340,126 @@ const incaseaza = (fid, suma, data) =>
     const st = q(`SELECT activ, scos_de FROM comision_manual WHERE id = ?`, [lin.id])[0];
     if (Number(st.activ) === 0 && st.scos_de) console.log("  ok   scoaterea dezactivează linia și reține cine a scos-o");
     else { picate++; console.log(`  PICAT scoaterea: ${JSON.stringify(st)}`); }
+  }
+
+  // ---- stornoul se poate adăuga și scade comisionul ----------------------
+  // A fost bug: condiția cerea baza > 0, deci respingea tocmai stornourile,
+  // cu mesajul „factura n-are valoare fără TVA" — care suna a factură stricată.
+  console.log("\nstornoul (factură cu minus) se poate adăuga:");
+  const fMinus = factura(partenerId, 9008, aziTxt, [[10, -80, 21]]); // -800 net
+  const inainteBaza = (() => {
+    const r = q(`SELECT COALESCE(SUM(baza),0) AS b FROM comision_manual WHERE utilizator_id = ? AND activ = 1`, [agentId]);
+    return Number(r[0].b);
+  })();
+  const rm = res();
+  await rute.post["/crm/comision/adauga"]({
+    user: ADMIN2, params: {}, query: {},
+    body: { factura: String(fMinus.id), agent: String(agentId), motiv: "storno de test" },
+    res: rm, req: { headers: {} },
+  });
+  const undeM = decodeURIComponent(String((rm.antet && (rm.antet.Location || rm.antet.location)) || ""));
+  const linieM = q(`SELECT baza FROM comision_manual WHERE factura_id = ? AND activ = 1`, [fMinus.id]);
+  if (linieM.length === 1 && Math.abs(Number(linieM[0].baza) + 800) < 0.01)
+    console.log("  ok   stornoul s-a scris cu baza −800,00");
+  else { picate++; console.log(`  PICAT stornoul nu s-a adăugat: ${JSON.stringify(linieM)} · ${undeM.slice(0, 130)}`); }
+  if (/n-are valoare f\u0103r\u0103 TVA/.test(undeM)) { picate++; console.log("  PICAT a dat mesajul greșit de „factură fără valoare”"); }
+  else console.log("  ok   nu mai dă mesajul de „factură fără valoare”");
+  if (/SCADE/.test(undeM)) console.log("  ok   mesajul spune limpede că scade comisionul");
+  else { picate++; console.log(`  PICAT mesajul nu spune că scade: ${undeM.slice(0, 130)}`); }
+  const dupaBaza = Number(q(`SELECT COALESCE(SUM(baza),0) AS b FROM comision_manual WHERE utilizator_id = ? AND activ = 1`, [agentId])[0].b);
+  if (Math.abs(dupaBaza - (inainteBaza - 800)) < 0.01) console.log("  ok   baza lunii a scăzut cu 800,00");
+  else { picate++; console.log(`  PICAT baza: înainte ${inainteBaza}, după ${dupaBaza}`); }
+
+  // ---- avansul din comisionul viitor ------------------------------------
+  console.log("\navans din comisionul viitor (reținere 3%):");
+  const avans = rute.post["/crm/comision/avans"];
+  if (!avans) { picate++; console.log("  PICAT lipsește ruta de avans"); }
+  else {
+    // f7: factură emisă și neîncasată → 1.000 net, 1.210 cu TVA, comision brut 20
+    const f7 = factura(partenerId, 9007, aziTxt, [[10, 100, 21]]);
+    let pg2 = await pagina({});
+    if (/Ia comisionul mai devreme/.test(pg2.corp)) console.log("  ok   secțiunea de avans e pe pagină");
+    else { picate++; console.log("  PICAT lipsește secțiunea de avans"); }
+    if (new RegExp('value="' + f7.id + '"').test(pg2.corp)) console.log("  ok   factura neîncasată se poate bifa pentru avans");
+    else { picate++; console.log("  PICAT factura neîncasată nu apare la avans"); }
+
+    const ra = res();
+    await avans({ user: ADMIN2, params: {}, query: {}, body: { factura: String(f7.id), agent: String(agentId) }, res: ra, req: { headers: {} } });
+    const l = q(`SELECT * FROM comision_manual WHERE factura_id = ? AND activ = 1`, [f7.id]);
+    if (l.length !== 1) { picate++; console.log(`  PICAT nu s-a scris linia de avans: ${JSON.stringify(l)}`); }
+    else {
+      const li = l[0];
+      // În tabel se scrie BAZA, nu comisionul: 1.000 lei net x cota 100% = 1.000
+      // bază brută, minus 3% = 970 bază scrisă. Comisionul care iese din ea la
+      // 2% e 19,40 lei, adică exact 3% sub cei 20 de lei bruți.
+      const okFel = String(li.fel) === "avans";
+      const okBrut = Math.abs(Number(li.baza_bruta) - 1000) < 0.01;
+      const okNet = Math.abs(Number(li.baza) - 970) < 0.01;
+      const okPct = Math.abs(Number(li.retinere_pct) - 3) < 0.01;
+      const comisionIesit = Number(li.baza) * 2 / 100;
+      const okComision = Math.abs(comisionIesit - 19.4) < 0.01;
+      if (okFel && okBrut && okNet && okPct && okComision)
+        console.log("  ok   bază brută 1.000 → reținere 3% → bază 970 → comision 19,40 în loc de 20,00");
+      else { picate++; console.log(`  PICAT linia de avans: fel=${li.fel} brut=${li.baza_bruta} baza=${li.baza} pct=${li.retinere_pct} comision=${comisionIesit}`); }
+    }
+    pg2 = await pagina({});
+    // maximul afișat la cererea de plată și evidențierea rândurilor manuale
+    if (/Maxim total:/.test(pg2.corp)) console.log("  ok   se afișează maximul total care poate fi cerut");
+    else { picate++; console.log("  PICAT nu se afișează maximul total"); }
+    if (/data-manual="avans"/.test(pg2.corp)) console.log("  ok   rândul de avans e marcat pentru evidențiere");
+    else { picate++; console.log("  PICAT rândul de avans n-are marcajul de evidențiere"); }
+    // rândurile manuale stau la coada listei
+    const dl = pg2.corp.indexOf('id="cautaFacturiComision"');
+    const tb = pg2.corp.slice(pg2.corp.indexOf("<tbody", dl), pg2.corp.indexOf("</tbody>", dl));
+    const randuri = tb.split("<tr").slice(1);
+    const indiciManuale = randuri.map((r, i) => (/data-manual=/.test(r) ? i : -1)).filter((i) => i >= 0);
+    const laCoada = indiciManuale.length && indiciManuale[0] === randuri.length - indiciManuale.length;
+    if (laCoada) console.log(`  ok   cele ${indiciManuale.length} rânduri manuale sunt la sfârșitul listei`);
+    else { picate++; console.log(`  PICAT rândurile manuale nu-s la coadă: pozitii ${indiciManuale} din ${randuri.length}`); }
+    if (/avans −3%/.test(pg2.corp)) console.log("  ok   linia apare marcată „avans −3%” în listă");
+    else { picate++; console.log("  PICAT linia de avans nu e marcată în listă"); }
+    if (new RegExp('value="' + f7.id + '"').test(pg2.corp)) { picate++; console.log("  PICAT factura luată în avans se mai poate bifa o dată"); }
+    else console.log("  ok   factura luată în avans nu mai apare la avans");
+
+    // și nu mai produce comision când se încasează
+    incaseaza(f7.id, f7.total, aziTxt);
+    pg2 = await pagina({});
+    const de2 = pg2.corp.indexOf('id="cautaFacturiComision"');
+    const lista2 = pg2.corp.slice(de2, pg2.corp.indexOf("</table>", de2));
+    const apareDeDouaOri = (lista2.match(new RegExp("9007", "g")) || []).length > 1;
+    if (!apareDeDouaOri) console.log("  ok   după încasare nu mai produce comision a doua oară");
+    else { picate++; console.log("  PICAT factura luată în avans produce comision și la încasare"); }
+    if (/Atenție: lista dă/.test(pg2.corp)) { picate++; console.log("  PICAT totalul nu se potrivește după avans"); }
+    else console.log("  ok   totalul listei se potrivește și după avans");
+  }
+
+  // ---- nu se poate cere mai mult decât e disponibil ----------------------
+  console.log("\ncererea de plată nu trece peste disponibil:");
+  const cerere = rute.post["/crm/comision/cerere"];
+  if (!cerere) { picate++; console.log("  PICAT lipsește ruta de cerere"); }
+  else {
+    const pgC = await pagina({});
+    const fereastraDeschisa = /id="formCerere"/.test(pgC.corp);
+    if (fereastraDeschisa) {
+      for (const [ce, re] of [
+        ["câmpul are max setat", /id="sumaCeruta"[^>]*max="[0-9.]+"/],
+        ["există locul pentru avertisment", /id="aviziereCerere"/],
+        ["scriptul taie suma și blochează butonul", /Nu poți cere mai mult de/],
+        ["butonul se blochează", /buton\.disabled = !!text/],
+      ]) {
+        if (re.test(pgC.corp)) console.log(`  ok   ${ce}`);
+        else { picate++; console.log(`  PICAT lipsește: ${ce}`); }
+      }
+    } else {
+      console.log("  (fereastra de cerere e închisă azi, deci formularul nu se randează — sar peste verificările din pagină)");
+    }
+    // Paza de pe server, care contează indiferent de ce face browserul.
+    const rc = res();
+    await cerere({ user: ADMIN2, params: {}, query: {}, body: { agent: String(agentId), suma: "999999" }, res: rc, req: { headers: {} } });
+    const unde = decodeURIComponent(String((rc.antet && (rc.antet.Location || rc.antet.location)) || rc.locatie || ""));
+    const aRefuzat = /nu po\u021bi cere|Cererea se poate face doar/.test(unde);
+    if (aRefuzat) console.log("  ok   serverul refuză o sumă peste disponibil");
+    else { picate++; console.log(`  PICAT serverul n-a refuzat: ${unde.slice(0, 160)}`); }
   }
 
   curata();
