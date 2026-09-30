@@ -49,6 +49,7 @@ require("./modules/angajati").register(router);
 require("./modules/salarii").register(router);
 require("./modules/warehouse").register(router);
 require("./modules/financiar").register(router);
+require("./modules/factoring").register(router);
 require("./modules/calculator").register(router);
 require("./modules/awb").register(router);
 require("./modules/pungi").register(router);
