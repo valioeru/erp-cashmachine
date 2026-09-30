@@ -261,6 +261,58 @@ function startLedger(cereri, lunaAcum) {
   return luniCereri.length ? luniCereri[0] : lunaAcum;
 }
 
+// Căutarea din lista de facturi. Filtrează pe loc, fără să reîncarce pagina —
+// la 20-30 de facturi un dus-întors la server ar fi mai lent decât tastatul.
+// Totalurile se resocotesc pe ce rămâne vizibil, ca să poți vedea imediat cât
+// comision a adus un anumit client: scrii numele lui și citești totalul.
+// Diacriticele se scot din amândouă părțile, ca „Delivery" să găsească și
+// „DELIVERY SOLUTIONS", iar „aquila" să găsească „AQUILA".
+const CAUTARE_FACTURI = `
+<script>
+(function () {
+  var cutie = document.getElementById("cautaFacturiComision");
+  var camp = document.getElementById("cautaFactura");
+  if (!cutie || !camp) return;
+  var randuri = [].slice.call(cutie.querySelectorAll("tbody tr"));
+  var cate = document.getElementById("cateFacturi");
+  var tInc = document.getElementById("totIncasat");
+  var tBaza = document.getElementById("totBaza");
+  var tCom = document.getElementById("totComision");
+  function simplu(s) {
+    return String(s).toLowerCase()
+      .replace(/[\u0103\u00e2]/g, "a").replace(/\u00ee/g, "i")
+      .replace(/[\u0219\u015f]/g, "s").replace(/[\u021b\u0163]/g, "t");
+  }
+  function bani(v) {
+    return v.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+  }
+  function val(tr, fel) {
+    var e = tr.querySelector('[data-cv="' + fel + '"]');
+    return e ? Number(e.getAttribute("data-v") || 0) : 0;
+  }
+  function filtreaza() {
+    var q = simplu(camp.value.trim());
+    var n = 0, inc = 0, baza = 0, com = 0;
+    for (var i = 0; i < randuri.length; i++) {
+      var tr = randuri[i];
+      var arata = !q || simplu(tr.textContent).indexOf(q) !== -1;
+      tr.style.display = arata ? "" : "none";
+      if (arata) { n++; inc += val(tr, "inc"); baza += val(tr, "baza"); com += val(tr, "com"); }
+    }
+    if (tInc) tInc.textContent = bani(inc);
+    if (tBaza) tBaza.textContent = bani(baza);
+    if (tCom) tCom.textContent = bani(com);
+    if (cate) {
+      cate.textContent = q
+        ? n + " din " + randuri.length + (randuri.length === 1 ? " factură" : " facturi")
+        : randuri.length + (randuri.length === 1 ? " factură" : " facturi");
+    }
+  }
+  camp.addEventListener("input", filtreaza);
+  camp.addEventListener("search", filtreaza);
+})();
+<\/script>`;
+
 function register(router) {
   router.get("/crm/comision", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
@@ -430,36 +482,48 @@ function register(router) {
       </p>
       ${
         bazaFacturi.length
-          ? table(
-              ["Factura", "Client", "Ultima încasare", "Cota mea", "Încasat (cu TVA)", "Bază (fără TVA)", "Comision"],
+          ? `<div class="toolbar" style="margin:0 0 10px">
+               <input id="cautaFactura" type="search" autocomplete="off" placeholder="Caută după client sau număr de factură…"
+                      style="min-width:320px;max-width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px">
+               <span id="cateFacturi" style="margin-left:10px;color:var(--text-muted);font-size:13px">${bazaFacturi.length} ${
+               bazaFacturi.length === 1 ? "factură" : "facturi"
+             }</span>
+             </div>
+             <div id="cautaFacturiComision">` +
+            table(
+              ["Factura", "Data facturii", "Client", "Ultima încasare", "Cota mea", "Încasat (cu TVA)", "Bază (fără TVA)", "Comision"],
               bazaFacturi.map((x) => [
                 `<a href="/facturi/${x.id}">${esc(x.document_extern || `${x.serie || ""}${x.numar || ""}`)}</a>${
                   nr(x.nr_plati) > 1 ? ` <span class="badge gri">${nr(x.nr_plati)} plăți</span>` : ""
                 }`,
+                esc(String(x.data_emiterii || "").slice(0, 10)),
                 esc(String(x.client || "—").slice(0, 44)),
                 esc(String(x.ultima_plata || "").slice(0, 10)),
                 `${nr(x.cota_agent).toLocaleString("ro-RO")}%`,
-                lei(x.incasat_partea_mea),
-                lei(x.baza),
-                `<strong>${lei(x.comision)}</strong>`,
+                `<span data-cv="inc" data-v="${nr(x.incasat_partea_mea)}">${lei(x.incasat_partea_mea)}</span>`,
+                `<span data-cv="baza" data-v="${nr(x.baza)}">${lei(x.baza)}</span>`,
+                `<strong data-cv="com" data-v="${nr(x.comision)}">${lei(x.comision)}</strong>`,
               ]),
               {
                 total: [
-                  `Total · ${bazaFacturi.length} ${bazaFacturi.length === 1 ? "factură" : "facturi"}`,
+                  `Total`,
                   "",
                   "",
                   "",
-                  lei(acum.incasat),
-                  `<strong>${lei(bazaFacturiTotal)}</strong>`,
-                  `<strong>${lei(bazaFacturiComision)}</strong>`,
+                  "",
+                  `<span id="totIncasat">${lei(acum.incasat)}</span>`,
+                  `<strong id="totBaza">${lei(bazaFacturiTotal)}</strong>`,
+                  `<strong id="totComision">${lei(bazaFacturiComision)}</strong>`,
                 ],
               }
             ) +
+            `</div>` +
             (bazaSePotriveste
               ? ""
               : `<p class="nota" style="color:var(--danger)">Atenție: lista dă ${lei(bazaFacturiTotal)} bază, iar capul paginii
                    ${lei(acum.baza)}. Diferența de ${lei(Math.abs(bazaFacturiTotal - nr(acum.baza)))} înseamnă că undeva e o
-                   încasare care nu se leagă de o factură alocată ție — spune-i lui Vali.</p>`)
+                   încasare care nu se leagă de o factură alocată ție — spune-i lui Vali.</p>`) +
+            CAUTARE_FACTURI
           : `<p class="nota">Luna asta n-a intrat încă niciun ban pe facturile tale. Când intră, apar aici una câte una.</p>`
       }
 
