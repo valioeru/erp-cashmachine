@@ -573,17 +573,25 @@ function register(router) {
     // Cerut aici, nu sus, ca să nu se închidă un cerc între module.
     const { HANDLERE } = require("./punte");
     const aplicare = require("../lib/punte-aplica");
-    const rezultate = await aplicare.aplicaTot(HANDLERE);
-    if (!rezultate.length) return redirect(ctx.res, inapoi("mesaj", "N-a fost nimic de aplicat."));
+    const { rezultate, statusuri } = await aplicare.aplicaTot(HANDLERE);
+    const statusText =
+      statusuri.trecute_pe_incasat || statusuri.trecute_pe_partial
+        ? ` Statusuri puse la zi: ${statusuri.trecute_pe_incasat} facturi trecute pe „încasată"` +
+          (statusuri.trecute_pe_partial ? `, ${statusuri.trecute_pe_partial} pe „încasată parțial"` : "") +
+          "."
+        : "";
+    if (!rezultate.length)
+      return redirect(ctx.res, inapoi("mesaj", "N-a fost nimic nou de aplicat." + statusText));
     const { total, peTip } = aplicare.rezumat(rezultate);
     const detalii = [...peTip.entries()]
-      .filter(([, v]) => v.adaugate || v.actualizate)
-      .map(([tip, v]) => `${tip}: ${v.adaugate} noi${v.actualizate ? `, ${v.actualizate} actualizate` : ""}`)
+      .filter(([, v]) => v.noi)
+      .map(([tip, v]) => `${tip}: ${v.noi}`)
       .join(" · ");
     const text =
       `Am aplicat ${total.loturi} ${total.loturi === 1 ? "lot" : "loturi"}: ` +
-      `${total.adaugate} rânduri noi, ${total.actualizate} actualizate, ${total.sarite} sărite (existau deja).` +
+      `${total.noi} rânduri noi, ${total.sarite} sărite (existau deja).` +
       (detalii ? ` — ${detalii}` : "") +
+      statusText +
       (total.erori ? ` ATENȚIE: ${total.erori} loturi au dat eroare, vezi /import/punte.` : "");
     redirect(ctx.res, inapoi(total.erori ? "eroare" : "mesaj", text));
   });

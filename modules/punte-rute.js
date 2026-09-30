@@ -352,9 +352,12 @@ module.exports = function registerRute(router, deps) {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
     // Ordinea de aplicare stă în lib/punte-aplica.js — vezi comentariul de
     // acolo: partenerii înaintea facturilor, facturile înaintea încasărilor.
-    const rezultate = await aplicare.aplicaTot(HANDLERE);
+    // Tot acolo se recalculează și statusul facturilor, la final.
+    const { rezultate, statusuri } = await aplicare.aplicaTot(HANDLERE);
     const body = `
       <h2>Loturi aplicate: ${rezultate.length}</h2>
+      <p class="mic">Statusuri recalculate: ${Number(statusuri.trecute_pe_incasat)} facturi trecute pe „încasată",
+         ${Number(statusuri.trecute_pe_partial)} pe „încasată parțial".</p>
       ${table(
         ["#", "Tip", "Rezultat"],
         rezultate.map((r) => [String(r.id), esc(TIPURI_ETICHETE[r.tip] || r.tip), esc(JSON.stringify(r.rez)).slice(0, 200)])
