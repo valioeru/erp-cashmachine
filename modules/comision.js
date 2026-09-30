@@ -1180,21 +1180,22 @@ function register(router) {
     let stare = "netrimis";
     try {
       const mail = require("../lib/mail");
-      let exp = null;
-      const candidati = [agentId];
-      for (const u of await db
-        .prepare("SELECT id FROM utilizatori WHERE activ = 1 AND smtp_host IS NOT NULL ORDER BY CASE WHEN rol = 'admin' THEN 0 ELSE 1 END, id")
-        .all())
-        candidati.push(u.id);
-      for (const id of candidati) {
-        const u = await db.prepare("SELECT * FROM utilizatori WHERE id = ?").get(id);
-        const cfg = u && mail.configUtilizator(u);
-        if (cfg) { exp = cfg; break; }
-      }
-      if (!exp) stare = "fără cont de email configurat";
+      // Candidații, în ordine: agentul care cere, apoi administratorii, apoi
+      // oricine are SMTP pus pe fișă. Se încearcă pe rând, Gmail înainte de
+      // SMTP la fiecare — vezi trimitePrinOricare() din lib/mail.js. Înainte
+      // se lua primul cu SMTP și atât, iar când parola aia a fost refuzată
+      // (30.09.2026) mailul n-a mai plecat deloc.
+      const candidati = await db
+        .prepare(
+          `SELECT * FROM utilizatori
+            WHERE activ = 1 AND (id = ? OR rol = 'admin' OR smtp_host IS NOT NULL)
+            ORDER BY CASE WHEN id = ? THEN 0 WHEN rol = 'admin' THEN 1 ELSE 2 END, id`
+        )
+        .all(agentId, agentId);
+      if (!candidati.length) stare = "fără cont de email configurat";
       else {
         const baza = (process.env.ERP_URL || "https://erp-cashmachine-app.onrender.com").replace(/\/$/, "");
-        await mail.trimite(exp, {
+        const dus = await mail.trimitePrinOricare(candidati, {
           catre: [EMAIL_COMISION],
           subiect: `Cerere comision ${numeLuna(lunaAcum)} — ${agent.nume}: ${money(suma)}`,
           corp: [
@@ -1216,14 +1217,21 @@ function register(router) {
             `Pagina lui: ${baza}/crm/comision?agent=${agentId}`,
           ].join("\n"),
         });
-        stare = "trimis";
+        // Se scrie și PE UNDE a plecat: când un drum a picat și a salvat-o
+        // altul, vrem să se vadă, nu să se ascundă sub un „trimis" verde.
+        stare = `trimis prin ${dus.prin} de pe ${dus.expeditor}`;
+        if (dus.incercari && dus.incercari.length) stare += ` (după ce a picat: ${dus.incercari.join(" · ")})`;
       }
     } catch (e) {
       stare = "eroare la trimitere: " + e.message;
     }
     if (r.lastInsertRowid) await db.prepare("UPDATE cereri_comision SET email_stare = ? WHERE id = ?").run(stare, r.lastInsertRowid);
 
-    const coada = stare === "trimis" ? "Mailul a plecat." : `Mailul n-a plecat (${stare}), dar cererea e înregistrată.`;
+    const aPlecat = stare.startsWith("trimis");
+    const coada = aPlecat
+      ? `Mailul a plecat (${stare.replace(/^trimis /, "")}).`
+      : `Mailul n-a plecat (${stare}), dar cererea e înregistrată — banii nu depind de serverul de email. ` +
+        `Se repară din Profil → Email: Gmail cere o „parolă de aplicație", nu parola contului.`;
     redirect(ctx.res, cuMesaj("mesaj", `Cerere înregistrată: ${money(suma)}. ${coada}`));
   });
 }
