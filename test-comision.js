@@ -249,6 +249,31 @@ const incaseaza = (fid, suma, data) =>
         else { picate++; console.log("  PICAT factura încasată luna asta nu apare în listă"); }
         if (!seRupe) console.log("  ok   totalul listei se potrivește cu cifra din capul paginii");
         else { picate++; console.log("  PICAT totalul listei nu se potrivește cu capul paginii"); }
+        // coloana cu data facturii și căutarea pe nume
+        for (const [ce, re] of [
+          ["coloana „Data facturii”", /<th[^>]*>Data facturii<\/th>/],
+          // layout() trece HTML-ul prin dateleInText, deci pe pagină data apare
+          // în format românesc (30.09.2026), nu ISO.
+          ["data emiterii apare pe rând", new RegExp(aziTxt.split("-").reverse().join("\\."))],
+          ["câmpul de căutare", /id="cautaFactura"/],
+          ["contorul de facturi", /id="cateFacturi"/],
+          ["valorile pentru resocotire", /data-cv="baza" data-v="/],
+          ["scriptul de filtrare", /camp\.addEventListener\("input", filtreaza\)/],
+        ]) {
+          if (re.test(r.corp)) console.log(`  ok   ${ce}`);
+          else { picate++; console.log(`  PICAT lipsește: ${ce}`); }
+        }
+        // numărăm coloanele DOAR în tabelul listei, nu în toate de pe pagină
+        const de = r.corp.indexOf('id="cautaFacturiComision"');
+        const bucata = de >= 0 ? r.corp.slice(de, r.corp.indexOf("</thead>", de)) : "";
+        const capete = (bucata.match(/<th[ >]/g) || []).length;
+        const dt = r.corp.indexOf("<tfoot", de);
+        const totaluri = dt >= 0 ? (r.corp.slice(dt, r.corp.indexOf("</tfoot>", dt)).match(/<td[ >]/g) || []).length : 0;
+        if (capete !== 8) console.log("    (cap: " + bucata.replace(/\s+/g, " ").slice(0, 260) + ")");
+        if (capete === 8) console.log("  ok   tabelul listei are cele 8 coloane așteptate");
+        else { picate++; console.log(`  PICAT tabelul listei are ${capete} coloane, așteptam 8`); }
+        if (totaluri === 8) console.log("  ok   rândul de total are tot 8 celule");
+        else { picate++; console.log(`  PICAT rândul de total are ${totaluri} celule, așteptam 8`); }
       }
     } catch (e) {
       picate++;
