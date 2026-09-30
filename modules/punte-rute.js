@@ -326,25 +326,11 @@ module.exports = function registerRute(router, deps) {
     send(ctx.res, 200, layout({ user: ctx.user, title: `Lot #${l.id}`, active: "/import", body }));
   });
 
-  async function aplicaLot(l) {
-    const handler = HANDLERE[l.tip];
-    if (!handler) return { eroare: `tip necunoscut: ${l.tip}` };
-    let randuri = [];
-    try {
-      randuri = JSON.parse(l.continut) || [];
-    } catch (e) {
-      return { eroare: "conținut ilizibil" };
-    }
-    try {
-      const rez = await handler(randuri);
-      await db.prepare("UPDATE punte_staging SET aplicat_la = ?, rezultat = ? WHERE id = ?").run(acum(), JSON.stringify(rez), l.id);
-      return rez;
-    } catch (e) {
-      const msg = String((e && e.message) || e).slice(0, 300);
-      await db.prepare("UPDATE punte_staging SET rezultat = ? WHERE id = ?").run("EROARE: " + msg, l.id);
-      return { eroare: msg };
-    }
-  }
+  // Aplicarea propriu-zisă stă în lib/punte-aplica.js, fiindcă o folosește și
+  // butonul „Actualizează din SmartBill" de la facturare. Un singur cod, ca
+  // ordinea de aplicare să nu poată diferi între cele două locuri.
+  const aplicare = require("../lib/punte-aplica");
+  const aplicaLot = (l) => aplicare.aplicaLot(HANDLERE, l);
 
   router.post("/import/punte/:id/aplica", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
@@ -364,13 +350,9 @@ module.exports = function registerRute(router, deps) {
 
   router.post("/import/punte/aplica-tot", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
-    // Ordinea contează: produsele întâi (ca stocul și rețetele să le
-    // găsească), apoi stocul, apoi producția, apoi consumurile.
-    const ordine = ["produse", "stoc", "productie", "consum"];
-    const loturi = await db.prepare("SELECT * FROM punte_staging WHERE aplicat_la IS NULL ORDER BY id").all();
-    loturi.sort((a, b) => ordine.indexOf(a.tip) - ordine.indexOf(b.tip) || a.id - b.id);
-    const rezultate = [];
-    for (const l of loturi) rezultate.push({ id: l.id, tip: l.tip, rez: await aplicaLot(l) });
+    // Ordinea de aplicare stă în lib/punte-aplica.js — vezi comentariul de
+    // acolo: partenerii înaintea facturilor, facturile înaintea încasărilor.
+    const rezultate = await aplicare.aplicaTot(HANDLERE);
     const body = `
       <h2>Loturi aplicate: ${rezultate.length}</h2>
       ${table(

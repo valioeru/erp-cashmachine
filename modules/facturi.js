@@ -205,10 +205,32 @@ function register(router) {
     };
   }
 
+  // Câte loturi stau neaplicate — ca butonul de actualizare să spună singur
+  // că are ceva de făcut, fără să fie nevoie să intri pe el ca să afli.
+  async function loturiInAsteptare() {
+    try {
+      const r = await db.prepare("SELECT COUNT(*) AS n FROM punte_staging WHERE aplicat_la IS NULL").get();
+      return Number((r && r.n) || 0);
+    } catch (e) {
+      return 0;
+    }
+  }
+
   router.get("/facturi", async (ctx) => {
     const { body: lista, totalRanduri } = await listaFacturi(ctx, "vanzare");
+    const asteptare = await loturiInAsteptare();
     const body = `
-      <div class="toolbar"><a href="/facturi/nou" class="btn">+ Factură nouă</a> <a href="/facturi/achizitii" class="btn secondary">Vezi achiziții (facturi de la furnizori)</a></div>
+      <div class="toolbar">
+        <a href="/facturi/nou" class="btn">+ Factură nouă</a>
+        ${
+          poateActualiza(ctx.user)
+            ? `<a href="/facturi/actualizare" class="btn secondary">⟳ Actualizează din SmartBill${
+                asteptare ? ` <span class="badge galben">${asteptare}</span>` : ""
+              }</a>`
+            : ""
+        }
+        <a href="/facturi/achizitii" class="btn secondary">Vezi achiziții (facturi de la furnizori)</a>
+      </div>
       ${lista}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Facturare & contabilitate (vânzări) · ${totalRanduri} documente`, active: "/facturi", body }));
@@ -383,6 +405,187 @@ function register(router) {
     }
 
     redirect(ctx.res, `/facturi/${facturaId}`);
+  });
+
+  // ---- Actualizare din SmartBill ----------------------------------------
+  //
+  // De ce nu e un simplu buton care cheamă SmartBill:
+  //
+  // API-ul public SmartBill e făcut pentru EMITEREA de documente noi, nu
+  // pentru citirea lor. Nu există niciun endpoint care să spună „dă-mi
+  // facturile emise între 1 și 30 septembrie". Singurul loc unde datele alea
+  // se văd e interfața web, iar aia cere sesiunea lui Vali în browser. De-aia
+  // culegerea se face din browser (punte/sincronizare.js) și ajunge aici ca
+  // loturi în așteptare.
+  //
+  // Butonul face deci două lucruri, în ordinea asta:
+  //   1. bagă în ERP tot ce a adus deja puntea și n-a fost încă aplicat
+  //      (sincronizarea de noapte lasă loturile în așteptare);
+  //   2. dacă vrei date proaspete chiar acum, îți dă semnul de carte de
+  //      apăsat în fila de SmartBill — ăla e singurul drum care există.
+  //
+  // Dacă vreodată SmartBill scoate un API de citire, aici se schimbă: pasul 1
+  // rămâne, pasul 2 devine un fetch făcut de server.
+  const SEMN_DE_CARTE =
+    "javascript:(function(){fetch('__ERP__/punte/sincronizare.js')" +
+    ".then(function(r){return r.text()}).then(function(t){eval(t);" +
+    "return window.__sync.tot(14)}).then(function(){alert('Sincronizare gata. " +
+    "Intră în ERP la Facturare → Actualizează din SmartBill și apasă Aplică.')})" +
+    ".catch(function(e){alert('N-a mers: '+e.message)})})()";
+
+  async function stareaActualizarii() {
+    const inAsteptare = await db
+      .prepare("SELECT id, tip, randuri, primit_la, sursa FROM punte_staging WHERE aplicat_la IS NULL ORDER BY id")
+      .all()
+      .catch(() => []);
+    const ultimaRulare = await db
+      .prepare("SELECT pornit_la, stare, gasit, importat, nota FROM sync_rulari ORDER BY id DESC LIMIT 1")
+      .get()
+      .catch(() => null);
+    const ultimaFactura = await db
+      .prepare(
+        "SELECT MAX(data_emiterii) AS d FROM facturi WHERE activ = 1 AND directie = 'vanzare' AND sursa_import IS NOT NULL"
+      )
+      .get()
+      .catch(() => null);
+    const ultimaIncasare = await db
+      .prepare("SELECT MAX(data) AS d FROM plati WHERE activ = 1")
+      .get()
+      .catch(() => null);
+    return { inAsteptare, ultimaRulare, ultimaFactura, ultimaIncasare };
+  }
+
+  // Aplicarea scrie în datele firmei (facturi, încasări), deci nu e pentru
+  // oricine are acces la lista de facturi: depozitul intră pe /facturi ca să
+  // vadă achizițiile, n-are treabă cu importul.
+  const poateActualiza = (u) => u && ["admin", "financiar"].includes(u.rol);
+
+  router.get("/facturi/actualizare", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (!poateActualiza(ctx.user)) return redirect(ctx.res, "/facturi");
+    const { inAsteptare, ultimaRulare, ultimaFactura, ultimaIncasare } = await stareaActualizarii();
+    const mesaj = String(ctx.query.mesaj || "");
+    const eroare = String(ctx.query.eroare || "");
+    const randuriInAsteptare = inAsteptare.reduce((s, l) => s + Number(l.randuri || 0), 0);
+
+    // Semnul de carte primește adresa reală a ERP-ului, luată din cererea
+    // curentă — ca să meargă și de pe localhost, la testare.
+    const gazda = (ctx.req.headers && ctx.req.headers.host) || "erp-cashmachine-app.onrender.com";
+    const schema = /localhost|127\.0\.0\.1/.test(gazda) ? "http" : "https";
+    const semn = SEMN_DE_CARTE.replace("__ERP__", `${schema}://${gazda}`);
+
+    let vechime = "";
+    if (ultimaRulare && ultimaRulare.pornit_la) {
+      const t = Date.parse(String(ultimaRulare.pornit_la).replace(" ", "T") + "Z");
+      const ore = isFinite(t) ? (Date.now() - t) / 3600000 : 0;
+      vechime =
+        ore < 1
+          ? "acum mai puțin de o oră"
+          : ore < 48
+            ? `acum ${Math.round(ore)} ore`
+            : `acum ${Math.round(ore / 24)} zile`;
+      if (ore > 36) {
+        vechime = `<span style="color:var(--danger)">${vechime}</span>`;
+      }
+    }
+
+    const body = `
+      ${mesaj ? `<div class="flash">${esc(mesaj)}</div>` : ""}
+      ${eroare ? `<div class="flash warn">${esc(eroare)}</div>` : ""}
+
+      <div class="cards">
+        <div class="card"><div class="label">În așteptare, neaplicat</div><div class="value">${inAsteptare.length}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${randuriInAsteptare.toLocaleString("ro-RO")} rânduri culese din SmartBill</div></div>
+        <div class="card"><div class="label">Ultima culegere</div><div class="value" style="font-size:18px">${vechime || "niciodată"}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${
+            ultimaRulare ? esc(String(ultimaRulare.stare || "")) + " · " + Number(ultimaRulare.gasit || 0) + " documente găsite" : "nicio rulare raportată"
+          }</div></div>
+        <div class="card"><div class="label">Cea mai nouă factură din SmartBill</div><div class="value" style="font-size:18px">${esc(
+          String((ultimaFactura && ultimaFactura.d) || "—").slice(0, 10)
+        )}</div>
+          <div style="font-size:12px;color:var(--text-muted)">ultima încasare: ${esc(String((ultimaIncasare && ultimaIncasare.d) || "—").slice(0, 10))}</div></div>
+      </div>
+
+      <h2>1. Bagă în ERP ce a venit deja</h2>
+      <p class="explic" style="max-width:900px">
+        Sincronizarea de noapte lasă documentele aici, în așteptare — nu le bagă singură în datele firmei.
+        Butonul ăsta le aplică: facturile noi, încasările, producția. Rândurile care există deja se sar,
+        deci îl poți apăsa de câte ori vrei fără să faci dubluri.
+      </p>
+      ${
+        inAsteptare.length
+          ? `<form method="post" action="/facturi/actualizare/aplica">
+               <button class="btn" type="submit">Aplică tot (${inAsteptare.length} ${
+                 inAsteptare.length === 1 ? "lot" : "loturi"
+               }, ${randuriInAsteptare.toLocaleString("ro-RO")} rânduri)</button>
+             </form>
+             <div style="margin-top:10px">${table(
+               ["Tip", "Rânduri", "Cules la", "De unde"],
+               inAsteptare.map((l) => [
+                 esc(String(l.tip)),
+                 Number(l.randuri || 0).toLocaleString("ro-RO"),
+                 esc(String(l.primit_la || "").slice(0, 16)),
+                 `<span class="cel-lung">${esc(String(l.sursa || "—"))}</span>`,
+               ])
+             )}</div>`
+          : `<p style="color:var(--text-muted)">Nimic în așteptare — tot ce a cules puntea e deja în ERP.</p>`
+      }
+
+      <h2>2. Culege acum din SmartBill</h2>
+      <p class="explic" style="max-width:900px">
+        SmartBill nu are un API care să listeze documentele pe o perioadă — API-ul lor e pentru emitere, nu
+        pentru citire. Deci serverul nu poate întreba singur: <strong>datele se pot citi doar din fila ta
+        de SmartBill, unde ești logat</strong>. Odată, trage linkul de mai jos în bara de favorite. Pe urmă,
+        când vrei date proaspete: deschizi <a href="https://cloud.smartbill.ro" target="_blank" rel="noopener">cloud.smartbill.ro</a>,
+        apeși favoritul, aștepți mesajul, și te întorci aici la pasul 1.
+      </p>
+      <p style="margin:10px 0 4px">
+        <a href="${esc(semn)}"
+           style="display:inline-block;padding:9px 14px;border:1px dashed var(--border);border-radius:8px;background:var(--bg-soft,#f6f6f4);font-weight:600;text-decoration:none"
+           onclick="alert('Nu-l apăsa aici — trage-l cu mouse-ul în bara de favorite a browserului, apoi apasă-l în fila de SmartBill.');return false">
+          ⟳ Sincronizare SmartBill
+        </a>
+        <span style="font-size:12px;color:var(--text-muted);margin-left:8px">↖ trage-l în bara de favorite</span>
+      </p>
+      <p class="mic" style="color:var(--text-muted);max-width:900px">
+        Culege ultimele 14 zile. Nu cere parole și nu ține minte nimic: citește rapoartele pe care le vezi
+        și tu, logat, și le trimite aici, unde stau până apeși „Aplică".
+      </p>
+
+      <h2>3. Ce merge singur</h2>
+      <p class="explic" style="max-width:900px">
+        Aceeași culegere rulează automat la 02:30, în browserul de pe calculatorul care rămâne pornit.
+        Dacă „Ultima culegere" de sus e mai veche de o zi, ori calculatorul a fost închis, ori sesiunea de
+        SmartBill a expirat — deschide o dată SmartBill și lasă fila logată.
+      </p>
+
+      <div class="toolbar" style="margin-top:18px">
+        <a class="btn secondary" href="/facturi">Înapoi la facturi</a>
+        ${ctx.user.rol === "admin" ? `<a class="btn secondary" href="/import/punte">Puntea, în detaliu</a>` : ""}
+      </div>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Actualizare din SmartBill", active: "/facturi", body }));
+  });
+
+  router.post("/facturi/actualizare/aplica", async (ctx) => {
+    if (!poateActualiza(ctx.user)) return redirect(ctx.res, "/facturi");
+    const inapoi = (cheie, text) => `/facturi/actualizare?${cheie}=${encodeURIComponent(text)}`;
+    // Cerut aici, nu sus, ca să nu se închidă un cerc între module.
+    const { HANDLERE } = require("./punte");
+    const aplicare = require("../lib/punte-aplica");
+    const rezultate = await aplicare.aplicaTot(HANDLERE);
+    if (!rezultate.length) return redirect(ctx.res, inapoi("mesaj", "N-a fost nimic de aplicat."));
+    const { total, peTip } = aplicare.rezumat(rezultate);
+    const detalii = [...peTip.entries()]
+      .filter(([, v]) => v.adaugate || v.actualizate)
+      .map(([tip, v]) => `${tip}: ${v.adaugate} noi${v.actualizate ? `, ${v.actualizate} actualizate` : ""}`)
+      .join(" · ");
+    const text =
+      `Am aplicat ${total.loturi} ${total.loturi === 1 ? "lot" : "loturi"}: ` +
+      `${total.adaugate} rânduri noi, ${total.actualizate} actualizate, ${total.sarite} sărite (existau deja).` +
+      (detalii ? ` — ${detalii}` : "") +
+      (total.erori ? ` ATENȚIE: ${total.erori} loturi au dat eroare, vezi /import/punte.` : "");
+    redirect(ctx.res, inapoi(total.erori ? "eroare" : "mesaj", text));
   });
 
   router.get("/facturi/:id", async (ctx) => {
