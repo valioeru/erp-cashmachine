@@ -141,6 +141,7 @@ async function facturiManualeLuna(agentId, luna) {
   return db
     .prepare(
       `SELECT m.id AS manual_id, m.baza, m.motiv, m.adaugat_la, m.adaugat_de,
+              m.fel, COALESCE(m.baza_bruta, m.baza) AS baza_bruta, m.retinere_pct,
               u.nume AS adaugat_de_nume,
               f.id, f.serie, f.numar, f.document_extern, f.data_emiterii,
               p.nume AS client
@@ -347,6 +348,11 @@ function startLedger(cereri, lunaAcum) {
 // comision a adus un anumit client: scrii numele lui și citești totalul.
 // Diacriticele se scot din amândouă părțile, ca „Delivery" să găsească și
 // „DELIVERY SOLUTIONS", iar „aquila" să găsească „AQUILA".
+// Cât se reține când agentul ia comisionul înainte să intre banii. E costul
+// banului luat mai devreme: firma plătește acum dintr-o factură care poate fi
+// încasată peste 60 de zile, sau deloc.
+const RETINERE_AVANS = 3;
+
 const CAUTARE_FACTURI = `
 <script>
 (function () {
@@ -637,9 +643,17 @@ function register(router) {
                   nr(x.nr_plati) > 1 ? ` <span class="badge gri">${nr(x.nr_plati)} plăți</span>` : ""
                 }${
                   x.manual
-                    ? ` <span class="badge" style="background:var(--warn,#c47f17);color:#fff" title="Adăugată manual de ${esc(
-                        String(x.adaugat_de_nume || "cineva")
-                      )} pe ${esc(String(x.adaugat_la || "").slice(0, 10))}${x.motiv ? " · " + esc(String(x.motiv)) : ""}">adăugată manual</span>
+                    ? ` <span class="badge" style="background:${
+                        x.fel === "avans" ? "var(--danger)" : "var(--warn,#c47f17)"
+                      };color:#fff" title="${
+                        x.fel === "avans"
+                          ? `Avans din comisionul viitor. Baza brută ${money(nr(x.baza_bruta))}, reținere ${nr(x.retinere_pct)}%.`
+                          : "Adăugată manual"
+                      } de ${esc(String(x.adaugat_de_nume || "cineva"))} pe ${esc(
+                        String(x.adaugat_la || "").slice(0, 10)
+                      )}${x.motiv ? " · " + esc(String(x.motiv)) : ""}">${
+                        x.fel === "avans" ? `avans −${nr(x.retinere_pct)}%` : "adăugată manual"
+                      }</span>
                        <form method="post" action="/crm/comision/scoate" style="display:inline"
                              onsubmit="return confirm('Scoți factura din comisionul lunii?')">
                          <input type="hidden" name="id" value="${x.manual_id}">
@@ -653,7 +667,9 @@ function register(router) {
                 esc(String(x.ultima_plata || "").slice(0, 10)),
                 `${nr(x.cota_agent).toLocaleString("ro-RO")}%`,
                 x.manual
-                  ? `<span data-cv="inc" data-v="0" style="color:var(--text-muted)">neîncasată</span>`
+                  ? `<span data-cv="inc" data-v="0" style="color:var(--text-muted)">${
+                      x.fel === "avans" ? "luată în avans" : "neîncasată"
+                    }</span>`
                   : `<span data-cv="inc" data-v="${nr(x.incasat_partea_mea)}">${lei(x.incasat_partea_mea)}</span>`,
                 `<span data-cv="baza" data-v="${nr(x.baza)}">${lei(x.baza)}</span>`,
                 `<strong data-cv="com" data-v="${nr(x.comision)}">${lei(x.comision)}</strong>`,
@@ -709,6 +725,64 @@ function register(router) {
         ]),
         { total: ["Total", String(viitor.length), `<strong>${lei(viitorTotal)}</strong>`] }
       )}
+
+      <h2 style="margin-top:22px">Ia comisionul mai devreme, din facturile neîncasate</h2>
+      <p class="explic">
+        Poți lua acum comisionul de pe facturi care încă n-au fost plătite — cel mult
+        <strong>${lei(viitorTotal)}</strong>, adică tot ce ai de luat din facturile deja emise.
+        Se reține <strong>${RETINERE_AVANS}%</strong> din suma luată în avans: firma scoate banul acum
+        dintr-o factură care poate intra peste două luni, sau deloc.
+        Bifezi facturile, iar comisionul lor intră în luna ${esc(numeLuna(lunaAcum))}.
+        <strong>Facturile alese nu mai produc comision când intră banii</strong> — s-a plătit deja.
+      </p>
+      ${
+        viitor.length
+          ? `<form method="post" action="/crm/comision/avans" id="formAvans"
+                   onsubmit="return confirm('Iei comisionul în avans pe facturile bifate? Ele nu vor mai produce comision când se încasează.')">
+               <input type="hidden" name="agent" value="${agentId}">
+               ${table(
+                 ["", "Factura", "Client", "Scadența", "Rest de încasat", "Comision brut", `După reținerea de ${RETINERE_AVANS}%`],
+                 viitor.map((x) => [
+                   `<input type="checkbox" name="factura" value="${x.id}" class="bifaAvans" data-brut="${nr(x.comision)}">`,
+                   `<a href="/facturi/${x.id}">${esc(x.document_extern || `${x.serie || ""}${x.numar || ""}`)}</a>`,
+                   esc(String(x.partener || "—").slice(0, 34)),
+                   esc(String(x.data_scadenta || x.data_emiterii || "").slice(0, 10)),
+                   lei(x.rest),
+                   lei(x.comision),
+                   `<strong>${lei(x.comision * (1 - RETINERE_AVANS / 100))}</strong>`,
+                 ]),
+                 { total: ["", `${viitor.length} facturi`, "", "", "", `<strong>${lei(viitorTotal)}</strong>`, `<strong>${lei(viitorTotal * (1 - RETINERE_AVANS / 100))}</strong>`] }
+               )}
+               <div class="toolbar" style="margin-top:10px;align-items:center;gap:12px">
+                 <button class="btn" type="submit">Ia în avans facturile bifate</button>
+                 <span id="sumaAvans" style="color:var(--text-muted);font-size:13px">nimic bifat</span>
+               </div>
+             </form>
+             <script>
+             (function () {
+               var f = document.getElementById("formAvans");
+               if (!f) return;
+               var et = document.getElementById("sumaAvans");
+               var bife = [].slice.call(f.querySelectorAll(".bifaAvans"));
+               function bani(v) {
+                 return v.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+               }
+               function socoteste() {
+                 var brut = 0, n = 0;
+                 for (var i = 0; i < bife.length; i++) {
+                   if (bife[i].checked) { n++; brut += Number(bife[i].getAttribute("data-brut") || 0); }
+                 }
+                 et.textContent = n
+                   ? n + (n === 1 ? " factură bifată · " : " facturi bifate · ") + bani(brut) + " brut, reținere " +
+                     bani(brut * ${RETINERE_AVANS} / 100) + ", primești " + bani(brut * (1 - ${RETINERE_AVANS} / 100))
+                   : "nimic bifat";
+               }
+               for (var i = 0; i < bife.length; i++) bife[i].addEventListener("change", socoteste);
+               socoteste();
+             })();
+             <\/script>`
+          : `<p class="nota">N-ai facturi emise și neîncasate, deci n-ai ce lua în avans.</p>`
+      }
 
       <h2>Facturile din care vine comisionul viitor</h2>
       ${table(
@@ -869,6 +943,76 @@ function register(router) {
       )
       .run(agentId, facturaId, lunaLui(azi()), baza, String(ctx.body.motiv || "").trim().slice(0, 200) || null, ctx.user.id, azi());
     return redirect(ctx.res, cuMesaj("mesaj", `${numar} (${money(baza)} fără TVA) a intrat în comisionul lunii.`));
+  });
+
+  // Avans din comisionul viitor. Agentul bifează facturi emise și neîncasate
+  // și le încasează comisionul acum, cu o reținere de RETINERE_AVANS%.
+  //
+  // Mecanica e aceeași cu adăugarea manuală — o linie în comision_manual —
+  // doar că baza scrisă e cea micșorată cu reținerea. Așa intră în luna
+  // curentă exact cât primește, iar factura, având linie manuală, nu mai
+  // produce comision când banii chiar intră. Fără partea asta, avansul s-ar
+  // plăti de două ori.
+  router.post("/crm/comision/avans", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const esteAdmin = ctx.user.rol === "admin";
+    const agentId = esteAdmin && nr(ctx.body.agent) ? nr(ctx.body.agent) : ctx.user.id;
+    if (!esteAdmin && agentId !== ctx.user.id) return redirect(ctx.res, "/crm/comision");
+    const inapoi = `/crm/comision${esteAdmin ? `?agent=${agentId}` : ""}`;
+    const cuMesaj = (cheie, text) => `${inapoi}${esteAdmin ? "&" : "?"}${cheie}=${encodeURIComponent(text)}`;
+
+    const cerute = [].concat(ctx.body.factura || []).map((x) => nr(x)).filter(Boolean);
+    if (!cerute.length) return redirect(ctx.res, cuMesaj("eroare", "N-ai bifat nicio factură."));
+
+    const agent = await db.prepare("SELECT id, nume, comision_procent FROM utilizatori WHERE id = ?").get(agentId);
+    if (!agent) return redirect(ctx.res, "/crm/comision");
+    const pct = nr(agent.comision_procent);
+    if (!(pct > 0)) return redirect(ctx.res, cuMesaj("eroare", "Procentul tău de comision e 0, deci avansul ar fi zero."));
+
+    // Recitim facturile din bază, nu ne bazăm pe ce a venit din formular:
+    // între afișarea paginii și bifat, o factură poate fi încasată, stornată
+    // sau luată deja în avans de altcineva.
+    const eligibile = await facturiNeincasate(agentId);
+    const dupaId = new Map(eligibile.map((x) => [Number(x.id), x]));
+    const alese = cerute.map((id) => dupaId.get(id)).filter(Boolean);
+    if (!alese.length)
+      return redirect(ctx.res, cuMesaj("eroare", "Facturile bifate nu mai sunt disponibile — între timp s-au încasat sau au intrat deja în comision."));
+
+    const lunaAcum = lunaLui(azi());
+    const aziISO = azi();
+    let brut = 0;
+    let scrise = 0;
+    for (const x of alese) {
+      const rest = nr(x.total) - nr(x.platit);
+      const restNet = rest * cb.raportNetJs(x.net, x.total, x.data_emiterii);
+      const bazaBruta = Math.round(restNet * (nr(x.procent) / 100) * 100) / 100;
+      if (!(bazaBruta > 0)) continue;
+      const baza = Math.round(bazaBruta * (1 - RETINERE_AVANS / 100) * 100) / 100;
+      const deja = await db.prepare("SELECT id FROM comision_manual WHERE factura_id = ? AND activ = 1").get(x.id);
+      if (deja) continue;
+      await db
+        .prepare(
+          `INSERT INTO comision_manual
+             (utilizator_id, factura_id, luna, baza, baza_bruta, retinere_pct, fel, motiv, adaugat_de, adaugat_la, activ)
+           VALUES (?, ?, ?, ?, ?, ?, 'avans', ?, ?, ?, 1)`
+        )
+        .run(agentId, x.id, lunaAcum, baza, bazaBruta, RETINERE_AVANS,
+             `avans din comisionul viitor, reținere ${RETINERE_AVANS}%`, ctx.user.id, aziISO);
+      brut += bazaBruta;
+      scrise++;
+    }
+    if (!scrise) return redirect(ctx.res, cuMesaj("eroare", "Nicio factură bifată n-a putut fi luată în avans."));
+    const retinut = Math.round(brut * (RETINERE_AVANS / 100) * 100) / 100;
+    const primit = Math.round((brut - retinut) * 100) / 100;
+    return redirect(
+      ctx.res,
+      cuMesaj(
+        "mesaj",
+        `${scrise} ${scrise === 1 ? "factură a intrat" : "facturi au intrat"} în avans: bază ${money(brut)}, reținere ${RETINERE_AVANS}% (${money(
+          retinut
+        )}), ți-au intrat ${money(primit)} în luna asta. Facturile nu mai produc comision la încasare.`
+      )
+    );
   });
 
   // Scoaterea nu șterge rândul, îl dezactivează: rămâne urma cine l-a pus,
