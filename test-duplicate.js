@@ -249,6 +249,51 @@ function sectiune(corp, cheie) {
   // A fost scris în cod ca obiect {href, eticheta, confirmare} și pus direct în
   // șablon, unde un obiect se scrie „[object Object]". Adică butonul n-a existat
   // niciodată: curățarea din 20.09 s-a făcut lovind ruta direct.
+  // --- 9. UN BAN DIFERENȚĂ ------------------------------------------------
+  // Cazul care a scăpat verificării stricte: CSHMUPA-40 a intrat o dată din
+  // fișier (cu liniile de produse, 3.353,39) și o dată prin punte (o linie
+  // „conform document", cu TVA-ul reconstituit, 3.353,40). Același client,
+  // aceeași zi, același număr — dar un ban diferență, deci nu se grupau.
+  //
+  // Se păstrează exemplarul CU produse, nu cel mai vechi: invers am arunca
+  // detaliul și am rămâne cu „conform document".
+  exec1(`UPDATE facturi SET activ = 1 WHERE serie = 'DUPTEST'`);
+  const cl = q(`SELECT id FROM parteneri WHERE cui = 'RO-DUP-C1'`)[0];
+  const cuDetaliu = q(
+    `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, status, sursa_import, firma_id, activ)
+     VALUES ('DUPBAN', 40, ?, 'vanzare', '2026-08-26', 'emisa', 'smartbill', 1, 1) RETURNING id`,
+    [cl.id]
+  )[0];
+  const faraDetaliu = q(
+    `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, status, sursa_import, firma_id, activ)
+     VALUES ('dupban', '0040', ?, 'vanzare', '2026-08-26', 'emisa', 'punte SmartBill', 1, 1) RETURNING id`,
+    [cl.id]
+  )[0];
+  exec1(`INSERT INTO facturi_linii (factura_id, denumire, cantitate, pret_unitar, cota_tva)
+         VALUES (${cuDetaliu.id}, 'SMST 23my reciclat', 114, 21.40, 21),
+                (${cuDetaliu.id}, 'Folie stretch', 12, 18.98, 21)`);
+  exec1(`INSERT INTO facturi_linii (factura_id, denumire, cantitate, pret_unitar, cota_tva)
+         VALUES (${faraDetaliu.id}, 'Conform document DUPBAN0040', 1, 2771.40, 21.0002)`);
+
+  const strict = await cer("/admin/date");
+  const secStrict = sectiune(strict.corp, "vanzari-duplicate");
+  cere("verificarea strictă NU prinde perechea de un ban (de-aia există a doua)", secStrict, [], ["DUPBAN-40"]);
+  const secNumar = sectiune(strict.corp, "numar-refolosit");
+  cere("dar „același număr folosit de două ori” o prinde", secNumar,
+    ["DUPBAN-40", 'action="/admin/date/numar-refolosit/curata"']);
+
+  await cer("/admin/date/numar-refolosit/curata", { metoda: "post" });
+  const ramas = q(`SELECT id FROM facturi WHERE serie ILIKE 'dupban' AND activ = 1`).map((x) => Number(x.id));
+  egal("rămâne exemplarul CU detaliul pe produse, nu cel mai vechi", ramas, [Number(cuDetaliu.id)]);
+  const scos = q(`SELECT id FROM facturi WHERE serie ILIKE 'dupban' AND activ = 0`).map((x) => Number(x.id));
+  egal("celălalt e doar dezactivat, nu șters", scos, [Number(faraDetaliu.id)]);
+  const dupa = sectiune((await cer("/admin/date")).corp, "numar-refolosit");
+  cere("iar numărul nu mai apare refolosit", dupa, [], ["DUPBAN-40"]);
+
+  exec1(`DELETE FROM facturi_linii WHERE factura_id IN (${cuDetaliu.id}, ${faraDetaliu.id})`);
+  exec1(`DELETE FROM curatari_duplicate WHERE ids = '[${faraDetaliu.id}]'`);
+  exec1(`DELETE FROM facturi WHERE serie ILIKE 'dupban'`);
+
   // Pașii de dinainte au lăsat exemplarele în plus dezactivate, deci raportul e
   // curat și n-ar avea de ce să scoată vreun buton. Le punem la loc ca să avem
   // ce repara.

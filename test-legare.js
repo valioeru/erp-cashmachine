@@ -308,7 +308,8 @@ egal("  domeniul se scoate din adresă", L.domeniulDin("Comercial <COMERCIAL@Eur
     : 0;
   egal("  numele unei firme apare cel mult de două ori în pagină", deCateOri <= 2, true);
   egal("  lista de firme se trimite o singură dată, ca date", p.corp.includes("var FIRME = ["), true);
-  egal("  rândurile au selecturi goale, umplute la clic", p.corp.includes('class="alege-firma"'), true);
+  egal("  rândurile au căutare, nu listă derulantă", p.corp.includes('class="cauta-firma"'), true);
+  egal("  și nu mai există niciun select de firme", /<select[^>]*name="partener_id"/.test(p.corp), false);
 
   // Pragul crește cu numărul de firme, nu e un număr fix: pagina are voie să
   // ducă O copie a listei, nu câte una de fiecare rând. Cu bug-ul în ea,
@@ -316,6 +317,64 @@ egal("  domeniul se scoate din adresă", L.domeniulDin("Comercial <COMERCIAL@Eur
   const prag = 120 * 1024 + nFirme * 80;
   console.log(`  (${nFirme} firme în bază, pagina are ${Math.round(p.corp.length / 1024)} KB, pragul e ${Math.round(prag / 1024)} KB)`);
   egal("  pagina duce o singură copie a listei de firme", p.corp.length < prag, true);
+
+  // --- 6. căutarea trebuie să GĂSEASCĂ, nu doar să conțină ------------------
+  // Bug-ul pe care îl păzește: lista era un <select> nativ cu ~1.000 de firme,
+  // iar acela caută doar după PRIMA literă. Vali a scris „dinamic" și n-a
+  // ajuns niciodată la „DYNAMIC PARCEL DISTRIBUTION" — firma era acolo, cu
+  // facturi pe ea, dar nu se putea găsi. Pentru omul din fața ecranului, asta
+  // e totuna cu a nu exista.
+  console.log("\ncăutarea firmei");
+  const idDyn = Number(q(`INSERT INTO parteneri (nume, cui, tip) VALUES ('DYNAMIC PARCEL DISTRIBUTION LEGTEST SA','RO-LEG-D','client') RETURNING id`)[0].id);
+  q(`INSERT INTO leaduri (nume, companie, email, sursa, stadiu) VALUES ('Ionel Prospect','POTENTIAL LEGTEST SRL','ionel@potentiallegtest.ro','targ','nou')`);
+  const idLead = Number(q(`SELECT id FROM leaduri WHERE companie = 'POTENTIAL LEGTEST SRL'`)[0].id);
+
+  const pc = res();
+  await rute.get["/email/domenii"]({ user: VALI, params: {}, query: {}, body: {}, res: pc, req: { url: "/email/domenii" } });
+  const lista = JSON.parse((pc.corp.match(/var FIRME = (\[[\s\S]*?\]);/) || [])[1] || "[]");
+  const cauta = (s) => {
+    const b = String(s).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").split(/\s+/).filter(Boolean);
+    return lista.filter((r) => b.every((x) => String(r[2]).includes(x)));
+  };
+
+  egal("  se găsește după o bucată din mijlocul numelui", cauta("parcel").some((r) => r[0] === idDyn), true);
+  egal("  și după două cuvinte, în orice ordine", cauta("distribution dynamic").some((r) => r[0] === idDyn), true);
+  egal("  și după CUI", cauta("RO-LEG-D").some((r) => r[0] === idDyn), true);
+  egal("  leadul agentului e și el în listă", cauta("potential legtest").some((r) => r[0] === idLead && r[4] === 1), true);
+  egal("  și se vede că e lead, nu partener",
+    (cauta("potential legtest")[0] || [])[3], "lead al agenților — încă fără fișă de partener");
+  egal("  partenerul poartă firma cu care a lucrat",
+    typeof (lista.find((r) => r[0] === idDyn) || [])[3], "string");
+  egal("  ce nu există nu se inventează", cauta("firmacarenuexista").length, 0);
+
+  // Alegerea unui lead face fișa de partener acum, din datele lui.
+  await rute.post["/email/domenii/confirma"]({
+    user: VALI, params: {}, query: {},
+    body: { domeniu: "potentiallegtest.ro", lead_id: String(idLead) },
+    res: res(), req: { url: "/x" },
+  });
+  const nou = q(`SELECT id, nume, email, sursa, stare FROM parteneri WHERE nume = 'POTENTIAL LEGTEST SRL'`)[0];
+  egal("  s-a făcut fișa de partener din lead", !!nou, true);
+  egal("  cu emailul lui", nou.email, "ionel@potentiallegtest.ro");
+  egal("  și se vede de unde vine", String(nou.sursa || "").startsWith("lead:"), true);
+  egal("  leadul e marcat convertit",
+    q(`SELECT stadiu, partener_id FROM leaduri WHERE id = ${idLead}`)[0].stadiu, "convertit");
+  egal("  și domeniul s-a legat de fișa nouă",
+    Number(q(`SELECT partener_id, domeniu FROM email_domenii WHERE lower(domeniu) = 'potentiallegtest.ro'`)[0].partener_id),
+    Number(nou.id));
+
+  // A doua oară nu se mai face o fișă nouă din același lead.
+  await rute.post["/email/domenii/confirma"]({
+    user: VALI, params: {}, query: {},
+    body: { domeniu: "potentiallegtest2.ro", lead_id: String(idLead) },
+    res: res(), req: { url: "/x" },
+  });
+  egal("  al doilea clic nu face al doilea partener",
+    Number(q(`SELECT COUNT(*) AS n FROM parteneri WHERE nume = 'POTENTIAL LEGTEST SRL'`)[0].n), 1);
+
+  exec1(`DELETE FROM email_domenii WHERE domeniu LIKE '%potentiallegtest%'`);
+  exec1(`DELETE FROM leaduri WHERE companie = 'POTENTIAL LEGTEST SRL'`);
+  exec1(`DELETE FROM parteneri WHERE nume = 'POTENTIAL LEGTEST SRL' OR cui = 'RO-LEG-D'`);
 
   // --- curățenie
   exec1(`DELETE FROM email_domenii WHERE domeniu LIKE '%legtest%'`);

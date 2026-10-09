@@ -112,14 +112,27 @@ const cateComenzi = () => Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE part
     "INSERT INTO produse (id, cod, denumire, unitate_masura, pret_vanzare) VALUES (96401,'CN-1','Folie stretch de test','buc',10)",
   ]) exec(s);
 
-  // --- formularul începe cu rândul gol ---------------------------------------
+  // --- formularul nu pornește cu niciun client ales --------------------------
+  //
+  // Clientul se caută acum, nu se derulează: lista nativă cu ~1.900 de firme
+  // căuta doar după prima literă, deci un client din mijlocul alfabetului nu se
+  // putea găsi. Bugul păzit aici — primul client din alfabet ales din start —
+  // nu mai e posibil din construcție: căsuța de căutare pornește goală, iar
+  // `partener_id` e gol până se alege din listă. Asta verificăm.
   let r = await cer("/comenzi/nou");
-  if (!r.corp.includes("— alege clientul —")) rau("lista de clienți n-are rând gol — primul din alfabet e ales din start");
-  else ok("lista de clienți începe cu „— alege clientul —”");
-  const inainteaLui = r.corp.indexOf("— alege clientul —");
-  const primul = r.corp.indexOf("AAA PRIMUL DIN ALFABET SRL");
-  if (!(inainteaLui >= 0 && primul > inainteaLui)) rau("rândul gol nu e primul în listă");
-  else ok("rândul gol e chiar primul, deci el e cel ales din start");
+  if (!r.corp.includes('class="cauta-client"')) rau("clientul nu se caută — s-a întors lista derulantă");
+  else ok("clientul se caută, pe nume sau CUI");
+  if (/<select[^>]*name="partener_id"/.test(r.corp)) rau("a reapărut lista derulantă de clienți");
+  else ok("nu mai există listă derulantă de clienți");
+  if (!/<input type="hidden" name="partener_id" value="">/.test(r.corp))
+    rau("formularul pornește cu un client deja ales", "partener_id ar trebui gol");
+  else ok("niciun client nu e ales din start");
+  if (!r.corp.includes("client-obligatoriu")) rau("formularul poate pleca fără client ales");
+  else ok("nu pleacă până nu se alege un client din listă");
+  // Ambii clienți sunt căutabili, nu doar cel de la începutul alfabetului.
+  if (!(r.corp.includes("AAA PRIMUL DIN ALFABET SRL") && r.corp.includes("ZZZ CLIENTUL ADEVARAT SRL")))
+    rau("nu toți clienții din bază sunt căutabili");
+  else ok("toți clienții din bază sunt căutabili");
 
   // --- fără client nu se salvează --------------------------------------------
   r = await cer("/comenzi", {
