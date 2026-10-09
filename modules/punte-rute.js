@@ -605,7 +605,7 @@ module.exports = function registerRute(router, deps) {
       return out.filter(Boolean);
     };
 
-    const produse = await db.prepare("SELECT id, cod, denumire FROM produse").all();
+    const produse = await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all();
     const dupaNume = new Map();
     const dupaCod = new Map();
     for (const p of produse) {

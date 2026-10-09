@@ -10,7 +10,7 @@
 // numere, numele câmpurilor, + - * / ( ) și funcțiile min/max/rotund. Ce nu
 // recunoaște, refuză — o formulă e o formulă, nu un loc de rulat cod.
 const db = require("../lib/db");
-const { esc, money, layout, table, subnavCrm, selectorCalculator } = require("../lib/render");
+const { esc, money, layout, table, subnavCrm, selectorCalculator, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // --- evaluator de formule -------------------------------------------------
@@ -188,7 +188,11 @@ function register(router) {
       )
       .join("");
 
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'furnizor' ORDER BY nume LIMIT 3000").all();
+    // Toți clienții, cu căutare pe nume sau CUI — nu doar ai agentului.
+    const parteneri = await db
+      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip != 'furnizor' ORDER BY nume LIMIT 5000")
+      .all();
+    const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     const oferteDeschise = await db
       .prepare(
         `SELECT o.id, o.numar, p.nume AS client FROM oferte o LEFT JOIN parteneri p ON p.id = o.partener_id
@@ -225,7 +229,7 @@ function register(router) {
                <label class="field"><span>Denumirea de pe document</span><input name="denumire_afisata" value="${esc(cat.nume)}" required></label>
                <label class="field"><span>Cantitate</span><input type="number" step="0.001" name="cantitate" value="${esc(String(cantitate))}" required></label>
                <label class="field"><span>Client</span>
-                 <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
+                 ${cautaClient({ nume: "client_cautat", obligatoriu: true })}
                </label>
              </div>
              <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
@@ -258,6 +262,7 @@ function register(router) {
       </form>
       ${rezultatHtml}
       ${adaugaHtml}
+      ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Calculator preț", active: "/crm", body }));
   });

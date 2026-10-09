@@ -1711,7 +1711,7 @@ function register(router) {
     let gasite = [];
     if (cauta) {
       gasite = await db
-        .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE denumire ILIKE ? OR cod ILIKE ? ORDER BY denumire LIMIT 40")
+        .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE activ = 1 AND (denumire ILIKE ? OR cod ILIKE ?) ORDER BY denumire LIMIT 40")
         .all(`%${cauta}%`, `%${cauta}%`);
     }
 

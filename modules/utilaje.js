@@ -21,7 +21,7 @@
 //    utilaj (ore_pe_zi) — dacă alocările depășesc numărul ăla, ziua e
 //    supraîncărcată și se vede roșu, nu se descoperă în atelier.
 const db = require("../lib/db");
-const { esc, layout, table, subnavProductie } = require("../lib/render");
+const { esc, cantitate, unitate, layout, table, subnavProductie } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const nr = (v) => Number(v || 0);
@@ -781,7 +781,8 @@ function register(router) {
         <div class="detail-grid">
           <div><div class="k">Client</div>${esc(c.partener_nume || c.client_text || "—")}</div>
           <div><div class="k">Produs</div>${esc(c.tip_produs || "—")}</div>
-          <div><div class="k">Cantitate</div>${esc([c.cantitate, c.um].filter(Boolean).join(" ") || "—")}</div>
+          <div><div class="k">Cantitate</div>${esc(cantitate(c.cantitate, c.um)) || "—"}</div>
+          <div><div class="k">UM</div>${esc(unitate(c.cantitate, c.um))}</div>
           <div><div class="k">Livrare promisă</div>${esc(c.data_livrare || c.data_solicitata || "—")}</div>
         </div>
       </div>

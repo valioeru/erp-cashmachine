@@ -58,7 +58,7 @@ async function ingestProduse(randuri) {
   let noi = 0, actualizate = 0, sarite = 0;
   const dupaCod = new Map();
   const dupaDenumire = new Map();
-  for (const p of await db.prepare("SELECT id, cod, denumire FROM produse").all()) {
+  for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all()) {
     if (p.cod) dupaCod.set(String(p.cod).trim().toLowerCase(), p.id);
     dupaDenumire.set(String(p.denumire).trim().toLowerCase(), p.id);
   }
@@ -107,7 +107,7 @@ async function ingestStoc(randuri) {
   let scrise = 0, produseNoi = 0, sarite = 0;
   const depozite = new Map((await db.prepare("SELECT id, denumire FROM depozite").all()).map((d) => [String(d.denumire).trim().toLowerCase(), d.id]));
   const produse = new Map();
-  for (const p of await db.prepare("SELECT id, cod, denumire FROM produse").all()) {
+  for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all()) {
     produse.set(String(p.denumire).trim().toLowerCase(), p.id);
     if (p.cod) produse.set(String(p.cod).trim().toLowerCase(), p.id);
   }
@@ -148,7 +148,7 @@ async function ingestStoc(randuri) {
 async function ingestProductie(randuri) {
   let documente = 0, liniiFinite = 0, liniiConsum = 0, retete = 0;
   const produse = new Map();
-  for (const p of await db.prepare("SELECT id, cod, denumire FROM produse").all()) {
+  for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all()) {
     produse.set(String(p.denumire).trim().toLowerCase(), p.id);
     if (p.cod) produse.set(String(p.cod).trim().toLowerCase(), p.id);
   }
@@ -211,7 +211,7 @@ async function ingestProductie(randuri) {
 async function ingestConsum(randuri) {
   let linii = 0, sarite = 0;
   const produse = new Map();
-  for (const p of await db.prepare("SELECT id, cod, denumire FROM produse").all()) {
+  for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all()) {
     produse.set(String(p.denumire).trim().toLowerCase(), p.id);
     if (p.cod) produse.set(String(p.cod).trim().toLowerCase(), p.id);
   }
@@ -258,7 +258,7 @@ async function ingestProfitProdus(randuri) {
       .normalize("NFD")
       .replace(/[̀-ͯ]/g, "")
       .replace(/[^a-z0-9]/g, "");
-  const produse = await db.prepare("SELECT id, cod, denumire FROM produse").all();
+  const produse = await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all();
   const dupaNume = new Map();
   const dupaCod = new Map();
   for (const p of produse) {
@@ -302,7 +302,7 @@ async function ingestProfitProdus(randuri) {
 async function ingestFacturiLinii(randuri) {
   let facturi = 0, linii = 0, negasite = 0, faraProdus = 0;
 
-  const idxProduse = indexProduse(await db.prepare("SELECT id, cod, denumire, pret_achizitie FROM produse").all());
+  const idxProduse = indexProduse(await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire, pret_achizitie FROM produse").all());
 
   // Grupăm rândurile pe factură. Cheia e ce ne dă browserul: numărul
   // documentului aşa cum apare în SmartBill (ex. „CSHM 3080").
