@@ -10,16 +10,23 @@
 // de randat, culege liniile și le trimite în loturi la ERP, pe /api/ingest.
 // În ERP loturile așteaptă „aplică" — nimic nu intră automat în baza de date.
 //
-// Cum se folosește:
-//   1. în tab-ul ERP:      copy(await (await fetch('/api/facturi-fara-linii?an=2026')).json())
-//      → de acolo iese lista de facturi care încă n-au linii
-//   2. în tab-ul SmartBill, pe /raport/facturi/, cu perioada pusă pe anul
-//      care te interesează: se lipește fișierul ăsta, apoi
-//        await window.__punte.culegeHarta()   ← număr document → id SmartBill
-//        window.__punte.incarcaCoada(lista.facturi)
-//        window.__punte.porneste()
+// Cum se folosește, pe scurt:
+//   1. fii logat ca admin în ERP, în orice tab
+//   2. în tab-ul SmartBill, pe /raport/facturi/, cu perioada pusă pe anul care
+//      te interesează, lipește fișierul ăsta în consolă, apoi:
+//        await window.__punte.totul(2026)
+//      Atât. Ia lista din ERP, culege harta, umple coada și pornește.
 //   3. progresul:           window.__punte.stare()
 //   4. oprire:              window.__punte.opreste()
+//
+// Pașii pe bucăți, dacă vrei să te uiți la fiecare (și cum era înainte):
+//   în tab-ul ERP:          copy(await (await fetch('/api/facturi-fara-linii?an=2026')).json())
+//   în tab-ul SmartBill:    await window.__punte.culegeHarta()
+//                           window.__punte.incarcaCoada(lista.facturi)
+//                           window.__punte.porneste()
+// ORDINEA CONTEAZĂ: harta se culege înaintea cozii. Coada traduce id-urile de
+// ERP în id-uri SmartBill prin hartă; fără ea, fiecare factură dă 404 mut și
+// puntea raportează liniștită „incomplet" la toate.
 //
 // Bucla se conduce singură: apelul de evaluare din CDP moare la 45 de secunde,
 // dar bucla merge mai departe în pagină după ce apelul s-a întors. De-aia
@@ -425,6 +432,61 @@
     return "oprit";
   };
   S.trimiteAcum = trimite;
+
+  // Tot drumul dintr-un singur apel.
+  //
+  // DE CE: pașii erau patru, iar doi dintre ei însemnau copiat un JSON dintr-un
+  // tab în altul. În practică asta se face o dată la câteva luni, adică exact
+  // atunci când nu-ți mai amintești ordinea — iar dacă inversezi harta cu coada,
+  // puntea raportează liniștită „incomplet" la toate facturile.
+  //
+  // Lista se ia direct din ERP: /api/facturi-fara-linii deschide CORS pentru
+  // originea SmartBill și acceptă sesiunea, deci nu se copiază nimic de mână.
+  // Trebuie doar să fii logat ca admin în ERP, în orice tab.
+  S.totul = async function (an, pagini) {
+    const u = ERP + "/api/facturi-fara-linii" + (an ? "?an=" + encodeURIComponent(an) : "");
+    let lista;
+    try {
+      const r = await fetch(u, { credentials: "include" });
+      if (r.status === 403)
+        throw new Error("ERP-ul zice 403 — deschide ERP-ul într-un tab, logat ca admin, și încearcă iar");
+      if (!r.ok) throw new Error("ERP-ul a răspuns " + r.status);
+      lista = await r.json();
+    } catch (e) {
+      console.error("[punte] n-am putut lua lista din ERP:", e.message);
+      return { eroare: e.message };
+    }
+    if (!lista || !lista.ok) {
+      console.error("[punte] ERP-ul n-a dat lista:", lista && lista.eroare);
+      return { eroare: (lista && lista.eroare) || "răspuns neașteptat" };
+    }
+    console.log(
+      "[punte] " + lista.fara_linii + " facturi fără linii" + (an ? " în " + an : "") +
+        ", din " + lista.total_facturi + " facturi de vânzare"
+    );
+    if (!lista.fara_linii) return { gata: true, fara_linii: 0 };
+
+    // Harta se culege ÎNAINTE de coadă: coada traduce id-urile de ERP în
+    // id-uri SmartBill prin ea, iar fără hartă ar încerca id-urile de ERP și
+    // ar lua 404 la fiecare.
+    console.log("[punte] culeg harta din raport…");
+    const inHarta = await S.culegeHarta(pagini);
+    console.log("[punte] " + inHarta + " documente în hartă");
+
+    const n = S.incarcaCoada(lista.facturi);
+    if ((S.fara_harta || []).length)
+      console.warn(
+        "[punte] " + S.fara_harta.length + " facturi nu-s în raportul deschis — " +
+          "pune perioada pe anul potrivit și rulează iar: " + S.fara_harta.slice(0, 5).join(", ")
+      );
+    if (!n) {
+      console.log("[punte] n-am ce pune în coadă.");
+      return S.stare();
+    }
+    S.porneste();
+    return S.stare();
+  };
+
   S.stare = function () {
     const motive = {};
     for (const e of S.esuate) motive[e.motiv] = (motive[e.motiv] || 0) + 1;
@@ -441,5 +503,5 @@
     };
   };
 
-  console.log("[punte] încărcată. incarcaCoada(lista) → porneste() → stare()");
+  console.log("[punte] încărcată. Scrie:  await __punte.totul(2026)   — apoi __punte.stare()");
 })();
