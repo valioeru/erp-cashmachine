@@ -86,6 +86,21 @@ function oraScurta(t) {
   return oraOk(t.ora) ? String(t.ora).slice(0, 5) : "";
 }
 
+// Cine are voie să umble la o intrare: cel în calendarul căruia stă, cel care
+// a scris-o, și adminul. Nu și cei invitați.
+function poateUmbla(user, t) {
+  if (!user || !t) return false;
+  if (user.rol === "admin") return true;
+  return Number(t.atribuit_lui) === Number(user.id) || Number(t.creat_de) === Number(user.id);
+}
+
+// Adresa de întoarcere din formular, acceptată doar dacă e tot din calendar.
+// Un formular măsluit nu trebuie să poată trimite omul oriunde după salvare.
+function inapoiSigur(v) {
+  const s = String(v || "");
+  return /^\/crm\/calendar(\?|#|$)/.test(s) ? s : "/crm/calendar";
+}
+
 function register(router) {
   // ---------------- luna pe ecran ----------------
   router.get("/crm/calendar", async (ctx) => {
@@ -109,6 +124,12 @@ function register(router) {
           .all(ctx.user.id, ctx.user.id)
       : [];
     const altCalendar = esteAdmin && agentId !== Number(ctx.user.id);
+    // Adresa paginii curente, ca formularele de răspuns la invitație să se
+    // întoarcă în aceeași zi, nu în prima zi a lunii.
+    const caleaAsta = () =>
+      `/crm/calendar?luna=${encodeURIComponent(luna)}${altCalendar ? `&agent=${agentId}` : ""}${
+        zi ? `&zi=${encodeURIComponent(zi)}` : ""
+      }#zi`;
 
     const aziStr = azi();
     const luna = lunaOk(ctx.query.luna) ? String(ctx.query.luna) : aziStr.slice(0, 7);
@@ -125,16 +146,45 @@ function register(router) {
 
     // Toate intrările lunii, dintr-o singură interogare. Una pe zi ar fi
     // însemnat 31 de drumuri la bază pentru o pagină care se deschide des.
+    //
+    // În calendarul cuiva intră DOUĂ feluri de rânduri: ce și-a pus el
+    // (atribuit_lui) și ce l-a invitat altcineva (taskuri_participanti).
+    // Invitațiile refuzate nu mai apar — altfel calendarul s-ar umple cu ce
+    // ai spus deja că nu faci.
     const intrari = await db
       .prepare(
         `SELECT t.id, t.titlu, t.tip, t.prioritate, t.status, t.scadenta, t.ora, t.durata_minute,
-                t.locatie, t.descriere, t.partener_id, p.nume AS client
+                t.locatie, t.descriere, t.partener_id, t.atribuit_lui, t.grup_cheie,
+                p.nume AS client, u.nume AS organizator,
+                COALESCE(pa.stare, 'organizator') AS starea_mea
            FROM taskuri t
            LEFT JOIN parteneri p ON p.id = t.partener_id
-          WHERE t.atribuit_lui = ? AND t.scadenta >= ? AND t.scadenta <= ?
+           LEFT JOIN utilizatori u ON u.id = t.atribuit_lui
+           LEFT JOIN taskuri_participanti pa ON pa.task_id = t.id AND pa.utilizator_id = ?
+          WHERE t.scadenta >= ? AND t.scadenta <= ?
+            AND (t.atribuit_lui = ? OR pa.id IS NOT NULL)
+            AND COALESCE(pa.stare, '') <> 'refuzat'
           ORDER BY t.scadenta, (CASE WHEN COALESCE(t.ora,'') = '' THEN 1 ELSE 0 END), t.ora, t.id`
       )
-      .all(agentId, prima, ultima);
+      .all(agentId, prima, ultima, agentId);
+
+    // Cine mai e invitat la fiecare intrare, cu răspunsul lui. O singură
+    // interogare pentru toată luna, nu una pe intrare.
+    const participanti = {};
+    if (intrari.length) {
+      const ids = intrari.map((t) => Number(t.id)).filter((n) => Number.isFinite(n));
+      const lista = ids.length
+        ? await db
+            .prepare(
+              `SELECT pa.task_id, pa.stare, u.id AS utilizator_id, u.nume
+                 FROM taskuri_participanti pa JOIN utilizatori u ON u.id = pa.utilizator_id
+                WHERE pa.task_id IN (${ids.map(() => "?").join(",")})
+                ORDER BY u.nume`
+            )
+            .all(...ids)
+        : [];
+      for (const r of lista) (participanti[String(r.task_id)] = participanti[String(r.task_id)] || []).push(r);
+    }
 
     const peZi = {};
     for (const t of intrari) {
@@ -150,15 +200,22 @@ function register(router) {
     for (let d = 1; d <= nrZile; d++) celule.push(`${luna}-${String(d).padStart(2, "0")}`);
     while (celule.length % 7) celule.push(null);
 
+    // Invitația neconfirmată se vede ALTFEL, nu doar cu o etichetă: cartonaș
+    // gol, cu chenar colorat. Altfel omul ar citi calendarul ca pe un program
+    // bătut în cuie și s-ar duce la o întâlnire pe care n-a acceptat-o.
     const cartonas = (t) => {
       const c = CULOARE[t.tip] || CULOARE.general;
       const gata = t.status === "finalizat" || t.status === "anulat";
+      const nou = t.starea_mea === "neconfirmat";
       const ora = oraScurta(t);
+      const stil = nou
+        ? `background:transparent;color:${c};border:1px dashed ${c}`
+        : `background:${c}${gata ? ";opacity:.45;text-decoration:line-through" : ""}`;
       return `<a href="/taskuri/${t.id}" class="cal-intrare" title="${esc(
-        [ora, t.titlu, t.client, t.locatie].filter(Boolean).join(" · ")
-      )}" style="background:${c}${gata ? ";opacity:.45;text-decoration:line-through" : ""}">${
-        ora ? `<strong>${esc(ora)}</strong> ` : ""
-      }${esc(t.titlu)}</a>`;
+        [nou ? "invitație neconfirmată de la " + (t.organizator || "cineva") : "", ora, t.titlu, t.client, t.locatie]
+          .filter(Boolean)
+          .join(" · ")
+      )}" style="${stil}">${nou ? "? " : ""}${ora ? `<strong>${esc(ora)}</strong> ` : ""}${esc(t.titlu)}</a>`;
     };
 
     const randuri = [];
@@ -194,6 +251,79 @@ function register(router) {
       .prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 3000")
       .all()
       .catch(() => []);
+    // Formularul de modificare stă pliat sub fiecare intrare a ta. Pliat,
+    // fiindcă în mod obișnuit te uiți la zi, nu o rescrii — dar când vrei să
+    // muți o întâlnire nu trebuie să deschizi altă pagină.
+    const alMeu = (user, t) => poateUmbla(user, t);
+    const formularModificare = (t) => {
+      // Nu scriem un numar de zile: luna de pe ecran nu le vede pe cele din
+      // luna urmatoare, iar un targ 31 oct - 2 nov ar aparea ca "2 zile" si ar
+      // sterge 3. Spunem ce face butonul, nu cat de mult.
+      const eGrup = !!t.grup_cheie;
+      return `<details style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">Modifică sau șterge</summary>
+        <form method="post" action="/crm/calendar/${t.id}/modifica" class="form" style="margin-top:8px">
+          <input type="hidden" name="inapoi" value="${esc(caleaAsta())}">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label class="field" style="flex:2;min-width:220px"><span>Ce e</span>
+              <input name="titlu" required value="${esc(t.titlu)}"></label>
+            <label class="field" style="width:150px"><span>Tip</span>
+              <select name="tip">${taskuri.optiuni(taskuri.TIPURI, t.tip)}</select></label>
+            <label class="field" style="width:140px"><span>Ziua</span>
+              <input type="date" name="scadenta" value="${esc(String(t.scadenta).slice(0, 10))}"></label>
+            <label class="field" style="width:100px"><span>Ora</span>
+              <input type="time" name="ora" value="${esc(oraScurta(t))}"></label>
+            <label class="field" style="width:110px"><span>Durata (min)</span>
+              <input type="number" name="durata_minute" min="0" step="15" value="${t.durata_minute ? Number(t.durata_minute) : ""}"></label>
+            <label class="field" style="width:130px"><span>Prioritate</span>
+              <select name="prioritate">${taskuri.optiuni(taskuri.PRIORITATI, t.prioritate)}</select></label>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
+            <label class="field" style="flex:1;min-width:220px"><span>Client</span>
+              <select name="partener_id">
+                <option value="">— fără client —</option>
+                ${parteneri
+                  .map(
+                    (p) =>
+                      `<option value="${p.id}"${Number(p.id) === Number(t.partener_id) ? " selected" : ""}>${esc(p.nume)}</option>`
+                  )
+                  .join("")}
+              </select></label>
+            <label class="field" style="flex:1;min-width:180px"><span>Unde</span>
+              <input name="locatie" value="${esc(t.locatie || "")}"></label>
+          </div>
+          <label class="field" style="margin-top:8px"><span>Detalii</span>
+            <textarea name="descriere" rows="2">${esc(t.descriere || "")}</textarea></label>
+          <div class="form-actions"><button class="btn small" type="submit">Salvează</button></div>
+          <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">
+            Dacă muți ziua sau ora, cei care confirmaseră sunt întrebați din nou — au spus „da" pentru altceva.
+          </p>
+        </form>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+          <form method="post" action="/crm/calendar/${t.id}/sterge" class="inline-form">
+            <input type="hidden" name="inapoi" value="${esc(caleaAsta())}">
+            <button class="btn secondary small danger" type="submit">Șterge ziua asta</button>
+          </form>
+          ${
+            eGrup
+              ? `<form method="post" action="/crm/calendar/${t.id}/sterge" class="inline-form">
+                   <input type="hidden" name="inapoi" value="${esc(caleaAsta())}">
+                   <input type="hidden" name="tot_grupul" value="1">
+                   <button class="btn secondary small danger" type="submit">Șterge toate zilele intrării</button>
+                 </form>`
+              : ""
+          }
+        </div>
+      </details>`;
+    };
+
+    // Colegii pe care îi poți invita — toți utilizatorii activi, mai puțin tu.
+    // Nu e o listă doar pentru admin: oricine poate pune ceva în calendarul
+    // altuia, fiindcă oricine are de dat o întâlnire mai departe.
+    const colegi = await db
+      .prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND id <> ? ORDER BY nume")
+      .all(ctx.user.id)
+      .catch(() => []);
     const aleZilei = zi ? peZi[zi] || [] : [];
     const blocZi = !zi
       ? `<p id="zi" style="color:var(--text-muted)">Dă clic pe o zi din calendar și pui pe ea ce ai de făcut — task, apel, întâlnire, târg.</p>`
@@ -205,13 +335,53 @@ function register(router) {
              ? `<div class="cal-lista">${aleZilei
                  .map((t) => {
                    const gata = t.status === "finalizat" || t.status === "anulat";
+                   const nou = t.starea_mea === "neconfirmat";
+                   const ai = participanti[String(t.id)] || [];
+                   const euSuntOrganizator = Number(t.atribuit_lui) === Number(agentId);
+                   // Cine mai vine, cu răspunsul fiecăruia. Organizatorul e
+                   // scris primul și nu are de confirmat nimic — e al lui.
+                   const cuCine = ai.length
+                     ? `<div style="font-size:12px;margin-top:4px">
+                          <span style="color:var(--text-muted)">Cu:</span>
+                          ${!euSuntOrganizator && t.organizator ? `<span class="badge gri">${esc(t.organizator)} (organizator)</span> ` : ""}
+                          ${ai
+                            .map(
+                              (x) =>
+                                `<span class="badge ${
+                                  x.stare === "confirmat" ? "verde" : x.stare === "refuzat" ? "rosu" : "galben"
+                                }">${esc(x.nume)}${
+                                  x.stare === "confirmat" ? " ✓" : x.stare === "refuzat" ? " ✗" : " — n-a confirmat"
+                                }</span>`
+                            )
+                            .join(" ")}
+                        </div>`
+                     : "";
+                   // Butoanele de răspuns apar DOAR la cel invitat, și doar cât
+                   // timp n-a răspuns. Organizatorul nu-și confirmă singur.
+                   const raspuns = nou
+                     ? `<div style="display:flex;gap:6px;margin-top:8px;align-items:center;flex-wrap:wrap">
+                          <span style="font-size:13px;color:var(--warn,#b5760b)">
+                            ${esc(t.organizator || "Cineva")} te-a pus în calendar. Confirmi?
+                          </span>
+                          <form method="post" action="/crm/calendar/${t.id}/raspund" class="inline-form">
+                            <input type="hidden" name="inapoi" value="${esc(caleaAsta())}">
+                            <input type="hidden" name="raspuns" value="confirmat">
+                            <button class="btn small" type="submit">Confirm</button>
+                          </form>
+                          <form method="post" action="/crm/calendar/${t.id}/raspund" class="inline-form">
+                            <input type="hidden" name="inapoi" value="${esc(caleaAsta())}">
+                            <input type="hidden" name="raspuns" value="refuzat">
+                            <button class="btn secondary small" type="submit">Nu pot</button>
+                          </form>
+                        </div>`
+                     : "";
                    return `<div class="detail-box" style="padding:10px 12px;margin-bottom:8px;border-left:4px solid ${
                      CULOARE[t.tip] || CULOARE.general
-                   }${gata ? ";opacity:.6" : ""}">
+                   }${gata ? ";opacity:.6" : ""}${nou ? ";border-style:dashed" : ""}">
                      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
                        <strong${gata ? ' style="text-decoration:line-through"' : ""}><a href="/taskuri/${t.id}">${esc(t.titlu)}</a></strong>
                        <span style="font-size:12px;color:var(--text-muted)">
-                         ${oraScurta(t) ? esc(oraScurta(t)) : "toată ziua"}${
+                         ${nou ? '<span class="badge galben">neconfirmată</span> ' : ""}${oraScurta(t) ? esc(oraScurta(t)) : "toată ziua"}${
                      t.durata_minute ? ` · ${Number(t.durata_minute)} min` : ""
                    } · ${esc(eticheta(t.tip))} ${taskuri.badge(taskuri.STATUSURI, t.status)}
                        </span>
@@ -221,6 +391,9 @@ function register(router) {
                      t.locatie ? `${t.client ? " · " : ""}📍 ${esc(t.locatie)}` : ""
                    }${t.descriere ? `${t.client || t.locatie ? " · " : ""}${esc(t.descriere)}` : ""}
                      </div>
+                     ${cuCine}
+                     ${raspuns}
+                     ${alMeu(ctx.user, t) ? formularModificare(t) : ""}
                    </div>`;
                  })
                  .join("")}</div>`
@@ -241,6 +414,29 @@ function register(router) {
              <label class="field" style="width:130px"><span>Prioritate</span>
                <select name="prioritate">${taskuri.optiuni(taskuri.PRIORITATI, "normala")}</select></label>
            </div>
+           ${
+             colegi.length
+               ? `<div class="field" style="display:block;margin-top:10px">
+                    <span style="font-weight:600">Cu cine (opțional)</span>
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px">
+                      ${colegi
+                        .map(
+                          (c) =>
+                            `<label style="display:flex;gap:5px;align-items:center;font-size:13px;white-space:nowrap">
+                               <input type="checkbox" name="participanti" value="${c.id}"${
+                              Number(c.id) === Number(agentId) && altCalendar ? " checked" : ""
+                            }> ${esc(c.nume)}
+                             </label>`
+                        )
+                        .join("")}
+                    </div>
+                    <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">
+                      Le apare în calendar ca <strong>neconfirmată</strong>. După ce confirmă, se vede confirmată
+                      la toată lumea. Nimeni nu intră în programul altuia fără să fi spus „da".
+                    </p>
+                  </div>`
+               : ""
+           }
            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
              <label class="field" style="flex:1;min-width:220px"><span>Client (opțional)</span>
                <select name="partener_id">
@@ -333,18 +529,16 @@ function register(router) {
     const zi = ziOk(b.zi) ? String(b.zi) : azi();
     const luna = lunaOk(b.luna) ? String(b.luna) : zi.slice(0, 7);
 
-    // Cui îi intră în calendar. Un agent scrie numai la el; adminul poate pune
-    // și la altcineva, fiindcă el e cel care împarte târgurile și vizitele.
-    // Verificarea e pe server: câmpul ascuns din formular nu e o regulă.
-    let pentruId = Number(ctx.user.id);
-    if (ctx.user.rol === "admin") {
-      const cerut = parseInt(b.agent, 10);
-      if (Number.isFinite(cerut) && cerut > 0) {
-        const alt = await db.prepare("SELECT id FROM utilizatori WHERE id = ? AND activ = 1").get(cerut);
-        if (alt) pentruId = Number(alt.id);
-      }
-    }
-    const inapoi = `/crm/calendar?luna=${luna}&zi=${zi}${pentruId !== Number(ctx.user.id) ? `&agent=${pentruId}` : ""}#zi`;
+    // Intrarea e a celui care o scrie — el e organizatorul, el o vede din
+    // prima clipă în calendarul lui. Adminul care se uită în calendarul
+    // altcuiva nu mai scrie direct acolo: îl INVITĂ, la fel ca oricine
+    // altcineva. „Indiferent că e admin", cuvintele lui Vali — nimeni nu-ți
+    // bagă ceva în program fără să fi spus tu „da".
+    const pentruId = Number(ctx.user.id);
+    const agentVizitat = parseInt(b.agent, 10);
+    const inapoi = `/crm/calendar?luna=${luna}&zi=${zi}${
+      Number.isFinite(agentVizitat) && agentVizitat > 0 && agentVizitat !== pentruId ? `&agent=${agentVizitat}` : ""
+    }#zi`;
 
     const titlu = String(b.titlu || "").trim();
     if (!titlu) return redirect(ctx.res, inapoi);
@@ -372,12 +566,32 @@ function register(router) {
       d = x.toISOString().slice(0, 10);
     }
 
+    // Pe cine invităm. Doar utilizatori activi care chiar există, niciodată
+    // pe tine însuți (ești deja organizator), și cel mult 50 — o bifă măsluită
+    // n-are ce scrie în calendarul a trei sute de oameni.
+    const ceruti = (Array.isArray(b.participanti) ? b.participanti : b.participanti ? [b.participanti] : [])
+      .map((x) => parseInt(x, 10))
+      .filter((n) => Number.isFinite(n) && n > 0 && n !== pentruId)
+      .slice(0, 50);
+    let invitati = [];
+    if (ceruti.length) {
+      const unici = [...new Set(ceruti)];
+      invitati = await db
+        .prepare(`SELECT id FROM utilizatori WHERE activ = 1 AND id IN (${unici.map(() => "?").join(",")})`)
+        .all(...unici);
+    }
+
+    // Cheia grupului leagă zilele unei intrări de mai multe zile, ca răspunsul
+    // la invitație să se dea o dată pe tot târgul, nu zi de zi.
+    const grup =
+      zileDeScris.length > 1 ? `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` : null;
+
     for (const d of zileDeScris) {
-      await db
+      const ins = await db
         .prepare(
           `INSERT INTO taskuri (titlu, descriere, tip, prioritate, status, scadenta, ora, durata_minute,
-                                locatie, atribuit_lui, creat_de, partener_id)
-           VALUES (?, ?, ?, ?, 'deschis', ?, ?, ?, ?, ?, ?, ?)`
+                                locatie, atribuit_lui, creat_de, partener_id, grup_cheie)
+           VALUES (?, ?, ?, ?, 'deschis', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
         )
         .run(
           zileDeScris.length > 1 ? `${titlu} (${zileDeScris.indexOf(d) + 1}/${zileDeScris.length})` : titlu,
@@ -390,11 +604,123 @@ function register(router) {
           locatie,
           pentruId,
           ctx.user.id,
-          partenerId
+          partenerId,
+          grup
         );
+      const taskId = ins.lastInsertRowid;
+      for (const inv of invitati) {
+        await db
+          .prepare(
+            `INSERT INTO taskuri_participanti (task_id, utilizator_id, stare, invitat_de)
+             VALUES (?, ?, 'neconfirmat', ?)`
+          )
+          .run(taskId, inv.id, ctx.user.id)
+          .catch(() => {});
+      }
     }
 
     redirect(ctx.res, inapoi);
+  });
+
+  // ---------------- modificarea unei intrări ----------------
+  //
+  // O umblă cel care a pus-o (sau adminul). Nu și cei invitați: dacă oricine
+  // invitat ar putea muta ora, omul s-ar trezi cu programul schimbat de
+  // altcineva — exact lucrul de care ne-am ferit cu confirmarea.
+  router.post("/crm/calendar/:id/modifica", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const b = ctx.body || {};
+    const t = await db
+      .prepare("SELECT id, atribuit_lui, creat_de, scadenta, ora, grup_cheie FROM taskuri WHERE id = ?")
+      .get(ctx.params.id);
+    const unde = inapoiSigur(b.inapoi);
+    if (!t || !poateUmbla(ctx.user, t)) return redirect(ctx.res, unde);
+
+    const titlu = String(b.titlu || "").trim();
+    if (!titlu) return redirect(ctx.res, unde);
+    const tip = taskuri.TIPURI.some(([v]) => v === b.tip) ? String(b.tip) : "general";
+    const prioritate = taskuri.PRIORITATI.some(([v]) => v === b.prioritate) ? String(b.prioritate) : "normala";
+    const ora = oraOk(b.ora) ? String(b.ora) : null;
+    const durata = Number.isFinite(parseInt(b.durata_minute, 10)) ? Math.max(0, parseInt(b.durata_minute, 10)) : null;
+    const locatie = String(b.locatie || "").trim() || null;
+    const descriere = String(b.descriere || "").trim() || null;
+    const partenerId = parseInt(b.partener_id, 10) || null;
+    const ziNoua = ziOk(b.scadenta) ? String(b.scadenta) : String(t.scadenta).slice(0, 10);
+
+    await db
+      .prepare(
+        `UPDATE taskuri SET titlu = ?, tip = ?, prioritate = ?, ora = ?, durata_minute = ?,
+                            locatie = ?, descriere = ?, partener_id = ?, scadenta = ?
+          WHERE id = ?`
+      )
+      .run(titlu, tip, prioritate, ora, durata, locatie, descriere, partenerId, ziNoua, t.id);
+
+    // Dacă s-a mutat ziua sau ora, confirmările nu mai înseamnă nimic: omul a
+    // spus „da" pentru marți la 10, nu pentru joi la 16. Se cer din nou.
+    const mutata = ziNoua !== String(t.scadenta).slice(0, 10) || (ora || "") !== (t.ora || "");
+    if (mutata) {
+      await db
+        .prepare("UPDATE taskuri_participanti SET stare = 'neconfirmat', raspuns_la = NULL WHERE task_id = ? AND stare = 'confirmat'")
+        .run(t.id);
+    }
+    redirect(ctx.res, unde);
+  });
+
+  // ---------------- ștergerea unei intrări ----------------
+  router.post("/crm/calendar/:id/sterge", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const b = ctx.body || {};
+    const t = await db.prepare("SELECT id, atribuit_lui, creat_de, grup_cheie FROM taskuri WHERE id = ?").get(ctx.params.id);
+    const unde = inapoiSigur(b.inapoi);
+    if (!t || !poateUmbla(ctx.user, t)) return redirect(ctx.res, unde);
+
+    // „Tot grupul" are sens doar pentru o intrare de mai multe zile, și numai
+    // dacă o cere omul explicit: altfel, cine voia să scoată o zi dintr-un
+    // târg ar rămâne fără târg.
+    const toate = String(b.tot_grupul || "") === "1" && t.grup_cheie;
+    const ids = toate
+      ? (await db.prepare("SELECT id FROM taskuri WHERE grup_cheie = ?").all(t.grup_cheie)).map((x) => Number(x.id))
+      : [Number(t.id)];
+    if (!ids.length) return redirect(ctx.res, unde);
+    const lista = ids.map(() => "?").join(",");
+
+    // Întâi legăturile, apoi rândul — altfel baza refuză ștergerea.
+    await db.prepare(`DELETE FROM taskuri_participanti WHERE task_id IN (${lista})`).run(...ids);
+    await db.prepare(`DELETE FROM taskuri_comentarii WHERE task_id IN (${lista})`).run(...ids).catch(() => {});
+    await db.prepare(`UPDATE interactiuni SET task_id = NULL WHERE task_id IN (${lista})`).run(...ids).catch(() => {});
+    await db.prepare(`DELETE FROM taskuri WHERE id IN (${lista})`).run(...ids);
+    redirect(ctx.res, unde);
+  });
+
+  // ---------------- răspunsul la o invitație ----------------
+  //
+  // Confirmi sau refuzi o dată, iar răspunsul prinde tot grupul: un târg de
+  // trei zile nu se confirmă de trei ori. Poți răspunde DOAR pentru tine —
+  // nimeni nu confirmă în locul altuia, nici adminul.
+  router.post("/crm/calendar/:id/raspund", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const raspuns = ctx.body.raspuns === "confirmat" ? "confirmat" : ctx.body.raspuns === "refuzat" ? "refuzat" : null;
+    const t = await db.prepare("SELECT id, grup_cheie FROM taskuri WHERE id = ?").get(ctx.params.id);
+    // Întoarcerea se ia din formular, dar numai dacă e o adresă din calendar.
+    // Altfel un formular măsluit ar putea trimite omul oriunde după salvare.
+    const unde = inapoiSigur(ctx.body.inapoi);
+    if (!t || !raspuns) return redirect(ctx.res, unde);
+
+    const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
+    if (t.grup_cheie) {
+      await db
+        .prepare(
+          `UPDATE taskuri_participanti SET stare = ?, raspuns_la = ?
+            WHERE utilizator_id = ?
+              AND task_id IN (SELECT id FROM taskuri WHERE grup_cheie = ?)`
+        )
+        .run(raspuns, acum, ctx.user.id, t.grup_cheie);
+    } else {
+      await db
+        .prepare("UPDATE taskuri_participanti SET stare = ?, raspuns_la = ? WHERE task_id = ? AND utilizator_id = ?")
+        .run(raspuns, acum, t.id, ctx.user.id);
+    }
+    redirect(ctx.res, unde + (unde.includes("#") ? "" : "#zi"));
   });
 }
 

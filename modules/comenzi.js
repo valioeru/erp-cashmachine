@@ -36,7 +36,10 @@ const STARE_FACTURABILA = "in_stoc_depozit";
 // si pe email: la biroul firmei, la Mihai si inapoi la agentul care a plasat-o,
 // ca sa aiba dovada scrisa fara sa intre in aplicatie. Adresele stau in
 // setari_app, deci se schimba din baza fara sa mai umblam prin cod.
-const CATRE_IMPLICIT = "office@cashmachine.ro, mihai.mosneanu@cashmachine.ro";
+// 09.10.2026: anunțul nu mai pleacă la office@, ci la comercial@ — cererea lui
+// Vali. Restul adreselor rămân cum erau. Cine vrea altceva fără deploy pune
+// cheia „comanda_noua_catre" în setari_app, care bate valoarea de aici.
+const CATRE_IMPLICIT = "comercial@cashmachine.ro, mihai.mosneanu@cashmachine.ro";
 
 function adreseDinText(text) {
   return String(text || "")

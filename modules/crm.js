@@ -575,15 +575,23 @@ function register(router) {
     }
     const agent = await db.prepare("SELECT id, nume, comision_procent FROM utilizatori WHERE id = ?").get(agentId);
     if (!agent) return redirect(ctx.res, "/crm");
-    // Adminul intră și el în listă, pe primul rând. Fără asta, odată ce
-    // alegea un agent nu se mai putea întoarce la biroul lui din aceeași
-    // listă — trebuia să umble la adresa din bară.
+    // În listă intră ORICINE are măcar un client alocat pe el, nu doar cei cu
+    // rolul „vânzări". Florentin și Mihai Mosneanu au clienți în portofoliu,
+    // dar alt rol, și lipseau din listă — adică adminul nu avea cum să le
+    // deschidă biroul, deși ei apar în toate rapoartele de comision.
+    //
+    // Plus cei cu rolul de vânzări chiar dacă n-au încă niciun client (un
+    // agent nou nu trebuie să aștepte prima alocare ca să existe în listă),
+    // plus adminul însuși, pe primul rând — fără el, odată ce alegea pe
+    // altcineva nu se mai putea întoarce la biroul lui din aceeași listă.
     const agenti = esteAdmin
       ? await db
           .prepare(
-            `SELECT id, nume FROM utilizatori
-              WHERE activ = 1 AND (rol = 'vanzari' OR id = ?)
-              ORDER BY (CASE WHEN id = ? THEN 0 ELSE 1 END), nume`
+            `SELECT u.id, u.nume FROM utilizatori u
+              WHERE u.activ = 1
+                AND (u.rol = 'vanzari' OR u.id = ?
+                     OR EXISTS (SELECT 1 FROM ${ALOC} a WHERE a.utilizator_id = u.id AND a.procent > 0))
+              ORDER BY (CASE WHEN u.id = ? THEN 0 ELSE 1 END), u.nume`
           )
           .all(ctx.user.id, ctx.user.id)
       : [];

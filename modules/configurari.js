@@ -32,6 +32,7 @@ function subnav(activ) {
   const linkuri = [
     ["/configurari/date", "Date importate"],
     ["/configurari/storno", "Facturi stornate"],
+    ["/configurari/adrese", "Adrese de anunț"],
   ];
   return `<div class="subnav">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
@@ -260,6 +261,94 @@ function perechiStorno(randuri) {
 
 function register(router) {
   router.get("/configurari", async (ctx) => redirect(ctx.res, "/configurari/date"));
+
+  // ---------------- Adresele pe care pleacă anunțurile ----------------
+  //
+  // Erau în cod. Adică de fiecare dată când se schimba o adresă — office@
+  // devine comercial@ — trebuia un deploy și un om care știe unde să caute.
+  // Acum stau în setari_app și se schimbă de aici, în zece secunde.
+  const ADRESE = [
+    {
+      cheie: "comanda_noua_catre",
+      titlu: "Comandă nouă",
+      explicatie:
+        "Cine primește anunțul când un agent pune o comandă. Agentul care a plasat-o primește oricum o copie, nu trebuie trecut aici.",
+      implicit: "comercial@cashmachine.ro, mihai.mosneanu@cashmachine.ro",
+    },
+  ];
+  const adreseDinText = (text) =>
+    String(text || "")
+      .split(/[,;\s]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+  router.get("/configurari/adrese", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const valori = {};
+    for (const a of ADRESE) {
+      const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = ?").get(a.cheie).catch(() => null);
+      valori[a.cheie] = r && String(r.valoare || "").trim() ? String(r.valoare) : "";
+    }
+    const gresite = String(ctx.query.gresite || "");
+    const body = `
+      ${subnav("/configurari/adrese")}
+      <h1>Adrese de anunț</h1>
+      <p style="max-width:760px;color:var(--text-muted)">
+        Adresele pe care aplicația trimite singură emailuri. Se schimbă de aici, fără programator și fără
+        repornire. Scrie-le despărțite prin virgulă. Lasă câmpul gol ca să revii la adresele implicite.
+      </p>
+      ${gresite ? `<p style="color:var(--danger)">Nu arată a adrese de email și n-au fost salvate: ${esc(gresite)}</p>` : ""}
+      ${ctx.query.salvat ? '<p style="color:var(--success)">Salvat.</p>' : ""}
+      <form class="form" method="post" action="/configurari/adrese" style="max-width:760px">
+        ${ADRESE.map(
+          (a) => `
+          <label class="field">
+            <span>${esc(a.titlu)}</span>
+            <input name="${esc(a.cheie)}" value="${esc(valori[a.cheie])}" placeholder="${esc(a.implicit)}">
+          </label>
+          <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 12px">
+            ${esc(a.explicatie)} Implicit: <code>${esc(a.implicit)}</code>.
+          </p>`
+        ).join("")}
+        <div class="form-actions"><button class="btn" type="submit">Salvează</button></div>
+      </form>
+      <p style="font-size:12px;color:var(--text-muted);max-width:760px">
+        De pe ce adresă <em>pleacă</em> mesajele e altceva și se pune pe fiecare om, în
+        <a href="/profil/email">contul lui de email</a>. Google cere acolo o „parolă de aplicație",
+        nu parola obișnuită — cu parola obișnuită trimiterea pică cu <code>535-5.7.8</code>.
+      </p>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Adrese de anunț", active: "/configurari", body }));
+  });
+
+  router.post("/configurari/adrese", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const gresite = [];
+    for (const a of ADRESE) {
+      const brut = String((ctx.body || {})[a.cheie] || "").trim();
+      // Se salvează doar ce arată a adresă. O adresă tastată greșit n-ar da
+      // nicio eroare la salvare, dar ar face ca anunțul să nu mai ajungă
+      // nicăieri — și nimeni n-ar observa până când cineva ar întreba de ce
+      // n-a primit comanda.
+      const bune = adreseDinText(brut).filter((x) => {
+        const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x);
+        if (!ok) gresite.push(x);
+        return ok;
+      });
+      const valoare = bune.join(", ");
+      const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
+      await db
+        .prepare(
+          `INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?)
+           ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la`
+        )
+        .run(a.cheie, valoare, acum);
+    }
+    redirect(
+      ctx.res,
+      "/configurari/adrese?salvat=1" + (gresite.length ? "&gresite=" + encodeURIComponent(gresite.join(", ")) : "")
+    );
+  });
 
   router.get("/configurari/date", async (ctx) => {
     const q = ctx.query || {};
