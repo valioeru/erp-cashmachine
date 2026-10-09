@@ -199,6 +199,10 @@ async function start() {
   await creeazaAdminInitialDacaLipseste();
   await require("./lib/grup").asiguraFirme();
   await require("./modules/sincronizare").incarcaTot();
+  // Partenerii ignorati: regulile se aplica si la pornire, ca sa prinda si
+  // ce a intrat in baza intre timp (un import facut inainte de a fi scrisa
+  // regula, sau regulile adaugate prin migrare).
+  await require("./lib/parteneri-ignorati").aplicaTot().catch((e) => console.error("[ignorati]", e.message));
   await require("./modules/calculator").seed();
   require("./modules/warehouse").porneste();
   require("./modules/marketing").porneste();
