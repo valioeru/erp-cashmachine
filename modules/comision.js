@@ -22,7 +22,7 @@
 const db = require("../lib/db");
 const { ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
-const { esc, money, layout, table, subnavCrm } = require("../lib/render");
+const { esc, money, cantitate, unitate, layout, table, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const nr = (v) => Number(v || 0);
@@ -896,18 +896,19 @@ function register(router) {
       ${
         comenzi.length
           ? table(
-              ["Comanda", "Client", "Produs", "Cantitate", "Livrare", "Valoare", "De unde e valoarea", `Comision (${pct}%)`],
+              ["Comanda", "Client", "Produs", "Cantitate", "UM", "Livrare", "Valoare", "De unde e valoarea", `Comision (${pct}%)`],
               comenzi.slice(0, 60).map((c) => [
                 `<a href="/productie/${c.id}">${esc(c.numar || String(c.id))}</a>`,
                 esc(c.client || "—"),
                 esc(c.tip_produs || "—"),
-                esc([c.cantitate, c.um].filter(Boolean).join(" ")),
+                esc(cantitate(c.cantitate, c.um)),
+                esc(unitate(c.cantitate, c.um)),
                 esc(c.data_livrare || "—"),
                 c.valoare ? lei(c.valoare) : `<span class="mic">—</span>`,
                 c.valoare ? `<span class="mic">${esc(c.temei)}</span>` : `<a class="mic" href="/productie/${c.id}">scrie o valoare</a>`,
                 c.valoare ? `<strong>${lei(c.comision)}</strong>` : `<span class="mic">—</span>`,
               ]),
-              { total: ["Total", "", "", "", "", lei(comenziValoare), "", `<strong>${lei(comenziComision)}</strong>`] }
+              { total: ["Total", "", "", "", "", "", lei(comenziValoare), "", `<strong>${lei(comenziComision)}</strong>`] }
             )
           : `<p class="mic">Nicio comandă nefacturată pe numele tău.</p>`
       }

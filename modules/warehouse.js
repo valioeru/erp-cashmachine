@@ -492,7 +492,7 @@ function register(router) {
       ];
     });
 
-    const produse = await db.prepare("SELECT id, denumire FROM produse ORDER BY denumire LIMIT 3000").all();
+    const produse = await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
     const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 2000").all();
 
     const body = `

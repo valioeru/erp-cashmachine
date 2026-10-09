@@ -5,7 +5,7 @@
 // pentru că le stabilesc oameni diferiți — exact ce era ținut până acum în
 // Excelul "Comenzi_in_lucru.xlsx".
 const db = require("../lib/db");
-const { esc, money, layout, table, dateleInText } = require("../lib/render");
+const { esc, money, cantitate, unitate, layout, table, dateleInText, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
 const { comenziSpreAlocare, ore } = require("./utilaje");
@@ -308,6 +308,113 @@ async function ingestRegistruComenzi(randuri) {
 // Tabelul „Comenzi spre alocare". Pentru fiecare comandă deschisă și
 // nealocată arată utilajele care o pot face și în câte ore — ca decizia „pe
 // ce o punem" să se ia din pagina asta, nu din cap.
+// ---------------------------------------------------------------------------
+// Liniile de produs ale unei comenzi
+//
+// O comandă poate avea mai multe produse, fiecare cu cantitatea și cu
+// caracteristicile lui. Formularul trimite patru liste paralele, plus o cheie
+// per rând:
+//
+//   linie_cheie[]      r0, r1, …  — cheia rândului, NU poziția lui
+//   linie_produs[]     id din nomenclator
+//   linie_cantitate[]  text, scris exact cum l-a scris omul
+//   linie_um[]         unitatea
+//   carac_<cheie>_<id> valoarea unei caracteristici a produsului de pe rând
+//
+// Cheia e cea care ține valorile lipite de produsul lor. Cu indici de poziție,
+// ștergerea unui rând din mijloc ar muta grosimea de la al treilea produs pe al
+// doilea — o greșeală care nu se vede nici în formular, nici în comandă, ci
+// abia în atelier.
+function caListaDeValori(v) {
+  if (v === undefined || v === null) return [];
+  return Array.isArray(v) ? v : [v];
+}
+
+// Întoarce { lista } sau { eroare: "mesaj" }. NU trimite răspunsul: cine o
+// cheamă decide ce face cu mesajul. Prima variantă întorcea direct rezultatul
+// lui send(), care e `undefined` — deci semnalul de oprire se pierdea și codul
+// mergea mai departe pe o listă inexistentă.
+async function citesteLinii(b) {
+  const chei = caListaDeValori(b["linie_cheie[]"]);
+  let idProduse = caListaDeValori(b["linie_produs[]"]);
+  let cantitati = caListaDeValori(b["linie_cantitate[]"]);
+  let unitati = caListaDeValori(b["linie_um[]"]);
+  // Formularul de dinainte de linii, cu un singur produs. Acceptat ca să nu dea
+  // 400 unui ecran rămas deschis de ieri.
+  const vechi = !idProduse.length && b.produs_id;
+  if (vechi) {
+    idProduse = [b.produs_id];
+    cantitati = [b.cantitate];
+    unitati = [b.um];
+  }
+
+  const lista = [];
+  for (let i = 0; i < idProduse.length; i++) {
+    const id = parseInt(idProduse[i], 10) || 0;
+    if (!id) continue;
+    const produs = await db.prepare("SELECT * FROM produse WHERE id = ? AND activ = 1").get(id);
+    if (!produs)
+      return {
+        eroare:
+          "Unul dintre produsele alese nu mai e în nomenclator sau a fost unificat în alt cod. Reîncarcă formularul și alege-l din listă.",
+      };
+
+    const cheie = vechi ? null : String(chei[i] === undefined ? i : chei[i]);
+    const carac = await db
+      .prepare("SELECT * FROM produse_caracteristici WHERE produs_id = ? AND activ = 1 ORDER BY ordine, id")
+      .all(produs.id);
+    const completate = [];
+    for (const c of carac) {
+      const camp = cheie === null ? "carac_" + c.id : "carac_" + cheie + "_" + c.id;
+      const val = String(b[camp] || "").trim();
+      if (!val) {
+        if (Number(c.obligatoriu))
+          return { eroare: `Caracteristica „${c.denumire}" este obligatorie pentru ${produs.denumire}.` };
+        continue;
+      }
+      if (c.tip === "numar" && !Number.isFinite(Number(val.replace(",", ".")))) {
+        return { eroare: `Caracteristica „${c.denumire}" (${produs.denumire}) trebuie să fie un număr. Ai scris „${val}".` };
+      }
+      if (c.tip === "lista" && c.valori && !String(c.valori).split("|").map((x) => x.trim()).includes(val)) {
+        return {
+          eroare: `Caracteristica „${c.denumire}" (${produs.denumire}) acceptă doar: ${String(c.valori).split("|").join(", ")}.`,
+        };
+      }
+      completate.push({ c, val });
+    }
+
+    lista.push({
+      produs,
+      // Cantitatea NU se reinterpretează: rămâne textul scris de om. Vezi
+      // despartCantitate() din lib/render.js pentru de ce.
+      cantitate: String(cantitati[i] === undefined ? "" : cantitati[i]).trim(),
+      um: String(unitati[i] === undefined ? "" : unitati[i]).trim() || produs.unitate_masura || "buc",
+      completate,
+    });
+  }
+  return { lista };
+}
+
+async function scrieLinii(comandaId, lista) {
+  let ordine = 0;
+  for (const l of lista) {
+    const linie = await db
+      .prepare(
+        `INSERT INTO comenzi_productie_linii (comanda_id, produs_id, denumire, cantitate, um, ordine)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+      )
+      .run(comandaId, l.produs.id, l.produs.denumire, l.cantitate, l.um, (ordine += 10));
+    for (const { c, val } of l.completate) {
+      await db
+        .prepare(
+          `INSERT INTO comenzi_productie_caracteristici (comanda_id, linie_id, caracteristica_id, denumire, valoare, unitate)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(comandaId, linie.lastInsertRowid, c.id, c.denumire, val, c.unitate || null);
+    }
+  }
+}
+
 function sectiuneSpreAlocare(spre) {
   if (!spre.utilaje) {
     return `<div class="detail-box" style="border-left:4px solid var(--warning,#d99b00)">
@@ -328,7 +435,8 @@ function sectiuneSpreAlocare(spre) {
       `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
       esc(c.partener_nume || c.client_text || "—"),
       esc(c.tip_produs || "—"),
-      esc([c.cantitate, c.um].filter(Boolean).join(" ") || "—"),
+      esc(cantitate(c.cantitate, c.um)),
+      esc(unitate(c.cantitate, c.um)),
       c.data_livrare
         ? c.data_livrare < azi()
           ? `<span class="badge rosu">${esc(c.data_livrare)}</span>`
@@ -357,7 +465,7 @@ function sectiuneSpreAlocare(spre) {
       ${spre.oameni} ${spre.oameni === 1 ? "om disponibil" : "oameni disponibili"} în producție.
     </p>
     ${table(
-      ["#", "Client", "Produs", "Cant.", "Livrare", "Poate fi făcută pe", "Ore est.", "Operatori", ""],
+      ["#", "Client", "Produs", "Cantitate", "UM", "Livrare", "Poate fi făcută pe", "Ore est.", "Operatori", ""],
       randuri
     )}
   `;
@@ -622,6 +730,12 @@ function register(router) {
         .prepare("UPDATE comenzi SET status = 'in_productie' WHERE id = ? AND status NOT IN ('facturata','livrata','anulata')")
         .run(a.comanda_id);
     }
+    await db.prepare("UPDATE comenzi_productie SET produs_id = ? WHERE id = ?").run(produs.id, ins.lastInsertRowid);
+    // O cerere din depozit e pentru un singur produs, dar se scrie ca linie, ca
+    // să apară în tabelul de produse al comenzii ca toate celelalte.
+    await scrieLinii(ins.lastInsertRowid, [
+      { produs, cantitate: String(a.cantitate), um: produs.unitate_masura || "buc", completate },
+    ]);
     redirect(ctx.res, `/productie/${ins.lastInsertRowid}`);
   });
 
@@ -641,7 +755,7 @@ function register(router) {
          ORDER BY CASE m.status WHEN 'ceruta' THEN 0 WHEN 'confirmata' THEN 1 ELSE 2 END, m.id DESC LIMIT 200`
       )
       .all();
-    const produse = await db.prepare("SELECT id, denumire FROM produse ORDER BY denumire LIMIT 3000").all();
+    const produse = await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
     const comenzi = await db
       .prepare("SELECT id, numar FROM comenzi_productie WHERE status IN ('noua','in_productie') ORDER BY id DESC LIMIT 100")
       .all();
@@ -800,7 +914,30 @@ function register(router) {
   });
 
   router.get("/productie/noua", async (ctx) => {
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 3000").all();
+    // Toți clienții, nu doar ai agentului care completează: căutarea merge pe
+    // toată baza, iar lângă fiecare firmă scrie al cui client e.
+    const parteneri = await db
+      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 5000")
+      .all();
+    // Produsele se iau din nomenclator, nu se mai scriu liber. Produse noi se
+    // adaugă doar din Financiar → Produse, ca să nu se nască al treilea cod
+    // pentru același articol direct din formularul de comandă.
+    const produse = await db
+      .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 5000")
+      .all();
+    const caracToate = await db
+      .prepare("SELECT * FROM produse_caracteristici WHERE activ = 1 ORDER BY produs_id, ordine, id")
+      .all();
+    const peProdus = {};
+    for (const c of caracToate) {
+      if (!peProdus[c.produs_id]) peProdus[c.produs_id] = [];
+      peProdus[c.produs_id].push({
+        id: c.id, denumire: c.denumire, tip: c.tip, unitate: c.unitate || "",
+        valori: c.valori || "", obligatoriu: Number(c.obligatoriu) ? 1 : 0,
+      });
+    }
+    const caracJson = JSON.stringify(peProdus).replace(/</g, "\\u003c");
+    const umJson = JSON.stringify(Object.fromEntries(produse.map((p) => [p.id, p.unitate_masura || "buc"]))).replace(/</g, "\\u003c");
     const utilizatori = await db.prepare("SELECT id, nume, cod_agent FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const nrNou = await numarComandaNou();
     const alesImplicit = ctx.user ? ctx.user.id : null;
@@ -811,12 +948,9 @@ function register(router) {
       <form class="form" method="post" action="/productie" style="max-width:860px">
         <div style="display:grid;grid-template-columns:200px 1fr;gap:14px">
           <label class="field">Nr. comandă<input name="numar" value="${esc(nrNou)}" required></label>
-          <label class="field">Client
-            <input name="client_nou" list="lista-clienti" placeholder="Scrie numele clientului" autocomplete="off">
-            <datalist id="lista-clienti">${parteneri.map((p) => `<option value="${esc(p.nume)}">`).join("")}</datalist>
-          </label>
+          <label class="field">Client${cautaClient({ nume: "client_nou" })}</label>
         </div>
-        <p class="ajutor">Dacă clientul nu e încă în ERP, îl scrii aici și se creează singur: partener nou, cu un lead convertit în spate, alocat agentului de mai jos.</p>
+        <p class="ajutor">Caută în toată baza, pe orice bucată din nume sau din CUI — inclusiv clienții colegilor, cu numele agentului scris dedesubt. Dacă firma nu e încă în ERP, scrii numele și se creează singură: partener nou, cu un lead convertit în spate, alocat agentului de mai jos.</p>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
           <label class="field">Reprezentant vânzări
@@ -829,15 +963,14 @@ function register(router) {
                 .join("")}
             </select>
           </label>
-          <label class="field">Produs comandat<input name="tip_produs" required placeholder="Ex: Folie Stretch, Pungi Curier, Bandă adezivă"></label>
+          <label class="field">Tip ambalare<input name="tip_ambalare" placeholder="Ex: 6 role/pack, 500/cutie"></label>
         </div>
 
-        <label class="field">Caracteristici produs (dimensiuni, microni…)<input name="caracteristici" placeholder="Ex: 23 microni reciclat, 1.5 kg net"></label>
-
-        <div style="display:grid;grid-template-columns:1fr 110px 1fr;gap:14px">
-          <label class="field">Cantitate comandată<input name="cantitate" required placeholder="Ex: 15000"></label>
-          <label class="field">UM<input name="um" value="buc"></label>
-          <label class="field">Tip ambalare<input name="tip_ambalare" placeholder="Ex: 6 role/pack, 500/cutie"></label>
+        <h2 style="margin:18px 0 4px;font-size:16px">Produsele comandate</h2>
+        <p class="ajutor">O comandă poate avea mai multe produse. Fiecare cu cantitatea lui și cu caracteristicile lui — se aleg din nomenclator. Dacă articolul nu există încă, se adaugă din <a href="/produse/nou">Financiar → Produse</a>, nu de aici: așa nu mai apar două coduri pentru același lucru.</p>
+        <div id="linii-produse"></div>
+        <div class="form-actions" style="margin-top:4px">
+          <button type="button" class="btn small secondary" id="adauga-produs">+ adaugă încă un produs</button>
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
@@ -864,6 +997,98 @@ function register(router) {
         <div class="form-actions"><button class="btn" type="submit">Înregistrează comanda</button> <a class="btn secondary" href="/productie">Renunță</a></div>
       </form>
       <p style="font-size:12px;color:var(--text-muted)">Sunt exact coloanele din registru. Numărul urmează formatul lui: ziua plus un contor.</p>
+      ${cautaClientScript(randuriClienti(parteneri, utilizatori))}
+      <script>
+        // Liniile de produs ale comenzii.
+        //
+        // Fiecare linie are o CHEIE proprie (r0, r1, …), nu un index de poziție.
+        // Caracteristicile se trimit ca "carac_<cheie>_<id>", deci ștergerea
+        // liniei din mijloc nu amestecă valorile între produsele rămase — cu
+        // indici de poziție, grosimea de la al treilea produs ar ajunge pe al
+        // doilea, iar nimeni n-ar vedea asta până în atelier.
+        (function () {
+          var CARAC = ${caracJson};
+          var UM = ${umJson};
+          var OPTIUNI = ${JSON.stringify(
+            '<option value="">— alege din nomenclator —</option>' +
+              produse.map((p) => `<option value="${p.id}">${esc(p.denumire)}${p.cod ? ` (${esc(p.cod)})` : ""}</option>`).join("")
+          ).replace(/</g, "\\u003c")};
+          var zona = document.getElementById("linii-produse");
+          var contor = 0;
+
+          function caracteristici(cheie, produsId) {
+            var lista = CARAC[produsId] || [];
+            if (!produsId) return "";
+            if (!lista.length)
+              return '<p class="ajutor" style="margin:6px 0 0">Produsul nu are caracteristici definite. Se definesc pe fișa lui, din Financiar → Produse.</p>';
+            var h = '<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border,#ddd)">' +
+              '<div style="font-weight:600;margin-bottom:8px;font-size:13px">Caracteristicile produsului</div>' +
+              '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+            for (var i = 0; i < lista.length; i++) {
+              var c = lista[i];
+              var et = c.denumire + (c.unitate ? " (" + c.unitate + ")" : "") + (c.obligatoriu ? " *" : "");
+              var nume = "carac_" + cheie + "_" + c.id;
+              var inp;
+              if (c.tip === "lista") {
+                var op = (c.valori || "").split("|").filter(Boolean)
+                  .map(function (v) { return '<option value="' + v.replace(/"/g, "&quot;") + '">' + v + "</option>"; }).join("");
+                inp = '<select name="' + nume + '"' + (c.obligatoriu ? " required" : "") + '><option value="">—</option>' + op + "</select>";
+              } else if (c.tip === "numar") {
+                inp = '<input name="' + nume + '" inputmode="decimal"' + (c.obligatoriu ? " required" : "") + ">";
+              } else {
+                inp = '<input name="' + nume + '"' + (c.obligatoriu ? " required" : "") + ">";
+              }
+              h += '<label class="field">' + et + inp + "</label>";
+            }
+            return h + "</div></div>";
+          }
+
+          function adauga() {
+            var cheie = "r" + contor++;
+            var rand = document.createElement("div");
+            rand.className = "detail-box linie-produs";
+            rand.style.cssText = "margin:0 0 10px";
+            rand.dataset.cheie = cheie;
+            rand.innerHTML =
+              '<input type="hidden" name="linie_cheie[]" value="' + cheie + '">' +
+              '<div style="display:grid;grid-template-columns:1fr 150px 90px 36px;gap:12px;align-items:end">' +
+                '<label class="field">Produs<select name="linie_produs[]" class="alege-produs" required>' + OPTIUNI + "</select></label>" +
+                '<label class="field">Cantitate<input name="linie_cantitate[]" required placeholder="Ex: 15000"></label>' +
+                '<label class="field">UM<input name="linie_um[]" value="buc"></label>' +
+                '<button type="button" class="link-btn danger scoate-linie" title="Scoate produsul" style="padding-bottom:8px">×</button>' +
+              "</div>" +
+              '<div class="zona-carac"></div>';
+            zona.appendChild(rand);
+            innoiesteScoaterea();
+          }
+
+          // Butonul de scos apare doar când sunt cel puțin două produse: o
+          // comandă fără niciun produs n-are sens, iar un × care golește tot
+          // formularul e o capcană.
+          function innoiesteScoaterea() {
+            var randuri = zona.querySelectorAll(".linie-produs");
+            for (var i = 0; i < randuri.length; i++) {
+              randuri[i].querySelector(".scoate-linie").style.visibility = randuri.length > 1 ? "visible" : "hidden";
+            }
+          }
+
+          zona.addEventListener("change", function (e) {
+            if (!e.target.classList || !e.target.classList.contains("alege-produs")) return;
+            var rand = e.target.closest(".linie-produs");
+            rand.querySelector(".zona-carac").innerHTML = caracteristici(rand.dataset.cheie, e.target.value);
+            var um = rand.querySelector('input[name="linie_um[]"]');
+            if (um && UM[e.target.value]) um.value = UM[e.target.value];
+          });
+          zona.addEventListener("click", function (e) {
+            if (!e.target.classList || !e.target.classList.contains("scoate-linie")) return;
+            var rand = e.target.closest(".linie-produs");
+            if (zona.querySelectorAll(".linie-produs").length > 1) rand.remove();
+            innoiesteScoaterea();
+          });
+          document.getElementById("adauga-produs").addEventListener("click", adauga);
+          adauga();
+        })();
+      </script>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă în producție", active: "/productie", body }));
   });
@@ -885,6 +1110,46 @@ function register(router) {
     const livrare = String(b.data_livrare || "") || null;
     const stare = String(b.status || "noua").trim() || "noua";
 
+    const nuMerge = (mesaj) =>
+      send(
+        ctx.res,
+        400,
+        layout({
+          user: ctx.user,
+          title: "Comanda nu se poate înregistra",
+          active: "/productie",
+          body: `<p>${esc(mesaj)}</p><p><a class="btn secondary" href="/productie/noua">Înapoi la formular</a></p>`,
+        })
+      );
+
+    // Produsele vin din nomenclator, oricâte ar fi. Fără niciunul nu se
+    // înregistrează comanda: altfel se întorc codurile scrise de mână pe care
+    // tocmai le-am unificat.
+    //
+    // `linie_cheie[]` ține cheia fiecărui rând din formular, ca valorile
+    // caracteristicilor să rămână lipite de produsul lor chiar dacă s-a șters
+    // un rând din mijloc. Formularul vechi, cu un singur `produs_id`, e
+    // acceptat în continuare — un ecran rămas deschis nu trebuie să dea 400.
+    const linii = await citesteLinii(b);
+    if (linii.eroare) return nuMerge(linii.eroare);
+    if (!linii.lista.length)
+      return nuMerge("Alege cel puțin un produs din nomenclator. Dacă articolul nu există, adaugă-l întâi din Financiar → Produse.");
+
+    // Coloanele plate de pe comandă rămân umplute: vreo douăzeci de locuri le
+    // citesc direct (comision, utilaje, rapoarte, punte). `tip_produs` adună
+    // denumirile, iar cantitatea și UM sunt ale PRIMEI linii — restul se văd
+    // în tabelul de produse de pe comandă.
+    const prima = linii.lista[0];
+    const denumiri = linii.lista.map((l) => l.produs.denumire).join(" + ").slice(0, 300);
+    const rezumat =
+      linii.lista
+        .map((l) => {
+          const c = l.completate.map(({ c: k, val }) => `${k.denumire}: ${val}${k.unitate ? " " + k.unitate : ""}`).join(", ");
+          return linii.lista.length > 1 ? `${l.produs.denumire}${c ? " — " + c : ""}` : c;
+        })
+        .filter(Boolean)
+        .join("; ") || null;
+
     const ins = await db
       .prepare(
         `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, agent_id, partener_id, client_text, tip_produs, caracteristici, cantitate, um, tip_ambalare, data_initiere, data_livrare, data_solicitata, data_finalizare, status, doc_emisa, fisa_tehnica, doc_emisa_txt, fisa_tehnica_txt, facturat, valoare_estimata, observatii, reteta, sursa)
@@ -898,10 +1163,10 @@ function register(router) {
         agentId,
         partenerId,
         p ? p.nume : numeClient || null,
-        String(b.tip_produs || "").trim(),
-        String(b.caracteristici || "").trim() || null,
-        String(b.cantitate || "").trim(),
-        String(b.um || "buc").trim(),
+        denumiri,
+        rezumat,
+        prima.cantitate,
+        prima.um,
         String(b.tip_ambalare || "").trim() || null,
         String(b.data_initiere || "") || azi(),
         livrare,
@@ -917,7 +1182,10 @@ function register(router) {
         String(b.observatii || "").trim() || null,
         String(b.reteta || "").trim() || null
       );
-    redirect(ctx.res, `/productie/${ins.lastInsertRowid}`);
+    const comandaId = ins.lastInsertRowid;
+    await db.prepare("UPDATE comenzi_productie SET produs_id = ? WHERE id = ?").run(prima.produs.id, comandaId);
+    await scrieLinii(comandaId, linii.lista);
+    redirect(ctx.res, `/productie/${comandaId}`);
   });
 
   router.get("/productie/:id/pdf", async (ctx) => {
@@ -931,6 +1199,26 @@ function register(router) {
       )
       .get(ctx.params.id);
     if (!c) return send(ctx.res, 404, "Comanda nu există.");
+
+    // Fișa tipărită e ce citește atelierul. Dacă o comandă are mai multe
+    // produse și fișa ar arăta doar primul, s-ar produce greșit — de-aia aici
+    // intră toate liniile, fiecare cu caracteristicile ei.
+    const liniiPdf = await db
+      .prepare(
+        `SELECT l.*, p.cod AS produs_cod FROM comenzi_productie_linii l
+           LEFT JOIN produse p ON p.id = l.produs_id
+          WHERE l.comanda_id = ? ORDER BY l.ordine, l.id`
+      )
+      .all(ctx.params.id);
+    const caracPdf = await db
+      .prepare("SELECT denumire, valoare, unitate, linie_id FROM comenzi_productie_caracteristici WHERE comanda_id = ? ORDER BY id")
+      .all(ctx.params.id);
+    const caracPdfPeLinie = {};
+    for (const x of caracPdf) {
+      const k = x.linie_id === null || x.linie_id === undefined ? "fara" : String(x.linie_id);
+      if (!caracPdfPeLinie[k]) caracPdfPeLinie[k] = [];
+      caracPdfPeLinie[k].push(x);
+    }
 
     const aloc = await db
       .prepare(
@@ -1019,14 +1307,40 @@ function register(router) {
   </div>
 
   <h1>${esc(c.tip_produs || "Produs")}</h1>
-  <div class="sub">${esc(c.caracteristici || "")}</div>
+  <div class="sub">${liniiPdf.length > 1 ? esc(liniiPdf.length + " produse pe comanda asta") : esc(c.caracteristici || "")}</div>
 
   <h2>Ce se face</h2>
-  <table class="cp-date">
-    <tr><th>Cantitate</th><td class="mare">${esc([c.cantitate, c.um].filter(Boolean).join(" ") || "—")}</td></tr>
-    ${rand("Tip ambalare", c.tip_ambalare)}
-    ${rand("Rețetă", c.reteta)}
-  </table>
+  ${
+    liniiPdf.length
+      ? `<table class="cp-tabel">
+           <tr><th>Produs</th><th>Cod</th><th>Cantitate</th><th>UM</th><th>Caracteristici</th></tr>
+           ${liniiPdf
+             .map(
+               (l) => `<tr>
+                 <td><strong>${esc(l.denumire || "")}</strong></td>
+                 <td>${esc(l.produs_cod) || "—"}</td>
+                 <td class="mare">${esc(cantitate(l.cantitate, l.um)) || "—"}</td>
+                 <td>${esc(unitate(l.cantitate, l.um))}</td>
+                 <td>${
+                   (caracPdfPeLinie[String(l.id)] || [])
+                     .map((x) => `${esc(x.denumire)}: <strong>${esc(x.valoare)}</strong>${x.unitate ? " " + esc(x.unitate) : ""}`)
+                     .join("<br>") || "—"
+                 }</td>
+               </tr>`
+             )
+             .join("")}
+         </table>
+         <table class="cp-date">
+           ${rand("Tip ambalare", c.tip_ambalare)}
+           ${rand("Rețetă", c.reteta)}
+         </table>`
+      : `<table class="cp-date">
+           <tr><th>Cantitate</th><td class="mare">${esc(cantitate(c.cantitate, c.um)) || "—"}</td></tr>
+           <tr><th>UM</th><td>${esc(unitate(c.cantitate, c.um))}</td></tr>
+           ${rand("Tip ambalare", c.tip_ambalare)}
+           ${rand("Rețetă", c.reteta)}
+         </table>`
+  }
 
   <h2>Pentru cine și până când</h2>
   <table class="cp-date">
@@ -1066,6 +1380,24 @@ function register(router) {
     // pe comandă nu e legat de unul din catalog, încercăm o potrivire după
     // denumire; dacă nici aia nu iese, spunem pe față că nu se poate calcula.
     let produsComanda = null;
+    const caracComanda = await db
+      .prepare("SELECT denumire, valoare, unitate, linie_id FROM comenzi_productie_caracteristici WHERE comanda_id = ? ORDER BY id")
+      .all(ctx.params.id);
+    // Produsele comenzii. Comenzile de dinainte de linii n-au niciunul — pentru
+    // ele rămâne valabil ce scrie în coloanele plate ale comenzii.
+    const liniiComanda = await db
+      .prepare(
+        `SELECT l.*, p.cod AS produs_cod FROM comenzi_productie_linii l
+           LEFT JOIN produse p ON p.id = l.produs_id
+          WHERE l.comanda_id = ? ORDER BY l.ordine, l.id`
+      )
+      .all(ctx.params.id);
+    const caracPeLinie = {};
+    for (const x of caracComanda) {
+      const k = x.linie_id === null || x.linie_id === undefined ? "fara" : String(x.linie_id);
+      if (!caracPeLinie[k]) caracPeLinie[k] = [];
+      caracPeLinie[k].push(x);
+    }
     if (c.produs_id) {
       produsComanda = await db
         .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa FROM produse WHERE id = ?")
@@ -1173,9 +1505,18 @@ function register(router) {
         </h1>
         <div class="detail-grid">
           <div><div class="k">Client</div>${c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—")}</div>
-          <div><div class="k">Produs</div>${esc(c.tip_produs || "—")}</div>
-          <div><div class="k">Caracteristici</div>${esc(c.caracteristici || "—")}</div>
-          <div><div class="k">Cantitate</div>${esc([c.cantitate, c.um].filter(Boolean).join(" "))}</div>
+          ${
+            liniiComanda.length
+              ? `<div><div class="k">Produse</div>${liniiComanda.length === 1 ? esc(liniiComanda[0].denumire || c.tip_produs || "—") : `${liniiComanda.length} produse, în tabelul de mai jos`}</div>`
+              : `<div><div class="k">Produs</div>${esc(c.tip_produs || "—")}</div>
+                 <div><div class="k">Caracteristici</div>${
+                   caracComanda.length
+                     ? caracComanda.map((x) => `<div><strong>${esc(x.denumire)}:</strong> ${esc(x.valoare)}${x.unitate ? " " + esc(x.unitate) : ""}</div>`).join("")
+                     : esc(c.caracteristici || "—")
+                 }</div>
+                 <div><div class="k">Cantitate</div>${esc(cantitate(c.cantitate, c.um)) || "—"}</div>
+                 <div><div class="k">UM</div>${esc(unitate(c.cantitate, c.um))}</div>`
+          }
           <div><div class="k">Ambalare</div>${esc(c.tip_ambalare || "—")}</div>
           <div><div class="k">Reprezentant</div>${esc(c.agent_nume || c.reprezentant || c.initiator || "—")}</div>
           <div><div class="k">Plasată la</div>${esc(c.data_initiere || "—")}</div>
@@ -1184,6 +1525,23 @@ function register(router) {
         </div>
         ${c.observatii ? `<p style="margin-top:12px;white-space:pre-wrap"><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
         ${c.reteta ? `<p style="white-space:pre-wrap"><strong>Rețetă / consum:</strong> ${esc(c.reteta)}</p>` : ""}
+        ${
+          liniiComanda.length
+            ? `<h2 style="font-size:15px;margin:16px 0 6px">Produsele comenzii</h2>
+               ${table(
+                 ["Produs", "Cod", "Cantitate", "UM", "Caracteristici"],
+                 liniiComanda.map((l) => [
+                   l.produs_id ? `<a href="/produse/${l.produs_id}">${esc(l.denumire || "")}</a>` : esc(l.denumire || ""),
+                   esc(l.produs_cod) || "—",
+                   esc(cantitate(l.cantitate, l.um)) || "—",
+                   esc(unitate(l.cantitate, l.um)),
+                   (caracPeLinie[String(l.id)] || [])
+                     .map((x) => `${esc(x.denumire)}: <strong>${esc(x.valoare)}</strong>${x.unitate ? " " + esc(x.unitate) : ""}`)
+                     .join("<br>") || "—",
+                 ])
+               )}`
+            : ""
+        }
         ${
           costPeBucata > 0
             ? `<p style="margin-top:12px">

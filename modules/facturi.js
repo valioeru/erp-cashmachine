@@ -246,7 +246,7 @@ function register(router) {
   });
   router.get("/facturi/achizitii/noua", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'client' ORDER BY nume").all();
-    const produse = await db.prepare("SELECT id, denumire, pret_achizitie, cota_tva FROM produse ORDER BY denumire").all();
+    const produse = await db.prepare("SELECT id, denumire, pret_achizitie, cota_tva FROM produse WHERE activ = 1 ORDER BY denumire").all();
     if (parteneri.length === 0) {
       return send(
         ctx.res,
@@ -329,7 +329,7 @@ function register(router) {
 
   router.get("/facturi/nou", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'furnizor' ORDER BY nume").all();
-    const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva FROM produse ORDER BY denumire").all();
+    const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva FROM produse WHERE activ = 1 ORDER BY denumire").all();
     if (parteneri.length === 0) {
       return send(
         ctx.res,

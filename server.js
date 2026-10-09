@@ -27,6 +27,7 @@ require("./modules/contacte").register(router);
 require("./modules/scadente").register(router);
 require("./modules/sincronizare").register(router);
 require("./modules/taskuri").register(router);
+require("./modules/calendar").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
 require("./modules/clienti-cheie").register(router);

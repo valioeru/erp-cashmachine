@@ -1,6 +1,6 @@
 "use strict";
 const db = require("../lib/db");
-const { esc, money, layout, table, actionLinks } = require("../lib/render");
+const { esc, money, layout, table, actionLinks, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
@@ -232,8 +232,16 @@ function register(router) {
   // tastează de două ori pentru că a uitat clientul.
   async function formularComandaNoua(ctx, { eroare, valori } = {}) {
     const v = valori || {};
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'furnizor' ORDER BY nume").all();
-    const produse = await db.prepare("SELECT id, denumire, pret_vanzare FROM produse ORDER BY denumire").all();
+    // Toți clienții din bază, nu doar ai agentului: căutarea de mai jos merge pe
+    // orice bucată din nume sau din CUI, iar lângă fiecare firmă scrie al cui
+    // client e.
+    const parteneri = await db
+      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
+      .all();
+    const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
+    // Produsele unificate (activ = 0) nu mai pot fi alese: altfel codul înghițit
+    // ar renaște ca duplicat chiar din formularul de comandă.
+    const produse = await db.prepare("SELECT id, denumire, pret_vanzare FROM produse WHERE activ = 1 ORDER BY denumire").all();
     if (parteneri.length === 0 || produse.length === 0) {
       return send(
         ctx.res,
@@ -264,12 +272,12 @@ function register(router) {
     }
     <form method="post" action="/comenzi" class="form" style="max-width:820px">
       <label class="field"><span>Client</span>
-        <select name="partener_id" required>
-          <option value="">— alege clientul —</option>
-          ${parteneri
-            .map((p) => `<option value="${p.id}"${String(v.partener_id) === String(p.id) ? " selected" : ""}>${esc(p.nume)}</option>`)
-            .join("")}
-        </select>
+        ${cautaClient({
+          nume: "client_cautat",
+          obligatoriu: true,
+          partenerId: v.partener_id,
+          valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
+        })}
       </label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
@@ -300,6 +308,7 @@ function register(router) {
         <a href="/comenzi" class="btn secondary">Renunță</a>
       </div>
     </form>
+    ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
     ${lineRowsScript()}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }

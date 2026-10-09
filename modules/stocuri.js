@@ -79,7 +79,7 @@ function register(router) {
   });
 
   router.get("/stocuri/miscare/nou", async (ctx) => {
-    const produse = await db.prepare("SELECT id, denumire FROM produse ORDER BY denumire").all();
+    const produse = await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire").all();
     const depozite = await db.prepare("SELECT id, denumire FROM depozite ORDER BY denumire").all();
     if (produse.length === 0 || depozite.length === 0) {
       return send(

@@ -544,3 +544,39 @@ button.chip { font-family: inherit; cursor: pointer; }
 .ct-mic:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
 .ct-mic:disabled { opacity: .35; cursor: not-allowed; }
 .ct-sub { font-size: 12px; color: var(--text-muted); }
+
+/* ---- Calendarul agentului -------------------------------------------------
+   O luna intreaga pe ecran. Celulele au inaltime fixa: fara ea, o zi cu cinci
+   intalniri intindea tot randul si saptamana arata ca un acordeon. Ce nu
+   incape se strange in „+N", iar ziua se deschide dedesubt la clic. */
+table.calendar { width: 100%; border-collapse: collapse; table-layout: fixed;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; margin: 0 0 18px; }
+table.calendar th { background: var(--bg); color: var(--text-muted); font-size: 12px;
+  text-transform: uppercase; letter-spacing: .4px; font-weight: 600;
+  padding: 7px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+td.cal-zi { vertical-align: top; height: 108px; padding: 4px 5px;
+  border: 1px solid var(--border); overflow: hidden; }
+td.cal-goala { background: var(--bg); }
+td.cal-weekend { background: #fafbfc; }
+td.cal-azi { box-shadow: inset 0 0 0 2px var(--primary); }
+td.cal-aleasa { background: #eef3fb; }
+.cal-nr { display: inline-block; font-size: 12px; font-weight: 600; color: var(--text-muted);
+  text-decoration: none; padding: 1px 5px; margin-bottom: 3px; border-radius: 10px; }
+.cal-nr:hover { background: var(--primary); color: #fff; }
+td.cal-azi .cal-nr { background: var(--primary); color: #fff; }
+.cal-intrare { display: block; color: #fff; font-size: 11.5px; line-height: 1.35;
+  padding: 2px 5px; margin-bottom: 2px; border-radius: 4px; text-decoration: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-intrare:hover { filter: brightness(1.12); }
+.cal-mai { display: block; font-size: 11px; color: var(--text-muted); padding: 1px 4px; text-decoration: none; }
+.cal-mai:hover { color: var(--primary); text-decoration: underline; }
+
+/* Pe telefon o grila de sapte coloane nu se poate citi, deci zilele curg una
+   sub alta si fiecare isi scrie numele. */
+@media (max-width: 760px) {
+  table.calendar, table.calendar thead, table.calendar tbody, table.calendar tr, table.calendar td { display: block; width: 100%; }
+  table.calendar thead { display: none; }
+  td.cal-zi { height: auto; min-height: 0; border-left: none; border-right: none; }
+  td.cal-goala { display: none; }
+}
