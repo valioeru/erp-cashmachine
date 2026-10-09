@@ -9,7 +9,7 @@
 // obligatoriu: din orice pas se poate sări direct la contract sau la comandă.
 // Un client care sună și comandă pe loc n-are nevoie de ofertă.
 const db = require("../lib/db");
-const { esc, layout, table, money, subnavCrm } = require("../lib/render");
+const { esc, layout, table, money, subnavCrm, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const concurenta = require("./concurenta");
@@ -125,21 +125,25 @@ function register(router) {
   // ---------------- ofertă nouă ----------------
   router.get("/oferte/nou", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 1000").all();
+    // Toți clienții din bază, nu doar ai agentului. LIMIT 1000 tăia alfabetic:
+    // un client de la coada alfabetului pur și simplu nu apărea în listă.
+    const parteneri = await db
+      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 5000")
+      .all();
+    const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     const presel = parseInt(ctx.query.partener_id, 10);
     const body = `
       ${subnavCrm("/oferte", ctx.user)}
       <form method="post" action="/oferte" class="form" style="max-width:560px">
         <label class="field"><span>Client</span>
-          <select name="partener_id" required>
-            ${parteneri.map((p) => `<option value="${p.id}"${presel === p.id ? " selected" : ""}>${esc(p.nume)}</option>`).join("")}
-          </select>
+          ${cautaClient({ nume: "client_cautat", obligatoriu: true, partenerId: presel || "", valoare: (parteneri.find((p) => p.id === presel) || {}).nume })}
         </label>
         <label class="field"><span>Titlu</span><input name="titlu" placeholder="ex. Cutii D7 — livrare lunară"></label>
         <label class="field"><span>Valabilă până la</span><input type="date" name="valabil_pana"></label>
         <label class="field"><span>Observații</span><textarea name="observatii" rows="3"></textarea></label>
         <button class="btn" type="submit">Creează oferta</button>
       </form>
+      ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Ofertă nouă", active: "/oferte", body }));
   });
@@ -168,13 +172,41 @@ function register(router) {
     const versiuni = await db
       .prepare("SELECT id, numar, versiune, status, creat_la FROM oferte WHERE radacina_id = ? ORDER BY versiune DESC")
       .all(o.radacina_id || o.id);
-    const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva, unitate_masura FROM produse ORDER BY denumire LIMIT 2000").all();
+    const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 2000").all();
     const editabil = poateEdita(ctx.user, o) && ["ciorna", "trimisa"].includes(o.status);
 
     // Blocul de piață: cu ce prețuri ne bate concurența la clientul ăsta.
     // Îl umplu cu liniile ofertei ca referință, ca diferența să se vadă pe loc,
     // nu după ce omul deschide alt raport și caută produsul cu mâna.
     const emailuri = await inbox.blocEmailuri({ user: ctx.user, ofertaId: o.id });
+
+    // Ce a plecat din ERP pe oferta asta. „Marcată trimisă" spunea doar că
+    // cineva a apăsat un buton; aici se vede data, adresa și textul exact pe
+    // care l-a citit clientul — util mai ales când sună și zice „la mine
+    // scria alt preț".
+    const trimise = await db
+      .prepare(
+        `SELECT e.id, e.catre, e.subiect, e.status, e.eroare, e.trimis_la, u.nume AS de_la
+           FROM emailuri e LEFT JOIN utilizatori u ON u.id = e.utilizator_id
+          WHERE e.oferta_id = ? ORDER BY e.id DESC LIMIT 25`
+      )
+      .all(o.id)
+      .catch(() => []);
+    const blocTrimise = trimise.length
+      ? `<h2>Trimisă pe email (${trimise.length})</h2>
+         ${table(
+           ["Când", "Către", "Subiect", "De la", "Stare"],
+           trimise.map((e) => [
+             esc(String(e.trimis_la || "").slice(0, 16)),
+             esc(e.catre || ""),
+             `<a href="/crm/email/${e.id}">${esc(e.subiect || "(fără subiect)")}</a>`,
+             esc(e.de_la || "—"),
+             e.status === "trimis"
+               ? '<span class="badge verde">trimis</span>'
+               : `<span class="badge rosu">eșuat</span> <span style="font-size:12px;color:var(--text-muted)">${esc(e.eroare || "")}</span>`,
+           ])
+         )}`
+      : "";
 
     // Ce știe piața despre fiecare produs, trimis o dată ca date. Agentul vede
     // prețurile concurenței în clipa în care alege produsul, fără reîncărcare
@@ -336,8 +368,13 @@ function register(router) {
       <h2>Ce facem cu oferta</h2>
       <div class="toolbar" style="flex-wrap:wrap">
         ${
+          linii.length
+            ? `<a class="btn" href="/crm/email/nou?oferta_id=${o.id}&sablon=oferta">Trimite oferta pe email</a>`
+            : `<span style="font-size:13px;color:var(--text-muted)">Pune cel puțin o linie și apoi o poți trimite pe email.</span>`
+        }
+        ${
           poateEdita(ctx.user, o) && o.status === "ciorna"
-            ? `<form method="post" action="/oferte/${o.id}/stare" class="inline-form"><input type="hidden" name="status" value="trimisa"><button class="btn" type="submit">Marchează trimisă</button></form>`
+            ? `<form method="post" action="/oferte/${o.id}/stare" class="inline-form"><input type="hidden" name="status" value="trimisa"><button class="btn secondary" type="submit">Marchează trimisă (fără email)</button></form>`
             : ""
         }
         ${
@@ -368,10 +405,16 @@ function register(router) {
         }
       </div>
       <p style="font-size:12px;color:var(--text-muted);max-width:760px">
+        „Trimite oferta pe email" scrie mesajul cu oferta întreagă în corp — linii, cantități,
+        prețuri, total și valabilitate — pe adresa clientului${
+          o.client_email ? ` (${esc(o.client_email)})` : ", pe care o completezi tu, că firma n-are email salvat"
+        }. Pleacă din contul tău, intră în istoricul clientului și oferta trece singură pe „Trimisă".
         Fluxul obișnuit e ofertă → acceptare → contract și comandă, dar poți sări direct la oricare
         dintre ele, oricând. La „versiune nouă", oferta asta rămâne ca istoric și se deschide una
         nouă, cu aceleași linii, pe care o modifici.
       </p>
+
+      ${blocTrimise}
 
       ${bi}
 
@@ -581,12 +624,17 @@ function register(router) {
 
   router.get("/contracte/nou", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 1000").all();
+    // Toți clienții din bază, nu doar ai agentului. LIMIT 1000 tăia alfabetic:
+    // un client de la coada alfabetului pur și simplu nu apărea în listă.
+    const parteneri = await db
+      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip IN ('client','ambele') ORDER BY nume LIMIT 5000")
+      .all();
+    const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     const presel = parseInt(ctx.query.partener_id, 10);
     const body = `
       ${subnavCrm("/contracte", ctx.user)}
       <form method="post" action="/contracte" class="form" style="max-width:560px">
-        <label class="field"><span>Client</span><select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}"${presel === p.id ? " selected" : ""}>${esc(p.nume)}</option>`).join("")}</select></label>
+        <label class="field"><span>Client</span>${cautaClient({ nume: "client_cautat", obligatoriu: true, partenerId: presel || "", valoare: (parteneri.find((p) => p.id === presel) || {}).nume })}</label>
         <label class="field"><span>Titlu</span><input name="titlu"></label>
         <label class="field"><span>Valoare</span><input name="valoare" type="number" step="0.01" value="0"></label>
         <label class="field"><span>Începe la</span><input type="date" name="data_start" value="${azi()}"></label>
@@ -594,6 +642,7 @@ function register(router) {
         <label class="field"><span>Observații</span><textarea name="observatii" rows="3"></textarea></label>
         <button class="btn" type="submit">Creează contractul</button>
       </form>
+      ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Contract nou", active: "/contracte", body }));
   });

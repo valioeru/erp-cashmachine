@@ -50,6 +50,21 @@ const TIPURI_INTERACTIUNE = [
 function azi() {
   return new Date().toISOString().slice(0, 10);
 }
+
+// Cine are voie să schimbe datele unui lead: adminul oricare, agentul pe al
+// lui, iar un lead neatribuit e al oricui pune mâna pe el. Un agent nu umblă
+// în lead-ul altuia — la fel ca la clienți, unde agentul se schimbă doar de
+// către admin.
+//
+// Number() dinadins: id-ul vine din bază uneori ca text, iar „===" l-ar face
+// pe agent să pară străin de propriul lead.
+function poateUmblaLaLead(user, lead) {
+  if (!user) return false;
+  if (user.rol === "admin") return true;
+  if (lead.atribuit_lui == null || lead.atribuit_lui === "") return true;
+  return Number(lead.atribuit_lui) === Number(user.id);
+}
+
 function badgeLead(stadiu) {
   const g = STADII_LEAD.find((s) => s[0] === stadiu);
   return g ? `<span class="badge ${g[2]}">${esc(g[1])}</span>` : esc(stadiu);
@@ -560,7 +575,18 @@ function register(router) {
     }
     const agent = await db.prepare("SELECT id, nume, comision_procent FROM utilizatori WHERE id = ?").get(agentId);
     if (!agent) return redirect(ctx.res, "/crm");
-    const agenti = esteAdmin ? await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol = 'vanzari' ORDER BY nume").all() : [];
+    // Adminul intră și el în listă, pe primul rând. Fără asta, odată ce
+    // alegea un agent nu se mai putea întoarce la biroul lui din aceeași
+    // listă — trebuia să umble la adresa din bară.
+    const agenti = esteAdmin
+      ? await db
+          .prepare(
+            `SELECT id, nume FROM utilizatori
+              WHERE activ = 1 AND (rol = 'vanzari' OR id = ?)
+              ORDER BY (CASE WHEN id = ? THEN 0 ELSE 1 END), nume`
+          )
+          .all(ctx.user.id, ctx.user.id)
+      : [];
 
     // ---- Perioada aleasă ---------------------------------------------------
     // Agentul (și adminul) pot alege luna curentă — implicit —, luna trecută,
@@ -616,6 +642,48 @@ function register(router) {
     }
     const qsPer = `perioada=${encodeURIComponent(perioada)}${perioada === "custom" ? `&de=${de}&la=${la}` : ""}`;
     const linkBirou = (id) => `/crm/birou?${id ? `agent=${id}&` : ""}${qsPer}`;
+
+    // Adminul alege din listă al cui birou citește, iar TOT ce urmează în
+    // pagină se schimbă cu el: comision, scadențe, clienți de contactat,
+    // sugestii, costuri, marjă, portofoliu.
+    //
+    // Lista stă SUS, înaintea cifrelor. Pusă jos — unde era — adminul citea
+    // comisionul și scadențele altcuiva și abia după ce derula tot ajungea la
+    // butonul care spunea ale cui sunt. Cifrele fără numele omului pe ele sunt
+    // cifre pe care le confunzi.
+    const altBirou = esteAdmin && Number(agentId) !== Number(ctx.user.id);
+    // Formularele din pagină (am sunat clientul, iau sugestia) se întorc aici,
+    // nu în biroul adminului: altfel, după fiecare salvare, el pierdea agentul
+    // pe care se uita și trebuia să-l aleagă din nou.
+    const caleaAsta = linkBirou(altBirou ? agentId : null);
+    const selectorAgent =
+      esteAdmin && agenti.length > 1
+        ? `<form method="get" action="/crm/birou" class="filtre" style="margin-bottom:14px">
+             <input type="hidden" name="perioada" value="${esc(perioada)}">
+             ${perioada === "custom" ? `<input type="hidden" name="de" value="${esc(de)}"><input type="hidden" name="la" value="${esc(la)}">` : ""}
+             <span style="font-size:13px">Biroul lui:</span>
+             <select name="agent" onchange="this.form.submit()">
+               ${agenti
+                 .map(
+                   (a) =>
+                     `<option value="${a.id}"${Number(a.id) === Number(agentId) ? " selected" : ""}>${esc(a.nume)}${
+                       Number(a.id) === Number(ctx.user.id) ? " — biroul meu" : ""
+                     }</option>`
+                 )
+                 .join("")}
+             </select>
+             <noscript><button class="btn secondary" type="submit">Deschide</button></noscript>
+             ${
+               altBirou
+                 ? `<span class="badge galben">te uiți în biroul lui ${esc(agent.nume)}</span>
+                    <a class="link-btn" href="${esc(linkBirou(null))}">înapoi la biroul meu</a>`
+                 : ""
+             }
+             <a class="link-btn" href="/crm/calendar${altBirou ? `?agent=${agentId}` : ""}">calendarul lui ${esc(
+             agent.nume.trim().split(/\s+/)[0] || agent.nume
+           )} →</a>
+           </form>`
+        : `<p style="margin:0 0 12px"><a class="link-btn" href="/crm/calendar">Calendarul meu →</a></p>`;
 
     const SUB_TOTAL =
       "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
@@ -1251,8 +1319,8 @@ function register(router) {
     try {
       await contacte.genereazaTaskuriContact(agentId);
       await contacte.genereazaSugestii();
-      blocContact = await contacte.blocTaskuriContact(ctx.user, agentId);
-      blocSug = await contacte.blocSugestii(ctx.user);
+      blocContact = await contacte.blocTaskuriContact(ctx.user, agentId, caleaAsta);
+      blocSug = await contacte.blocSugestii(ctx.user, { agentId, numeAgent: agent.nume, inapoi: caleaAsta });
     } catch (e) {
       blocContact = `<p style="color:var(--danger)">Nu s-au putut genera task-urile de contact: ${esc(e.message)}</p>`;
     }
@@ -1268,6 +1336,7 @@ function register(router) {
 
     const body = `
       ${subnavCrm("/crm/birou", ctx.user)}
+      ${selectorAgent}
       ${widgetComision}
       ${blocSold}
       ${blocContact}
@@ -1275,18 +1344,6 @@ function register(router) {
       ${blocCost}
       ${blocMarja}
       ${blocClienti}
-      ${
-        esteAdmin && agenti.length
-          ? `<form method="get" action="/crm/birou" class="filtre">
-              <input type="hidden" name="perioada" value="${esc(perioada)}">
-              ${perioada === "custom" ? `<input type="hidden" name="de" value="${esc(de)}"><input type="hidden" name="la" value="${esc(la)}">` : ""}
-              <span style="font-size:13px">Biroul lui:</span>
-              <select name="agent" onchange="this.form.submit()">
-                ${agenti.map((a) => `<option value="${a.id}"${a.id === agentId ? " selected" : ""}>${esc(a.nume)}</option>`).join("")}
-              </select>
-            </form>`
-          : ""
-      }
       <div class="cards">
         <div class="card"><div class="label">Clienți în portofoliu</div><div class="value">${clienti.length}</div></div>
         <div class="card"><div class="label">Vânzări portofoliu (12 luni)</div><div class="value">${money(vanzari12Total)}</div></div>
@@ -1521,22 +1578,48 @@ function register(router) {
         ${l.stadiu !== "convertit" ? `<a class="btn" href="/crm/leaduri/${l.id}/converteste">→ Convertește în client</a>` : ""}
       </div>
 
+      ${
+        poateUmblaLaLead(ctx.user, l)
+          ? `<h2>Modifică lead-ul</h2>
       <form class="form" method="post" action="/crm/leaduri/${l.id}/actualizeaza">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <label class="field">Nume<input name="nume" required value="${esc(l.nume || "")}"></label>
+          <label class="field">Companie<input name="companie" value="${esc(l.companie || "")}"></label>
+          <label class="field">Email<input name="email" type="email" value="${esc(l.email || "")}"></label>
+          <label class="field">Telefon<input name="telefon" value="${esc(l.telefon || "")}"></label>
+          <label class="field">Sursă
+            <select name="sursa">
+              ${SURSE_LEAD.map((s) => `<option value="${esc(s)}"${String(l.sursa || "") === s ? " selected" : ""}>${esc(s)}</option>`).join("")}
+              ${SURSE_LEAD.includes(String(l.sursa || "")) ? "" : `<option value="${esc(l.sursa || "")}" selected>${esc(l.sursa || "—")}</option>`}
+            </select>
+          </label>
           <label class="field">Stadiu
             <select name="stadiu">${STADII_LEAD.filter(([v]) => v !== "convertit" || l.stadiu === "convertit")
               .map(([v, t]) => `<option value="${v}"${l.stadiu === v ? " selected" : ""}>${esc(t)}</option>`)
               .join("")}</select>
           </label>
           <label class="field">Agent responsabil
-            <select name="atribuit_lui">
+            <select name="atribuit_lui"${ctx.user && ctx.user.rol === "admin" ? "" : " disabled"}>
               <option value="">— neatribuit —</option>
-              ${useri.map((u) => `<option value="${u.id}"${l.atribuit_lui === u.id ? " selected" : ""}>${esc(u.nume)}</option>`).join("")}
+              ${useri.map((u) => `<option value="${u.id}"${Number(l.atribuit_lui) === Number(u.id) ? " selected" : ""}>${esc(u.nume)}</option>`).join("")}
             </select>
           </label>
         </div>
-        <div class="form-actions"><button class="btn small" type="submit">Salvează</button></div>
+        <label class="field">Observații <textarea name="observatii" rows="3" placeholder="Ce vrea, de unde a venit, ce s-a discutat">${esc(l.observatii || "")}</textarea></label>
+        <div class="form-actions"><button class="btn" type="submit">Salvează modificările</button></div>
       </form>
+      <p style="font-size:12px;color:var(--text-muted);max-width:720px">
+        ${
+          ctx.user && ctx.user.rol === "admin"
+            ? "Ca administrator poți schimba și agentul responsabil."
+            : "Agentul responsabil îl schimbă doar administratorul — altfel un lead ar putea trece dintr-un portofoliu în altul fără ca nimeni să știe."
+        }
+      </p>`
+          : `<p style="color:var(--text-muted);max-width:720px">
+               Lead-ul e al lui <strong>${esc(l.agent_nume || "—")}</strong>, deci îl modifică el sau administratorul.
+               Poți totuși să adaugi o interacțiune mai jos — ce ai discutat cu omul rămâne scris.
+             </p>`
+      }
 
       <h2>Adaugă o interacțiune</h2>
       <form class="form" method="post" action="/crm/leaduri/${l.id}/interactiune">
@@ -1585,11 +1668,44 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: `Lead: ${l.nume}`, active: "/crm", body }));
   });
 
+  // Lead-ul se modifică în întregime, nu doar stadiul: până acum numele greșit
+  // la telefon, emailul tastat anapoda sau compania scrisă pe fugă rămâneau
+  // așa pe veci, fiindcă singura cale de corectură era să faci alt lead.
   router.post("/crm/leaduri/:id/actualizeaza", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const l = await db.prepare("SELECT id, nume, atribuit_lui FROM leaduri WHERE id = ?").get(ctx.params.id);
+    if (!l) return redirect(ctx.res, "/crm/leaduri");
+    if (!poateUmblaLaLead(ctx.user, l)) return redirect(ctx.res, `/crm/leaduri/${l.id}`);
+
+    const b = ctx.body;
+    // Numele e singurul câmp obligatoriu în bază. Un formular trimis cu el gol
+    // nu șterge numele vechi — păstrăm ce era, nu stricăm fișa.
+    const nume = String(b.nume || "").trim() || String(l.nume || "").trim();
+    const text = (v) => String(v || "").trim() || null;
+    // Agentul nu-și poate muta singur lead-ul la altcineva: câmpul e „disabled"
+    // în pagină, deci nici nu vine în formular, dar asta se verifică pe server
+    // — ascunsul din HTML nu e o regulă, e doar o sugestie.
+    const agentNou = ctx.user.rol === "admin" ? nr(b.atribuit_lui) : l.atribuit_lui;
+
     await db
-      .prepare("UPDATE leaduri SET stadiu = ?, atribuit_lui = ?, ultima_activitate = ? WHERE id = ?")
-      .run(String(ctx.body.stadiu || "nou"), nr(ctx.body.atribuit_lui), azi(), ctx.params.id);
-    redirect(ctx.res, `/crm/leaduri/${ctx.params.id}`);
+      .prepare(
+        `UPDATE leaduri SET nume = ?, companie = ?, email = ?, telefon = ?, sursa = ?,
+                            stadiu = ?, atribuit_lui = ?, observatii = ?, ultima_activitate = ?
+          WHERE id = ?`
+      )
+      .run(
+        nume,
+        text(b.companie),
+        text(b.email),
+        text(b.telefon),
+        text(b.sursa) || "manual",
+        String(b.stadiu || "nou"),
+        agentNou,
+        text(b.observatii),
+        azi(),
+        l.id
+      );
+    redirect(ctx.res, `/crm/leaduri/${l.id}`);
   });
 
   router.post("/crm/leaduri/:id/interactiune", async (ctx) => {

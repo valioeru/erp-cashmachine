@@ -194,7 +194,7 @@ async function genereazaSugestii() {
 // ------------------------------------------------------------------
 // Blocuri pentru dashboard-ul agentului (folosite din crm.js)
 // ------------------------------------------------------------------
-async function blocTaskuriContact(user, agentId) {
+async function blocTaskuriContact(user, agentId, inapoi) {
   const taskuri = await db
     .prepare(
       `SELECT t.id, t.titlu, t.descriere, t.scadenta, t.prioritate, t.partener_id, p.nume AS client,
@@ -227,6 +227,7 @@ async function blocTaskuriContact(user, agentId) {
           ${t.telefon ? ` · tel. ${esc(t.telefon)}` : ""}${t.email ? ` · ${esc(t.email)}` : ""}
         </div>
         <form method="post" action="/crm/contact/${t.id}" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
+          ${inapoi ? `<input type="hidden" name="inapoi" value="${esc(inapoi)}">` : ""}
           <label class="field" style="width:120px"><span>Cum</span>
             <select name="mod">${Object.entries(MODURI).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>
           </label>
@@ -248,7 +249,18 @@ async function blocTaskuriContact(user, agentId) {
   return `<h2>Clienți de contactat <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— generate automat, fără discuție de peste ${PRAG_ZILE} de zile</span></h2>${carduri}`;
 }
 
-async function blocSugestii(user) {
+// Sugestiile sunt aceeași listă pentru toți agenții — cine le ia primul. Dar
+// „cine le ia" nu e mereu cel logat: adminul se poate uita în biroul altui
+// agent, iar atunci butonul trebuie să dea clientul AGENTULUI ĂLUIA, nu
+// adminului. Fără asta, adminul care voia să-i dea Isabelei un client îl lua
+// pe numele lui și apărea în portofoliul greșit.
+async function blocSugestii(user, opt) {
+  const o = opt || {};
+  const agentId = Number(o.agentId) || Number(user.id);
+  const altul = Number(agentId) !== Number(user.id);
+  const numeAgent = String(o.numeAgent || "");
+  const prenume = numeAgent.trim().split(/\s+/)[0] || numeAgent;
+  const inapoi = String(o.inapoi || "");
   const sugestii = await db
     .prepare(
       `SELECT l.id, l.nume, l.companie, l.email, l.telefon, l.motiv_sugestie, l.partener_id, l.observatii
@@ -266,7 +278,7 @@ async function blocSugestii(user) {
         WHERE l.sursa = 'sugestie' AND l.atribuit_lui = ?
         ORDER BY l.id DESC LIMIT 10`
     )
-    .all(user.id);
+    .all(agentId);
 
   const lista = sugestii.length
     ? sugestii
@@ -280,11 +292,13 @@ async function blocSugestii(user) {
           <div style="font-size:13px;color:var(--text-muted);margin:4px 0 2px">${esc(s.motiv_sugestie || "")}</div>
           ${s.observatii ? `<div style="font-size:12px;color:var(--text-muted);margin:0 0 8px">${esc(s.observatii)}</div>` : `<div style="margin-bottom:8px"></div>`}
           <form method="post" action="/crm/sugestii/${s.id}/preia" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
+            ${inapoi ? `<input type="hidden" name="inapoi" value="${esc(inapoi)}">` : ""}
+            ${altul ? `<input type="hidden" name="pentru" value="${agentId}">` : ""}
             <label class="field" style="flex:1;min-width:170px"><span>Persoană de contact</span><input name="persoana_contact" placeholder="opțional"></label>
             <label class="field" style="width:140px"><span>Cum îl contactezi</span>
               <select name="mod_contact">${Object.entries(MODURI).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>
             </label>
-            <button class="btn" type="submit">Îl iau eu</button>
+            <button class="btn" type="submit">${altul ? `I-l dau lui ${esc(prenume)}` : "Îl iau eu"}</button>
           </form>
         </div>`
         )
@@ -292,12 +306,16 @@ async function blocSugestii(user) {
     : `<p style="color:var(--text-muted)">Momentan nu sunt clienți nelucrați de propus.</p>`;
 
   const alMeu = preluate.length
-    ? `<p style="font-size:13px;color:var(--text-muted);margin-top:8px">Luați de tine: ${preluate
+    ? `<p style="font-size:13px;color:var(--text-muted);margin-top:8px">Luați de ${altul ? esc(numeAgent || "agent") : "tine"}: ${preluate
         .map((p) => `${p.partener_id ? `<a href="/parteneri/${p.partener_id}">${esc(p.nume)}</a>` : esc(p.nume)}${p.persoana_contact ? ` (${esc(p.persoana_contact)})` : ""}`)
         .join(", ")}</p>`
     : "";
 
-  return `<h2>Clienți sugerați <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— aceeași listă pentru toți agenții, cine îi ia primul</span></h2>${lista}${alMeu}`;
+  return `<h2>Clienți sugerați <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— ${
+    altul
+      ? `aceeași listă pentru toți agenții; de aici pleacă în portofoliul lui ${esc(numeAgent || "agentul ăsta")}`
+      : "aceeași listă pentru toți agenții, cine îi ia primul"
+  }</span></h2>${lista}${alMeu}`;
 }
 
 // ------------------------------------------------------------------
@@ -361,9 +379,29 @@ function register(router) {
     const persoana = String(ctx.body.persoana_contact || "").trim() || null;
     const modContact = MODURI[ctx.body.mod_contact] ? ctx.body.mod_contact : null;
 
+    // Cui îi intră clientul. Normal, celui care apasă. Dar adminul poate
+    // apăsa din biroul altui agent, iar atunci clientul e al agentului ăluia.
+    //
+    // „pentru" se ia în seamă DOAR pentru admin și doar pentru un utilizator
+    // activ care există: altfel un agent ar putea trimite formularul cu id-ul
+    // unui coleg și i-ar scrie în portofoliu fără să-l întrebe nimeni.
+    let pentruId = Number(ctx.user.id);
+    let pentruNume = ctx.user.nume;
+    if (ctx.user.rol === "admin") {
+      const cerut = parseInt(ctx.body.pentru, 10);
+      if (Number.isFinite(cerut) && cerut > 0 && cerut !== Number(ctx.user.id)) {
+        const alt = await db.prepare("SELECT id, nume FROM utilizatori WHERE id = ? AND activ = 1").get(cerut);
+        if (alt) {
+          pentruId = Number(alt.id);
+          pentruNume = alt.nume;
+        }
+      }
+    }
+    const datDeAltul = pentruId !== Number(ctx.user.id);
+
     await db
       .prepare("UPDATE leaduri SET atribuit_lui = ?, stadiu = 'in_lucru', persoana_contact = ?, mod_contact = ?, ultima_activitate = ? WHERE id = ?")
-      .run(ctx.user.id, persoana, modContact, azi(), l.id);
+      .run(pentruId, persoana, modContact, azi(), l.id);
 
     // Sugestiile venite din piata n-au inca fisa de client. Cand le ia cineva,
     // ii facem fisa pe loc si i-o alocam — altfel agentul ar avea un lead pe
@@ -394,7 +432,7 @@ function register(router) {
       if (Number((are && are.n) || 0) === 0) {
         await db
           .prepare("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, valabil_de_la) VALUES (?, ?, 100, ?)")
-          .run(partenerId, ctx.user.id, azi());
+          .run(partenerId, pentruId, azi());
       }
       await db
         .prepare(
@@ -403,15 +441,26 @@ function register(router) {
         )
         .run(
           `Contactează ${l.nume}`,
-          `Client luat din sugestii.${persoana ? ` Persoană de contact: ${persoana}.` : ""}${modContact ? ` Preferă ${MODURI[modContact].toLowerCase()}.` : ""}`,
+          `Client ${datDeAltul ? `dat de ${ctx.user.nume}` : "luat"} din sugestii.${persoana ? ` Persoană de contact: ${persoana}.` : ""}${
+            modContact ? ` Preferă ${MODURI[modContact].toLowerCase()}.` : ""
+          }`,
           peste(2),
-          ctx.user.id,
+          pentruId,
           partenerId,
           l.id
         );
+      // Nota rămâne pe numele celui care a apăsat — el a făcut gestul —, dar
+      // scrie limpede în portofoliul cui a intrat clientul.
       await db
         .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'nota', ?, ?, ?)")
-        .run(partenerId, "Client preluat din sugestii", `Preluat de ${ctx.user.nume}.${persoana ? ` Contact: ${persoana}.` : ""}${l.observatii ? ` ${l.observatii}` : ""}`, ctx.user.id);
+        .run(
+          partenerId,
+          "Client preluat din sugestii",
+          `${datDeAltul ? `Dat lui ${pentruNume} de ${ctx.user.nume}` : `Preluat de ${ctx.user.nume}`}.${persoana ? ` Contact: ${persoana}.` : ""}${
+            l.observatii ? ` ${l.observatii}` : ""
+          }`,
+          ctx.user.id
+        );
     }
 
     redirect(ctx.res, ctx.body.inapoi ? String(ctx.body.inapoi) : "/crm/birou");

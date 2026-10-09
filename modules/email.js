@@ -84,6 +84,83 @@ async function idDinDosar() {
   return set;
 }
 
+// ---- Oferta scrisă în corpul emailului --------------------------------
+//
+// Textul e aliniat cu spații, nu cu tabel HTML, și asta e o alegere, nu o
+// scurtătură: mesajul pleacă pe text simplu (vezi lib/mail.js), iar pe text
+// simplu un tabel HTML ajunge la client ca șir de etichete. Cu spații, oferta
+// arată la fel în Outlook, în Gmail și pe telefon.
+function nrRo(n, zecimale) {
+  const z = zecimale == null ? 2 : zecimale;
+  return Number(n || 0).toLocaleString("ro-RO", { minimumFractionDigits: z, maximumFractionDigits: z });
+}
+
+function zile(data) {
+  const s = String(data || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "";
+  return `${s.slice(8, 10)}.${s.slice(5, 7)}.${s.slice(0, 4)}`;
+}
+
+function corpOferta(o, linii, u, semnatura) {
+  const nrOf = o.numar || "OF" + String(o.id).padStart(5, "0");
+  const persoana = String(o.persoana_contact || "").trim();
+  const net = linii.reduce((s, l) => s + Number(l.cantitate || 0) * Number(l.pret_unitar || 0), 0);
+  const brut = linii.reduce(
+    (s, l) => s + Number(l.cantitate || 0) * Number(l.pret_unitar || 0) * (1 + (Number(l.cota_tva) || 0) / 100),
+    0
+  );
+  const stanga = (t, n) => {
+    const s = String(t == null ? "" : t);
+    return (s.length > n ? s.slice(0, n - 1) + "…" : s).padEnd(n);
+  };
+  const dreapta = (t, n) => {
+    const s = String(t == null ? "" : t);
+    return s.length > n ? s.slice(0, n) : s.padStart(n);
+  };
+  // Cantitatea întreagă se scrie întreagă. „100,000 role" arată ca o greșeală
+  // de tastare într-o ofertă trimisă unui client.
+  const cant = (v) => nrRo(v, Number(v) % 1 === 0 ? 0 : 3);
+
+  const cap = ` ${stanga("Produs", 30)} ${stanga("U.M.", 6)} ${dreapta("Cant.", 10)} ${dreapta("Preț unitar", 14)} ${dreapta("Valoare", 15)}`;
+  const linie = " " + "-".repeat(cap.length - 1);
+  const randuri = linii.map(
+    (l) =>
+      ` ${stanga(l.denumire, 30)} ${stanga(l.um || "buc", 6)} ${dreapta(cant(l.cantitate), 10)} ${dreapta(
+        nrRo(l.pret_unitar) + " lei",
+        14
+      )} ${dreapta(nrRo(Number(l.cantitate || 0) * Number(l.pret_unitar || 0)) + " lei", 15)}`
+  );
+  const totaluri = [
+    ` ${dreapta("Total fără TVA:", cap.length - 17)} ${dreapta(nrRo(net) + " lei", 15)}`,
+    ` ${dreapta("TVA:", cap.length - 17)} ${dreapta(nrRo(brut - net) + " lei", 15)}`,
+    ` ${dreapta("TOTAL de plată:", cap.length - 17)} ${dreapta(nrRo(brut) + " lei", 15)}`,
+  ];
+
+  return [
+    persoana ? `Bună ziua, ${persoana},` : "Bună ziua,",
+    "",
+    `Vă transmitem mai jos oferta noastră ${nrOf}${o.versiune > 1 ? ` (versiunea ${o.versiune})` : ""}.`,
+    "",
+    cap,
+    linie,
+    ...randuri,
+    linie,
+    ...totaluri,
+    "",
+    o.valabil_pana ? `Oferta este valabilă până la ${zile(o.valabil_pana)}.` : "",
+    o.observatii ? String(o.observatii) : "",
+    o.observatii || o.valabil_pana ? "" : "",
+    "Prețurile sunt în lei. Rămân la dispoziția dumneavoastră pentru orice",
+    "lămurire sau ajustare a cantităților.",
+    "",
+    "Cu stimă,",
+    u && u.nume ? String(u.nume) : "",
+  ]
+    .filter((r, i, t) => !(r === "" && t[i - 1] === ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n") + (semnatura || "");
+}
+
 function marimeOmeneasca(n) {
   const x = Number(n) || 0;
   if (!x) return "";
@@ -321,7 +398,27 @@ function register(router) {
     // folosită din Biroul agentului).
     let subiectPrecompletat = subiectRaspuns;
     let corpPrecompletat = citat ? semnatura + citat : semnatura;
-    if (ctx.query.sablon === "zi_nastere" && partenerId) {
+    // Oferta, scrisă în corpul mesajului. Nu ca atașament și nu ca link:
+    // clientul deschide mailul pe telefon, în ușa depozitului, și trebuie să
+    // vadă prețul acolo, nu după ce descarcă un PDF. Textul e aliniat cu
+    // spații, nu cu tabel HTML — jumătate din clienți citesc în Outlook pe
+    // text simplu, iar acolo un tabel HTML ajunge cod.
+    if (ctx.query.sablon === "oferta" && ofertaId) {
+      const o = await db
+        .prepare(
+          `SELECT o.*, p.nume AS client, p.persoana_contact
+             FROM oferte o JOIN parteneri p ON p.id = o.partener_id WHERE o.id = ?`
+        )
+        .get(ofertaId)
+        .catch(() => null);
+      if (o) {
+        const linii = await db
+          .prepare("SELECT denumire, um, cantitate, pret_unitar, cota_tva FROM oferte_linii WHERE oferta_id = ? ORDER BY id")
+          .all(o.id);
+        subiectPrecompletat = `Ofertă ${o.numar || "OF" + String(o.id).padStart(5, "0")} — Cash Machine`;
+        corpPrecompletat = corpOferta(o, linii, u, semnatura);
+      }
+    } else if (ctx.query.sablon === "zi_nastere" && partenerId) {
       const p = await db.prepare("SELECT nume, persoana_contact FROM parteneri WHERE id = ?").get(partenerId);
       const catreCine = p && p.persoana_contact ? p.persoana_contact : "dumneavoastră";
       subiectPrecompletat = "La mulți ani! 🎂";
@@ -423,6 +520,7 @@ function register(router) {
         <input type="hidden" name="partener_id" value="${partenerId || ""}">
         <input type="hidden" name="lead_id" value="${leadId || ""}">
         <input type="hidden" name="oportunitate_id" value="${oportunitateId || ""}">
+        <input type="hidden" name="oferta_id" value="${ofertaId || ""}">
         ${
           expeditori.length > 1
             ? `<label class="field">De pe ce adresă trimitem
@@ -451,7 +549,9 @@ function register(router) {
         <label class="field" style="flex-direction:row;align-items:center;gap:8px">
           <input type="checkbox" name="inregistreaza" value="1" checked> Înregistrează și ca interacțiune în istoricul partenerului
         </label>
-        <div class="form-actions"><button class="btn" type="submit">Trimite</button> <a class="btn secondary" href="/crm/activitate">Renunță</a></div>
+        <div class="form-actions"><button class="btn" type="submit">Trimite</button> <a class="btn secondary" href="${
+          ofertaId ? `/oferte/${ofertaId}` : "/crm/activitate"
+        }">Renunță</a></div>
       </form>
       <script>
         document.addEventListener("click", function (e) {
@@ -482,6 +582,7 @@ function register(router) {
     const partenerId = parseInt(b.partener_id, 10) || null;
     const leadId = parseInt(b.lead_id, 10) || null;
     const oportunitateId = parseInt(b.oportunitate_id, 10) || null;
+    const ofertaId = parseInt(b.oferta_id, 10) || null;
 
     let status = "trimis";
     let eroare = null;
@@ -532,10 +633,20 @@ function register(router) {
     // de ce n-a ajuns mesajul la client.
     const ins = await db
       .prepare(
-        `INSERT INTO emailuri (utilizator_id, partener_id, lead_id, oportunitate_id, catre, cc, subiect, corp, status, eroare)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO emailuri (utilizator_id, partener_id, lead_id, oportunitate_id, oferta_id, catre, cc, subiect, corp, status, eroare)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
-      .run(u.id, partenerId, leadId, oportunitateId, catre.join(", "), cc.join(", ") || null, subiect, corp, status, eroare);
+      .run(u.id, partenerId, leadId, oportunitateId, ofertaId, catre.join(", "), cc.join(", ") || null, subiect, corp, status, eroare);
+
+    // Oferta plecată chiar acum nu mai are nevoie de „marchează trimisă".
+    // Starea se mută singură, și numai din ciornă: o ofertă acceptată căreia
+    // i se mai trimite o copie n-are de ce să se întoarcă la „trimisă".
+    if (status === "trimis" && ofertaId) {
+      await db
+        .prepare("UPDATE oferte SET status = 'trimisa' WHERE id = ? AND status = 'ciorna'")
+        .run(ofertaId)
+        .catch(() => {});
+    }
 
     if (status === "trimis" && b.inregistreaza && (partenerId || leadId)) {
       await db
@@ -547,7 +658,10 @@ function register(router) {
           .run(new Date().toISOString().slice(0, 10), leadId);
       }
     }
-    redirect(ctx.res, `/crm/email/${ins.lastInsertRowid}`);
+    // Plecat de pe o ofertă, omul se întoarce la ofertă: acolo vede starea
+    // mutată pe „Trimisă" și rândul cu ce a plecat — sau, dacă n-a plecat,
+    // motivul scris în clar. Trimis din altă parte, rămâne pe fișa mesajului.
+    redirect(ctx.res, ofertaId ? `/oferte/${ofertaId}` : `/crm/email/${ins.lastInsertRowid}`);
   });
 
   router.get("/crm/email/:id", async (ctx) => {
