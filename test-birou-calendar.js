@@ -130,6 +130,8 @@ async function curat() {
     `DELETE FROM interactiuni WHERE partener_id IN (SELECT id FROM parteneri WHERE ${PART_TEST})
        OR lead_id IN (SELECT id FROM leaduri WHERE ${LEAD_TEST})
        OR utilizator_id BETWEEN 96501 AND 96599`,
+    `DELETE FROM taskuri_participanti WHERE utilizator_id BETWEEN 96501 AND 96599
+       OR task_id IN (SELECT id FROM taskuri WHERE atribuit_lui BETWEEN 96501 AND 96599 OR creat_de BETWEEN 96501 AND 96599)`,
     `DELETE FROM taskuri WHERE atribuit_lui BETWEEN 96501 AND 96599 OR creat_de BETWEEN 96501 AND 96599
        OR lead_id IN (SELECT id FROM leaduri WHERE ${LEAD_TEST})
        OR partener_id IN (SELECT id FROM parteneri WHERE ${PART_TEST})`,
@@ -340,17 +342,23 @@ async function curat() {
   egal("o dată greșită se oprește la 60 de zile",
     Number(unu("SELECT COUNT(*) FROM taskuri WHERE atribuit_lui = 96502 AND titlu LIKE 'An tastat greșit%'")), 60);
 
-  // --- adminul pune în calendarul agentului --------------------------------
+  // --- nici adminul nu scrie DIRECT în calendarul altuia --------------------
+  //
+  // Regula s-a schimbat la cererea lui Vali: „indiferent că e admin". Înainte,
+  // adminul care se uita în calendarul Isabelei scria acolo pe loc, fără s-o
+  // întrebe nimeni. Acum o invită, ca oricine altcineva, iar ea confirmă.
   await cer("/crm/calendar", {
     metoda: "post",
-    body: { zi: ZI, luna: LUNA, titlu: "Vizită impusă de admin", tip: "apel", agent: String(ISABELA.id) },
+    body: { zi: ZI, luna: LUNA, titlu: "Vizită propusă de admin", tip: "apel", agent: String(ISABELA.id),
+            participanti: [String(ISABELA.id)] },
   });
-  egal("adminul poate pune în calendarul agentului",
-    Number(unu("SELECT atribuit_lui FROM taskuri WHERE titlu = 'Vizită impusă de admin'")), ISABELA.id);
-  egal("dar se vede cine a scris-o",
-    Number(unu("SELECT creat_de FROM taskuri WHERE titlu = 'Vizită impusă de admin'")), ADMIN.id);
+  egal("intrarea rămâne a adminului, el a scris-o",
+    Number(unu("SELECT atribuit_lui FROM taskuri WHERE titlu = 'Vizită propusă de admin'")), ADMIN.id);
+  egal("iar agentul o primește ca invitație, nu ca fapt împlinit",
+    unu("SELECT stare FROM taskuri_participanti WHERE task_id = (SELECT id FROM taskuri WHERE titlu = 'Vizită propusă de admin')"),
+    "neconfirmat");
 
-  // --- un agent NU poate scrie în calendarul altuia -------------------------
+  // --- „agent=" din formular nu mai mută proprietatea intrării ---------------
   await cer("/crm/calendar", {
     metoda: "post", user: ISABELA,
     body: { zi: ZI, luna: LUNA, titlu: "Încercare în calendarul altuia", agent: String(ADMIN.id) },
@@ -362,6 +370,177 @@ async function curat() {
   const inainte = Number(unu("SELECT COUNT(*) FROM taskuri WHERE atribuit_lui = 96502"));
   await cer("/crm/calendar", { metoda: "post", user: ISABELA, body: { zi: ZI, luna: LUNA, titlu: "   " } });
   egal("o intrare fără titlu nu se scrie", Number(unu("SELECT COUNT(*) FROM taskuri WHERE atribuit_lui = 96502")), inainte);
+
+  // =====================================================================
+  console.log("\n— Invitații: pui ceva la altcineva, el confirmă —");
+  // =====================================================================
+  //
+  // Cererea lui Vali, cuvânt cu cuvânt: „un agent sa adauge in calendarul
+  // altuia sau mai multor persoane o activitate, indiferent ca e admin; apare
+  // neconfirmata la acel user, iar dupa confirmare apare confirmata la toti".
+  await cer("/crm/calendar", {
+    metoda: "post", user: ISABELA,
+    body: { zi: ZI, luna: LUNA, titlu: "Ședință de preț", tip: "intalnire", ora: "09:00",
+            participanti: [String(ADMIN.id)] },
+  });
+  const sed = q("SELECT id, atribuit_lui FROM taskuri WHERE titlu = 'Ședință de preț'");
+  egal("intrarea rămâne a celui care a scris-o", sed.length && Number(sed[0].atribuit_lui), ISABELA.id);
+  egal("celălalt primește o invitație neconfirmată",
+    q("SELECT u.id, p.stare FROM taskuri_participanti p JOIN utilizatori u ON u.id = p.utilizator_id WHERE p.task_id = ?", [sed[0].id])
+      .map((x) => x.id + ":" + x.stare),
+    [ADMIN.id + ":neconfirmat"]);
+  egal("și cine l-a invitat se vede",
+    Number(unu("SELECT invitat_de FROM taskuri_participanti WHERE task_id = ?", [sed[0].id])), ISABELA.id);
+
+  // Apare în calendarul adminului, marcată „neconfirmată", cu buton de răspuns.
+  r = await cer("/crm/calendar", { query: { luna: LUNA, zi: ZI } });
+  if (!r.corp.includes("Ședință de preț")) rau("invitația nu apare în calendarul celui invitat");
+  else ok("invitația apare în calendarul celui invitat");
+  if (!r.corp.includes("neconfirmată")) rau("nu scrie nicăieri că e neconfirmată");
+  else ok("scrie limpede că e neconfirmată");
+  if (!r.corp.includes("Isabela Radu te-a pus în calendar")) rau("nu spune cine l-a invitat");
+  else ok("spune cine l-a invitat");
+  if (!r.corp.includes(`/crm/calendar/${sed[0].id}/raspund`)) rau("lipsesc butoanele de confirmare");
+  else ok("are butoane de confirmare");
+
+  // --- nimeni nu confirmă în locul altuia ------------------------------------
+  await cer("/crm/calendar/:id/raspund", {
+    metoda: "post", user: ISABELA, params: { id: String(sed[0].id) },
+    body: { raspuns: "confirmat", inapoi: "/crm/calendar" },
+  });
+  egal("organizatorul nu poate confirma în locul invitatului",
+    unu("SELECT stare FROM taskuri_participanti WHERE task_id = ?", [sed[0].id]), "neconfirmat");
+
+  // --- confirmarea ------------------------------------------------------------
+  r = await cer("/crm/calendar/:id/raspund", {
+    metoda: "post", params: { id: String(sed[0].id) },
+    body: { raspuns: "confirmat", inapoi: "/crm/calendar?luna=" + LUNA + "&zi=" + ZI },
+  });
+  egal("după confirmare, starea e confirmat",
+    unu("SELECT stare FROM taskuri_participanti WHERE task_id = ?", [sed[0].id]), "confirmat");
+  if (!/^\/crm\/calendar\?luna=/.test(locatie(r))) rau("nu se întoarce în ziua din care a răspuns", locatie(r));
+  else ok("se întoarce în ziua din care a răspuns");
+
+  // Acum o vede confirmată și organizatorul, și cel invitat.
+  r = await cer("/crm/calendar", { user: ISABELA, query: { luna: LUNA, zi: ZI } });
+  if (!/Vali Oeru ✓/.test(r.corp)) rau("organizatorul nu vede că celălalt a confirmat");
+  else ok("organizatorul vede confirmarea");
+  r = await cer("/crm/calendar", { query: { luna: LUNA, zi: ZI } });
+  if (r.corp.includes("te-a pus în calendar")) rau("invitatul e întrebat din nou după ce a confirmat");
+  else ok("invitatul nu mai e întrebat după ce a confirmat");
+
+  // --- refuzul o scoate din calendarul lui, dar nu din al organizatorului ----
+  await cer("/crm/calendar", {
+    metoda: "post", user: ISABELA,
+    body: { zi: "2026-11-19", luna: LUNA, titlu: "Vizită pe care n-o pot face", participanti: [String(ADMIN.id)] },
+  });
+  const viz = Number(unu("SELECT id FROM taskuri WHERE titlu = 'Vizită pe care n-o pot face'"));
+  await cer("/crm/calendar/:id/raspund", {
+    metoda: "post", params: { id: String(viz) }, body: { raspuns: "refuzat", inapoi: "/crm/calendar" },
+  });
+  r = await cer("/crm/calendar", { query: { luna: LUNA } });
+  if (r.corp.includes("Vizită pe care n-o pot face")) rau("ce am refuzat îmi stă în continuare în calendar");
+  else ok("ce am refuzat dispare din calendarul meu");
+  r = await cer("/crm/calendar", { user: ISABELA, query: { luna: LUNA, zi: "2026-11-19" } });
+  if (!r.corp.includes("Vizită pe care n-o pot face")) rau("refuzul a șters intrarea și de la organizator");
+  else ok("organizatorul își păstrează intrarea");
+  if (!/Vali Oeru ✗/.test(r.corp)) rau("organizatorul nu vede că celălalt a refuzat");
+  else ok("organizatorul vede refuzul");
+
+  // --- un târg de trei zile se confirmă o singură dată ------------------------
+  await cer("/crm/calendar", {
+    metoda: "post", user: ISABELA,
+    body: { zi: "2026-11-04", luna: LUNA, titlu: "Târg cu colegul", pana_la: "2026-11-06",
+            participanti: [String(ADMIN.id)] },
+  });
+  const grup = q("SELECT id FROM taskuri WHERE titlu LIKE 'Târg cu colegul%' ORDER BY scadenta");
+  egal("târgul are trei zile", grup.length, 3);
+  egal("și o invitație pe fiecare zi",
+    Number(unu(`SELECT COUNT(*) FROM taskuri_participanti WHERE task_id IN (${grup.map((x) => x.id).join(",")})`)), 3);
+  await cer("/crm/calendar/:id/raspund", {
+    metoda: "post", params: { id: String(grup[0].id) }, body: { raspuns: "confirmat", inapoi: "/crm/calendar" },
+  });
+  egal("o singură confirmare acoperă tot târgul",
+    q(`SELECT stare FROM taskuri_participanti WHERE task_id IN (${grup.map((x) => x.id).join(",")})`).map((x) => x.stare),
+    ["confirmat", "confirmat", "confirmat"]);
+
+  // --- invitație către mai mulți deodată --------------------------------------
+  exec(`INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol, activ) VALUES
+          (96503,'Catalin Georgescu','catalin@test.ro','x','y','vanzari',1) ON CONFLICT (id) DO NOTHING`);
+  await cer("/crm/calendar", {
+    metoda: "post", user: ISABELA,
+    body: { zi: "2026-11-10", luna: LUNA, titlu: "Ședința de luni", participanti: [String(ADMIN.id), "96503"] },
+  });
+  const sedinta = Number(unu("SELECT id FROM taskuri WHERE titlu = 'Ședința de luni'"));
+  egal("toți cei bifați primesc invitație",
+    q("SELECT utilizator_id FROM taskuri_participanti WHERE task_id = ? ORDER BY utilizator_id", [sedinta]).map((x) => Number(x.utilizator_id)),
+    [96501, 96503]);
+
+  // --- nu te poți invita pe tine, și nici un utilizator inexistent -------------
+  await cer("/crm/calendar", {
+    metoda: "post", user: ISABELA,
+    body: { zi: "2026-11-11", luna: LUNA, titlu: "Singur cu mine", participanti: [String(ISABELA.id), "999999"] },
+  });
+  egal("nu te inviți pe tine și nici pe cineva inexistent",
+    Number(unu("SELECT COUNT(*) FROM taskuri_participanti WHERE task_id = (SELECT id FROM taskuri WHERE titlu = 'Singur cu mine')")), 0);
+
+  // --- modificarea și ștergerea unei intrări ---------------------------------
+  r = await cer("/crm/calendar", { user: ISABELA, query: { luna: LUNA, zi: ZI } });
+  if (!r.corp.includes("Modifică sau șterge")) rau("nu poți modifica o intrare de-a ta din calendar");
+  else ok("intrările tale se pot modifica din calendar");
+
+  await cer("/crm/calendar/:id/modifica", {
+    metoda: "post", user: ISABELA, params: { id: String(sed[0].id) },
+    body: { titlu: "Ședință de preț — mutată", tip: "intalnire", scadenta: "2026-11-20", ora: "15:30",
+            durata_minute: "45", locatie: "online", descriere: "am mutat-o", inapoi: "/crm/calendar?luna=" + LUNA },
+  });
+  egal("titlul s-a schimbat", unu("SELECT titlu FROM taskuri WHERE id = ?", [sed[0].id]), "Ședință de preț — mutată");
+  egal("ziua s-a mutat", String(unu("SELECT scadenta FROM taskuri WHERE id = ?", [sed[0].id])).slice(0, 10), "2026-11-20");
+  egal("ora s-a mutat", unu("SELECT ora FROM taskuri WHERE id = ?", [sed[0].id]), "15:30");
+  egal("iar confirmarea s-a cerut din nou — omul confirmase alt ceas",
+    unu("SELECT stare FROM taskuri_participanti WHERE task_id = ?", [sed[0].id]), "neconfirmat");
+
+  // Cel invitat NU poate umbla la intrarea altuia.
+  await cer("/crm/calendar/:id/modifica", {
+    metoda: "post", user: { id: 96503, nume: "Catalin Georgescu", rol: "vanzari" },
+    params: { id: String(sed[0].id) }, body: { titlu: "FURAT", inapoi: "/crm/calendar" },
+  });
+  egal("un coleg nu poate modifica intrarea altuia",
+    unu("SELECT titlu FROM taskuri WHERE id = ?", [sed[0].id]), "Ședință de preț — mutată");
+
+  // Ștergerea unei singure zile dintr-un târg.
+  const inainteGrup = q("SELECT id FROM taskuri WHERE titlu LIKE 'Târg cu colegul%'").length;
+  await cer("/crm/calendar/:id/sterge", {
+    metoda: "post", user: ISABELA, params: { id: String(grup[1].id) }, body: { inapoi: "/crm/calendar" },
+  });
+  egal("se poate scoate o singură zi dintr-un târg",
+    q("SELECT id FROM taskuri WHERE titlu LIKE 'Târg cu colegul%'").length, inainteGrup - 1);
+  egal("și i-au plecat și invitațiile",
+    Number(unu("SELECT COUNT(*) FROM taskuri_participanti WHERE task_id = ?", [grup[1].id])), 0);
+
+  // Ștergerea întregului grup.
+  await cer("/crm/calendar/:id/sterge", {
+    metoda: "post", user: ISABELA, params: { id: String(grup[0].id) },
+    body: { tot_grupul: "1", inapoi: "/crm/calendar" },
+  });
+  egal("se poate șterge tot târgul dintr-o dată",
+    q("SELECT id FROM taskuri WHERE titlu LIKE 'Târg cu colegul%'").length, 0);
+
+  // Un coleg nu poate șterge intrarea altuia.
+  await cer("/crm/calendar/:id/sterge", {
+    metoda: "post", user: { id: 96503, nume: "Catalin Georgescu", rol: "vanzari" },
+    params: { id: String(sed[0].id) }, body: { inapoi: "/crm/calendar" },
+  });
+  egal("un coleg nu poate șterge intrarea altuia",
+    Number(unu("SELECT COUNT(*) FROM taskuri WHERE id = ?", [sed[0].id])), 1);
+
+  // --- lista de agenți din Birou: oricine are clienți alocați -------------------
+  exec(`INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol, activ) VALUES
+          (96504,'Florentin Udrea','florentin@test.ro','x','y','operational',1) ON CONFLICT (id) DO NOTHING`);
+  exec("INSERT INTO alocari_clienti (partener_id, utilizator_id, procent, valabil_de_la) VALUES (96601, 96504, 100, '2026-01-01')");
+  r = await cer("/crm/birou");
+  if (!r.corp.includes("Florentin Udrea")) rau("un om cu clienți alocați dar alt rol nu apare în listă");
+  else ok("oricine are clienți alocați apare în listă, indiferent de rol");
 
   // =====================================================================
   console.log("\n— Oferta pleacă pe email, cu textul ei în corp —");
