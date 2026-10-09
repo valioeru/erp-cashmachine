@@ -46,9 +46,12 @@ function register(router) {
     const firmaCeruta = Number(ctx.query.firma) || 0;
 
     const args = [];
-    let unde = "1 = 1";
-    if (tip === "client") unde = "p.tip IN ('client','ambele')";
-    else if (tip === "furnizor") unde = "p.tip IN ('furnizor','ambele')";
+    // Partenerii ignorați nu apar în listă. Sunt firme scoase intenționat din
+    // ERP (date de test rămase în SmartBill), iar locul lor e în
+    // Configurări → Parteneri ignorați, de unde se pun la loc.
+    let unde = "COALESCE(p.ignorat,0) = 0";
+    if (tip === "client") unde = "COALESCE(p.ignorat,0) = 0 AND p.tip IN ('client','ambele')";
+    else if (tip === "furnizor") unde = "COALESCE(p.ignorat,0) = 0 AND p.tip IN ('furnizor','ambele')";
     if (cauta) {
       unde += " AND (LOWER(p.nume) LIKE ? OR LOWER(COALESCE(p.cui,'')) LIKE ?)";
       args.push("%" + cauta.toLowerCase() + "%", "%" + cauta.toLowerCase() + "%");

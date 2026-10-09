@@ -33,6 +33,7 @@ function subnav(activ) {
     ["/configurari/date", "Date importate"],
     ["/configurari/storno", "Facturi stornate"],
     ["/configurari/adrese", "Adrese de anunț"],
+    ["/configurari/ignorati", "Parteneri ignorați"],
   ];
   return `<div class="subnav">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
@@ -261,6 +262,106 @@ function perechiStorno(randuri) {
 
 function register(router) {
   router.get("/configurari", async (ctx) => redirect(ctx.res, "/configurari/date"));
+
+  // ---------------- Parteneri ignorați ----------------
+  //
+  // Firme care nu trebuie să mai apară nicăieri și pe care importul le sare.
+  // Au apărut din date de test rămase în SmartBill (BSI A/S cu 19,2 milioane
+  // RON, Rovenma cu 2,46 milioane EUR în soldul de furnizori) — sume care nu
+  // există în contabilitate, dar care umflau raportul.
+  const ignorare = require("../lib/parteneri-ignorati");
+
+  router.get("/configurari/ignorati", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const lista = await ignorare.reguli();
+    const cuNume = lista.map((r) => r.cheie);
+    const afectati = cuNume.length
+      ? await db
+          .prepare(
+            `SELECT p.id, p.nume, p.cui,
+                    (SELECT COUNT(*) FROM facturi f WHERE f.partener_id = p.id) AS facturi
+               FROM parteneri p WHERE COALESCE(p.ignorat,0) = 1 ORDER BY p.nume`
+          )
+          .all()
+          .catch(() => [])
+      : [];
+    const body = `
+      ${subnav("/configurari/ignorati")}
+      <h1>Parteneri ignorați</h1>
+      <p style="max-width:780px;color:var(--text-muted)">
+        Firmele de aici dispar din listele și rapoartele ERP-ului, iar importul din SmartBill le sare
+        de fiecare dată — deci nu se mai întorc singure. <strong>Nu se șterge nimic.</strong> Partenerul
+        rămâne în bază, marcat, iar facturile lui sunt doar scoase din calcul. Scoți regula de aici și
+        totul revine exact cum era, inclusiv facturile pe care le-a scos ignorarea
+        (nu și cele scoase de mână, din alt motiv).
+      </p>
+      ${ctx.query.eroare ? `<p style="color:var(--danger)">${esc(ctx.query.eroare)}</p>` : ""}
+      ${
+        ctx.query.ok
+          ? `<p style="color:var(--success)">Gata. ${esc(String(ctx.query.p || 0))} parteneri și ${esc(
+              String(ctx.query.f || 0)
+            )} facturi afectate.</p>`
+          : ""
+      }
+      ${
+        lista.length
+          ? table(
+              ["Nume", "CUI", "De ce", "Adăugat", "Acțiuni"],
+              lista.map((r) => [
+                esc(r.nume),
+                esc(r.cui || "—"),
+                esc(r.motiv || "—"),
+                esc(String(r.adaugat_la || "").slice(0, 10)),
+                `<form method="post" action="/configurari/ignorati/${r.id}/scoate" class="inline-form"><button class="link-btn" type="submit">pune-l la loc</button></form>`,
+              ])
+            )
+          : '<p style="color:var(--text-muted)">Niciun partener ignorat.</p>'
+      }
+      <h2>Adaugă unul</h2>
+      <form class="form" method="post" action="/configurari/ignorati" style="max-width:760px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <label class="field" style="flex:2;min-width:240px"><span>Numele firmei, exact cum apare</span>
+            <input name="nume" required placeholder="BSI A/S"></label>
+          <label class="field" style="width:160px"><span>CUI (opțional)</span><input name="cui"></label>
+          <label class="field" style="flex:1;min-width:200px"><span>De ce (opțional)</span>
+            <input name="motiv" placeholder="date de test"></label>
+          <button class="btn" type="submit">Ignoră-l</button>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">
+          Potrivirea se face pe nume, fără diacritice și fără semne de punctuație, sau pe CUI dacă îl pui.
+          „BSI A/S" prinde și „bsi a s", dar nu și „BSI AS SRL" — pe aia o adaugi separat.
+        </p>
+      </form>
+      ${
+        afectati.length
+          ? `<h2>Cine e scos acum (${afectati.length})</h2>
+             ${table(
+               ["Partener", "CUI", "Facturi scoase din calcul"],
+               afectati.map((p) => [`<a href="/parteneri/${p.id}">${esc(p.nume)}</a>`, esc(p.cui || "—"), String(p.facturi || 0)])
+             )}`
+          : ""
+      }
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Parteneri ignorați", active: "/configurari", body }));
+  });
+
+  router.post("/configurari/ignorati", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const r = await ignorare.adauga({
+      nume: (ctx.body || {}).nume,
+      cui: (ctx.body || {}).cui,
+      motiv: (ctx.body || {}).motiv,
+      utilizatorId: ctx.user.id,
+    });
+    if (r.eroare) return redirect(ctx.res, "/configurari/ignorati?eroare=" + encodeURIComponent(r.eroare));
+    redirect(ctx.res, `/configurari/ignorati?ok=1&p=${r.parteneri || 0}&f=${r.facturi || 0}`);
+  });
+
+  router.post("/configurari/ignorati/:id/scoate", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/");
+    const r = await ignorare.ridica(ctx.params.id);
+    redirect(ctx.res, `/configurari/ignorati?ok=1&p=${r.parteneri || 0}&f=${r.facturi || 0}`);
+  });
 
   // ---------------- Adresele pe care pleacă anunțurile ----------------
   //

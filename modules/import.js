@@ -18,6 +18,7 @@ const smartbill = require("../lib/smartbill");
 const grup = require("../lib/grup");
 const { xlsxDisponibil, normalizeHeader, gasesteColoana, gasesteRandHeader, parseFisier, parseNumar, parseData } = require("../lib/import-utils");
 const { cheiaFacturii, cheiaDocumentExtern } = require("../lib/documente");
+const ignorare = require("../lib/parteneri-ignorati");
 
 const ALIASE = {
   serie: ["serie", "seria"],
@@ -160,6 +161,19 @@ function statusDinText(text) {
   if (/achitat|platit|plătit|incasat|încasat/.test(t)) return "platita";
   return "emisa";
 }
+
+// Cheia cu care se potrivește o încasare cu factura ei.
+//
+// Se folosește `cheiaDocumentExtern` din lib/documente.js — același
+// normalizator cu care se face deduplicarea facturilor. DE CE CONTEAZĂ:
+// factura intră în ERP spartă în serie și număr, iar „CSHMUPA0065" devine
+// serie „CSHMUPA" și număr 65. Raportul de încasări scrie „CSHMUPA0065", cu
+// zerourile puse de SmartBill. Puse cap la cap fără normalizare, „CSHMUPA65"
+// și „CSHMUPA0065" nu se potriveau, iar încasarea raporta „nu găsesc factura"
+// deși factura era acolo. La facturi normalizarea exista deja; la încasări,
+// nu — de-aia bugul s-a văzut abia când au apărut facturi pe seria CSHMUPA,
+// singura cu zerouri în față.
+const cheieFactura = (text) => cheiaDocumentExtern(text);
 
 async function gasesteSauCreeazaPartener(nume, cui, tipDorit, cache) {
   const cheie = (cui || nume || "").toLowerCase().trim();
@@ -611,8 +625,18 @@ function register(router) {
       dupaNume.set(String(p.nume).toLowerCase().trim(), p);
     }
 
+    // Partenerii ignorați nu se nasc și nu se folosesc: rândurile lor cad
+    // înainte de orice. Altfel BSI și Rovenma s-ar întoarce la fiecare import,
+    // oricât i-am scoate din listă.
+    const ignorati = await ignorare.set();
+    let sariteIgnorate = 0;
     const deCreat = new Map();
     for (const inr of inregistrari) {
+      if (ignorare.esteIgnorat(ignorati, inr.numeClient, inr.cui)) {
+        inr.ignorat = true;
+        sariteIgnorate++;
+        continue;
+      }
       const cheieCui = inr.cui.toLowerCase();
       const cheieNume = inr.numeClient.toLowerCase();
       const gasit = (cheieCui && dupaCui.get(cheieCui)) || dupaNume.get(cheieNume);
@@ -641,6 +665,7 @@ function register(router) {
       }
     }
     for (const inr of inregistrari) {
+      if (inr.ignorat) continue;
       if (inr.partenerId) continue;
       const gasit = (inr.cui && dupaCui.get(inr.cui.toLowerCase())) || dupaNume.get(inr.numeClient.toLowerCase());
       if (gasit) inr.partenerId = gasit.id;
@@ -795,6 +820,7 @@ function register(router) {
         {
           "Facturi importate": create,
           "Sărite (deja existau sau rânduri de total)": sarite,
+          "Sărite (parteneri ignorați)": sariteIgnorate,
           "Parteneri noi creați": parteneriNoi.length,
           "Clienți alocați pe agenți (din Observații)": directie === "vanzare" ? agentiAlocati : "—",
           "Rânduri cu erori": erori.length,
@@ -1116,7 +1142,7 @@ function register(router) {
     const dupaCheie = new Map();
     const cheiInchise = new Set();
     for (const f of facturi) {
-      const cheie = `${String(f.serie || "").toUpperCase()}${String(f.numar || "")}`.replace(/[^A-Z0-9]/g, "");
+      const cheie = cheieFactura(`${String(f.serie || "")}${String(f.numar || "")}`);
       if (f.inchis_istoric) { cheiInchise.add(cheie); continue; }
       if (!dupaCheie.has(cheie)) dupaCheie.set(cheie, []);
       dupaCheie.get(cheie).push(f.id);
@@ -1181,7 +1207,7 @@ function register(router) {
       const tinte = [];
       let atinsInchisa = false;
       for (const b of bucati) {
-        const cheie = b.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const cheie = cheieFactura(b);
         const gasite = dupaCheie.get(cheie);
         if (gasite && gasite.length) tinte.push(gasite[0]);
         else if (cheiInchise.has(cheie)) atinsInchisa = true;
