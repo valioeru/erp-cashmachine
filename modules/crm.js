@@ -19,6 +19,7 @@ const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
+const curierat = require("../lib/clienti-curierat");
 
 const STADII = [
   { key: "lead", label: "Lead" },
@@ -1530,6 +1531,19 @@ function register(router) {
   router.post("/crm/leaduri", async (ctx) => {
     const b = ctx.body;
     if (!String(b.nume || "").trim()) return redirect(ctx.res, "/crm/leaduri/nou");
+
+    // Firma e client Sameday? Nu blocăm — agentul poate avea alt motiv să-l
+    // aibă în listă, iar un buton care refuză fără explicație se ocolește prin
+    // alt nume. Îi spunem de ce nu-i poate oferta consumabilele, scriem motivul
+    // pe lead ca să rămână acolo și după ce se închide pagina, și-l lăsăm să
+    // decidă. Ăsta e sensul deciziei din 10.10.2026, nu o interdicție tehnică.
+    const curier = await curierat.esteClientCurierat(String(b.companie || b.nume));
+    const notaCurier = curier
+      ? `ATENȚIE: client Sameday. Primește de la noi prin curier, pe AWB${
+          curier.oras ? ` (${curier.oras})` : ""
+        }. Nu-i ofertăm consumabilele de curierat pe care le cumpără prin Sameday.`
+      : "";
+
     const info = await db
       .prepare(
         `INSERT INTO leaduri (nume, companie, email, telefon, sursa, stadiu, atribuit_lui, observatii, creat_de, ultima_activitate)
@@ -1542,10 +1556,35 @@ function register(router) {
         String(b.telefon || "").trim() || null,
         String(b.sursa || "manual"),
         nr(b.atribuit_lui),
-        String(b.observatii || "").trim() || null,
+        [String(b.observatii || "").trim(), notaCurier].filter(Boolean).join("\n\n") || null,
         ctx.user ? ctx.user.id : null,
         azi()
       );
+    if (curier) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: "Client Sameday",
+          active: "/crm",
+          body: `
+            <h1>Lead-ul e salvat, dar citește asta întâi</h1>
+            <div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
+              ${curierat.avertisment(curier)}
+            </div>
+            <p style="color:var(--text-muted)">
+              L-am salvat oricum — poate ai alt motiv să-l ai în listă. Avertismentul e scris și pe lead,
+              la observații, ca să-l vadă și cine deschide după tine. Ce cumpără prin Sameday se vede în
+              <a href="/rapoarte/comenzi-la-zi/client/${curier.id}">fișa lui din raportul de comenzi</a>.
+            </p>
+            <p>
+              <a class="btn" href="/crm/leaduri/${info.lastInsertRowid}">Deschide lead-ul</a>
+              <a class="btn secondary" href="/crm/leaduri">Înapoi la lead-uri</a>
+            </p>`,
+        })
+      );
+    }
     redirect(ctx.res, `/crm/leaduri/${info.lastInsertRowid}`);
   });
 

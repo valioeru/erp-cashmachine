@@ -19,6 +19,7 @@
 //    altcuiva) și primește imediat un task de contact.
 const db = require("../lib/db");
 const { ALOC } = require("./alocari");
+const curierat = require("../lib/clienti-curierat");
 const { esc, layout, table, money, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
@@ -167,10 +168,17 @@ async function genereazaSugestii() {
     .all();
 
   const prag = peste(-270);
+  // Clienții de pe AWB-urile curierului nu intră în sugestii. Ei primesc marfa
+  // de la noi, dar cumpără de la Sameday — iar decizia lui Vali, din
+  // 10.10.2026, e să nu ne ducem peste curier la clientul lui. Lista se cere
+  // o dată, nu o interogare pe candidat.
+  const cheiCurierat = await curierat.cheiLista();
+  let sarite = 0;
   let create = 0;
   for (const c of candidati) {
     if (create >= 30) break;
     if (deja.has(Number(c.id))) continue;
+    if (cheiCurierat.has(curierat.cheieClient(c.nume))) { sarite++; continue; }
     const uf = c.ultima_factura ? String(c.ultima_factura).slice(0, 10) : null;
     const faraAgent = Number(c.alocat) === 0;
     const adormit = uf && uf < prag;
@@ -188,6 +196,7 @@ async function genereazaSugestii() {
       .run(c.nume, c.nume, c.email || null, c.telefon || null, c.id, motiv, null);
     create++;
   }
+  if (sarite) console.log(`[contacte] ${sarite} candidati sariti: sunt clienti de curierat (Sameday)`);
   return create;
 }
 
@@ -261,15 +270,24 @@ async function blocSugestii(user, opt) {
   const numeAgent = String(o.numeAgent || "");
   const prenume = numeAgent.trim().split(/\s+/)[0] || numeAgent;
   const inapoi = String(o.inapoi || "");
-  const sugestii = await db
+  // Se cer mai multe decât se arată, fiindcă din ele se scot clienții
+  // curierului. Filtrarea e aici, la afișare, PE LÂNGĂ cea de la generare:
+  // lead-urile pot intra și prin punte, din piață, nu numai din portofoliul
+  // nostru — iar plasa trebuie să fie și pe drumul ăla.
+  const brute = await db
     .prepare(
       `SELECT l.id, l.nume, l.companie, l.email, l.telefon, l.motiv_sugestie, l.partener_id, l.observatii
          FROM leaduri l
         WHERE l.sursa = 'sugestie' AND l.atribuit_lui IS NULL AND l.stadiu <> 'pierdut'
         ORDER BY CASE WHEN l.partener_id IS NULL THEN 0 ELSE 1 END, l.id DESC
-        LIMIT ${MINIM_SUGESTII}`
+        LIMIT ${MINIM_SUGESTII * 3}`
     )
     .all();
+  const cheiCurierat = await curierat.cheiLista();
+  const esteCurierat = (l) =>
+    cheiCurierat.has(curierat.cheieClient(l.nume)) || (l.companie && cheiCurierat.has(curierat.cheieClient(l.companie)));
+  const sugestii = brute.filter((l) => !esteCurierat(l)).slice(0, MINIM_SUGESTII);
+  const ascunse = brute.length - brute.filter((l) => !esteCurierat(l)).length;
 
   const preluate = await db
     .prepare(
@@ -315,7 +333,13 @@ async function blocSugestii(user, opt) {
     altul
       ? `aceeași listă pentru toți agenții; de aici pleacă în portofoliul lui ${esc(numeAgent || "agentul ăsta")}`
       : "aceeași listă pentru toți agenții, cine îi ia primul"
-  }</span></h2>${lista}${alMeu}`;
+  }</span></h2>${
+    ascunse
+      ? `<p style="font-size:12px;color:var(--text-muted);margin:-6px 0 10px">${ascunse} ${
+          ascunse === 1 ? "firmă e ascunsă" : "firme sunt ascunse"
+        } din listă: sunt clienți Sameday, cumpără consumabilele prin curier și nu le ofertăm noi.</p>`
+      : ""
+  }${lista}${alMeu}`;
 }
 
 // ------------------------------------------------------------------

@@ -140,7 +140,7 @@ const CATEGORII = [
       {
         href: "/rapoarte/comenzi-la-zi",
         nume: "Comenzi consumabile la zi (Sameday)",
-        desc: "Comenzile zilnice de consumabile, cu venitul, costul și marja pe fiecare zi și pe fiecare produs. Prețul rămâne înghețat pe linie, deci o creștere de preț nu rescrie istoricul.",
+        desc: "Comenzile zilnice de consumabile, cu venitul, costul și marja pe fiecare zi, pe fiecare produs și pe fiecare client de pe AWB — cu oraș și adresă. Costul vine singur din nomenclator: din rețetă dacă îl facem noi, din ultima intrare de marfă dacă îl cumpărăm. Prețul rămâne înghețat pe linie, deci o creștere de preț nu rescrie istoricul.",
       },
     ],
   },
