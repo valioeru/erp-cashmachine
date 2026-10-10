@@ -30,6 +30,9 @@ require("./modules/taskuri").register(router);
 require("./modules/calendar").register(router);
 require("./modules/email").register(router);
 require("./modules/rapoarte").register(router);
+// Raportul de comenzi zilnice de consumabile stă în modulul lui, dar
+// împrumută subnavul rapoartelor — deci se înregistrează DUPĂ rapoarte.
+require("./modules/comenzi-zi").register(router);
 require("./modules/clienti-cheie").register(router);
 require("./modules/buget").register(router);
 require("./modules/balanta").register(router);
@@ -204,6 +207,9 @@ async function start() {
   // regula, sau regulile adaugate prin migrare).
   await require("./lib/parteneri-ignorati").aplicaTot().catch((e) => console.error("[ignorati]", e.message));
   await require("./modules/calculator").seed();
+  // Istoricul comenzilor Sameday: se importă o singură dată, la prima
+  // pornire în care tabelul e gol. Dacă pică, nu oprește aplicația.
+  await require("./modules/comenzi-zi").seed().catch((e) => console.error("[comenzi-zi]", e.message));
   require("./modules/warehouse").porneste();
   require("./modules/marketing").porneste();
   require("./modules/inbox").porneste();
