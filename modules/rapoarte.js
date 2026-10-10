@@ -137,6 +137,11 @@ const CATEGORII = [
     rapoarte: [
       { href: "/rapoarte/stocuri", nume: "Situația stocurilor", desc: "Stoc curent pe produs și pe depozit, cu alertă la produsele sub stocul minim." },
       { href: "/rapoarte/comenzi", nume: "Comenzi pe status", desc: "Câte comenzi sunt în fiecare stadiu și care sunt cele mai vechi nefinalizate." },
+      {
+        href: "/rapoarte/comenzi-la-zi",
+        nume: "Comenzi consumabile la zi (Sameday)",
+        desc: "Comenzile zilnice de consumabile, cu venitul, costul și marja pe fiecare zi și pe fiecare produs. Prețul rămâne înghețat pe linie, deci o creștere de preț nu rescrie istoricul.",
+      },
     ],
   },
   {
@@ -4184,4 +4189,7 @@ function register(router) {
   });
 }
 
-module.exports = { register };
+// „pagina" e exportată ca să poată fi folosită de rapoartele ținute în module
+// separate (ex. comenzi-zi.js): altfel ar avea alt subnav decât restul și
+// cititorul n-ar mai putea sări de la un raport la altul.
+module.exports = { register, pagina };
