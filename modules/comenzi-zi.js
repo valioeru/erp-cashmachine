@@ -1052,25 +1052,82 @@ function tabelProduse(produse, totalMarja) {
   );
 }
 
-function tabelZile(zile) {
-  if (!zile.length) return "";
+// Venit, cost și marjă pentru o listă de zile — la rândul de total al
+// tabelului pe zi și la fiecare lună din tabelul pe luni.
+function sumaZile(zile) {
+  const t = { venit: 0, cost: 0, venit_fara_cost: 0, linii: 0, zile: zile.length };
+  for (const z of zile) {
+    t.venit += nr(z.venit);
+    t.cost += nr(z.cost);
+    t.venit_fara_cost += nr(z.venit_fara_cost);
+    t.linii += nr(z.linii);
+  }
+  return t;
+}
+
+// Venit, cost, marjă și marjă % — aceleași patru coloane pe zi, pe total și pe lună.
+function coloaneBani(t) {
+  const venit = nr(t.venit);
+  const cuCost = venit - nr(t.venit_fara_cost);
+  const marja = cuCost - nr(t.cost);
+  return [
+    money(venit),
+    cuCost > 0 ? money(t.cost) : "—",
+    cuCost > 0 ? money(marja) : "—",
+    cuCost > 0 ? procent(marja, cuCost).toFixed(1) + "%" : "—",
+  ];
+}
+
+function tabelZile(zile, eticheta) {
+  if (!zile.length) return '<p style="color:var(--text-muted)">Nicio zi cu comenzi în perioada aleasă.</p>';
+  const t = sumaZile(zile);
   return table(
     ["Ziua", "Venit", "Cost", "Marjă", "Marjă %", "Produse", "Sursa"],
-    zile.map((z) => {
-      const venit = nr(z.venit);
-      const cuCost = venit - nr(z.venit_fara_cost);
-      const marja = cuCost - nr(z.cost);
-      return [
-        `<strong>${dataRo(z.data)}</strong>`,
-        money(venit),
-        cuCost > 0 ? money(z.cost) : "—",
-        cuCost > 0 ? money(marja) : "—",
-        cuCost > 0 ? procent(marja, cuCost).toFixed(1) + "%" : "—",
-        nr(z.linii),
-        esc(z.sursa || ""),
-      ];
-    })
+    zile
+      .map((z) => [`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || "")])
+      .concat([[`<strong>Total${eticheta ? " " + esc(eticheta) : ""}</strong>`, ...coloaneBani(t).map((c) => `<strong>${c}</strong>`), `${t.zile} zile`, ""]])
   );
+}
+
+// Tabelul pe luni: o linie pe lună, cu totalul ei; săgeata deschide zilele
+// lunii, cu totalul lunii dedesubt. <details> face deschiderea fără JavaScript.
+function tabelLuni(zile) {
+  if (!zile.length) return "";
+  const peLuna = new Map();
+  for (const z of zile) {
+    const l = String(z.data).slice(0, 7);
+    if (!peLuna.has(l)) peLuna.set(l, []);
+    peLuna.get(l).push(z);
+  }
+  const luni = [...peLuna.keys()].sort().reverse();
+  const grila = "display:grid;grid-template-columns:minmax(150px,1.4fr) repeat(4,minmax(90px,1fr)) minmax(60px,.6fr);gap:8px;align-items:center";
+  const rand = (eticheta, t, extra) =>
+    `<div style="${grila}${extra || ""}"><span>${eticheta}</span>${coloaneBani(t)
+      .map((c) => `<span style="text-align:right">${c}</span>`)
+      .join("")}<span style="text-align:right">${t.zile}</span></div>`;
+  const total = sumaZile(zile);
+  return `<style>
+    .luni-zi details > summary { list-style: none; cursor: pointer; padding: 8px 6px; border-bottom: 1px solid var(--border, #e5e5e5); }
+    .luni-zi details > summary::-webkit-details-marker { display: none; }
+    .luni-zi .sageata { display: inline-block; width: 1em; font-size: 11px; transition: transform .15s; }
+    .luni-zi details[open] .sageata { transform: rotate(90deg); }
+    .luni-zi details > div { padding: 6px 0 14px 18px; }
+  </style>
+  <div class="luni-zi" style="overflow-x:auto">
+    <div style="${grila};padding:6px;font-size:12px;color:var(--text-muted)">
+      <span>Luna</span>${["Venit", "Cost", "Marjă", "Marjă %", "Zile"].map((h) => `<span style="text-align:right">${h}</span>`).join("")}
+    </div>
+    ${luni
+      .map((l) => {
+        const zl = peLuna.get(l);
+        return `<details>
+          <summary>${rand(`<span class="sageata">▸</span> <strong>${esc(etichetaLuna(l))}</strong>`, sumaZile(zl))}</summary>
+          <div>${tabelZile(zl, etichetaLuna(l))}</div>
+        </details>`;
+      })
+      .join("")}
+    ${rand("<strong>Total general</strong>", total, ";padding:10px 6px;font-weight:600")}
+  </div>`;
 }
 
 function formularZi(produse, zi, cantitati) {
@@ -1312,11 +1369,12 @@ function register(router) {
     const luna = per.luna || lunaAzi;
 
     const produse = await db.prepare("SELECT * FROM consumabile_produse WHERE activ = 1 ORDER BY ordine").all();
-    const [tLuna, tTot, pProd, zile] = await Promise.all([
+    const [tLuna, tTot, pProd, zile, toateZilele] = await Promise.all([
       totalPerioada(deLa, panaLa),
       totalPerioada("0000-01-01", "9999-12-31"),
       peProdus(deLa, panaLa),
       peZi(deLa, panaLa),
+      peZi("0000-01-01", "9999-12-31"),
     ]);
 
     const ultima = await db
@@ -1383,8 +1441,12 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       <h2>Top produse — ${esc(per.eticheta)}</h2>
       ${tabelProduse(pProd, marjaLuna)}
 
-      <h2>Pe zi</h2>
-      ${tabelZile(zile)}
+      <h2>Pe zi — ${esc(per.eticheta)}</h2>
+      ${tabelZile(zile, per.eticheta)}
+
+      <h2>Pe luni</h2>
+      <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Apasă pe o lună ca să-i vezi zilele, cu totalul lunii dedesubt.</p>
+      ${tabelLuni(toateZilele)}
 
       <h2 id="top-clienti">Top clienți — ${esc(perC.eticheta)}</h2>
       ${filtruPerioada(perC, luniSelect, { pre: "c", pastreaza: per.qs, ancora: "top-clienti" })}
