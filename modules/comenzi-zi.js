@@ -28,14 +28,46 @@ const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const rapoarte = require("./rapoarte");
 const cc = require("../lib/clienti-curierat");
+const { parseFisier, normalizeHeader } = require("../lib/import-utils");
 
 const CLIENT = "Sameday";
 const CALE = "/rapoarte/comenzi-la-zi";
 
 const nr = (v) => Number(v || 0);
 
+// Ziua de azi la București, nu în UTC: între miezul nopții și 3 dimineața
+// UTC-ul e încă „ieri", iar filtrul „azi" ar arăta ziua greșită.
 function azi() {
-  return new Date().toISOString().slice(0, 10);
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Bucharest" });
+}
+
+function ziPlus(zi, pas) {
+  const t = Date.parse(String(zi).slice(0, 10) + "T00:00:00Z");
+  return new Date(t + pas * 86400000).toISOString().slice(0, 10);
+}
+
+const eData = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+
+// Perioada raportului, din query: azi, ieri, o lună sau un interval ales.
+// Implicit, luna curentă — așa arăta raportul și înainte de filtre.
+function perioadaDin(q) {
+  const z = azi();
+  const fel = String((q && q.perioada) || "");
+  if (fel === "azi") return { fel, deLa: z, panaLa: z, eticheta: `azi, ${dataRo(z)}`, qs: "perioada=azi" };
+  if (fel === "ieri") {
+    const i = ziPlus(z, -1);
+    return { fel, deLa: i, panaLa: i, eticheta: `ieri, ${dataRo(i)}`, qs: "perioada=ieri" };
+  }
+  if (fel === "custom" && eData(q.de) && eData(q.pana)) {
+    const [a, b] = q.de <= q.pana ? [q.de, q.pana] : [q.pana, q.de];
+    return {
+      fel, deLa: a, panaLa: b,
+      eticheta: a === b ? dataRo(a) : `${dataRo(a)} – ${dataRo(b)}`,
+      qs: `perioada=custom&de=${a}&pana=${b}`,
+    };
+  }
+  const luna = /^\d{4}-\d{2}$/.test(String((q && q.luna) || "")) ? q.luna : z.slice(0, 7);
+  return { fel: "luna", luna, deLa: `${luna}-01`, panaLa: ultimaZiDinLuna(luna), eticheta: etichetaLuna(luna), qs: `luna=${luna}` };
 }
 
 // Lunile se calculează pe șiruri, nu pe Date: un `new Date("2026-03-31")` plus
@@ -552,14 +584,22 @@ async function scrieZiDinAwb(zi, lista, o) {
   const produse = await db.prepare("SELECT * FROM consumabile_produse WHERE activ = 1").all();
   const dupaId = new Map(produse.map((p) => [Number(p.id), p]));
 
+  const sursa = o.sursa || "AWB";
   let ziRand = await db.prepare("SELECT id, sursa FROM consumabile_zile WHERE client = ? AND data = ?").get(CLIENT, zi);
   if (!ziRand) {
     const ins = await db
       .prepare("INSERT INTO consumabile_zile (client, data, sursa, creat_de) VALUES (?,?,?,?) RETURNING id")
-      .run(CLIENT, zi, "AWB", o.userId || null);
-    ziRand = { id: Number(ins.lastInsertRowid), sursa: "AWB" };
+      .run(CLIENT, zi, sursa, o.userId || null);
+    ziRand = { id: Number(ins.lastInsertRowid), sursa };
   }
   const ziId = Number(ziRand.id);
+
+  // Etichetele AWB sunt ce a plecat efectiv, comenzile aprobate sunt ce s-a
+  // cerut. Când vin etichetele unei zile, ele iau locul comenzilor aprobate
+  // pentru aceeași zi — altfel aceeași comandă s-ar număra de două ori.
+  if (sursa === "AWB") {
+    await db.prepare(`DELETE FROM consumabile_awb WHERE zi_id = ? AND awb LIKE '${PREFIX_COMANDA}%'`).run(ziId);
+  }
 
   // Clienții. Adresa, orașul și agenția se completează dacă lipsesc, dar nu se
   // rescriu: un client care s-a mutat o dată n-are nevoie să fie rescris de
@@ -658,7 +698,7 @@ async function scrieZiDinAwb(zi, lista, o) {
       .prepare(`DELETE FROM consumabile_linii WHERE zi_id = ? AND produs_id NOT IN (${ids.map(() => "?").join(",")})`)
       .run(ziId, ...ids);
   }
-  await db.prepare("UPDATE consumabile_zile SET sursa = 'AWB' WHERE id = ?").run(ziId);
+  await db.prepare("UPDATE consumabile_zile SET sursa = ? WHERE id = ?").run(sursa, ziId);
 
   const t = await totalPerioada(zi, zi);
   return {
@@ -669,6 +709,115 @@ async function scrieZiDinAwb(zi, lista, o) {
     produse: sume.length,
     venit: nr(t.venit),
   };
+}
+
+// ---- importul comenzilor aprobate de Sameday --------------------------------
+//
+// Sameday trimite pe mail, în ziua aprobării, un Excel cu comenzile de
+// consumabile ale clienților lui: un rând pe produs, cu ID-ul comenzii,
+// clientul, punctul de ridicare și adresa. E aceeași comandă pe care o vor
+// duce mâine etichetele AWB, dar vine cu o zi mai devreme și cu adresa întreagă.
+//
+// Fiecare comandă se scrie ca o „expediție" cu cheia CMD-<ID>, în aceleași
+// tabele ca AWB-urile — așa topul de clienți, fișa clientului și excluderea
+// din sugestiile agenților merg la fel, fără cod nou. Când sosesc etichetele
+// AWB ale aceleiași zile, ele iau locul comenzilor (vezi scrieZiDinAwb).
+//
+// Aceeași regulă de refuz ca la AWB: un produs nerecunoscut oprește toată ziua.
+const PREFIX_COMANDA = "CMD-";
+
+// Antetul Excelului, normalizat. Coloanele cu „(punct de ridicare)" în coadă se
+// caută după început, ca o mică schimbare de formulare să nu rupă importul.
+const COL_COMANDA = {
+  id: ["id", "idcomanda"],
+  produs: ["tipconsumabil", "consumabil", "produs"],
+  cantitate: ["cantitate"],
+  client: ["client"],
+  punct: ["punctderidicare"],
+  judet: ["judet"],
+  oras: ["localitate", "oras"],
+  adresa: ["adresa"],
+  status: ["status"],
+};
+// Statusurile care spun că o comandă NU se mai livrează.
+const STATUS_ANULAT = /anulat|respins|refuzat|sters|stearsa/i;
+
+function citesteComenzi(randuri) {
+  const iAntet = (randuri || []).findIndex((r) => {
+    const n = (r || []).map(normalizeHeader);
+    return n.includes("cantitate") && n.some((x) => x.startsWith("tipconsumabil") || x === "produs");
+  });
+  if (iAntet < 0) throw new Error("nu găsesc antetul (coloanele „Tip Consumabil” și „Cantitate”)");
+  const antet = randuri[iAntet].map(normalizeHeader);
+  const col = {};
+  for (const [k, chei] of Object.entries(COL_COMANDA)) col[k] = antet.findIndex((h) => chei.some((c) => h === c || h.startsWith(c)));
+  for (const k of ["id", "produs", "cantitate", "client"]) if (col[k] < 0) throw new Error(`lipsește coloana „${k}”`);
+
+  const comenzi = new Map();
+  let anulate = 0;
+  for (const r of randuri.slice(iAntet + 1)) {
+    const v = (k) => (col[k] >= 0 && r[col[k]] != null ? String(r[col[k]]).trim() : "");
+    const id = v("id");
+    if (!id || !v("produs")) continue;
+    if (STATUS_ANULAT.test(v("status"))) { anulate++; continue; }
+    const cant = Number(v("cantitate").replace(",", "."));
+    if (!(cant > 0)) continue;
+    let c = comenzi.get(id);
+    if (!c) {
+      c = { awb: PREFIX_COMANDA + id, destinatar: v("client"), punct: v("punct"), judet: v("judet") || null, oras: v("oras") || null, adresa: v("adresa") || null, colete: 1, kg: null, articole: [] };
+      comenzi.set(id, c);
+    }
+    const a = c.articole.find((x) => cheieText(x.produs) === cheieText(v("produs")));
+    if (a) a.cantitate += cant;
+    else c.articole.push({ produs: v("produs"), cantitate: cant });
+  }
+  return { comenzi: [...comenzi.values()], anulate };
+}
+
+async function importaComenziAprobate(randuri, opt) {
+  const o = opt || {};
+  const zi = o.zi;
+  const { comenzi, anulate } = citesteComenzi(randuri);
+  const produse = await db.prepare("SELECT * FROM consumabile_produse WHERE activ = 1 ORDER BY ordine").all();
+  const index = indexeazaProduse(produse);
+
+  const necunoscute = new Map();
+  const lista = [];
+  for (const c of comenzi) {
+    const articole = [];
+    for (const a of c.articole) {
+      const p = potrivesteProdus(a.produs, index);
+      if (!p) { necunoscute.set(cheieText(a.produs), { nume: a.produs, awb: c.awb, cantitate: a.cantitate }); continue; }
+      articole.push({ produs: p, cantitate: a.cantitate });
+    }
+    // Punctul de ridicare ține locul agenției de pe etichetă: e locul de unde
+    // ridică Sameday, iar în fișa clientului spune la fel de mult.
+    lista.push({ ...c, data: zi, agentie: c.punct || null, fisier: o.fisier || null, articole });
+  }
+
+  const raport = { zi, comenzi: comenzi.length, anulate, clienti: new Set(comenzi.map((c) => cc.cheieClient(cc.curataNume(c.destinatar)))).size, necunoscute: [...necunoscute.values()], scris: false, detaliu: null };
+  if (raport.necunoscute.length) {
+    raport.motiv = `${raport.necunoscute.length} produse nerecunoscute — ziua nu se scrie până nu primesc un alias`;
+    return raport;
+  }
+  const ziRand = await db.prepare("SELECT id FROM consumabile_zile WHERE client = ? AND data = ?").get(CLIENT, zi);
+  if (ziRand) {
+    const reale = await db
+      .prepare(`SELECT COUNT(*) AS n FROM consumabile_awb WHERE zi_id = ? AND awb NOT LIKE '${PREFIX_COMANDA}%'`)
+      .get(ziRand.id);
+    if (nr(reale && reale.n) > 0) {
+      raport.motiv = `ziua ${dataRo(zi)} are deja AWB-uri (ce a plecat efectiv) — nu o rescriu cu comenzile aprobate`;
+      return raport;
+    }
+  }
+  if (o.uscat) {
+    raport.motiv = "probă uscată — n-am scris nimic";
+    raport.detaliu = await previzualizeazaZi(zi, lista, produse);
+    return raport;
+  }
+  raport.detaliu = await scrieZiDinAwb(zi, lista, { userId: o.userId, sursa: "comenzi aprobate" });
+  raport.scris = true;
+  return raport;
 }
 
 // ---- interogările raportului ------------------------------------------------
@@ -686,7 +835,7 @@ async function peProdus(deLa, panaLa) {
          JOIN consumabile_produse p ON p.id = l.produs_id
         WHERE z.client = ? AND z.data >= ? AND z.data <= ?
         GROUP BY p.id, p.cod, p.denumire, p.um, p.ordine, p.cost
-        ORDER BY p.ordine`
+        ORDER BY venit DESC, p.ordine`
     )
     .all(CLIENT, deLa, panaLa);
 }
@@ -1103,14 +1252,38 @@ const AVERTISMENT_CLIENTI = `<div class="flash" style="background:#eef2fb;border
   introducă una din ele ca lead, ERP-ul îi spune de ce nu merge.
 </div>`;
 
+// Filtrul de perioadă: azi, ieri, o lună sau un interval ales de mână.
+function filtruPerioada(per, luni) {
+  const buton = (fel, text, href) =>
+    `<a class="btn${per.fel === fel ? "" : " secondary"}" href="${CALE}?${href}">${text}</a>`;
+  return `<div class="filtre" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
+    ${buton("azi", "Azi", "perioada=azi")}
+    ${buton("ieri", "Ieri", "perioada=ieri")}
+    <form method="get" action="${CALE}" style="display:flex;gap:6px;align-items:flex-end">
+      <label>Luna
+        <select name="luna" onchange="this.form.submit()">
+          ${per.fel === "luna" ? "" : '<option value="" selected>—</option>'}
+          ${luni.map((l) => `<option value="${l}"${per.fel === "luna" && l === per.luna ? " selected" : ""}>${etichetaLuna(l)}</option>`).join("")}
+        </select>
+      </label>
+    </form>
+    <form method="get" action="${CALE}" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
+      <input type="hidden" name="perioada" value="custom">
+      <label>De la<input type="date" name="de" value="${per.fel === "custom" ? esc(per.deLa) : ""}" required></label>
+      <label>Până la<input type="date" name="pana" value="${per.fel === "custom" ? esc(per.panaLa) : ""}" required></label>
+      <button class="btn${per.fel === "custom" ? "" : " secondary"}" type="submit">Aplică</button>
+    </form>
+  </div>`;
+}
+
 // ---- rutele -----------------------------------------------------------------
 
 function register(router) {
   router.get(CALE, async (ctx) => {
     const lunaAzi = azi().slice(0, 7);
-    const luna = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? ctx.query.luna : lunaAzi;
-    const deLa = `${luna}-01`;
-    const panaLa = ultimaZiDinLuna(luna);
+    const per = perioadaDin(ctx.query || {});
+    const { deLa, panaLa } = per;
+    const luna = per.luna || lunaAzi;
 
     const produse = await db.prepare("SELECT * FROM consumabile_produse WHERE activ = 1 ORDER BY ordine").all();
     const [tLuna, tTot, pProd, zile] = await Promise.all([
@@ -1157,20 +1330,14 @@ function register(router) {
     for (let i = 0; i < 18; i++) luniSelect.push(lunaPlus(lunaAzi, -i));
 
     const corp = `
-      <form class="filtre" method="get" action="${CALE}" style="margin-bottom:14px">
-        <label>Luna
-          <select name="luna" onchange="this.form.submit()">
-            ${luniSelect.map((l) => `<option value="${l}"${l === luna ? " selected" : ""}>${etichetaLuna(l)}</option>`).join("")}
-          </select>
-        </label>
-      </form>
+${filtruPerioada(per, luniSelect)}
 
       <div class="cards">
         ${cardulLunii(ultima ? `Ultima zi — ${dataRo(ultima.data)}` : "Ultima zi", tUltima)}
-        ${cardulLunii(etichetaLuna(luna), tLuna)}
+        ${cardulLunii(per.eticheta, tLuna)}
         ${cardulLunii("Cumulat, tot istoricul", tTot)}
         <div class="card">
-          <div class="label">Media pe zi lucrătoare, ${etichetaLuna(luna)}</div>
+          <div class="label">Media pe zi lucrătoare, ${esc(per.eticheta)}</div>
           <div class="value">${money(mediaZi)}</div>
           <div style="font-size:12px;color:var(--text-muted);margin-top:4px">din ${nr(tLuna.zile)} zile cu comenzi</div>
         </div>
@@ -1178,26 +1345,26 @@ function register(router) {
 
       ${
         acoperire < 99.5
-          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Doar ${acoperire.toFixed(0)}% din venitul lunii are cost completat în spate. Marja de mai sus e marja produselor cu cost — restul nu e zero, e necunoscut. Completează costurile jos, în „Prețuri și costuri".</div>`
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Doar ${acoperire.toFixed(0)}% din venitul perioadei are cost completat în spate. Marja de mai sus e marja produselor cu cost — restul nu e zero, e necunoscut. Completează costurile jos, în „Prețuri și costuri".</div>`
           : ""
       }
 
-      <h2>Pe produs — ${esc(etichetaLuna(luna))}</h2>
+      <h2>Top produse — ${esc(per.eticheta)}</h2>
       ${tabelProduse(pProd, marjaLuna)}
 
       <h2>Pe zi</h2>
       ${tabelZile(zile)}
 
-      <h2>Clienții care au comandat — ${esc(etichetaLuna(luna))}</h2>
+      <h2>Top clienți — ${esc(per.eticheta)}</h2>
       ${AVERTISMENT_CLIENTI}
       ${
         nr(tLuna.venit) > 0 && nr(acop.venit_awb) < nr(tLuna.venit) * 0.995
-          ? `<p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Din ${money(tLuna.venit)} ai lunii, ${money(
+          ? `<p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Din ${money(tLuna.venit)} ai perioadei, ${money(
               acop.venit_awb
             )} (${procent(acop.venit_awb, tLuna.venit).toFixed(0)}%) au AWB-uri în spate și se pot repartiza pe clienți. Restul sunt zile intrate de mână, înainte ca parsarea AWB-urilor să existe.</p>`
           : `<p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">${nr(acop.awb_uri).toLocaleString(
               "ro-RO"
-            )} expediții, ${nr(acop.clienti)} clienți distincți în luna asta.</p>`
+            )} comenzi, ${nr(acop.clienti)} clienți distincți în perioada asta.</p>`
       }
       ${tabelTopClienti(topuri, produseTop, nr(acop.venit_awb))}
 
@@ -1211,7 +1378,22 @@ function register(router) {
         dacă îl cumpărăm, iar la nevoie din prețul de achiziție scris pe produs. Un cost de peste cinci ori prețul
         de vânzare nu se acceptă — aia nu e marjă proastă, e legătură greșită.
       </p>
-      ${legare ? formularLegare(produse, legare) : `<p><a class="btn secondary" href="${CALE}?luna=${luna}&legare=1">Arată legăturile la nomenclator</a></p>`}
+      ${legare ? formularLegare(produse, legare) : `<p><a class="btn secondary" href="${CALE}?${per.qs}&legare=1">Arată legăturile la nomenclator</a></p>`}
+
+      <h2>Încarcă comenzile aprobate de Sameday</h2>
+      <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">
+        Excelul „Comenzi consumabile aprobate” primit pe mail, așa cum vine (ID, Tip Consumabil, Cantitate, Client, punct de ridicare, adresă).
+        Se scrie pe ziua aprobării, cu clientul și adresa fiecărei comenzi. Când sosesc etichetele AWB ale aceleiași zile, ele iau locul
+        comenzilor — nu se dublează nimic. Dă întâi „probă uscată”.
+      </p>
+      <form method="post" action="${CALE}/comenzi-aprobate" enctype="multipart/form-data" class="form">
+        <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+          <label style="flex:1 1 260px">Fișierul (.xlsx)<input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
+          <label style="flex:0 1 190px">Ziua aprobării<input type="date" name="zi" value="${esc(azi())}" required></label>
+          <button class="btn secondary" type="submit" name="uscat" value="1">Probă uscată</button>
+          <button class="btn" type="submit">Scrie ziua</button>
+        </div>
+      </form>
 
       <h2>Încarcă AWB-urile unei zile</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">
@@ -1413,6 +1595,54 @@ function register(router) {
   // nu existe două drumuri prin care datele intră în bază și să se comporte
   // diferit. „Probă uscată" calculează și arată ziua fără să scrie nimic; e
   // modul în care se verifică o zi înainte s-o accepți.
+  router.post(`${CALE}/comenzi-aprobate`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    const b = ctx.body || {};
+    const f = ((b.__files && b.__files.fisier) || [])[0];
+    const zi = String(b.zi || "").slice(0, 10);
+    const inapoi = `<p><a href="${CALE}">← Comenzi consumabile la zi</a></p>`;
+    if (!f || !eData(zi)) {
+      return send(ctx.res, 400, rapoarte.pagina(ctx, "Comenzi aprobate", CALE, `<p>Lipsește fișierul sau ziua.</p>${inapoi}`));
+    }
+    let r;
+    try {
+      r = await importaComenziAprobate(parseFisier(f.filename, f.data), {
+        zi,
+        uscat: String(b.uscat || "") === "1",
+        userId: ctx.user.id,
+        fisier: f.filename,
+      });
+    } catch (e) {
+      return send(ctx.res, 400, rapoarte.pagina(ctx, "Comenzi aprobate", CALE, `<p>Nu pot citi fișierul: ${esc(e.message)}</p>${inapoi}`));
+    }
+    if (r.scris) await umpleCosturiLipsa();
+    const d = r.detaliu;
+    const corp = `
+      ${inapoi}
+      <h1 style="margin-top:0">${r.scris ? "Comenzi aprobate scrise" : "Comenzi aprobate"} — ${dataRo(zi)}</h1>
+      <p>${nr(r.comenzi)} comenzi de la ${nr(r.clienti)} clienți${r.anulate ? `, ${r.anulate} rânduri anulate sărite` : ""}.</p>
+      ${r.motiv ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">${esc(r.motiv)}</div>` : ""}
+      ${
+        r.necunoscute.length
+          ? `<h2>Produse pe care nu le recunosc</h2>
+             <p style="font-size:13px;color:var(--text-muted)">Adaugă un alias pentru fiecare în „Prețuri, aliasuri și costuri manuale”, apoi reîncarcă fișierul.</p>
+             ${table(["Numele exact din fișier", "Exemplu de comandă", "Cantitate"], r.necunoscute.map((n) => [`<code>${esc(n.nume)}</code>`, esc(n.awb), nr(n.cantitate)]))}`
+          : ""
+      }
+      ${
+        d && d.linii
+          ? `<h2>Pe produs</h2>${table(
+              ["Produs", "Cantitate", "Preț", "Valoare"],
+              d.linii.map((l) => [esc(l.denumire || ""), nr(l.cantitate).toLocaleString("ro-RO"), money(l.pret), money(l.valoare)])
+            )}
+             <p><strong>Total ${money(d.venit)}</strong>${d.exista_deja ? ` — ziua există deja (sursa „${esc(d.sursa_existenta || "")}”) și se rescrie` : ""}</p>`
+          : ""
+      }
+      ${d && r.scris ? `<p><strong>Scris: ${money(d.venit)}</strong>, ${nr(d.clienti)} clienți. <a href="${CALE}?perioada=custom&de=${zi}&pana=${zi}">Vezi ziua în raport →</a></p>` : ""}
+    `;
+    send(ctx.res, 200, rapoarte.pagina(ctx, "Comenzi aprobate", CALE, corp));
+  });
+
   router.post(`${CALE}/awb`, async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
     const b = ctx.body || {};
@@ -1482,6 +1712,9 @@ function register(router) {
 }
 
 module.exports = {
+  importaComenziAprobate,
+  citesteComenzi,
+  perioadaDin,
   register,
   seed,
   recalculeazaCosturi,
