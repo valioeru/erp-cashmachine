@@ -163,6 +163,9 @@ const nrComenzi = async () => Number((await db.prepare(`SELECT COUNT(*) AS n FRO
   egal("interval greșit → luna curentă", p2.fel, "luna");
   const pAzi = mod.perioadaDin({ perioada: "azi" }), pIeri = mod.perioadaDin({ perioada: "ieri" });
   egal("ieri e cu o zi înainte de azi", new Date(Date.parse(pAzi.deLa + "T00:00:00Z") - 86400000).toISOString().slice(0, 10), pIeri.deLa);
+  egal("filtrul de la top clienți, neales, nu are perioadă proprie", mod.perioadaDin({ perioada: "ieri" }, "c"), null);
+  const pc = mod.perioadaDin({ perioada: "ieri", cperioada: "custom", cde: "2031-03-01", cpana: "2031-03-05" }, "c");
+  egal("filtrul de la top clienți e independent de cel de sus", [pc.deLa, pc.panaLa, pc.qs], ["2031-03-01", "2031-03-05", "cperioada=custom&cde=2031-03-01&cpana=2031-03-05"]);
   egal("luna aleasă", [mod.perioadaDin({ luna: "2031-02" }).deLa, mod.perioadaDin({ luna: "2031-02" }).panaLa], ["2031-02-01", "2031-02-28"]);
 
   curata();

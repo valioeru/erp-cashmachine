@@ -50,24 +50,29 @@ const eData = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
 
 // Perioada raportului, din query: azi, ieri, o lună sau un interval ales.
 // Implicit, luna curentă — așa arăta raportul și înainte de filtre.
-function perioadaDin(q) {
+function perioadaDin(q, pre) {
+  const x = pre || "";
+  const g = (k) => String((q && q[x + k]) || "");
   const z = azi();
-  const fel = String((q && q.perioada) || "");
-  if (fel === "azi") return { fel, deLa: z, panaLa: z, eticheta: `azi, ${dataRo(z)}`, qs: "perioada=azi" };
+  const fel = g("perioada");
+  if (fel === "azi") return { fel, deLa: z, panaLa: z, eticheta: `azi, ${dataRo(z)}`, qs: `${x}perioada=azi` };
   if (fel === "ieri") {
     const i = ziPlus(z, -1);
-    return { fel, deLa: i, panaLa: i, eticheta: `ieri, ${dataRo(i)}`, qs: "perioada=ieri" };
+    return { fel, deLa: i, panaLa: i, eticheta: `ieri, ${dataRo(i)}`, qs: `${x}perioada=ieri` };
   }
-  if (fel === "custom" && eData(q.de) && eData(q.pana)) {
-    const [a, b] = q.de <= q.pana ? [q.de, q.pana] : [q.pana, q.de];
+  if (fel === "custom" && eData(g("de")) && eData(g("pana"))) {
+    const [a, b] = g("de") <= g("pana") ? [g("de"), g("pana")] : [g("pana"), g("de")];
     return {
       fel, deLa: a, panaLa: b,
       eticheta: a === b ? dataRo(a) : `${dataRo(a)} – ${dataRo(b)}`,
-      qs: `perioada=custom&de=${a}&pana=${b}`,
+      qs: `${x}perioada=custom&${x}de=${a}&${x}pana=${b}`,
     };
   }
-  const luna = /^\d{4}-\d{2}$/.test(String((q && q.luna) || "")) ? q.luna : z.slice(0, 7);
-  return { fel: "luna", luna, deLa: `${luna}-01`, panaLa: ultimaZiDinLuna(luna), eticheta: etichetaLuna(luna), qs: `luna=${luna}` };
+  // Fără nimic ales, un filtru cu prefix nu are perioadă proprie: întoarce
+  // null, iar apelantul folosește perioada filtrului de sus.
+  if (x && !/^\d{4}-\d{2}$/.test(g("luna"))) return null;
+  const luna = /^\d{4}-\d{2}$/.test(g("luna")) ? g("luna") : z.slice(0, 7);
+  return { fel: "luna", luna, deLa: `${luna}-01`, panaLa: ultimaZiDinLuna(luna), eticheta: etichetaLuna(luna), qs: `${x}luna=${luna}` };
 }
 
 // Lunile se calculează pe șiruri, nu pe Date: un `new Date("2026-03-31")` plus
@@ -1253,24 +1258,42 @@ const AVERTISMENT_CLIENTI = `<div class="flash" style="background:#eef2fb;border
 </div>`;
 
 // Filtrul de perioadă: azi, ieri, o lună sau un interval ales de mână.
-function filtruPerioada(per, luni) {
-  const buton = (fel, text, href) =>
-    `<a class="btn${per.fel === fel ? "" : " secondary"}" href="${CALE}?${href}">${text}</a>`;
+// Raportul are două, independente: unul sus (totaluri, produse, zile) și unul
+// la top clienți, cu parametrii prefixați „c". Fiecare filtru păstrează în
+// linkuri și formulare ce e ales la celălalt, ca să nu-l reseteze.
+function filtruPerioada(per, luni, opt) {
+  const o = opt || {};
+  const x = o.pre || "";
+  const alte = String(o.pastreaza || "");
+  const ancora = o.ancora ? `#${o.ancora}` : "";
+  const cu = (qs) => [alte, qs].filter(Boolean).join("&");
+  const ascunse = alte
+    .split("&")
+    .filter(Boolean)
+    .map((kv) => {
+      const [k, v] = kv.split("=");
+      return `<input type="hidden" name="${esc(k)}" value="${esc(decodeURIComponent(v || ""))}">`;
+    })
+    .join("");
+  const buton = (fel, text) =>
+    `<a class="btn${per.fel === fel ? "" : " secondary"}" href="${CALE}?${cu(`${x}perioada=${fel}`)}${ancora}">${text}</a>`;
   return `<div class="filtre" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
-    ${buton("azi", "Azi", "perioada=azi")}
-    ${buton("ieri", "Ieri", "perioada=ieri")}
-    <form method="get" action="${CALE}" style="display:flex;gap:6px;align-items:flex-end">
+    ${buton("azi", "Azi")}
+    ${buton("ieri", "Ieri")}
+    <form method="get" action="${CALE}${ancora}" style="display:flex;gap:6px;align-items:flex-end">
+      ${ascunse}
       <label>Luna
-        <select name="luna" onchange="this.form.submit()">
+        <select name="${x}luna" onchange="this.form.submit()">
           ${per.fel === "luna" ? "" : '<option value="" selected>—</option>'}
           ${luni.map((l) => `<option value="${l}"${per.fel === "luna" && l === per.luna ? " selected" : ""}>${etichetaLuna(l)}</option>`).join("")}
         </select>
       </label>
     </form>
-    <form method="get" action="${CALE}" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
-      <input type="hidden" name="perioada" value="custom">
-      <label>De la<input type="date" name="de" value="${per.fel === "custom" ? esc(per.deLa) : ""}" required></label>
-      <label>Până la<input type="date" name="pana" value="${per.fel === "custom" ? esc(per.panaLa) : ""}" required></label>
+    <form method="get" action="${CALE}${ancora}" style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
+      ${ascunse}
+      <input type="hidden" name="${x}perioada" value="custom">
+      <label>De la<input type="date" name="${x}de" value="${per.fel === "custom" ? esc(per.deLa) : ""}" required></label>
+      <label>Până la<input type="date" name="${x}pana" value="${per.fel === "custom" ? esc(per.panaLa) : ""}" required></label>
       <button class="btn${per.fel === "custom" ? "" : " secondary"}" type="submit">Aplică</button>
     </form>
   </div>`;
@@ -1283,6 +1306,9 @@ function register(router) {
     const lunaAzi = azi().slice(0, 7);
     const per = perioadaDin(ctx.query || {});
     const { deLa, panaLa } = per;
+    // Top clienți are filtrul lui. Neales, urmează perioada de sus.
+    const perC0 = perioadaDin(ctx.query || {}, "c");
+    const perC = perC0 || { ...per, fel: "" };
     const luna = per.luna || lunaAzi;
 
     const produse = await db.prepare("SELECT * FROM consumabile_produse WHERE activ = 1 ORDER BY ordine").all();
@@ -1319,8 +1345,13 @@ function register(router) {
 
     // Clienții de pe AWB-uri. Topul de produse se cere într-o interogare pentru
     // toți cei din top, nu una per client.
-    const [topuri, acop] = await Promise.all([topClienti(deLa, panaLa, 20), acoperireAwb(deLa, panaLa)]);
-    const produseTop = await produseTopClienti(topuri.map((c) => Number(c.id)), deLa, panaLa, 3);
+    const [topuri, acop, tClienti] = await Promise.all([
+      topClienti(perC.deLa, perC.panaLa, 20),
+      acoperireAwb(perC.deLa, perC.panaLa),
+      perC0 ? totalPerioada(perC.deLa, perC.panaLa) : null,
+    ]);
+    const tC = tClienti || tLuna;
+    const produseTop = await produseTopClienti(topuri.map((c) => Number(c.id)), perC.deLa, perC.panaLa, 3);
 
     // Legarea la nomenclator se calculează doar când e cerută: parcurge tot
     // nomenclatorul și n-are ce căuta la fiecare deschidere a raportului.
@@ -1330,7 +1361,7 @@ function register(router) {
     for (let i = 0; i < 18; i++) luniSelect.push(lunaPlus(lunaAzi, -i));
 
     const corp = `
-${filtruPerioada(per, luniSelect)}
+${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
 
       <div class="cards">
         ${cardulLunii(ultima ? `Ultima zi — ${dataRo(ultima.data)}` : "Ultima zi", tUltima)}
@@ -1355,13 +1386,14 @@ ${filtruPerioada(per, luniSelect)}
       <h2>Pe zi</h2>
       ${tabelZile(zile)}
 
-      <h2>Top clienți — ${esc(per.eticheta)}</h2>
+      <h2 id="top-clienti">Top clienți — ${esc(perC.eticheta)}</h2>
+      ${filtruPerioada(perC, luniSelect, { pre: "c", pastreaza: per.qs, ancora: "top-clienti" })}
       ${AVERTISMENT_CLIENTI}
       ${
-        nr(tLuna.venit) > 0 && nr(acop.venit_awb) < nr(tLuna.venit) * 0.995
-          ? `<p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Din ${money(tLuna.venit)} ai perioadei, ${money(
+        nr(tC.venit) > 0 && nr(acop.venit_awb) < nr(tC.venit) * 0.995
+          ? `<p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Din ${money(tC.venit)} ai perioadei, ${money(
               acop.venit_awb
-            )} (${procent(acop.venit_awb, tLuna.venit).toFixed(0)}%) au AWB-uri în spate și se pot repartiza pe clienți. Restul sunt zile intrate de mână, înainte ca parsarea AWB-urilor să existe.</p>`
+            )} (${procent(acop.venit_awb, tC.venit).toFixed(0)}%) au AWB-uri în spate și se pot repartiza pe clienți. Restul sunt zile intrate de mână, înainte ca parsarea AWB-urilor să existe.</p>`
           : `<p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">${nr(acop.awb_uri).toLocaleString(
               "ro-RO"
             )} comenzi, ${nr(acop.clienti)} clienți distincți în perioada asta.</p>`
@@ -1378,7 +1410,7 @@ ${filtruPerioada(per, luniSelect)}
         dacă îl cumpărăm, iar la nevoie din prețul de achiziție scris pe produs. Un cost de peste cinci ori prețul
         de vânzare nu se acceptă — aia nu e marjă proastă, e legătură greșită.
       </p>
-      ${legare ? formularLegare(produse, legare) : `<p><a class="btn secondary" href="${CALE}?${per.qs}&legare=1">Arată legăturile la nomenclator</a></p>`}
+      ${legare ? formularLegare(produse, legare) : `<p><a class="btn secondary" href="${CALE}?${per.qs}${perC0 ? "&" + perC0.qs : ""}&legare=1">Arată legăturile la nomenclator</a></p>`}
 
       <h2>Încarcă comenzile aprobate de Sameday</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">
