@@ -7,28 +7,219 @@ const fuziune = require("../lib/produse-fuziune");
 
 const TIPURI = [["text", "text liber"], ["numar", "număr"], ["lista", "listă de valori"]];
 
+// ---------------------------------------------------------------------------
+// Prețul de listă
+//
+// Formula e una singură și e scrisă pe față în pagină, ca să nu existe dubiu:
+//
+//     preț listă = cost de bază × (1 + adaos/100)
+//
+// „Adaos", nu „marjă". Cele două se confundă permanent și dau rezultate
+// diferite pe aceleași cifre: un adaos de 30% peste un cost de 100 dă 130,
+// în timp ce o marjă de 30% din prețul de vânzare dă 142,86. Aici e adaos
+// peste cost, iar pagina arată alături și marja rezultată din preț, ca să se
+// vadă amândouă și să nu se mai confunde nimeni.
+//
+// COSTUL DE BAZĂ se ia în trei trepte, în ordinea încrederii:
+//   1. rețeta (produse.cost_reteta) — calculată din componente, se reface
+//      singură când se schimbă prețul materiilor prime;
+//   2. costul de producție scris de mână (pret_productie) — pentru ce facem
+//      noi și n-are încă rețetă;
+//   3. prețul de achiziție (pret_achizitie) — pentru ce cumpărăm.
+// Dacă niciuna nu există, costul e necunoscut și prețul de listă nu se
+// calculează. Nu se pune zero: un cost zero ar da un preț de listă egal cu
+// adaosul și ar arăta ca o cifră serioasă.
+const ADAOS_IMPLICIT = 30;
+
+function costBaza(p) {
+  const reteta = Number((p && p.cost_reteta) || 0);
+  if (reteta > 0) return { valoare: reteta, sursa: "rețetă" };
+  const productie = Number((p && p.pret_productie) || 0);
+  if (productie > 0) return { valoare: productie, sursa: "producție" };
+  const achizitie = Number((p && p.pret_achizitie) || 0);
+  if (achizitie > 0) return { valoare: achizitie, sursa: "achiziție" };
+  return { valoare: 0, sursa: null };
+}
+
+function adaosProdus(p, implicit) {
+  const a = Number((p && p.adaos_lista) != null ? p.adaos_lista : NaN);
+  if (Number.isFinite(a) && a >= 0) return { valoare: a, propriu: true };
+  return { valoare: Number(implicit) || 0, propriu: false };
+}
+
+function pretLista(p, implicit) {
+  const c = costBaza(p);
+  if (!(c.valoare > 0)) return null;
+  const a = adaosProdus(p, implicit);
+  return c.valoare * (1 + a.valoare / 100);
+}
+
+// Marja rezultată din preț, ca procent din prețul de vânzare. E cealaltă
+// citire a aceluiași lucru, pusă alături ca să nu se confunde cu adaosul.
+function marjaDinPret(pret, cost) {
+  const pv = Number(pret) || 0;
+  const c = Number(cost) || 0;
+  if (!(pv > 0) || !(c > 0)) return null;
+  return ((pv - c) / pv) * 100;
+}
+
+async function adaosImplicit() {
+  const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = 'adaos_lista_implicit'").get().catch(() => null);
+  const v = r ? Number(String(r.valoare).replace(",", ".")) : NaN;
+  return Number.isFinite(v) && v >= 0 ? v : ADAOS_IMPLICIT;
+}
+
+async function scrieSetare(cheie, valoare) {
+  const acum = new Date().toISOString();
+  const exista = await db.prepare("SELECT cheie FROM setari_app WHERE cheie = ?").get(cheie).catch(() => null);
+  if (exista) await db.prepare("UPDATE setari_app SET valoare = ?, actualizat_la = ? WHERE cheie = ?").run(String(valoare), acum, cheie);
+  else await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?)").run(cheie, String(valoare), acum);
+}
+
+const lei = (v) => (v == null ? '<span style="color:var(--text-muted)">—</span>' : money(v));
+
 function register(router) {
+  // Adaosul implicit se citește o dată per cerere și se ține aici, ca să nu
+  // facem o interogare pentru fiecare dintre cele peste patru mii de rânduri.
+  let adaosCurent = ADAOS_IMPLICIT;
+
   registerCrud(router, {
     path: "/produse",
     table: "produse",
     title: "Produse",
     singular: "produs",
+    search: ["cod", "denumire"],
+    filtre: [
+      { name: "categorie", label: "Categorie" },
+      { name: "gestiune", label: "Gestiune" },
+    ],
+    limita: 200,
+    ordine: "denumire",
+    inainte: async () => { adaosCurent = await adaosImplicit(); },
+    banner: async (ctx) => {
+      const r = await db.prepare("SELECT COUNT(*) AS n FROM produse WHERE cota_tva = 19").get().catch(() => ({ n: 0 }));
+      const n = Number((r && r.n) || 0);
+      const tva = n
+        ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">
+             <strong>${n.toLocaleString("ro-RO")} ${n === 1 ? "produs are" : "produse au"} încă TVA 19%.</strong>
+             Cota standard e 21% de la 01.08.2025. Produsele noi intră deja cu 21%; pe cele vechi nu le-am schimbat singur.
+             <form method="post" action="/produse/tva" style="display:inline;margin-left:8px">
+               <button class="btn small" type="submit">Treci-le pe 21%</button>
+             </form>
+           </div>`
+        : "";
+      const setare = `<form method="post" action="/produse/adaos" class="filtre" style="margin-bottom:12px">
+          <label>Adaos implicit pentru prețul de listă
+            <input name="adaos" type="number" step="0.1" min="0" value="${esc(adaosCurent)}" style="width:90px"> %
+          </label>
+          <button class="btn small" type="submit">Salvează</button>
+          <span style="font-size:12px;color:var(--text-muted)">
+            Preț listă = cost × (1 + adaos/100). Se aplică produselor care n-au adaos propriu.
+          </span>
+        </form>`;
+      return tva + setare;
+    },
     fields: [
       { name: "cod", label: "Cod produs" },
       { name: "denumire", label: "Denumire", required: true },
+      { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },
+      { name: "gestiune", label: "Gestiune", datalist: true, ajutor: "Gestiunea din contabilitate în care stă produsul." },
       { name: "unitate_masura", label: "Unitate de măsură", default: "buc" },
-      { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", step: "0.01", default: 0 },
-      { name: "pret_achizitie", label: "Preț achiziție", type: "number", step: "0.01", default: 0 },
-      { name: "cota_tva", label: "Cotă TVA (%)", type: "number", step: "0.01", default: 19 },
+      { name: "pret_achizitie", label: "Preț achiziție", type: "number", step: "0.01", default: 0, ajutor: "Pentru marfa pe care o cumpărăm." },
+      { name: "pret_productie", label: "Cost de producție", type: "number", step: "0.0001", ajutor: "Pentru ce facem noi. Lasă gol dacă produsul are rețetă — atunci costul se ia din ea." },
+      {
+        name: "_cost",
+        label: "Cost de bază folosit",
+        type: "calculat",
+        calc: (r) => {
+          const c = costBaza(r);
+          return c.sursa ? `${money(c.valoare)} <span style="font-weight:400;color:var(--text-muted)">(${c.sursa})</span>` : "necunoscut";
+        },
+      },
+      { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", step: "0.1", ajutor: "Lasă gol ca să folosească adaosul implicit al firmei." },
+      {
+        name: "_lista",
+        label: "Preț de listă (calculat)",
+        type: "calculat",
+        calc: (r) => {
+          const pl = pretLista(r, adaosCurent);
+          if (pl == null) return 'necunoscut — produsul n-are cost';
+          const a = adaosProdus(r, adaosCurent);
+          return `${money(pl)} <span style="font-weight:400;color:var(--text-muted)">(adaos ${a.valoare}%${a.propriu ? "" : ", implicit"})</span>`;
+        },
+      },
+      { name: "pret_minim", label: "Preț minim de vânzare", type: "number", step: "0.01", ajutor: "Sub prețul ăsta pagina te avertizează. Lasă gol dacă n-ai o limită." },
+      { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", step: "0.01", default: 0, ajutor: "Prețul folosit efectiv în oferte și facturi." },
+      { name: "cota_tva", label: "Cotă TVA (%)", type: "number", step: "0.01", default: 21 },
       { name: "stoc_minim", label: "Stoc minim (alertă)", type: "number", step: "0.01", default: 0 },
     ],
     listColumns: [
       { key: "cod", label: "Cod" },
       { key: "denumire", label: "Denumire", render: (r) => `<a href="/produse/${r.id}">${esc(r.denumire)}</a>` },
+      { key: "categorie", label: "Categorie", render: (r) => esc(r.categorie || "—") },
+      { key: "gestiune", label: "Gestiune", render: (r) => esc(r.gestiune || "—") },
       { key: "unitate_masura", label: "UM" },
-      { key: "pret_vanzare", label: "Preț vânzare", render: (r) => money(r.pret_vanzare) },
-      { key: "cota_tva", label: "TVA", render: (r) => `${esc(r.cota_tva)}%` },
+      {
+        key: "_cost",
+        label: "Achiziție / producție",
+        render: (r) => {
+          const c = costBaza(r);
+          if (!c.sursa) return '<span style="color:var(--text-muted)">—</span>';
+          return `${money(c.valoare)}<br><span style="font-size:11px;color:var(--text-muted)">${c.sursa}</span>`;
+        },
+      },
+      {
+        key: "_adaos",
+        label: "Adaos",
+        render: (r) => {
+          const a = adaosProdus(r, adaosCurent);
+          return `${a.valoare}%${a.propriu ? "" : '<br><span style="font-size:11px;color:var(--text-muted)">implicit</span>'}`;
+        },
+      },
+      {
+        key: "_lista",
+        label: "Preț listă",
+        render: (r) => {
+          const pl = pretLista(r, adaosCurent);
+          if (pl == null) return '<span style="color:var(--text-muted)">—</span>';
+          const pv = Number(r.pret_vanzare) || 0;
+          const sub = pv > 0 && pv < pl * 0.995;
+          return `${money(pl)}${sub ? '<br><span class="badge galben" title="prețul de vânzare e sub prețul de listă">sub listă</span>' : ""}`;
+        },
+      },
+      {
+        key: "pret_vanzare",
+        label: "Preț vânzare",
+        render: (r) => {
+          const pv = Number(r.pret_vanzare) || 0;
+          const pmin = Number(r.pret_minim) || 0;
+          const subMinim = pmin > 0 && pv > 0 && pv < pmin;
+          const c = costBaza(r);
+          const m = marjaDinPret(pv, c.valoare);
+          return `${money(pv)}${subMinim ? ' <span class="badge rosu" title="sub prețul minim de vânzare">sub minim</span>' : ""}` +
+            (m != null ? `<br><span style="font-size:11px;color:var(--text-muted)">marjă ${m.toFixed(1)}%</span>` : "");
+        },
+      },
+      { key: "pret_minim", label: "Preț minim", render: (r) => lei(Number(r.pret_minim) > 0 ? r.pret_minim : null) },
+      { key: "cota_tva", label: "TVA", render: (r) => `${esc(r.cota_tva)}%${Number(r.cota_tva) === 19 ? ' <span class="badge galben">vechi</span>' : ""}` },
     ],
+  });
+
+  // Trecerea produselor rămase pe 19% la cota curentă de 21%. Se face numai la
+  // apăsarea butonului, de un admin, și atinge EXACT rândurile cu 19 — nu
+  // umblă la cotele reduse de 9% sau 5%, care sunt în continuare valabile.
+  router.post("/produse/tva", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/produse");
+    const r = await db.prepare("UPDATE produse SET cota_tva = 21 WHERE cota_tva = 19").run();
+    console.log(`[produse] cota TVA 19 -> 21 pe ${r.changes} produse`);
+    return redirect(ctx.res, "/produse");
+  });
+
+  router.post("/produse/adaos", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/produse");
+    const v = Number(String((ctx.body && ctx.body.adaos) || "").replace(",", "."));
+    if (Number.isFinite(v) && v >= 0 && v < 1000) await scrieSetare("adaos_lista_implicit", v);
+    return redirect(ctx.res, "/produse");
   });
 
   // Pagină de detaliu produs: stoc pe depozite + rețetă de fabricație (BOM) —
