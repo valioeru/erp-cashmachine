@@ -4,6 +4,7 @@ const { esc, money, layout, table, actionLinks } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const inbox = require("./inbox");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
+const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const smartbill = require("../lib/smartbill");
 
 const STATUS_LABEL = {
@@ -124,6 +125,33 @@ function register(router) {
       )
       .all(...args);
 
+    // Totalul perioadei, pe zile — pentru rândul de total și tabelul pe luni.
+    // Numără tot filtrul, nu doar pagina de 50 de pe ecran.
+    const peZile = await db
+      .prepare(
+        `SELECT SUBSTRING(f.data_emiterii, 1, 10) AS data,
+                COUNT(*) AS documente,
+                COALESCE(SUM(l.total), 0) AS total,
+                COALESCE(SUM(pl.platit), 0) AS platit
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id) l ON l.factura_id = f.id
+         LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+         WHERE ${clauza} AND f.status <> 'anulata'
+         GROUP BY SUBSTRING(f.data_emiterii, 1, 10)
+         ORDER BY data DESC`
+      )
+      .all(...args);
+    for (const z of peZile) z.rest = Math.max(0, Number(z.total || 0) - Number(z.platit || 0));
+    const etIncasat = directie === "achizitie" ? "Plătit" : "Încasat";
+    const COLOANE_ZILE = [
+      { camp: "documente", eticheta: "Facturi", tip: "nr" },
+      { camp: "total", eticheta: "Total", tip: "bani" },
+      { camp: "platit", eticheta: etIncasat, tip: "bani" },
+      { camp: "rest", eticheta: directie === "achizitie" ? "De plătit" : "De încasat", tip: "bani" },
+    ];
+    const tPer = aduna(peZile, COLOANE_ZILE);
+
     // Scadența, cu zilele de întârziere la vedere.
     //
     // Lista aducea deja data_scadenta din bază, dar n-o arăta — și fără ea
@@ -196,11 +224,22 @@ function register(router) {
           </span>
         </span>
       </form>
+      <div class="cards">
+        <div class="card"><div class="label">Facturi — ${esc(per.eticheta)}</div><div class="value">${Number(tPer.documente || 0).toLocaleString("ro-RO")}</div></div>
+        <div class="card"><div class="label">Total facturat</div><div class="value">${money(tPer.total)}</div></div>
+        <div class="card"><div class="label">${etIncasat}</div><div class="value">${money(tPer.platit)}</div></div>
+        <div class="card"><div class="label">${directie === "achizitie" ? "De plătit" : "De încasat"}</div><div class="value" style="color:${tPer.rest > 0.5 ? "var(--warn)" : "inherit"}">${money(tPer.rest)}</div></div>
+      </div>
       ${table(
         ["Document", directie === "achizitie" ? "Furnizor" : "Client", "Data", "Scadența", "Status", "Total", directie === "achizitie" ? "Plătit" : "Încasat", "Acțiuni"],
-        rows
+        rows.concat(
+          rows.length
+            ? [[`<strong>Total ${esc(per.eticheta)}</strong>`, `${Number(tPer.documente || 0).toLocaleString("ro-RO")} facturi`, "", "", "", `<strong>${money(tPer.total)}</strong>`, `<strong>${money(tPer.platit)}</strong>`, ""]]
+            : []
+        )
       )}
       ${paginare}
+      ${rezumatPeLuni(peZile, COLOANE_ZILE, { eticheta: per.eticheta })}
     `,
     };
   }

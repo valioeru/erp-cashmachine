@@ -2,6 +2,7 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, actionLinks, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
+const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const { send, redirect } = require("../lib/router");
 
 // Drumul unei comenzi, în ordinea în care se întâmplă de fapt:
@@ -203,6 +204,23 @@ function register(router) {
          ORDER BY c.id DESC`
       )
       .all(per.de, per.la + " 23:59:59");
+    // Totalul perioadei, pe zile, fără comenzile anulate.
+    const peZi = new Map();
+    for (const c of comenzi) {
+      if (c.status === "anulata") continue;
+      const d = String(c.data || "").slice(0, 10);
+      if (!d) continue;
+      const z = peZi.get(d) || { data: d, comenzi: 0, total: 0 };
+      z.comenzi += 1;
+      z.total += Number(c.total || 0);
+      peZi.set(d, z);
+    }
+    const COLOANE_ZILE = [
+      { camp: "comenzi", eticheta: "Comenzi", tip: "nr" },
+      { camp: "total", eticheta: "Total", tip: "bani" },
+    ];
+    const zile = [...peZi.values()];
+    const tPer = aduna(zile, COLOANE_ZILE);
     const body = `
       <div class="toolbar"><a href="/comenzi/nou" class="btn">+ Comandă nouă</a></div>
       <form class="filtre perioade" method="get" action="/comenzi">
@@ -224,8 +242,13 @@ function register(router) {
           STATUS_LABEL[c.status] || esc(c.status),
           money(c.total),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
-        ])
+        ]).concat(
+          comenzi.length
+            ? [[`<strong>Total ${esc(per.eticheta)}</strong>`, `${tPer.comenzi} comenzi (fără anulate)`, "", "", `<strong>${money(tPer.total)}</strong>`, ""]]
+            : []
+        )
       )}
+      ${rezumatPeLuni(zile, COLOANE_ZILE, { eticheta: per.eticheta })}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări — comenzi", active: "/comenzi", body }));
   });

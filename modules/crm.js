@@ -16,7 +16,7 @@ const cost = require("../lib/cost");
 const { ALOC, ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
-const { chipuriPerioada } = require("../lib/perioada");
+const { chipuriPerioada, azi: perAzi, ieri: perIeri } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
 const curierat = require("../lib/clienti-curierat");
@@ -619,7 +619,10 @@ function register(router) {
     let perioada = String(ctx.query.perioada || "luna");
     if (perioada === "luna_curenta") perioada = "luna";
     let de, la, etichetaPer;
-    if (perioada === "luna_trecuta") {
+    if (perioada === "azi" || perioada === "ieri") {
+      de = perioada === "azi" ? perAzi() : perIeri(); la = de;
+      etichetaPer = `${perioada} (${de})`;
+    } else if (perioada === "luna_trecuta") {
       de = `${lunaPrecedentaStr}-01`; la = ultimaZiDin(lunaPrecedentaStr);
       etichetaPer = `luna trecută (${lunaPrecedentaStr})`;
     } else if (perioada === "an_curent") {

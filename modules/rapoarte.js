@@ -21,7 +21,7 @@ const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
 const { esc, money, layout, table, dataRo, dateleInText } = require("../lib/render");
-const { chipuriPerioada } = require("../lib/perioada");
+const { chipuriPerioada, ieri: ieriPer, azi: aziPer } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
 // Subinterogări refolosite: totalul fiecărei facturi (calculat din liniile ei)
@@ -196,7 +196,13 @@ function intervalDinQuery(ctx, implicitLuni = 12, presetImplicit = null) {
   let panaLa = aziStr;
   const luna = Number(aziStr.slice(5, 7));
   const ultimaZi = (a, l) => `${a}-${String(l).padStart(2, "0")}-${new Date(Date.UTC(a, l, 0)).getUTCDate()}`;
-  if (preset === "luna_curenta") deLa = `${aziStr.slice(0, 7)}-01`;
+  if (preset === "azi") {
+    deLa = aziPer();
+    panaLa = deLa;
+  } else if (preset === "ieri") {
+    deLa = ieriPer();
+    panaLa = deLa;
+  } else if (preset === "luna_curenta") deLa = `${aziStr.slice(0, 7)}-01`;
   else if (preset === "luna_trecuta") {
     const a = luna === 1 ? an - 1 : an;
     const l = luna === 1 ? 12 : luna - 1;

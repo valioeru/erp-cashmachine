@@ -24,6 +24,7 @@ const db = require("../lib/db");
 const crypto = require("crypto");
 const { esc, money, layout, table } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
+const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, parseNumar, parseData } = require("../lib/import-utils");
 
@@ -123,6 +124,29 @@ function register(router) {
          ORDER BY t.data DESC, t.id DESC LIMIT 300`
       )
       .all(...argePer);
+    // Totalul perioadei, pe zile: încasări (intrări) și plăți (ieșiri). Ia
+    // toată perioada, oricare ar fi filtrul de status al listei („de lucrat"
+    // ar arăta doar nepotrivitele) — fără tranzacțiile ignorate.
+    const peZile = await db
+      .prepare(
+        `SELECT SUBSTRING(t.data, 1, 10) AS data,
+                COUNT(*) AS tranzactii,
+                COALESCE(SUM(CASE WHEN t.suma > 0 THEN t.suma ELSE 0 END), 0) AS intrari,
+                COALESCE(SUM(CASE WHEN t.suma < 0 THEN -t.suma ELSE 0 END), 0) AS iesiri,
+                COALESCE(SUM(t.suma), 0) AS net
+         FROM tranzactii_banca t
+         WHERE t.status <> 'ignorata' AND t.data >= ? AND t.data <= ?
+         GROUP BY SUBSTRING(t.data, 1, 10)
+         ORDER BY data DESC`
+      )
+      .all(...argePer);
+    const COLOANE_ZILE = [
+      { camp: "tranzactii", eticheta: "Tranzacții", tip: "nr" },
+      { camp: "intrari", eticheta: "Încasări", tip: "bani" },
+      { camp: "iesiri", eticheta: "Plăți", tip: "bani" },
+      { camp: "net", eticheta: "Net", tip: "bani" },
+    ];
+    const tPer = aduna(peZile, COLOANE_ZILE);
     const contoare = await db.prepare("SELECT status, COUNT(*) AS n, COALESCE(SUM(suma),0) AS s FROM tranzactii_banca GROUP BY status").all();
     const cnt = Object.fromEntries(contoare.map((r) => [r.status, r]));
     const v = (st, camp) => Number((cnt[st] || {})[camp] || 0);
@@ -177,6 +201,12 @@ function register(router) {
           : ""
       }
 
+      <div class="cards">
+        <div class="card"><div class="label">Încasări — ${esc(per.eticheta)}</div><div class="value" style="color:var(--success)">${money(tPer.intrari)}</div></div>
+        <div class="card"><div class="label">Plăți — ${esc(per.eticheta)}</div><div class="value" style="color:var(--danger)">${money(tPer.iesiri)}</div></div>
+        <div class="card"><div class="label">Net</div><div class="value">${money(tPer.net)}</div></div>
+        <div class="card"><div class="label">Tranzacții</div><div class="value">${Number(tPer.tranzactii || 0).toLocaleString("ro-RO")}</div></div>
+      </div>
       ${table(
         ["Data", "Suma", "Descriere", "Factura potrivită", "Motiv", "Status", "Acțiuni"],
         tranzactii.map((t) => [
@@ -200,6 +230,7 @@ function register(router) {
         Account Data, Smart Fintech) — se poate integra ulterior, cu cont la unul dintre ei. Importul de extras de mai sus face
         exact aceeași treabă, cu un export CSV pe săptămână.
       </p>
+      ${rezumatPeLuni(peZile, COLOANE_ZILE, { titlu: "Încasări și plăți pe luni", eticheta: per.eticheta })}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Bancă — extras & reconciliere", active: "/banca", body }));
   });
