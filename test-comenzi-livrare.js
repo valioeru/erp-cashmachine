@@ -304,6 +304,15 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
   else ok("fiecare linie are filtru de categorie");
   if (!/class="cauta-produs"/.test(formular.corp)) rau("lipsește căutarea de produs");
   else ok("fiecare linie are căsuță de căutare");
+  // Lista de rezultate trebuie să fie `fixed`. Pe `absolute` se vedea doar o
+  // dungă de câțiva pixeli: rândul e o celulă de tabel, iar un strămoș cu
+  // overflow (derularea pe orizontală) taie orice element absolut, oricât de
+  // mare i-ar fi z-index-ul.
+  if (!/\.rezultate-produs\s*\{[^}]*position:\s*fixed/.test(formular.corp))
+    rau("lista de rezultate nu e „fixed” — se va tăia în tabel");
+  else ok("lista de rezultate iese din tabel, nu se taie");
+  if (!/function comenziAseaza/.test(formular.corp)) rau("lipsește așezarea listei după câmp");
+  else ok("lista se așază după câmp, și la derulare");
   for (const c of ["Folie stretch manuala", "Cartoane"]) {
     if (!formular.corp.includes(`<option value="${c}"`)) rau("categoria lipsește din filtru", c);
     else ok("categoria apare în filtru: " + c);
