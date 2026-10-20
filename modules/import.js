@@ -325,6 +325,19 @@ function register(router) {
         <button type="submit" class="btn">Importă stoc</button>
       </form>
 
+      <h2>3b. Categorii și gestiuni pe articole</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Fișierul „categorii gestiuni articole": cod, produs, gestiune, categorie, U.M.
+        <b>Nu creează produse</b> — doar completează categoria și gestiunea pe cele care există deja, ca să funcționeze
+        filtrul de categorie din formularul de comandă. Un cod trecut și cu categoria lui, și cu „diverse", primește
+        categoria adevărată. Un articol care stă în două gestiuni rămâne fără gestiune și apare la raport —
+        baza are o singură coloană și nu ghicesc care. Unitatea de măsură nu se atinge.
+      </p>
+      <form method="post" action="/import/categorii" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
+        <button type="submit" class="btn">Importă categorii și gestiuni</button>
+      </form>
+
       <h2>4. Bonuri de consum intern</h2>
       <p style="font-size:13px;color:var(--text-muted)">Coloane așteptate: nr. bon, gestiune, produs, cantitate, dată. Se adaugă ca "ieșire" de stoc.</p>
       <form method="post" action="/import/consum" enctype="multipart/form-data" class="form" style="max-width:520px">
@@ -891,6 +904,89 @@ function register(router) {
   });
 
   // ---- 3. Stoc pe gestiuni -----------------------------------------------
+  // ---- Categorii și gestiuni pe articole ---------------------------------
+  //
+  // Nomenclatorul a primit coloanele `categorie` și `gestiune` și au rămas
+  // goale pe aproape toate produsele, iar filtrul de categorie din formularul
+  // de comandă n-avea ce filtra. Fișierul vine din gestiunea SmartBill și
+  // conține exact clasificarea pe care o folosește lumea.
+  //
+  // Regula de potrivire și cea de ciocnire stau în modules/punte.js, în
+  // ingestCategoriiProduse — aceleași și pentru drumul prin punte, ca să nu
+  // existe două comportamente pentru același fișier.
+  router.post("/import/categorii", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/import");
+    const file = preiaFisier(ctx);
+    if (!file) return send(ctx.res, 200, paginaRezultat("Import categorii", { Eroare: "Nu ai selectat niciun fișier." }, []));
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, paginaRezultat("Import categorii", { Eroare: e.message }, []));
+    }
+    if (!rows.length) return send(ctx.res, 200, paginaRezultat("Import categorii", { Eroare: "Fișierul pare gol." }, []));
+
+    const randHeader = Math.max(0, gasesteRandHeader(rows, ALIASE));
+    const header = rows[randHeader].map(normalizeHeader);
+    const idx = mapColoane(header, ALIASE);
+    if (idx.cod === -1 && idx.produs === -1) {
+      return send(
+        ctx.res,
+        200,
+        paginaRezultat("Import categorii — coloane nerecunoscute", { "Coloane găsite": rows[randHeader].join(" | ") }, [
+          "Nu am găsit nici coloana de cod, nici cea de produs.",
+        ])
+      );
+    }
+    if (idx.categoria === -1 && idx.gestiune === -1) {
+      return send(
+        ctx.res,
+        200,
+        paginaRezultat("Import categorii — coloane nerecunoscute", { "Coloane găsite": rows[randHeader].join(" | ") }, [
+          "Nu am găsit nici coloana de categorie, nici cea de gestiune — fișierul n-are ce aduce.",
+        ])
+      );
+    }
+
+    const ia = (row, i) => (i === -1 ? "" : String(row[i] === null || row[i] === undefined ? "" : row[i]).trim());
+    const randuri = [];
+    for (let r = randHeader + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c === null || c === undefined ? "" : c).trim() === "")) continue;
+      randuri.push({
+        cod: ia(row, idx.cod),
+        produs: ia(row, idx.produs),
+        gestiune: ia(row, idx.gestiune),
+        categorie: ia(row, idx.categoria),
+        um: ia(row, idx.um),
+      });
+    }
+    if (!randuri.length) return send(ctx.res, 200, paginaRezultat("Import categorii", { Eroare: "Niciun rând cu date." }, []));
+
+    const rez = await require("./punte").HANDLERE.categorii_produse(randuri);
+    const avertismente = []
+      .concat(rez.exemple_nepotrivite || [])
+      .concat((rez.exemple_mai_multe_gestiuni || []).map((x) => "două gestiuni, n-am scris niciuna → " + x))
+      .concat((rez.exemple_um_diferita || []).map((x) => "UM diferită, NU am schimbat-o → " + x));
+    return send(
+      ctx.res,
+      200,
+      paginaRezultat(
+        "Import categorii și gestiuni",
+        {
+          "Rânduri citite": randuri.length,
+          "Categorii scrise": rez.categorii_scrise,
+          "Gestiuni scrise": rez.gestiuni_scrise,
+          "Erau deja corecte": rez.neschimbate,
+          "Articole negăsite în ERP": rez.nepotrivite,
+          "Articole în două gestiuni": rez.mai_multe_gestiuni,
+          "UM diferită de cea din ERP": rez.um_diferita,
+        },
+        avertismente
+      )
+    );
+  });
+
   router.post("/import/stoc", async (ctx) => {
     const file = preiaFisier(ctx);
     if (!file) return send(ctx.res, 200, paginaRezultat("Import stoc", { Eroare: "Nu ai selectat niciun fișier." }, []));
