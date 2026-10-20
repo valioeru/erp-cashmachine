@@ -292,6 +292,73 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
   if (/>in_stoc_depozit</.test(listaDepozit.corp)) rau("lista depozitului arată statusul brut, cu underscore");
   else ok("lista depozitului arată statusul în română, nu numele din bază");
 
+  // ------------------------------------- alegerea produsului pe comanda nouă
+  console.log("\nAlegerea produsului:");
+  exec(`UPDATE produse SET categorie = 'Folie stretch manuala' WHERE id = ${PROD_A}`);
+  exec(`UPDATE produse SET categorie = 'Cartoane' WHERE id = ${PROD_B}`);
+  const formular = await cer("/comenzi/nou");
+  if (/<select[^>]*name="produs_id\[\]"/.test(formular.corp))
+    rau("a rămas lista derulantă cu toate produsele pe linie");
+  else ok("produsul nu mai e o listă derulantă cu tot nomenclatorul");
+  if (!/class="cat-produs"/.test(formular.corp)) rau("lipsește filtrul de categorie pe linie");
+  else ok("fiecare linie are filtru de categorie");
+  if (!/class="cauta-produs"/.test(formular.corp)) rau("lipsește căutarea de produs");
+  else ok("fiecare linie are căsuță de căutare");
+  for (const c of ["Folie stretch manuala", "Cartoane"]) {
+    if (!formular.corp.includes(`<option value="${c}"`)) rau("categoria lipsește din filtru", c);
+    else ok("categoria apare în filtru: " + c);
+  }
+  if (!formular.corp.includes("— toate categoriile —")) rau("nu se poate renunța la filtru");
+  else ok("se poate renunța la filtru");
+  // Produsele pleacă o singură dată, ca date, nu clonate pe fiecare linie.
+  const aparitii = (formular.corp.match(/Produs pe stoc/g) || []).length;
+  if (aparitii > 2) rau("produsele se repetă în pagină", aparitii + " apariții");
+  else ok("produsele se trimit o singură dată (" + aparitii + " apariții)");
+
+  // Cantitate fără produs ales: oprită, nu 500 pe NOT NULL.
+  const inainteLinii = Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ?", [CLIENT])[0].n);
+  const rGol = await cer("/comenzi", {
+    metoda: "post",
+    body: { partener_id: String(CLIENT), livrare_partiala: "da",
+            "produs_id[]": [""], "cantitate[]": ["3"], "pret_unitar[]": ["10"] },
+  });
+  egal("cantitate fără produs ales nu salvează nimic",
+    Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ?", [CLIENT])[0].n), inainteLinii);
+  if (!rGol.corp.includes("niciun produs ales")) rau("nu spune că lipsește produsul");
+  else ok("spune limpede că n-a apăsat pe produs");
+
+  // --------------------------------------- categoriile aduse din fișierul Excel
+  console.log("\nImportul de categorii și gestiuni:");
+  const HANDLERE = require(path.join(RAD, "modules", "punte.js")).HANDLERE;
+  exec(`UPDATE produse SET categorie = NULL, gestiune = NULL WHERE id IN (${PROD_A}, ${PROD_B})`);
+  const rezCat = await HANDLERE.categorii_produse([
+    // același cod de două ori: o dată în coșul „diverse", o dată clasificat
+    { cod: "LP-A", produs: "Produs pe stoc", gestiune: "Materie prima", categorie: "diverse", um: "buc" },
+    { cod: "LP-A", produs: "Produs pe stoc", gestiune: "Materie prima", categorie: "Folie stretch manuala", um: "buc" },
+    // același articol în două gestiuni: ciocnire reală, nu scăpare
+    { cod: "LP-B", produs: "Produs lipsă", gestiune: "Online", categorie: "Cartoane", um: "kg" },
+    { cod: "LP-B", produs: "Produs lipsă", gestiune: "Produse Finite", categorie: "Cartoane", um: "kg" },
+    // cod care nu există în ERP
+    { cod: "LP-INEXISTENT", produs: "Articol fantomă", gestiune: "Online", categorie: "Saci", um: "buc" },
+  ]);
+  const dupaImport = (id) => q("SELECT categorie, gestiune, unitate_masura FROM produse WHERE id = ?", [id])[0] || {};
+  egal("categoria adevărată bate „diverse”", dupaImport(PROD_A).categorie, "Folie stretch manuala");
+  egal("gestiunea unică se scrie", dupaImport(PROD_A).gestiune, "Materie prima");
+  egal("categoria se scrie și când gestiunea e ambiguă", dupaImport(PROD_B).categorie, "Cartoane");
+  egal("gestiunea NU se ghicește când articolul stă în două", dupaImport(PROD_B).gestiune, null);
+  egal("ciocnirea de gestiuni se raportează", rezCat.mai_multe_gestiuni, 1);
+  egal("codul inexistent se raportează, nu se creează", rezCat.nepotrivite, 1);
+  egal("nu s-a născut niciun produs nou",
+    Number(q("SELECT COUNT(*) AS n FROM produse WHERE cod = 'LP-INEXISTENT'")[0].n), 0);
+  egal("unitatea de măsură diferită se numără, nu se suprascrie", rezCat.um_diferita, 1);
+  egal("și chiar nu s-a atins", dupaImport(PROD_B).unitate_masura, "buc");
+
+  // Reimportul aceluiași fișier nu mai are ce scrie.
+  const rezCat2 = await HANDLERE.categorii_produse([
+    { cod: "LP-A", produs: "Produs pe stoc", gestiune: "Materie prima", categorie: "Folie stretch manuala", um: "buc" },
+  ]);
+  egal("reimportul nu rescrie ce e deja corect", rezCat2.categorii_scrise + rezCat2.gestiuni_scrise, 0);
+
   // ------------------------------------------------- cine ajunge la Comenzi
   //
   // Bug-ul reparat: „Comenzi" atârna sub Vânzări, iar producția și depozitul
