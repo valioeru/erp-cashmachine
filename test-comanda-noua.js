@@ -169,13 +169,42 @@ const cateComenzi = () => Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE part
   if (!r.corp.includes("cel puțin o linie")) rau("nu spune că lipsesc liniile");
   else ok("o comandă fără nicio cantitate e oprită");
 
+  // --- fără răspuns la livrarea parțială --------------------------------------
+  //
+  // Întrebarea se pune agentului la plasare, nu depozitului peste trei zile.
+  // Radio-urile au `required`, dar asta e doar HTML: un POST venit din altă
+  // parte trebuie oprit tot aici, altfel depozitul rămâne iar cu întrebarea
+  // în brațe și comanda stă.
+  if (!/name="livrare_partiala"/.test((await cer("/comenzi/nou")).corp))
+    rau("formularul nu întreabă despre livrarea parțială");
+  else ok("formularul întreabă despre livrarea parțială");
+
+  r = await cer("/comenzi", {
+    metoda: "post",
+    body: { partener_id: "96302", numar: "CMD-FP",
+            "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
+  });
+  egal("fără răspuns la livrarea parțială nu se salvează", cateComenzi(), 0);
+  if (!r.corp.includes("livrare parțială")) rau("nu spune că lipsește răspunsul despre livrarea parțială");
+  else ok("spune limpede că lipsește răspunsul despre livrarea parțială");
+
+  r = await cer("/comenzi", {
+    metoda: "post",
+    body: { partener_id: "96302", numar: "CMD-FP2", livrare_partiala: "poate",
+            "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
+  });
+  egal("un răspuns inventat nu trece drept „da”", cateComenzi(), 0);
+
   // --- comanda bună trece ------------------------------------------------------
   r = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: "96302", numar: "CMD-2",
+    body: { partener_id: "96302", numar: "CMD-2", livrare_partiala: "nu",
             "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
   });
   egal("comanda bună se salvează", cateComenzi(), 1);
+  egal("răspunsul despre livrarea parțială se scrie în bază",
+    q("SELECT livrare_partiala FROM comenzi WHERE partener_id = 96302").map((x) => x.livrare_partiala),
+    ["nu"]);
   egal("pe clientul ales, nu pe primul din alfabet",
     q("SELECT p.nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.partener_id BETWEEN 96301 AND 96399").map((x) => x.nume),
     ["ZZZ CLIENTUL ADEVARAT SRL"]);
