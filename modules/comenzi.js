@@ -176,6 +176,41 @@ function lineRowsScript(produse) {
 
     function comenziRand(el) { return el.closest('tr'); }
 
+    // Lista de rezultate stă pe „fixed", nu pe „absolute".
+    //
+    // Pe „absolute" se desena corect, dar se vedea doar o dungă de câțiva
+    // pixeli: rândul e o celulă de tabel, iar undeva deasupra există un
+    // overflow pentru derularea pe orizontală. Orice strămoș cu overflow
+    // taie un element poziționat absolut, oricât de mare i-ar fi z-index-ul.
+    // „Fixed" îl scoate din tabel cu totul, iar poziția o calculăm noi din
+    // dreptunghiul câmpului. Prețul: trebuie repusă la derulare și la
+    // redimensionare, de-aia cele două ascultători de mai jos.
+    function comenziAseaza(cutie, input) {
+      var r = input.getBoundingClientRect();
+      var subSpatiu = window.innerHeight - r.bottom - 8;
+      cutie.style.left = r.left + 'px';
+      cutie.style.width = r.width + 'px';
+      // Dacă nu încape dedesubt, o punem deasupra câmpului.
+      if (subSpatiu < 140 && r.top > subSpatiu) {
+        cutie.style.top = 'auto';
+        cutie.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+        cutie.style.maxHeight = Math.max(120, r.top - 12) + 'px';
+      } else {
+        cutie.style.bottom = 'auto';
+        cutie.style.top = (r.bottom + 4) + 'px';
+        cutie.style.maxHeight = Math.max(120, subSpatiu) + 'px';
+      }
+    }
+    function comenziReaseaza() {
+      document.querySelectorAll('.rezultate-produs').forEach(function (cutie) {
+        if (cutie.hidden) return;
+        var input = cutie.parentNode.querySelector('.cauta-produs');
+        if (input) comenziAseaza(cutie, input);
+      });
+    }
+    window.addEventListener('scroll', comenziReaseaza, true);
+    window.addEventListener('resize', comenziReaseaza);
+
     // Filtrul de categorie: golește produsul ales dacă nu mai e în categorie,
     // ca să nu rămână pe linie un articol care contrazice filtrul de deasupra.
     function comenziFiltreaza(select) {
@@ -208,6 +243,7 @@ function lineRowsScript(produse) {
       if (!gasite.length) {
         cutie.innerHTML = '<div class="rezultat-gol">Niciun produs aici. Schimbă categoria sau scrie altceva.</div>';
         cutie.hidden = false;
+        comenziAseaza(cutie, input);
         return;
       }
       cutie.innerHTML = gasite.map(function (p) {
@@ -217,6 +253,7 @@ function lineRowsScript(produse) {
                '" onclick="comenziAlege(this)">' + cod + p[2] + ' ' + catTxt + '</button>';
       }).join('');
       cutie.hidden = false;
+      comenziAseaza(cutie, input);
     }
 
     function comenziAlege(btn) {
@@ -262,8 +299,10 @@ function lineRowsScript(produse) {
     }
   </script>
   <style>
-    .rezultate-produs { position:absolute; z-index:40; left:0; right:0; top:100%; max-height:300px; overflow:auto;
-      background:var(--card,#fff); border:1px solid var(--border,#ddd); border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.12); }
+    /* fixed, nu absolute: vezi comentariul din comenziAseaza. left/top/width
+       le pune JS-ul din dreptunghiul câmpului. */
+    .rezultate-produs { position:fixed; z-index:400; max-height:300px; overflow-y:auto; min-width:240px;
+      background:var(--card,#fff); border:1px solid var(--border,#ddd); border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.18); }
     .rezultat-produs { display:block; width:100%; text-align:left; padding:6px 10px; border:0; background:none; cursor:pointer; font-size:13px; }
     .rezultat-produs:hover { background:var(--accent-slab,#e8f0fe); }
     .rezultat-cod { color:var(--text-muted); font-variant-numeric:tabular-nums; }
