@@ -2,33 +2,14 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, actionLinks, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
-const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const { send, redirect } = require("../lib/router");
+const livrare = require("../lib/livrare-partiala");
 
-// Drumul unei comenzi, în ordinea în care se întâmplă de fapt:
-// agentul o plasează → producția o preia → marfa ajunge în depozit → abia
-// atunci agentul poate cere factura → cineva cu drepturi pe facturare o
-// validează și pleacă în SmartBill.
-const STATUS_LABEL = {
-  // „Ciornă" e starea comenzilor citite automat dintr-un email. Nu e în FLUX
-  // dinadins: nu se poate factura din ea, nu intră în lista depozitului, și
-  // nu pleacă niciun anunț. Există un singur drum înainte — agentul apasă
-  // „Validează", iar atunci comanda devine „nouă" și abia atunci se anunță
-  // biroul și depozitul. Un robot care citește emailuri n-are voie să pună
-  // singur marfă în mișcare.
-  ciorna: '<span class="badge galben">ciornă — de validat</span>',
-  noua: '<span class="badge gri">nouă</span>',
-  confirmata: '<span class="badge albastru">confirmată</span>',
-  in_productie: '<span class="badge galben">în producție</span>',
-  in_stoc_depozit: '<span class="badge verde">în stoc depozit</span>',
-  facturata: '<span class="badge verde">facturată</span>',
-  livrata: '<span class="badge verde">livrată</span>',
-  anulata: '<span class="badge rosu">anulată</span>',
-};
-// Ordinea fluxului — folosită ca să știm ce urmează și de la ce pas se poate factura.
-const FLUX = ["noua", "confirmata", "in_productie", "in_stoc_depozit", "facturata", "livrata"];
-// De la starea asta încolo agentul poate apăsa „Facturează".
-const STARE_FACTURABILA = "in_stoc_depozit";
+// Stările comenzii și bara de pași stau în lib/comenzi-stari.js: le citește
+// și depozitul, iar o a doua copie aici ar fi rămas în urmă la prima
+// modificare. Vezi comentariul de acolo.
+const stari = require("../lib/comenzi-stari");
+const { STATUS_LABEL, poateFactura, bara: baraStatus } = stari;
 
 // ------------------------------------------------------------------
 // Anuntul de comanda noua
@@ -159,11 +140,6 @@ async function anuntaComandaNoua(comandaId, user) {
   return { status, eroare, catre };
 }
 
-function poateFactura(comanda) {
-  const i = FLUX.indexOf(comanda.status);
-  return i >= FLUX.indexOf(STARE_FACTURABILA) && comanda.status !== "anulata";
-}
-
 function asArray(v) {
   if (v === undefined) return [];
   return Array.isArray(v) ? v : [v];
@@ -204,23 +180,6 @@ function register(router) {
          ORDER BY c.id DESC`
       )
       .all(per.de, per.la + " 23:59:59");
-    // Totalul perioadei, pe zile, fără comenzile anulate.
-    const peZi = new Map();
-    for (const c of comenzi) {
-      if (c.status === "anulata") continue;
-      const d = String(c.data || "").slice(0, 10);
-      if (!d) continue;
-      const z = peZi.get(d) || { data: d, comenzi: 0, total: 0 };
-      z.comenzi += 1;
-      z.total += Number(c.total || 0);
-      peZi.set(d, z);
-    }
-    const COLOANE_ZILE = [
-      { camp: "comenzi", eticheta: "Comenzi", tip: "nr" },
-      { camp: "total", eticheta: "Total", tip: "bani" },
-    ];
-    const zile = [...peZi.values()];
-    const tPer = aduna(zile, COLOANE_ZILE);
     const body = `
       <div class="toolbar"><a href="/comenzi/nou" class="btn">+ Comandă nouă</a></div>
       <form class="filtre perioade" method="get" action="/comenzi">
@@ -242,15 +201,10 @@ function register(router) {
           STATUS_LABEL[c.status] || esc(c.status),
           money(c.total),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
-        ]).concat(
-          comenzi.length
-            ? [[`<strong>Total ${esc(per.eticheta)}</strong>`, `${tPer.comenzi} comenzi (fără anulate)`, "", "", `<strong>${money(tPer.total)}</strong>`, ""]]
-            : []
-        )
+        ])
       )}
-      ${rezumatPeLuni(zile, COLOANE_ZILE, { eticheta: per.eticheta })}
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Vânzări — comenzi", active: "/comenzi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Comenzi", active: "/comenzi", body }));
   });
 
   // Formularul de comandă nouă, redat și la deschidere și când salvarea a fost
@@ -309,6 +263,21 @@ function register(router) {
         <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
         <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta" value="${esc(v.data_livrare_ceruta || "")}"></label>
       </div>
+      <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
+        <legend style="font-size:13px;padding:0 4px">Dacă nu e toată marfa pe stoc, clientul acceptă livrare parțială?</legend>
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-right:18px">
+          <input type="radio" name="livrare_partiala" value="da" required${v.livrare_partiala === "da" ? " checked" : ""}>
+          <span>Da — trimitem ce e acum, restul mai târziu</span>
+        </label>
+        <label style="display:inline-flex;align-items:center;gap:6px">
+          <input type="radio" name="livrare_partiala" value="nu" required${v.livrare_partiala === "nu" ? " checked" : ""}>
+          <span>Nu — doar comanda completă</span>
+        </label>
+        <div class="mic" style="color:var(--text-muted);margin-top:6px">
+          Întreabă clientul acum, nu peste trei zile. Depozitul nu are voie să trimită jumătate de comandă fără răspunsul ăsta.
+        </div>
+      </fieldset>
+
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
       <h2>Produse comandate</h2>
@@ -366,6 +335,7 @@ function register(router) {
       numar,
       observatii,
       data_livrare_ceruta: ctx.body.data_livrare_ceruta,
+      livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
       linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i] })),
     };
     const idClient = parseInt(partener_id, 10);
@@ -381,6 +351,17 @@ function register(router) {
     if (!produsIds.some((id, i) => Number(cantitati[i] || 0) > 0)) {
       return await formularComandaNoua(ctx, {
         eroare: "Scrie cel puțin o linie cu cantitate — altfel comanda ajunge goală la depozit.",
+        valori,
+      });
+    }
+
+    // Livrarea parțială se întreabă acum, nu după ce depozitul descoperă că
+    // lipsește marfă. Radio-urile din formular au `required`, dar ce vine prin
+    // HTTP nu se crede pe cuvânt: o comandă trimisă din altă parte ar intra
+    // fără răspuns, iar depozitul ar rămâne iar cu întrebarea în brațe.
+    if (!valori.livrare_partiala) {
+      return await formularComandaNoua(ctx, {
+        eroare: "Spune dacă clientul acceptă livrare parțială. Depozitul nu are ce face cu o comandă fără răspunsul ăsta.",
         valori,
       });
     }
@@ -408,14 +389,15 @@ function register(router) {
 
     const info = await db
       .prepare(
-        "INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta) VALUES (?, ?, ?, ?, ?) RETURNING id"
+        "INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala) VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
       )
       .run(
         partener_id,
         numar || "",
         observatii || "",
         ctx.user ? ctx.user.id : null,
-        String(ctx.body.data_livrare_ceruta || "") || null
+        String(ctx.body.data_livrare_ceruta || "") || null,
+        valori.livrare_partiala
       );
     const comandaId = info.lastInsertRowid;
 
@@ -478,19 +460,54 @@ function register(router) {
       )
       .all(comanda.id);
 
-    // Statusul îl mișcă producția/depozitul/adminul; agentul doar facturează
-    // când marfa e gata. Așa nu-și trece nimeni singur comanda pe „livrată".
-    const potiSchimbaStatus = ctx.user && ["admin", "depozit", "financiar"].includes(ctx.user.rol);
+    // Fiecare mută bucata lui de drum: producția „în producție" și
+    // „finalizat", depozitul stările de stoc și livrarea, financiarul
+    // facturarea. Agentul nu are stările de livrare — el nu vede când pleacă
+    // marfa din depozit, deci n-are de unde să știe; își poate anula doar
+    // comanda lui. Lista e în lib/comenzi-stari.js.
+    const stariDePus = stari.stariPermise(ctx.user, comanda);
+    // Ștergerea rămâne unde era: nu e un pas din flux, e o greșeală de
+    // reparat, și n-o deschid producției doar fiindcă acum vede pagina.
+    const potiSterge = ctx.user && ["admin", "depozit", "financiar"].includes(ctx.user.rol);
+
+    // Răspunsul clientului la livrarea parțială. Îl poate schimba agentul
+    // comenzii sau un admin — e o informație luată la telefon, nu o decizie
+    // a depozitului, deci depozitul n-o rescrie.
+    const acceptaPartial = livrare.acceptaPartial(comanda);
+    const potiRaspundeLivrare =
+      ctx.user && (ctx.user.rol === "admin" || Number(comanda.agent_id) === Number(ctx.user.id) || ctx.user.rol === "vanzari");
+    const formLivrare = (etichetaButon) =>
+      `<form method="post" action="/comenzi/${comanda.id}/livrare-partiala" class="inline-form" style="gap:6px;margin-top:6px">
+         <select name="livrare_partiala">
+           <option value="da"${livrare.raspuns(comanda) === "da" ? " selected" : ""}>acceptă livrare parțială</option>
+           <option value="nu"${livrare.raspuns(comanda) === "nu" ? " selected" : ""}>doar comanda completă</option>
+         </select>
+         <button class="btn small" type="submit">${esc(etichetaButon)}</button>
+       </form>`;
 
     const body = `
+      ${baraStatus(comanda)}
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">Client</div>${esc(comanda.partener_nume)}</div>
           <div><div class="k">Data</div>${esc(comanda.data)}</div>
           <div><div class="k">Status</div>${STATUS_LABEL[comanda.status] || esc(comanda.status)}</div>
+          <div><div class="k">Livrare parțială</div>${livrare.eticheta(comanda)}${
+            potiRaspundeLivrare && comanda.status !== "anulata" && !comanda.factura_id
+              ? formLivrare(livrare.raspuns(comanda) ? "Schimbă" : "Răspunde")
+              : ""
+          }</div>
           <div><div class="k">Observații</div>${esc(comanda.observatii) || "—"}</div>
         </div>
       </div>
+      ${
+        !livrare.raspuns(comanda) && comanda.status !== "anulata"
+          ? `<p style="max-width:820px;color:var(--text-muted);font-size:13px;margin:0 0 12px">
+               Comanda asta e de dinainte să întrebăm despre livrarea parțială. Până primește un răspuns,
+               depozitul o tratează ca „doar comanda completă" — nu pleacă nimic pe jumătate din greșeală.
+             </p>`
+          : ""
+      }
 
       ${table(
         ["Produs", "Cantitate", "UM", "Preț unitar", "Subtotal", "În stoc acum"],
@@ -569,7 +586,12 @@ function register(router) {
                ${
                  stoc.acoperiteTot
                    ? `<form method="post" action="/comenzi/${comanda.id}/factureaza" class="inline-form"><button class="btn" type="submit">Facturează tot</button></form>`
-                   : `<form method="post" action="/comenzi/${comanda.id}/factureaza-partial" class="inline-form"><button class="btn" type="submit">Facturează parțial ce e în stoc</button></form>`
+                   : acceptaPartial
+                     ? `<form method="post" action="/comenzi/${comanda.id}/factureaza-partial" class="inline-form"><button class="btn" type="submit">Facturează parțial ce e în stoc</button></form>`
+                     : `<span style="color:var(--text-muted);font-size:13px;max-width:460px">
+                          ${livrare.raspuns(comanda) === "nu" ? "Clientul a cerut comanda completă" : "Nu știm dacă clientul acceptă parțial"} —
+                          nu se facturează pe bucăți. Comanda așteaptă marfa, sau schimbi răspunsul mai sus.
+                        </span>`
                }
                <form method="post" action="/comenzi/${comanda.id}/decizie" class="inline-form">
                  <input type="hidden" name="decizie" value="astept">
@@ -594,19 +616,21 @@ function register(router) {
 
       <h2>Acțiuni</h2>
       ${
-        potiSchimbaStatus
+        stariDePus.length
           ? `<form method="post" action="/comenzi/${comanda.id}/status" class="form" style="max-width:360px">
               <label class="field"><span>Schimbă status</span>
                 <select name="status">
-                  ${Object.keys(STATUS_LABEL)
-                    .map((s) => `<option value="${s}" ${s === comanda.status ? "selected" : ""}>${s.replace(/_/g, " ")}</option>`)
+                  ${stariDePus
+                    .map((s) => `<option value="${s}" ${s === comanda.status ? "selected" : ""}>${esc(stari.PASI_ETICHETE[s] || s.replace(/_/g, " "))}</option>`)
                     .join("")}
                 </select>
               </label>
               <button type="submit" class="btn small">Actualizează status</button>
+              <div class="mic" style="color:var(--text-muted);margin-top:4px">Doar pașii care sunt ai tăi. Restul îi mută depozitul, producția sau facturarea.</div>
             </form>`
-          : `<p style="color:var(--text-muted);font-size:13px">
-               Statusul îl schimbă depozitul sau producția. Tu vei putea factura când comanda ajunge „în stoc depozit".
+          : `<p style="color:var(--text-muted);font-size:13px;max-width:520px">
+               Pe comanda asta n-ai pași de mutat. Depozitul o verifică pe stoc, producția o face, facturarea o închide —
+               iar tu vei putea cere factura când ajunge „în stoc depozit".
              </p>`
       }
 
@@ -624,7 +648,7 @@ function register(router) {
               : `<span style="color:var(--text-muted);font-size:13px">Facturarea se deblochează la statusul „în stoc depozit".</span>`
         }
         ${
-          potiSchimbaStatus
+          potiSterge
             ? `<form method="post" action="/comenzi/${comanda.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi definitiv comanda?')">
                  <button type="submit" class="link-btn danger">Șterge comanda</button>
                </form>`
@@ -658,14 +682,14 @@ function register(router) {
   });
 
   router.post("/comenzi/:id/status", async (ctx) => {
-    // Doar producția, depozitul, financiarul sau adminul mișcă statusul.
-    if (!ctx.user || !["admin", "depozit", "financiar"].includes(ctx.user.rol)) {
-      return redirect(ctx.res, `/comenzi/${ctx.params.id}`);
-    }
+    if (!ctx.user) return redirect(ctx.res, "/login");
     const nou = String(ctx.body.status || "");
-    if (!Object.prototype.hasOwnProperty.call(STATUS_LABEL, nou)) return redirect(ctx.res, `/comenzi/${ctx.params.id}`);
     const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
     if (!c) return redirect(ctx.res, "/comenzi");
+    // Lista se citește din comandă, nu doar din rol: agentul își mută doar
+    // comanda lui. Verificarea e aici, nu doar în `<select>` — altfel un POST
+    // trimis de mână ar putea pune orice stare pe orice comandă.
+    if (!stari.poateMuta(ctx.user, c, nou)) return redirect(ctx.res, `/comenzi/${ctx.params.id}`);
     await db.prepare("UPDATE comenzi SET status = ? WHERE id = ?").run(nou, c.id);
     await db
       .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
@@ -752,6 +776,56 @@ function register(router) {
     redirect(ctx.res, `/comenzi/${ctx.params.id}`);
   });
 
+  // Răspunsul la livrarea parțială, dat sau schimbat după plasare.
+  //
+  // Există pentru comenzile de dinainte de coloana asta și pentru cazul real
+  // în care clientul se răzgândește la telefon. Nu-l dă depozitul: el vede
+  // răspunsul, nu-l scrie — altfel „clientul acceptă" ar deveni ce-i convine
+  // depozitului într-o zi aglomerată.
+  //
+  // Dacă răspunsul se schimbă în „da" iar comanda stătea pe „așteaptă marfă"
+  // cu ceva disponibil, drumul se redeschide singur: trece pe „în stoc
+  // depozit" și agentul poate factura partea acoperită. Invers, un „nu" pe o
+  // comandă neacoperită integral o trimite înapoi la așteptare.
+  router.post("/comenzi/:id/livrare-partiala", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const comanda = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
+    if (!comanda) return redirect(ctx.res, "/comenzi");
+    const potrivit =
+      ctx.user.rol === "admin" || ctx.user.rol === "vanzari" || Number(comanda.agent_id) === Number(ctx.user.id);
+    if (!potrivit) return redirect(ctx.res, `/comenzi/${comanda.id}`);
+
+    const raspuns = livrare.valid((ctx.body || {}).livrare_partiala);
+    if (!raspuns) return redirect(ctx.res, `/comenzi/${comanda.id}`);
+    await db.prepare("UPDATE comenzi SET livrare_partiala = ? WHERE id = ?").run(raspuns, comanda.id);
+
+    // Recalculăm starea doar dacă depozitul se uitase deja la stoc. Înainte de
+    // verificare n-avem ce muta: comanda e tot „nouă" și așteaptă depozitul.
+    if (comanda.verificata_depozit_la && ["asteapta_marfa", "in_stoc_depozit", "confirmata"].includes(comanda.status)) {
+      try {
+        const { acoperiteTot, acoperitePartial } = await require("./warehouse").potrivire(comanda.id);
+        const nou = livrare.statusDupaVerificare({
+          acoperiteTot,
+          acoperitePartial,
+          comanda: { ...comanda, livrare_partiala: raspuns },
+        });
+        if (nou !== comanda.status) await db.prepare("UPDATE comenzi SET status = ? WHERE id = ?").run(nou, comanda.id);
+      } catch (e) {
+        console.error("[comenzi] recalcul status dupa livrare partiala:", e.message);
+      }
+    }
+
+    await db
+      .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+      .run(
+        comanda.partener_id,
+        `Comanda ${comanda.numar || "#" + comanda.id}: ${livrare.text({ livrare_partiala: raspuns })}`,
+        null,
+        ctx.user.id
+      );
+    redirect(ctx.res, `/comenzi/${comanda.id}`);
+  });
+
   // Facturare parțială: intră pe factură doar cât e acoperit din stoc acum.
   // Restul rămâne pe comandă, cu „cantitate_livrata" mărită, ca a doua oară
   // să se factureze exact ce a mai rămas.
@@ -760,6 +834,29 @@ function register(router) {
     const comanda = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
     if (!comanda) return redirect(ctx.res, "/comenzi");
     if (comanda.status === "anulata") return redirect(ctx.res, `/comenzi/${comanda.id}`);
+
+    // Butonul nu se arată dacă clientul n-a acceptat parțial, dar asta e doar
+    // HTML. Regula se ține aici: un POST trimis direct nu are voie să taie
+    // comanda în bucăți pe care clientul nu le-a cerut.
+    if (!livrare.acceptaPartial(comanda)) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user,
+          title: "Livrarea parțială nu e acceptată",
+          active: "/comenzi",
+          body: `<p style="max-width:620px">
+                   ${
+                     livrare.raspuns(comanda) === "nu"
+                       ? "Clientul a cerut comanda completă, deci nu se facturează pe bucăți."
+                       : "Nimeni n-a întrebat clientul dacă acceptă livrare parțială, iar fără răspuns nu pleacă marfă pe jumătate."
+                   }
+                 </p>
+                 <a class="btn secondary" href="/comenzi/${comanda.id}">Înapoi la comandă</a>`,
+        })
+      );
+    }
 
     const { linii: potrivite } = await require("./warehouse").potrivire(comanda.id);
     const deFacturat = potrivite.filter((l) => l.acoperit > 0.0001);

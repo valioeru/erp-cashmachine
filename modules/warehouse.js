@@ -23,6 +23,8 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const livrare = require("../lib/livrare-partiala");
+const stari = require("../lib/comenzi-stari");
 
 const REZERVARE_ORE = 24;
 
@@ -199,13 +201,14 @@ function register(router) {
         <div class="card"><div class="label">Rezervări active</div><div class="value">${Number(nrRezervari.n || 0)}</div></div>
       </div>
       ${table(
-        ["Nr.", "Client", "Cerut pe", "Status", "Acoperire stoc", "Valoare", ""],
+        ["Nr.", "Client", "Cerut pe", "Status", "Acoperire stoc", "Livrare parțială", "Valoare", ""],
         comenzi.map((c) => [
           esc(c.numar || "#" + c.id),
           esc(c.partener_nume),
           esc(c.data_livrare_ceruta || "—"),
-          esc(c.status),
+          stari.eticheta(c.status),
           stareStoc(c.id),
+          livrare.eticheta(c),
           money(c.total),
           `<a class="btn small" href="/depozit/comanda/${c.id}">Deschide</a>`,
         ])
@@ -221,7 +224,11 @@ function register(router) {
       .prepare("SELECT c.*, p.nume AS partener_nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
       .get(id);
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Comanda nu există", active: "/depozit", body: "<p>Comanda nu există.</p>" }));
-    const { linii, acoperiteTot } = await potrivire(id);
+    const { linii, acoperiteTot, acoperitePartial } = await potrivire(id);
+    // Ce are voie depozitul să trimită, după răspunsul luat de agent de la
+    // client. Operatorul îl vede, nu îl schimbă.
+    const acceptaPartial = livrare.acceptaPartial(c);
+    const statusDupa = livrare.statusDupaVerificare({ acoperiteTot, acoperitePartial, comanda: c });
     const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 2000").all();
     const aprov = await db
       .prepare(
@@ -275,8 +282,20 @@ function register(router) {
     const actiuni = poateDepozit(ctx.user)
       ? `<div class="toolbar" style="flex-wrap:wrap;gap:8px">
            <form method="post" action="/depozit/comanda/${id}/confirma" class="inline-form">
-             <button class="btn" type="submit" ${acoperiteTot ? "" : 'title="Nu tot e pe stoc — confirmarea trimite doar ce se poate acoperi"'}>
-               Confirmă disponibilitatea
+             <button class="btn" type="submit" title="${esc(
+               statusDupa === "in_stoc_depozit"
+                 ? acoperiteTot
+                   ? "Marfa e pe stoc: comanda pleacă spre livrare."
+                   : "Clientul acceptă parțial: pleacă ce e pe stoc, restul rămâne pe comandă."
+                 : "Nu pleacă marfă acum. Comanda rămâne aici și așteaptă aprovizionarea sau producția."
+             )}">
+               ${
+                 statusDupa === "in_stoc_depozit"
+                   ? acoperiteTot
+                     ? "Aprobă — pleacă spre livrare"
+                     : "Aprobă parțial — pleacă ce e pe stoc"
+                   : "Confirmă verificarea — așteaptă marfă"
+               }
              </button>
            </form>
            <form method="post" action="/depozit/comanda/${id}/rezerva" class="inline-form">
@@ -299,11 +318,26 @@ function register(router) {
 
     const body = `
       ${subnavDepozit("/depozit", ctx.user)}
+      ${stari.bara(c)}
       <p style="color:var(--text-muted)">
-        Status: <strong>${esc(c.status)}</strong> ·
+        Status: ${stari.eticheta(c.status)} ·
         cerută pe ${esc(c.data_livrare_ceruta || "fără termen")} ·
         ${c.verificata_depozit_la ? "verificată de depozit la " + esc(String(c.verificata_depozit_la).slice(0, 16)) : "neverificată încă"}
       </p>
+      <div class="detail-box" style="max-width:820px;border-left:4px solid ${
+        acceptaPartial ? "var(--verde,#1a7f42)" : "var(--rosu,#b3261e)"
+      }">
+        <strong>Livrare parțială:</strong> ${livrare.eticheta(c)}
+        <div class="mic" style="color:var(--text-muted);margin-top:4px">
+          ${
+            acceptaPartial
+              ? "Clientul a spus că primește ce e pe stoc acum, restul mai târziu. Ai voie să trimiți incomplet."
+              : livrare.raspuns(c) === "nu"
+                ? "Clientul vrea comanda întreagă. Nu trimite nimic până nu e acoperită tot — cere aprovizionare pentru ce lipsește."
+                : "Nimeni n-a întrebat clientul. Până răspunde agentul, comanda se tratează ca „doar completă”."
+          }
+        </div>
+      </div>
       ${actiuni}
       ${table(["Produs", "Cerut", "Livrat", "Stoc fizic", "Rezervat de alții", "Disponibil", "Lipsă", "Stare", "Aprovizionare"], randuri)}
       ${
@@ -327,13 +361,53 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: `Comanda ${c.numar || "#" + c.id} — ${c.partener_nume}`, active: "/depozit", body }));
   });
 
-  // Confirmarea depozitului: marfa există, comanda se întoarce la agent.
+  // Confirmarea depozitului: operatorul s-a uitat la stoc și spune încotro
+  // pleacă comanda.
+  //
+  // Până acum butonul scria „confirmata" orice-ar fi fost pe stoc, iar de
+  // acolo nu se putea factura: cineva trebuia să mai mute o dată statusul, de
+  // mână, pe „în stoc depozit". În practică nu-l muta nimeni, și comenzile cu
+  // marfa pe raft stăteau zile întregi așteptând un clic de care nu știa
+  // nimeni. Acum butonul duce comanda exact unde îi e locul:
+  //
+  //   tot pe stoc                   → în stoc depozit, pleacă spre livrare
+  //   parțial, clientul acceptă     → în stoc depozit, pleacă cât e
+  //   parțial sau nimic, fără accept→ așteaptă marfă, rămâne în lista asta
+  //
+  // Regula e în lib/livrare-partiala.js, ca să fie una singură și pentru
+  // depozit, și pentru agent.
   router.post("/depozit/comanda/:id/confirma", async (ctx) => {
     if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit");
     const id = parseInt(ctx.params.id, 10);
+    const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(id);
+    if (!c) return redirect(ctx.res, "/depozit");
+    if (c.status === "anulata") return redirect(ctx.res, `/depozit/comanda/${id}`);
+
+    const { acoperiteTot, acoperitePartial } = await potrivire(id);
+    const status = livrare.statusDupaVerificare({ acoperiteTot, acoperitePartial, comanda: c });
+
     await db
-      .prepare("UPDATE comenzi SET status = 'confirmata', verificata_depozit_la = ?, verificata_depozit_de = ? WHERE id = ?")
-      .run(acum(), ctx.user.nume, id);
+      .prepare("UPDATE comenzi SET status = ?, verificata_depozit_la = ?, verificata_depozit_de = ? WHERE id = ?")
+      .run(status, acum(), ctx.user.nume, id);
+
+    // Agentul trebuie să afle fără să întrebe pe telefon. Scrierea în istoric
+    // nu are voie să rupă confirmarea: marfa e verificată oricum.
+    try {
+      const spune =
+        status === "in_stoc_depozit"
+          ? acoperiteTot
+            ? "Toată marfa e pe stoc — comanda pleacă spre livrare."
+            : "Marfa e doar parțial pe stoc, iar clientul acceptă livrare parțială — pleacă ce există."
+          : acoperitePartial
+            ? "Lipsește o parte din marfă, iar clientul vrea comanda completă — așteaptă aprovizionarea."
+            : "Nimic nu e pe stoc — comanda așteaptă aprovizionarea sau producția.";
+      await db
+        .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+        .run(c.partener_id, `Comanda ${c.numar || "#" + c.id}: verificată de depozit`, spune, ctx.user.id);
+    } catch (e) {
+      console.error("[depozit] nu am putut scrie confirmarea in istoric:", e.message);
+    }
+
     redirect(ctx.res, `/depozit/comanda/${id}`);
   });
 
