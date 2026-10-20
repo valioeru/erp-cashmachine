@@ -359,6 +359,32 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
   ]);
   egal("reimportul nu rescrie ce e deja corect", rezCat2.categorii_scrise + rezCat2.gestiuni_scrise, 0);
 
+  // Și prin pagina de import, cu fișier, nu doar prin punte.
+  require(path.join(RAD, "modules", "import.js")).register(router);
+  exec(`UPDATE produse SET categorie = NULL, gestiune = NULL WHERE id IN (${PROD_A}, ${PROD_B})`);
+  const csv = [
+    "Cod,Produs,Gestiune,Categorie,U.M.",
+    "LP-A,Produs pe stoc,Materie prima,diverse,buc",
+    "LP-A,Produs pe stoc,Materie prima,Folie stretch manuala,buc",
+    "LP-B,Produs lipsa,Online,Cartoane,buc",
+  ].join("\n");
+  const rImport = await cer("/import/categorii", {
+    metoda: "post",
+    user: { id: 1, nume: "Vali", rol: "admin" },
+    body: { __files: { fisier: [{ filename: "categorii.csv", data: Buffer.from(csv, "utf8") }] } },
+  });
+  if (!rImport.corp.includes("Categorii scrise")) rau("pagina de import nu raportează ce a scris");
+  else ok("pagina de import raportează ce a scris");
+  egal("importul din fișier scrie categoria", dupaImport(PROD_A).categorie, "Folie stretch manuala");
+  egal("și gestiunea", dupaImport(PROD_B).gestiune, "Online");
+  // Un om care nu e admin nu importă nimic.
+  exec(`UPDATE produse SET categorie = NULL WHERE id = ${PROD_A}`);
+  await cer("/import/categorii", {
+    metoda: "post", user: GABI,
+    body: { __files: { fisier: [{ filename: "categorii.csv", data: Buffer.from(csv, "utf8") }] } },
+  });
+  egal("doar adminul importă", dupaImport(PROD_A).categorie, null);
+
   // ------------------------------------------------- cine ajunge la Comenzi
   //
   // Bug-ul reparat: „Comenzi" atârna sub Vânzări, iar producția și depozitul
