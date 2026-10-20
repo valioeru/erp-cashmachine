@@ -18,6 +18,7 @@ module.exports = function registerRute(router, deps) {
   const TIPURI_ETICHETE = {
     parteneri: "Clienți și furnizori (lista din SmartBill)",
     produse: "Produse / servicii",
+    categorii_produse: "Categorii și gestiuni pe articole",
     stoc: "Stoc la zi",
     productie: "Rapoarte de producție (dau rețetele)",
     consum: "Bonuri de consum",

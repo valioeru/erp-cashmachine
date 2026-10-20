@@ -691,6 +691,118 @@ function potrivesteProdus(idx, cod, den) {
 // dacă îl depășește de peste cinci ori, nu se scrie deloc.
 const PRAG_COST_ABERANT = 5;
 
+// Categoriile și gestiunile articolelor, din registrul ținut în Excel.
+//
+// Nomenclatorul de produse a primit coloanele `categorie` și `gestiune`, dar
+// au rămas goale pe aproape toate cele 4.100 de produse. Fără ele, filtrul
+// din formularul de comandă n-are ce filtra: agentul derulează o listă de
+// patru mii de rânduri ca să găsească o folie.
+//
+// DOUĂ LUCRURI PE CARE FIȘIERUL LE SPUNE ALTFEL DECÂT LE ȚINE BAZA:
+//
+// 1. CATEGORIA. Un cod apare uneori de două ori, o dată cu categoria lui
+//    adevărată și o dată cu „diverse" — coșul în care cade ce n-a apucat
+//    nimeni să clasifice. Categoria adevărată bate „diverse". După regula
+//    asta nu mai rămâne niciun cod cu două categorii reale.
+//
+// 2. GESTIUNEA. Aici ciocnirea e reală, nu o scăpare: același articol chiar
+//    stă în Online ȘI în Produse Finite, sau la Alți Furnizori ȘI la Materie
+//    primă. Baza are o singură coloană `gestiune` pe produs, deci n-am unde
+//    pune două. Nu ghicesc: scriu gestiunea doar când articolul are una
+//    singură în fișier, iar pe celelalte le întorc la numărătoare, ca să se
+//    vadă câte sunt și să se decidă pe ele separat.
+//
+// Unitatea de măsură NU se atinge. E în fișier, dar de ea atârnă cantitățile
+// de pe comenzi și facturi; o schimbare acolo rescrie tăcut cât s-a vândut.
+// Se numără câte diferă și atât.
+const CATEGORIE_COS = "diverse";
+
+function alegeCategorie(variante) {
+  const toate = [...new Set(variante.map((x) => curat(x.categorie)).filter(Boolean))];
+  const reale = toate.filter((c) => c.toLowerCase() !== CATEGORIE_COS);
+  if (reale.length === 1) return { valoare: reale[0], conflict: false };
+  if (reale.length === 0 && toate.length) return { valoare: toate[0], conflict: false };
+  return { valoare: null, conflict: reale.length > 1 };
+}
+
+async function ingestCategoriiProduse(randuri) {
+  const produse = await db
+    .prepare("SELECT id, cod, denumire, categorie, gestiune, unitate_masura FROM produse WHERE activ = 1")
+    .all();
+  const idx = indexProduse(produse);
+
+  // Fișierul are mai multe rânduri pe același articol; întâi îl strângem.
+  const peArticol = new Map();
+  for (const r of randuri) {
+    const cod = curat(r.cod);
+    const den = curat(r.produs) || curat(r.denumire);
+    const cheie = normCod(cod) || normNume(den);
+    if (!cheie) continue;
+    if (!peArticol.has(cheie)) peArticol.set(cheie, { cod, den, variante: [] });
+    peArticol.get(cheie).variante.push({ categorie: curat(r.categorie), gestiune: curat(r.gestiune), um: curat(r.um) });
+  }
+
+  let categoriiScrise = 0, gestiuniScrise = 0, neschimbate = 0, nepotrivite = 0;
+  let categoriiInConflict = 0, maiMulteGestiuni = 0, umDiferita = 0;
+  const exempleNepotrivite = [], exempleGestiuni = [], exempleUm = [];
+  const atinse = new Set();
+
+  for (const { cod, den, variante } of peArticol.values()) {
+    const gasite = potrivesteProdus(idx, cod, den);
+    if (!gasite.length) {
+      nepotrivite++;
+      if (exempleNepotrivite.length < 25) exempleNepotrivite.push(`${cod} — ${den}`.slice(0, 80));
+      continue;
+    }
+
+    const cat = alegeCategorie(variante);
+    if (cat.conflict) categoriiInConflict++;
+
+    const gestiuni = [...new Set(variante.map((x) => x.gestiune).filter(Boolean))];
+    const gestiune = gestiuni.length === 1 ? gestiuni[0] : null;
+    if (gestiuni.length > 1) {
+      maiMulteGestiuni++;
+      if (exempleGestiuni.length < 20) exempleGestiuni.push(`${cod}: ${gestiuni.join(" + ")}`.slice(0, 90));
+    }
+
+    const um = (variante.find((x) => x.um) || {}).um || "";
+
+    for (const p of gasite) {
+      if (atinse.has(p.id)) continue;
+      atinse.add(p.id);
+      if (um && curat(p.unitate_masura) && um.toLowerCase() !== curat(p.unitate_masura).toLowerCase()) {
+        umDiferita++;
+        if (exempleUm.length < 20) exempleUm.push(`${p.cod || p.id}: în bază „${p.unitate_masura}", în fișier „${um}"`.slice(0, 90));
+      }
+      let ceva = false;
+      if (cat.valoare && curat(p.categorie) !== cat.valoare) {
+        await db.prepare("UPDATE produse SET categorie = ? WHERE id = ?").run(cat.valoare, p.id);
+        categoriiScrise++;
+        ceva = true;
+      }
+      if (gestiune && curat(p.gestiune) !== gestiune) {
+        await db.prepare("UPDATE produse SET gestiune = ? WHERE id = ?").run(gestiune, p.id);
+        gestiuniScrise++;
+        ceva = true;
+      }
+      if (!ceva) neschimbate++;
+    }
+  }
+
+  return {
+    categorii_scrise: categoriiScrise,
+    gestiuni_scrise: gestiuniScrise,
+    neschimbate,
+    nepotrivite,
+    categorii_in_conflict: categoriiInConflict,
+    mai_multe_gestiuni: maiMulteGestiuni,
+    um_diferita: umDiferita,
+    exemple_nepotrivite: exempleNepotrivite,
+    exemple_mai_multe_gestiuni: exempleGestiuni,
+    exemple_um_diferita: exempleUm,
+  };
+}
+
 async function ingestCostProduse(randuri) {
   const produse = await db
     .prepare(
@@ -1352,6 +1464,7 @@ const HANDLERE = {
   consum: ingestConsum,
   profit_produs: ingestProfitProdus,
   cost_produse: ingestCostProduse,
+  categorii_produse: ingestCategoriiProduse,
   facturi: ingestFacturi,
   facturi_linii: ingestFacturiLinii,
   balante: ingestBalante,

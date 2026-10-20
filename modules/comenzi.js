@@ -145,27 +145,131 @@ function asArray(v) {
   return Array.isArray(v) ? v : [v];
 }
 
-function lineRowsScript() {
+// Produsele pleacă o singură dată în pagină, ca date, nu ca mii de
+// `<option>` clonate pe fiecare linie. Normalizarea pentru căutare se face
+// în browser, la încărcare: un al doilea exemplar al fiecărei denumiri, scris
+// în HTML, ar fi dublat degeaba pagina.
+//
+// MAX_REZULTATE ține lista scurtă. Fără el, o categorie cu 400 de articole
+// desenează 400 de rânduri la fiecare literă tastată și câmpul se mișcă greu
+// exact când omul scrie mai repede.
+const MAX_REZULTATE = 40;
+
+function lineRowsScript(produse) {
+  const date = (produse || []).map((p) => [
+    p.id,
+    String(p.cod || ""),
+    String(p.denumire || ""),
+    Number(p.pret_vanzare || 0),
+    String(p.categorie || "").trim(),
+  ]);
   return `<script>
+    var COMENZI_PRODUSE = ${JSON.stringify(date).replace(/</g, "\\u003c")};
+    var COMENZI_MAX = ${MAX_REZULTATE};
+    (function () {
+      var fara = function (s) {
+        return String(s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
+      };
+      COMENZI_PRODUSE.forEach(function (p) { p[5] = fara(p[1] + ' ' + p[2]); });
+      window.comenziFaraDiacritice = fara;
+    })();
+
+    function comenziRand(el) { return el.closest('tr'); }
+
+    // Filtrul de categorie: golește produsul ales dacă nu mai e în categorie,
+    // ca să nu rămână pe linie un articol care contrazice filtrul de deasupra.
+    function comenziFiltreaza(select) {
+      var rand = comenziRand(select);
+      var cautare = rand.querySelector('.cauta-produs');
+      var ascuns = rand.querySelector('input[name="produs_id[]"]');
+      if (ascuns && ascuns.value) {
+        var ales = COMENZI_PRODUSE.find(function (p) { return String(p[0]) === String(ascuns.value); });
+        var cat = select.value === '\\u0000' ? '' : select.value;
+        if (ales && select.value && ales[4] !== cat) { ascuns.value = ''; cautare.value = ''; }
+      }
+      cautare.focus();
+      comenziCauta(cautare);
+    }
+
+    function comenziCauta(input) {
+      var rand = comenziRand(input);
+      var cutie = rand.querySelector('.rezultate-produs');
+      var catSel = rand.querySelector('.cat-produs');
+      var cat = catSel ? catSel.value : '';
+      var q = window.comenziFaraDiacritice(input.value).trim();
+      var gasite = [];
+      for (var i = 0; i < COMENZI_PRODUSE.length && gasite.length < COMENZI_MAX; i++) {
+        var p = COMENZI_PRODUSE[i];
+        if (cat === '\\u0000') { if (p[4]) continue; }
+        else if (cat && p[4] !== cat) continue;
+        if (q && p[5].indexOf(q) === -1) continue;
+        gasite.push(p);
+      }
+      if (!gasite.length) {
+        cutie.innerHTML = '<div class="rezultat-gol">Niciun produs aici. Schimbă categoria sau scrie altceva.</div>';
+        cutie.hidden = false;
+        return;
+      }
+      cutie.innerHTML = gasite.map(function (p) {
+        var cod = p[1] ? '<span class="rezultat-cod">' + p[1] + '</span> ' : '';
+        var catTxt = p[4] ? '<span class="rezultat-cat">' + p[4] + '</span>' : '';
+        return '<button type="button" class="rezultat-produs" data-id="' + p[0] + '" data-pret="' + p[3] +
+               '" onclick="comenziAlege(this)">' + cod + p[2] + ' ' + catTxt + '</button>';
+      }).join('');
+      cutie.hidden = false;
+    }
+
+    function comenziAlege(btn) {
+      var rand = comenziRand(btn);
+      var id = btn.getAttribute('data-id');
+      var pret = btn.getAttribute('data-pret');
+      var p = COMENZI_PRODUSE.find(function (x) { return String(x[0]) === String(id); });
+      rand.querySelector('input[name="produs_id[]"]').value = id;
+      rand.querySelector('.cauta-produs').value = p ? p[2] : '';
+      rand.querySelector('.rezultate-produs').hidden = true;
+      var pretInput = rand.querySelector('input[name="pret_unitar[]"]');
+      if (pretInput && pret && !pretInput.value) pretInput.value = pret;
+      var cant = rand.querySelector('input[name="cantitate[]"]');
+      if (cant && !cant.value) cant.focus();
+    }
+
+    // Click în afară: lista se închide, dar produsul ales rămâne. Dacă omul a
+    // scris ceva și n-a apăsat pe nimic, textul se șterge — altfel ar rămâne
+    // pe ecran o denumire pe jumătate scrisă lângă o linie fără produs.
+    document.addEventListener('click', function (e) {
+      document.querySelectorAll('.alege-produs').forEach(function (sp) {
+        if (sp.contains(e.target)) return;
+        sp.querySelector('.rezultate-produs').hidden = true;
+        var ascuns = sp.querySelector('input[name="produs_id[]"]');
+        var cautare = sp.querySelector('.cauta-produs');
+        if (!ascuns.value) cautare.value = '';
+      });
+    });
+
     function comenziAddRow() {
       var tbody = document.getElementById('linii-body');
-      var first = tbody.querySelector('tr');
-      var clone = first.cloneNode(true);
+      var clone = tbody.querySelector('tr').cloneNode(true);
       clone.querySelectorAll('input').forEach(function (el) { el.value = ''; });
+      clone.querySelectorAll('select').forEach(function (el) { el.selectedIndex = 0; });
+      var cutie = clone.querySelector('.rezultate-produs');
+      if (cutie) { cutie.innerHTML = ''; cutie.hidden = true; }
       tbody.appendChild(clone);
+      clone.querySelector('.cat-produs').focus();
     }
     function comenziRemoveRow(btn) {
       var tbody = document.getElementById('linii-body');
       if (tbody.children.length > 1) btn.closest('tr').remove();
     }
-    function comenziFillPret(select) {
-      var opt = select.options[select.selectedIndex];
-      var pret = opt.getAttribute('data-pret');
-      var row = select.closest('tr');
-      var pretInput = row.querySelector('input[name="pret_unitar[]"]');
-      if (pretInput && pret && !pretInput.value) pretInput.value = pret;
-    }
-  </script>`;
+  </script>
+  <style>
+    .rezultate-produs { position:absolute; z-index:40; left:0; right:0; top:100%; max-height:300px; overflow:auto;
+      background:var(--card,#fff); border:1px solid var(--border,#ddd); border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.12); }
+    .rezultat-produs { display:block; width:100%; text-align:left; padding:6px 10px; border:0; background:none; cursor:pointer; font-size:13px; }
+    .rezultat-produs:hover { background:var(--accent-slab,#e8f0fe); }
+    .rezultat-cod { color:var(--text-muted); font-variant-numeric:tabular-nums; }
+    .rezultat-cat { color:var(--text-muted); font-size:11px; }
+    .rezultat-gol { padding:8px 10px; color:var(--text-muted); font-size:13px; }
+  </style>`;
 }
 
 function register(router) {
@@ -221,7 +325,9 @@ function register(router) {
     const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     // Produsele unificate (activ = 0) nu mai pot fi alese: altfel codul înghițit
     // ar renaște ca duplicat chiar din formularul de comandă.
-    const produse = await db.prepare("SELECT id, denumire, pret_vanzare FROM produse WHERE activ = 1 ORDER BY denumire").all();
+    const produse = await db
+      .prepare("SELECT id, cod, denumire, pret_vanzare, categorie FROM produse WHERE activ = 1 ORDER BY denumire")
+      .all();
     if (parteneri.length === 0 || produse.length === 0) {
       return send(
         ctx.res,
@@ -233,13 +339,58 @@ function register(router) {
         })
       );
     }
-    const optiuniProdus = (ales) =>
-      produse
-        .map(
-          (p) =>
-            `<option value="${p.id}" data-pret="${p.pret_vanzare}"${String(ales) === String(p.id) ? " selected" : ""}>${esc(p.denumire)}</option>`
+    // Alegerea produsului: întâi categoria, apoi căutarea în ea.
+    //
+    // Până acum fiecare linie avea o listă derulantă cu TOATE produsele —
+    // peste patru mii de rânduri — iar butonul „+ Adaugă linie" clona rândul
+    // cu tot cu listă. Trei linii pe comandă însemnau douăsprezece mii de
+    // elemente în pagină, și oricum nu se putea căuta în ele: lista nativă
+    // sare doar la prima literă tastată, deci o folie din mijlocul
+    // alfabetului se găsea derulând.
+    //
+    // Acum produsele se trimit o singură dată, ca date, iar fiecare linie are
+    // un filtru de categorie și o căsuță de căutare. Căutarea merge pe cod și
+    // pe denumire, fără diacritice, oriunde în text — nu doar la început.
+    const categorii = [...new Set(produse.map((p) => String(p.categorie || "").trim()).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "ro")
+    );
+    const faraCategorie = produse.some((p) => !String(p.categorie || "").trim());
+    const optiuniCategorie = (aleasa) =>
+      [`<option value="">— toate categoriile —</option>`]
+        .concat(
+          categorii.map(
+            (c) => `<option value="${esc(c)}"${String(aleasa || "") === c ? " selected" : ""}>${esc(c)}</option>`
+          )
         )
+        .concat(faraCategorie ? [`<option value="\u0000"${String(aleasa || "") === "\u0000" ? " selected" : ""}>(fără categorie)</option>`] : [])
         .join("");
+
+    const numeProdus = (id) => {
+      const p = produse.find((x) => String(x.id) === String(id));
+      return p ? p.denumire : "";
+    };
+    const categoriaProdusului = (id) => {
+      const p = produse.find((x) => String(x.id) === String(id));
+      return p ? String(p.categorie || "").trim() : "";
+    };
+
+    const randLinie = (l) => `<tr>
+            <td style="min-width:150px">
+              <select class="cat-produs" onchange="comenziFiltreaza(this)">${optiuniCategorie(categoriaProdusului(l.produs_id))}</select>
+            </td>
+            <td style="min-width:260px">
+              <span class="alege-produs" style="position:relative;display:block">
+                <input type="hidden" name="produs_id[]" value="${esc(l.produs_id || "")}">
+                <input type="search" class="cauta-produs" autocomplete="off" style="width:100%"
+                       placeholder="scrie din cod sau denumire" value="${esc(numeProdus(l.produs_id))}"
+                       oninput="comenziCauta(this)" onfocus="comenziCauta(this)">
+                <div class="rezultate-produs" hidden></div>
+              </span>
+            </td>
+            <td><input type="number" step="0.01" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
+            <td><input type="number" step="0.01" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
+            <td><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
+          </tr>`;
 
     // Liniile scrise deja, dacă salvarea a fost oprită. Altfel, un rând gol.
     const linii = Array.isArray(v.linii) && v.linii.length ? v.linii : [{}];
@@ -282,18 +433,9 @@ function register(router) {
 
       <h2>Produse comandate</h2>
       <table class="table lines-table">
-        <thead><tr><th>Produs</th><th>Cantitate</th><th>Preț unitar</th><th></th></tr></thead>
+        <thead><tr><th>Categorie</th><th>Produs</th><th>Cantitate</th><th>Preț unitar</th><th></th></tr></thead>
         <tbody id="linii-body">
-          ${linii
-            .map(
-              (l) => `<tr>
-            <td><select name="produs_id[]" onchange="comenziFillPret(this)">${optiuniProdus(l.produs_id)}</select></td>
-            <td><input type="number" step="0.01" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
-            <td><input type="number" step="0.01" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
-            <td><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
-          </tr>`
-            )
-            .join("")}
+          ${linii.map(randLinie).join("")}
         </tbody>
       </table>
       <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>
@@ -304,7 +446,7 @@ function register(router) {
       </div>
     </form>
     ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
-    ${lineRowsScript()}`;
+    ${lineRowsScript(produse)}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
 
@@ -351,6 +493,25 @@ function register(router) {
     if (!produsIds.some((id, i) => Number(cantitati[i] || 0) > 0)) {
       return await formularComandaNoua(ctx, {
         eroare: "Scrie cel puțin o linie cu cantitate — altfel comanda ajunge goală la depozit.",
+        valori,
+      });
+    }
+
+    // O linie cu cantitate, dar fără produs ales.
+    //
+    // Înainte nu se putea întâmpla: lista derulantă avea mereu ceva selectat.
+    // Acum produsul se caută, iar câmpul ascuns rămâne gol până se apasă pe
+    // un rezultat — deci se poate scrie o cantitate lângă un produs doar
+    // tastat, nu și ales. Fără verificarea asta, inserarea cădea cu 500 pe
+    // `produs_id` NOT NULL, iar omul vedea o pagină de eroare în loc să afle
+    // că n-a apăsat pe produs.
+    const liniiFaraProdus = produsIds.filter((id, i) => Number(cantitati[i] || 0) > 0 && !parseInt(id, 10)).length;
+    if (liniiFaraProdus) {
+      return await formularComandaNoua(ctx, {
+        eroare:
+          liniiFaraProdus === 1
+            ? "O linie are cantitate, dar niciun produs ales. Caută produsul și apasă pe el în listă."
+            : `${liniiFaraProdus} linii au cantitate, dar niciun produs ales. Caută produsul și apasă pe el în listă.`,
         valori,
       });
     }
@@ -406,7 +567,8 @@ function register(router) {
     );
     for (let i = 0; i < produsIds.length; i++) {
       const cant = Number(cantitati[i] || 0);
-      if (cant > 0) await insertLinie.run(comandaId, produsIds[i], cant, Number(preturi[i] || 0));
+      const produsId = parseInt(produsIds[i], 10);
+      if (cant > 0 && produsId) await insertLinie.run(comandaId, produsId, cant, Number(preturi[i] || 0));
     }
 
     // Anuntul pe email nu are voie sa strice plasarea comenzii: daca serverul
@@ -466,9 +628,10 @@ function register(router) {
     // marfa din depozit, deci n-are de unde să știe; își poate anula doar
     // comanda lui. Lista e în lib/comenzi-stari.js.
     const stariDePus = stari.stariPermise(ctx.user, comanda);
-    // Ștergerea rămâne unde era: nu e un pas din flux, e o greșeală de
-    // reparat, și n-o deschid producției doar fiindcă acum vede pagina.
-    const potiSterge = ctx.user && ["admin", "depozit", "financiar"].includes(ctx.user.rol);
+    // Ștergerea e doar a adminului. Nu e un pas din flux — e ștergere
+    // definitivă din bază, cu linii cu tot. Pentru „comanda nu se mai face"
+    // există „anulată", care lasă urma pe client și motivul scris.
+    const potiSterge = ctx.user && ctx.user.rol === "admin";
 
     // Răspunsul clientului la livrarea parțială. Îl poate schimba agentul
     // comenzii sau un admin — e o informație luată la telefon, nu o decizie
@@ -649,7 +812,8 @@ function register(router) {
         }
         ${
           potiSterge
-            ? `<form method="post" action="/comenzi/${comanda.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi definitiv comanda?')">
+            ? `<form method="post" action="/comenzi/${comanda.id}/sterge" class="inline-form"
+                     onsubmit="return confirm('Ștergi DEFINITIV comanda ${esc(String(comanda.numar || "#" + comanda.id)).replace(/'/g, "")}, cu tot cu linii? Nu se mai poate întoarce. Dacă vrei doar s-o oprești, pune-o pe „anulată”.')">
                  <button type="submit" class="link-btn danger">Șterge comanda</button>
                </form>`
             : ""
@@ -919,8 +1083,36 @@ function register(router) {
     redirect(ctx.res, `/facturi/${facturaId}`);
   });
 
+  // Ștergerea unei comenzi — numai adminul.
+  //
+  // Ruta asta n-a avut NICIO verificare până acum. Butonul se ascundea de
+  // cine n-avea voie, dar un POST trimis de mână ștergea definitiv orice
+  // comandă, cu linii cu tot, de la orice utilizator logat. Ascunderea unui
+  // buton nu e un drept de acces; se vedea abia când cineva nimerea adresa.
+  //
+  // Nu se șterge în tăcere: înainte de DELETE se scrie în istoricul
+  // clientului ce comandă a fost și cine a șters-o. Rândul din `comenzi`
+  // dispare, urma rămâne — altfel o comandă de 40.000 de lei se evaporă și
+  // peste o lună nu mai știe nimeni că a existat.
   router.post("/comenzi/:id/sterge", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (ctx.user.rol !== "admin") return redirect(ctx.res, `/comenzi/${ctx.params.id}`);
     try {
+      const c = await db
+        .prepare(
+          `SELECT c.*, COALESCE((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id), 0) AS total
+           FROM comenzi c WHERE c.id = ?`
+        )
+        .get(ctx.params.id);
+      if (!c) return redirect(ctx.res, "/comenzi");
+      await db
+        .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+        .run(
+          c.partener_id,
+          `Comanda ${c.numar || "#" + c.id} a fost ștearsă`,
+          `Ștearsă definitiv de ${ctx.user.nume}. Era pe statusul „${c.status}”, valoare ${Number(c.total || 0).toFixed(2)} lei.`,
+          ctx.user.id
+        );
       await db.prepare("DELETE FROM comenzi_linii WHERE comanda_id = ?").run(ctx.params.id);
       await db.prepare("DELETE FROM comenzi WHERE id = ?").run(ctx.params.id);
       redirect(ctx.res, "/comenzi");
