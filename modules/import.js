@@ -19,6 +19,7 @@ const grup = require("../lib/grup");
 const { xlsxDisponibil, normalizeHeader, gasesteColoana, gasesteRandHeader, parseFisier, parseNumar, parseData } = require("../lib/import-utils");
 const { cheiaFacturii, cheiaDocumentExtern } = require("../lib/documente");
 const ignorare = require("../lib/parteneri-ignorati");
+const monday = require("../lib/monday-import");
 
 const ALIASE = {
   serie: ["serie", "seria"],
@@ -336,6 +337,18 @@ function register(router) {
       <form method="post" action="/import/categorii" enctype="multipart/form-data" class="form" style="max-width:520px">
         <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
         <button type="submit" class="btn">Importă categorii și gestiuni</button>
+      </form>
+
+      <h2>3c. Monday CRM — Accounts, Contacts, Leads</h2>
+      <p style="font-size:13px;color:var(--text-muted)">
+        Exporturile din Monday (Board → Export to Excel), unul câte unul: <b>Accounts</b> merg în parteneri,
+        <b>Contacts</b> în contactele de marketing, <b>Leads</b> în lead-uri. Boardul se recunoaște singur, după coloane.
+        <b>Se completează doar golurile</b> — nimic din ce e deja scris la noi nu se suprascrie. Ce e nou intră pe tine,
+        ca agenții să și-l aloce singuri de pe fișă.
+      </p>
+      <form method="post" action="/import/monday" enctype="multipart/form-data" class="form" style="max-width:520px">
+        <label class="field"><span>Fișier (.xlsx sau .csv)</span><input type="file" name="fisier" accept=".xlsx,.xls,.csv" required></label>
+        <button type="submit" class="btn">Importă din Monday</button>
       </form>
 
       <h2>4. Bonuri de consum intern</h2>
@@ -986,6 +999,209 @@ function register(router) {
       )
     );
   });
+
+  // ---- Monday CRM: Accounts, Contacts, Leads ------------------------------
+  //
+  // Firma a lucrat o vreme pe Monday și îl părăsește. Trei boarduri, trei
+  // destinații: Accounts → parteneri, Contacts → mk_contacte, Leads →
+  // leaduri. Regula peste tot e aceeași: se completează golurile, nu se
+  // suprascrie nimic. Fișa din ERP e cea la care se uită lumea azi.
+  //
+  // AGENTUL. Exporturile Monday n-au coloana Owner, iar Vali a decis:
+  // „lasă-i pe mine ca și clienți noi și îi lăsăm pe ei să și-i aloce
+  // singuri". Deci tot ce e nou intră pe el. Un partener care are deja agent
+  // nu se atinge — ăla e un om care lucrează contul acum.
+  router.post("/import/monday", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/import");
+    const file = preiaFisier(ctx);
+    if (!file) return send(ctx.res, 200, paginaRezultat("Import Monday", { Eroare: "Nu ai selectat niciun fișier." }, []));
+    let rows;
+    try {
+      rows = parseFisier(file.filename, file.data);
+    } catch (e) {
+      return send(ctx.res, 200, paginaRezultat("Import Monday", { Eroare: e.message }, []));
+    }
+
+    // Exporturile Monday au una-două linii de titlu înaintea antetului real.
+    // Antetul e primul rând care are „Name" în prima celulă.
+    const iCap = rows.findIndex((r) => r && String(r[0] || "").trim() === "Name");
+    if (iCap === -1) {
+      return send(ctx.res, 200, paginaRezultat("Import Monday", { Eroare: "Nu am găsit antetul: niciun rând nu începe cu Name." }, []));
+    }
+    const cap = rows[iCap].map((c) => String(c === null || c === undefined ? "" : c).trim());
+    const board = monday.detecteazaBoard(cap);
+    if (!board) {
+      return send(
+        ctx.res,
+        200,
+        paginaRezultat("Import Monday — board nerecunoscut", { "Coloane găsite": cap.filter(Boolean).join(" | ") }, [
+          "Aștept unul dintre boardurile Accounts, Contacts sau Leads.",
+        ])
+      );
+    }
+
+    const brute = [];
+    for (let r = iCap + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c === null || c === undefined ? "" : c).trim() === "")) continue;
+      const o = {};
+      cap.forEach((k, i) => { if (k) o[k] = row[i]; });
+      const n = monday.normalizeaza(board, o);
+      if (n) brute.push(n);
+    }
+    if (!brute.length) return send(ctx.res, 200, paginaRezultat("Import Monday", { Eroare: "Niciun rând cu nume." }, []));
+
+    const rez = await aplicaMonday(board, brute, ctx.user.id);
+    return send(ctx.res, 200, paginaRezultat(`Import Monday — ${board}`, rez.sumar, rez.avertismente));
+  });
+
+  // Scrierea propriu-zisă, pe fiecare fel de board.
+  async function aplicaMonday(board, randuri, userId) {
+    const parteneri = await db.prepare("SELECT id, nume, cui, email, telefon, adresa, agent_id FROM parteneri").all();
+    const dupaFirma = new Map();
+    for (const p of parteneri) {
+      const k = monday.cheieFirma(p.nume);
+      if (k && !dupaFirma.has(k)) dupaFirma.set(k, p);
+    }
+    const sumar = {};
+    const avertismente = [];
+
+    if (board === "accounts") {
+      let noi = 0, completate = 0, neschimbate = 0, agentPus = 0;
+      for (const r of randuri) {
+        const gasit = r.cheie && dupaFirma.get(r.cheie);
+        const adresa = r.sediu || "";
+        if (gasit) {
+          const de = monday.doarGolurile(gasit, { adresa }, ["adresa"]);
+          const faraAgent = !gasit.agent_id;
+          if (Object.keys(de).length || faraAgent) {
+            await db
+              .prepare("UPDATE parteneri SET adresa = COALESCE(NULLIF(adresa,''), NULLIF(?,'')), agent_id = COALESCE(agent_id, ?) WHERE id = ?")
+              .run(adresa, userId, gasit.id);
+            if (faraAgent) agentPus++;
+            completate++;
+          } else neschimbate++;
+          continue;
+        }
+        const ins = await db
+          .prepare("INSERT INTO parteneri (tip, nume, adresa, agent_id, sursa) VALUES ('client', ?, ?, ?, 'monday') RETURNING id")
+          .run(r.nume.slice(0, 200), adresa || null, userId);
+        dupaFirma.set(r.cheie, { id: Number(ins.lastInsertRowid), nume: r.nume, agent_id: userId });
+        noi++;
+      }
+      Object.assign(sumar, {
+        "Companii în fișier": randuri.length,
+        "Clienți noi": noi,
+        "Existenți, completați": completate,
+        "din care au primit agent": agentPus,
+        "Existenți, nimic de completat": neschimbate,
+      });
+      return { sumar, avertismente };
+    }
+
+    if (board === "contacts") {
+      const existente = await db.prepare("SELECT id, nume, email, telefon, functie, partener_id FROM mk_contacte WHERE activ = 1").all();
+      const cheiaOm = (nume, email) => monday.cheiePersoana(nume) + "|" + String(email || "").toLowerCase();
+      const dupaOm = new Map();
+      const dupaEmail = new Map();
+      for (const c of existente) {
+        dupaOm.set(cheiaOm(c.nume, c.email), c);
+        if (c.email) dupaEmail.set(String(c.email).toLowerCase(), c);
+      }
+      let noi = 0, completate = 0, neschimbate = 0, faraFirma = 0;
+      for (const r of randuri) {
+        const partener = r.firma ? dupaFirma.get(monday.cheieFirma(r.firma)) : null;
+        if (r.firma && !partener) {
+          faraFirma++;
+          if (avertismente.length < 25) avertismente.push(`firma nu există în ERP, contactul intră fără legătură → ${r.nume} (${r.firma})`);
+        }
+        const gasit = (r.email && dupaEmail.get(r.email)) || dupaOm.get(cheiaOm(r.nume, r.email));
+        if (gasit) {
+          const de = monday.doarGolurile(gasit, { email: r.email, telefon: r.telefon, functie: r.functie }, ["email", "telefon", "functie"]);
+          if (Object.keys(de).length || (!gasit.partener_id && partener)) {
+            await db
+              .prepare(
+                `UPDATE mk_contacte SET
+                   email       = COALESCE(NULLIF(email,''), NULLIF(?,'')),
+                   telefon     = COALESCE(NULLIF(telefon,''), NULLIF(?,'')),
+                   functie     = COALESCE(NULLIF(functie,''), NULLIF(?,'')),
+                   partener_id = COALESCE(partener_id, ?)
+                 WHERE id = ?`
+              )
+              .run(r.email || "", r.telefon || "", r.functie || "", partener ? partener.id : null, gasit.id);
+            completate++;
+          } else neschimbate++;
+          continue;
+        }
+        const ins = await db
+          .prepare(
+            `INSERT INTO mk_contacte (partener_id, firma_text, nume, functie, email, telefon, sursa, observatii, creat_de)
+             VALUES (?, ?, ?, ?, ?, ?, 'monday', ?, ?) RETURNING id`
+          )
+          .run(partener ? partener.id : null, r.firma || null, r.nume.slice(0, 160), r.functie || null, r.email || null, r.telefon || null, r.observatii || null, userId);
+        if (r.email) dupaEmail.set(r.email, { id: Number(ins.lastInsertRowid), nume: r.nume, email: r.email });
+        noi++;
+      }
+      Object.assign(sumar, {
+        "Contacte în fișier": randuri.length,
+        "Contacte noi": noi,
+        "Existente, completate": completate,
+        "Existente, nimic de completat": neschimbate,
+        "Fără firmă potrivită în ERP": faraFirma,
+      });
+      return { sumar, avertismente };
+    }
+
+    // leads
+    const existente = await db.prepare("SELECT id, nume, companie, email, telefon, atribuit_lui, partener_id FROM leaduri").all();
+    const dupaEmail = new Map();
+    const dupaNumeFirma = new Map();
+    for (const l of existente) {
+      if (l.email) dupaEmail.set(String(l.email).toLowerCase(), l);
+      dupaNumeFirma.set(monday.cheiePersoana(l.nume) + "|" + monday.cheieFirma(l.companie), l);
+    }
+    let noi = 0, completate = 0, neschimbate = 0;
+    for (const r of randuri) {
+      const partener = r.firma ? dupaFirma.get(monday.cheieFirma(r.firma)) : null;
+      const gasit = (r.email && dupaEmail.get(r.email)) || dupaNumeFirma.get(monday.cheiePersoana(r.nume) + "|" + monday.cheieFirma(r.firma));
+      if (gasit) {
+        const de = monday.doarGolurile(gasit, { email: r.email, telefon: r.telefon, companie: r.firma }, ["email", "telefon", "companie"]);
+        if (Object.keys(de).length || !gasit.atribuit_lui || (!gasit.partener_id && partener)) {
+          await db
+            .prepare(
+              `UPDATE leaduri SET
+                 email        = COALESCE(NULLIF(email,''), NULLIF(?,'')),
+                 telefon      = COALESCE(NULLIF(telefon,''), NULLIF(?,'')),
+                 companie     = COALESCE(NULLIF(companie,''), NULLIF(?,'')),
+                 atribuit_lui = COALESCE(atribuit_lui, ?),
+                 partener_id  = COALESCE(partener_id, ?)
+               WHERE id = ?`
+            )
+            .run(r.email || "", r.telefon || "", r.firma || "", userId, partener ? partener.id : null, gasit.id);
+          completate++;
+        } else neschimbate++;
+        continue;
+      }
+      await db
+        .prepare(
+          `INSERT INTO leaduri (nume, companie, email, telefon, sursa, stadiu, atribuit_lui, partener_id, creat_de, ultima_activitate, observatii)
+           VALUES (?, ?, ?, ?, 'monday', ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          r.nume.slice(0, 160), r.firma || null, r.email || null, r.telefon || null,
+          r.stadiu, userId, partener ? partener.id : null, userId, r.ultimaActivitate,
+          r.statusMonday ? `Status în Monday: ${r.statusMonday}` : null
+        );
+      noi++;
+    }
+    Object.assign(sumar, {
+      "Lead-uri în fișier": randuri.length,
+      "Lead-uri noi": noi,
+      "Existente, completate": completate,
+      "Existente, nimic de completat": neschimbate,
+    });
+    return { sumar, avertismente };
+  }
 
   router.post("/import/stoc", async (ctx) => {
     const file = preiaFisier(ctx);
