@@ -132,6 +132,18 @@ function uitaAgentii() {
   _agenti = null;
 }
 
+// Drumul invers lui agentDinCod: din agentul ERP-ului în codul din registru.
+// Registrul ține reprezentantul ca inițiale (GT, MM, CG, IR), deci comanda
+// de producție născută în ERP trebuie să poarte aceeași notație, altfel
+// coloana „Reprezentant" arată altfel pentru rândurile importate decât
+// pentru cele făcute aici.
+async function codPentruAgent(agentId) {
+  if (!agentId) return null;
+  const u = await db.prepare("SELECT nume, cod_agent FROM utilizatori WHERE id = ?").get(agentId).catch(() => null);
+  if (!u) return null;
+  return String(u.cod_agent || "").trim() || initialeNume(u.nume) || null;
+}
+
 async function agentDinCod(cod) {
   const c = String(cod || "").trim().toUpperCase();
   const toti = await listaAgenti();
@@ -238,7 +250,10 @@ async function scrieRandRegistru(v, cacheP, existente) {
   const facturatTxt = String(v.facturat || "").trim();
   const eFacturat = /^da$/i.test(facturatTxt);
   let status;
-  if (/anulat/.test(stare)) status = "anulata";
+  // „Canceled" scris în engleză în registru — trei comenzi din 758. Fără el,
+  // intrau ca „în producție" și rămâneau în lista de lucru a producției
+  // pentru totdeauna, fiindcă nimeni nu le mai caută.
+  if (/anulat|cancel/.test(stare)) status = "anulata";
   else if (eFacturat) status = "facturata";
   else if (/finalizat/.test(stare)) status = "finalizata";
   else status = "in_productie"; // stare goală în registru = încă în lucru
@@ -693,26 +708,50 @@ function register(router) {
     const produs = await db.prepare("SELECT denumire, unitate_masura FROM produse WHERE id = ?").get(a.produs_id);
     const comanda = a.comanda_id
       ? await db
-          .prepare("SELECT c.numar, c.partener_id, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+          .prepare("SELECT c.numar, c.partener_id, c.agent_id, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
           .get(a.comanda_id)
       : null;
+
+    // Câmpurile din registrul de comenzi, completate din ce ȘTIE deja ERP-ul.
+    //
+    // Până acum comanda de producție se năștea din cererea depozitului cu
+    // jumătate de registru gol: fără reprezentant, fără valoare, fără
+    // caracteristici. Producția o primea și nu știa nici al cui client e,
+    // nici cât face — iar registrul pe care îl ține firma are exact
+    // coloanele astea. Ce poate fi dedus se completează singur; ce scrie un
+    // om (caracteristici, ambalare, DoC, fișă tehnică) rămâne gol, dar se
+    // vede pe fișă că lipsește.
+    const reprezentant = comanda ? await codPentruAgent(comanda.agent_id) : null;
+    let valoareEstimata = null;
+    if (a.comanda_id && a.produs_id) {
+      const linie = await db
+        .prepare("SELECT pret_unitar FROM comenzi_linii WHERE comanda_id = ? AND produs_id = ? LIMIT 1")
+        .get(a.comanda_id, a.produs_id)
+        .catch(() => null);
+      const pret = Number(linie && linie.pret_unitar);
+      if (Number.isFinite(pret) && pret > 0) valoareEstimata = Math.round(pret * Number(a.cantitate || 0) * 100) / 100;
+    }
     const numar = await numarComandaNou();
     const ins = await db
       .prepare(
-        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, partener_id, client_text, tip_produs, cantitate, um,
+        `INSERT INTO comenzi_productie (numar, initiator, initiator_id, reprezentant, agent_id, partener_id, client_text,
+                                        tip_produs, cantitate, um, valoare_estimata,
                                         data_initiere, data_solicitata, data_propusa, data_livrare, status, sursa, comanda_id,
                                         aprovizionare_id, produs_id, observatii)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', 'depozit', ?, ?, ?, ?) RETURNING id`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'noua', 'depozit', ?, ?, ?, ?) RETURNING id`
       )
       .run(
         numar,
         ctx.user.nume,
         ctx.user.id,
+        reprezentant,
+        comanda ? comanda.agent_id || null : null,
         comanda ? comanda.partener_id : null,
         comanda ? comanda.client : null,
         produs ? produs.denumire : null,
         String(a.cantitate),
         produs ? produs.unitate_masura || "buc" : "buc",
+        valoareEstimata,
         azi(),
         a.termen_cerut || null,
         termen,
@@ -730,7 +769,12 @@ function register(router) {
         .prepare("UPDATE comenzi SET status = 'in_productie' WHERE id = ? AND status NOT IN ('facturata','livrata','anulata')")
         .run(a.comanda_id);
     }
-    await db.prepare("UPDATE comenzi_productie SET produs_id = ? WHERE id = ?").run(produs.id, ins.lastInsertRowid);
+    // Aici era un UPDATE care punea produs_id = produs.id. `produs` e citit
+    // mai sus cu SELECT denumire, unitate_masura — fără id — deci scria
+    // `undefined` peste valoarea bună pusă în INSERT, iar legătura cu
+    // produsul se pierdea imediat ce se crea comanda. Dacă produsul fusese
+    // între timp șters, rândul crăpa de tot. INSERT-ul pune deja a.produs_id,
+    // care e corect, deci linia a fost scoasă.
     // O cerere din depozit e pentru un singur produs, dar se scrie ca linie, ca
     // să apară în tabelul de produse al comenzii ca toate celelalte.
     await scrieLinii(ins.lastInsertRowid, [

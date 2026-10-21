@@ -124,11 +124,18 @@ function register(router) {
   router.get("/rapoarte/balanta", async (ctx) => {
     await regenereazaDacaENevoie();
 
-    const deLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.de_la || "")) ? String(ctx.query.de_la) : inceputAn();
-    const panaLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.pana_la || "")) ? String(ctx.query.pana_la) : azi();
-    const nivel = ctx.query.nivel === "clasa" ? "clasa" : "cont";
-
     const inchisa = String(ctx.query.inchisa || "") === "1";
+
+    const deLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.de_la || "")) ? String(ctx.query.de_la) : inceputAn();
+    // Balanța închisă se cere implicit pe ZIUA DE IERI, nu pe azi: ziua în
+    // curs n-are facturile introduse și nici încasările confirmate, deci „la
+    // zi" pe azi arată mereu mai prost decât e firma în realitate.
+    const panaLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.pana_la || ""))
+      ? String(ctx.query.pana_la)
+      : inchisa
+        ? inchidere.ieri(azi())
+        : azi();
+    const nivel = ctx.query.nivel === "clasa" ? "clasa" : "cont";
 
     let { conturi, total, verificari } = await conta.balanta(deLa, panaLa);
 
@@ -240,18 +247,32 @@ function register(router) {
                Clasele 6 și 7 sunt închise în 121, TVA-ul e decontat, iar
                ${
                  inch.lunaIncompleta
-                   ? `ce lipsea din luna în curs a fost completat cu cifrele din <b>${esc(inch.referinta.de.slice(0, 7))}</b>`
+                   ? `salariile, dobânzile și amortizarea sunt luate din <b>${esc(inch.referinta.de.slice(0, 7))}</b>, proratate la
+                      <b>${nrRo(inch.factor)}%</b> — ${inch.zileScurse} zile scurse din ${inch.zileReferinta}`
                    : "luna e întreagă, deci nu s-a estimat nimic"
-               }.
+               }. Rezultatul e trecut mai departe din 121 în 117.
                Nu s-a scris nicio notă în registru — balanța reală e neatinsă, o vezi apăsând „Înapoi la balanța brută".
                Nu o trimite nicăieri ca document: închiderea adevărată o face contabila.
              </div>
+             ${
+               inch.diferenta
+                 ? `<div class="flash" style="max-width:none;background:${inch.diferenta.peste_prag ? "#f8e5e3" : "#fbf0da"};border-color:${inch.diferenta.peste_prag ? "#e8bdb8" : "#e6d0a0"};color:${inch.diferenta.peste_prag ? "var(--danger)" : "var(--warn)"}">
+                      <strong>Am închis balanța cu o notă pe 473</strong> — ${money(inch.diferenta.suma)}
+                      ${inch.diferenta.pe_solduri_initiale ? `(${money(inch.diferenta.pe_solduri_initiale)} pe soldurile inițiale` : ""}${inch.diferenta.pe_solduri_initiale && inch.diferenta.pe_rulaje ? ", " : ""}${inch.diferenta.pe_rulaje ? `${inch.diferenta.pe_solduri_initiale ? "" : "("}${money(inch.diferenta.pe_rulaje)} pe rulaje` : ""}${inch.diferenta.pe_solduri_initiale || inch.diferenta.pe_rulaje ? ")" : ""}.
+                      ${
+                        inch.diferenta.peste_prag
+                          ? "Suma e prea mare ca să fie rotunjire. Balanța arată acum închisă, dar diferența e reală și trebuie căutată — începe cu soldurile inițiale preluate din Conta."
+                          : "E de ordinul rotunjirilor, dar scrie aici ca să nu dispară tăcut."
+                      }
+                    </div>`
+                 : ""
+             }
              <div class="cards" style="margin-bottom:12px">
                <div class="card"><div class="label">Venituri (clasa 7)</div><div class="value">${money(inch.venituri)}</div></div>
                <div class="card"><div class="label">Cheltuieli (clasa 6)</div><div class="value">${money(inch.cheltuieli)}</div></div>
                <div class="card"><div class="label">Rezultat estimat</div>
                  <div class="value" style="color:${inch.rezultat >= 0 ? "var(--verde,#1a7f42)" : "var(--rosu,#b3261e)"}">${money(inch.rezultat)}</div>
-                 <div style="font-size:12px">${inch.rezultat >= 0 ? "profit" : "pierdere"}, în contul 121</div></div>
+                 <div style="font-size:12px">${inch.rezultat >= 0 ? "profit" : "pierdere"}, trecut în 117</div></div>
                <div class="card"><div class="label">Balanța închide</div>
                  <div class="value">${inch.echilibrat ? "da" : "NU"}</div></div>
              </div>
