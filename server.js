@@ -61,6 +61,11 @@ require("./modules/pungi").register(router);
 require("./modules/cutii").register(router);
 require("./modules/dezvoltare").register(router);
 require("./modules/procurement").register(router);
+// Comenzile către furnizor stau sub /procurement, dar în modulul lor. Se
+// înregistrează DUPĂ procurement și își pune singur „/procurement/comenzi/noua"
+// și „/procurement/comenzi/preturi" înaintea lui „/procurement/comenzi/:id" —
+// altfel ruta cu id ar înghiți cele două pagini. (Vezi test-rute.js.)
+require("./modules/comenzi-furnizor").register(router);
 require("./modules/marketing").register(router);
 require("./modules/concurenta").register(router);
 // Culegerea și legarea domeniilor se înregistrează ÎNAINTEA inboxului: acolo
