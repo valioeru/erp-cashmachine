@@ -281,20 +281,41 @@ async function profitContabil(an, panaLa) {
   if (!sn || !sn.eticheta) return null;
   const inchisa = eSfarsitDeLuna(sn.pana);
 
+  // RULAJELE NU SUNT MEREU DE LA 1 IANUARIE.
+  //
+  // Balanțele trase prin punte sunt cumulate pe an, deci la ele „rulaje"
+  // înseamnă de la 1 ianuarie. O balanță exportată din Conta pe o singură
+  // lună (01/09 – 30/09) are în coloana aia DOAR luna aia — iar profitul
+  // lunii septembrie afișat ca profitul anului e o cifră falsă care arată
+  // perfect normal. Pe balanța din 30.09.2026 diferența era între 237.164 lei
+  // (septembrie) și 150.078 lei (anul până la septembrie).
+  //
+  // „Total sume" e cumulat de la 1 ianuarie în amândouă, deci scăzând
+  // soldurile inițiale iese exact cumulatul anului, indiferent ce perioadă a
+  // ales omul la export. Aceeași regulă ca în rapoarte.js — acolo e scrisă
+  // pe larg, aici se respectă.
+  const areTotaluri = await db
+    .prepare("SELECT 1 AS da FROM balante_snapshot WHERE eticheta = ? AND (ts_d <> 0 OR ts_c <> 0) LIMIT 1")
+    .get(sn.eticheta)
+    .catch(() => null);
+  const cumulat = Boolean(areTotaluri && areTotaluri.da);
+  const D = cumulat ? "(ts_d - si_d)" : "r_d";
+  const C = cumulat ? "(ts_c - si_c)" : "r_c";
+
   const c121 = await db
-    .prepare("SELECT r_d, r_c FROM balante_snapshot WHERE eticheta = ? AND cont = '121' LIMIT 1")
+    .prepare(`SELECT ${D} AS d, ${C} AS c FROM balante_snapshot WHERE eticheta = ? AND cont = '121' LIMIT 1`)
     .get(sn.eticheta);
-  if (c121 && (Number(c121.r_c) || Number(c121.r_d))) {
-    const venituri = Number(c121.r_c) || 0;
-    const cheltuieli = Number(c121.r_d) || 0;
+  if (c121 && (Number(c121.c) || Number(c121.d))) {
+    const venituri = Number(c121.c) || 0;
+    const cheltuieli = Number(c121.d) || 0;
     return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, inchisa, sursa: "contul 121" };
   }
 
   const r = await db
     .prepare(
       `SELECT
-         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN r_c - r_d ELSE 0 END), 0) AS venituri,
-         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN r_d - r_c ELSE 0 END), 0) AS cheltuieli
+         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN ${C} - ${D} ELSE 0 END), 0) AS venituri,
+         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN ${D} - ${C} ELSE 0 END), 0) AS cheltuieli
        FROM balante_snapshot WHERE eticheta = ? AND LENGTH(cont) <= 4`
     )
     .get(sn.eticheta);
