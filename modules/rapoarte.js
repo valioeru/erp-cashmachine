@@ -447,15 +447,30 @@ function soldurile(conturi, faza) {
     const g2 = cont.slice(0, 2);
     const cls = cont.charAt(0);
     const netD = faza === "initial" ? Number(c.si_d) - Number(c.si_c) : Number(c.sf_d) - Number(c.sf_c);
+    // CONTURILE RECTIFICATIVE SCAD ACTIVUL, NU SE ARUNCĂ.
+    //
+    // Până la 21.10.2026 aici scria `Math.max(0, netD)` pe clasa 2. Amortizarea
+    // (281x) are sold CREDITOR, deci netD negativ, deci max(0, ...) o făcea
+    // zero: amortizarea dispărea din socoteală în loc să scadă din imobilizări.
+    // La 30.09.2026 asta umfla activul cu 1.734.275,52 lei — raportul arăta
+    // 19,76 milioane în loc de 18,02 — și, mai rău, „total activ" nu mai era
+    // egal cu „capitaluri + datorii". Un analist de credit vede imediat o
+    // balanță care nu se închide, iar raportul de capitaluri proprii pe total
+    // activ ieșea 8,4% în loc de 9,2%.
+    //
+    // Aceeași capcană era pe provizioane și ajustări (39x, 49x, 59x). Ele nu
+    // sunt nici active, nici datorii: sunt scăderi din activul pe care îl
+    // corectează.
+    const eRectificativ = /^(28|29|39|49|59)/.test(cont);
     if (["10", "11", "12"].includes(g2)) b.capitaluri += -netD;
     else if (g2 === "16") b.datoriiTL += Math.max(0, -netD);
-    else if (cls === "2") b.activeImob += Math.max(0, netD);
+    else if (cls === "2") b.activeImob += netD;
     else if (cls === "3") {
-      const v = Math.max(0, netD);
-      b.activeCirc += v;
-      b.stocuri += v;
+      b.activeCirc += netD;
+      b.stocuri += netD;
     } else if (cls === "4") {
-      if (netD > 0) b.activeCirc += netD;
+      if (eRectificativ) b.activeCirc += netD;
+      else if (netD > 0) b.activeCirc += netD;
       else b.datoriiCurente += -netD;
     } else if (cls === "5") {
       if (cont.startsWith("519")) {
@@ -464,10 +479,16 @@ function soldurile(conturi, faza) {
         const v = Math.max(0, -netD);
         b.credite519 += v;
         b.datoriiCurente += v;
+      } else if (eRectificativ) {
+        b.activeCirc += netD;
+      } else if (netD >= 0) {
+        b.activeCirc += netD;
+        if (["51", "53", "54"].includes(g2)) b.cash += netD;
       } else {
-        const v = Math.max(0, netD);
-        b.activeCirc += v;
-        if (["51", "53", "54"].includes(g2)) b.cash += v;
+        // Cont bancar pe credit = descoperit de cont. E datorie, nu activ
+        // negativ: altfel ar scădea și activul, și datoriile, iar bilanțul ar
+        // părea mai mic decât e.
+        b.datoriiCurente += -netD;
       }
     }
   }
