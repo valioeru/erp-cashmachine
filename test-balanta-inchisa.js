@@ -76,8 +76,8 @@ console.log("\nÎnchiderea claselor 6 și 7:");
   aprox("venituri strânse", r.venituri, 100000);
   aprox("cheltuieli strânse", r.cheltuieli, 60000);
   aprox("rezultatul estimat", r.rezultat, 40000);
-  aprox("121 are profitul pe credit", gaseste(r.conturi, "121").sfC, 40000);
-  egal("121 nu are nimic pe debit", gaseste(r.conturi, "121").sfD, 0);
+  egal("121 nu rămâne deschis, trece în 117", gaseste(r.conturi, "121").sfC + gaseste(r.conturi, "121").sfD, 0);
+  aprox("profitul se vede în 117", gaseste(r.conturi, "117").sfC, 40000);
   if (!echilibrat(r.total)) rau("balanța nu mai închide după închiderea claselor", JSON.stringify(r.total));
   else ok("balanța închide după închiderea claselor");
   egal("raportul spune singur că e echilibrat", r.echilibrat, true);
@@ -93,7 +93,7 @@ console.log("\nPierderea, nu doar profitul:");
   ];
   const r = i.inchide({ conturi, plan, panaLa: "2026-10-31", liniiAnterioare: [] });
   aprox("rezultat negativ", r.rezultat, -15000);
-  aprox("121 are pierderea pe debit", gaseste(r.conturi, "121").sfD, 15000);
+  aprox("pierderea se vede în 117, pe debit", gaseste(r.conturi, "117").sfD, 15000);
   if (!echilibrat(r.total)) rau("balanța nu închide pe pierdere");
   else ok("balanța închide și pe pierdere");
 }
@@ -145,8 +145,9 @@ console.log("\nEstimarea lunii în curs:");
   egal("luna e recunoscută ca incompletă", r.lunaIncompleta, true);
   egal("referința e luna plină dinainte", r.referinta.de.slice(0, 7), "2026-09");
   egal("s-au estimat patru conturi", r.estimari.length, 4);
-  aprox("salariile intră ca cheltuială", r.cheltuieli, 51200);
-  aprox("rezultatul e pierderea estimată", r.rezultat, -51200);
+  // 21 din 30 de zile ale lunii de referință: 51.200 × 0,7
+  aprox("salariile intră proporțional cu zilele scurse", r.cheltuieli, 35840);
+  aprox("rezultatul e pierderea estimată, tot proporțional", r.rezultat, -35840);
   if (!echilibrat(r.total)) rau("estimarea a strâmbat balanța", JSON.stringify(r.total));
   else ok("balanța închide și după estimare");
 }
@@ -214,10 +215,94 @@ console.log("\nTotul la un loc, ca în pagină:");
   egal("niciun cont din clasele 6 și 7 nu rămâne deschis", deschise.map((c) => c.cont), []);
   const tvaDeschis = ["4426", "4427"].filter((x) => { const c = gaseste(r.conturi, x); return c && (c.sfD > 0.01 || c.sfC > 0.01); });
   egal("TVA-ul nu rămâne deschis", tvaDeschis, []);
-  aprox("rezultat = 100.000 venituri - 60.000 marfă - 40.000 salarii estimate", r.rezultat, 0);
+  // salarii 40.000 × 21/30 = 28.000 → 100.000 - 60.000 - 28.000
+  aprox("rezultat = venituri - marfă - salarii proratate", r.rezultat, 12000);
   if (!echilibrat(r.total)) rau("balanța completă nu închide", JSON.stringify(r.total));
   else ok("balanța completă închide");
 }
+
+console.log("\nProrata pe zilele scurse:");
+{
+  // 21 de zile din octombrie, raportate la septembrie care are 30 → 70%.
+  aprox("21 din 30 de zile = 70%", i.prorata("2026-10-21", { de: "2026-09-01" }), 0.7);
+  aprox("nu trece niciodată de 100%", i.prorata("2026-03-31", { de: "2026-02-01" }), 1);
+  const conturi = [cont("5121", "Bancă", { siD: 100000 }), cont("1012", "Capital", { siC: 100000 })];
+  const liniiAnterioare = [
+    { cont: "641", debit: 30000, credit: 0 },
+    { cont: "421", debit: 0, credit: 30000 },
+  ];
+  const r = i.inchide({ conturi, plan, panaLa: "2026-10-21", liniiAnterioare, conturiMiscateLunaCurenta: new Set() });
+  egal("raportul spune ce prorata a folosit", r.factor, 70);
+  egal("și din câte zile", [r.zileScurse, r.zileReferinta], [21, 30]);
+  aprox("salariile intră proporțional, nu întregi", r.cheltuieli, 21000);
+  if (!echilibrat(r.total)) rau("prorata a strâmbat balanța", JSON.stringify(r.total));
+  else ok("balanța închide și cu prorata");
+}
+{
+  // Rotunjirea pe fiecare cont nu are voie să lase balanța deschisă.
+  const conturi = [cont("5121", "Bancă", { siD: 1 }), cont("1012", "Capital", { siC: 1 })];
+  const liniiAnterioare = [
+    { cont: "641", debit: 1000.01, credit: 0 },
+    { cont: "6451", debit: 333.33, credit: 0 },
+    { cont: "421", debit: 0, credit: 1333.34 },
+  ];
+  const r = i.inchide({ conturi, plan, panaLa: "2026-10-07", liniiAnterioare, conturiMiscateLunaCurenta: new Set() });
+  if (!echilibrat(r.total)) rau("rotunjirea a lăsat balanța deschisă", JSON.stringify(r.total));
+  else ok("rotunjirea pe conturi nu lasă balanța deschisă");
+}
+
+console.log("\nÎnchiderea lui 121 în 117:");
+{
+  const conturi = [
+    cont("4111", "Clienți", { rD: 100000 }),
+    cont("707", "Venituri", { rC: 100000 }),
+    cont("607", "Cheltuieli", { rD: 60000 }),
+    cont("401", "Furnizori", { rC: 60000 }),
+  ];
+  const r = i.inchide({ conturi, plan, panaLa: "2026-10-31", liniiAnterioare: [] });
+  egal("121 nu mai rămâne deschis", gaseste(r.conturi, "121").sfD + gaseste(r.conturi, "121").sfC, 0);
+  aprox("rezultatul a trecut în 117", gaseste(r.conturi, "117").sfC, 40000);
+  egal("se raportează ce s-a mutat", r.reportat.length, 2);
+  if (!echilibrat(r.total)) rau("balanța nu închide după mutarea în 117");
+  else ok("balanța închide după mutarea în 117");
+
+  const fara = i.inchide({ conturi, plan, panaLa: "2026-10-31", liniiAnterioare: [], inchide121: false });
+  aprox("se poate și fără, dacă vrem 121 la vedere", gaseste(fara.conturi, "121").sfC, 40000);
+}
+
+console.log("\nDiferența rămasă, pusă pe 473 și spusă:");
+{
+  // Balanță strâmbă intenționat cu 7 lei: un cont fără contrapartidă.
+  const conturi = [
+    cont("5121", "Bancă", { siD: 1007 }),
+    cont("1012", "Capital", { siC: 1000 }),
+  ];
+  const r = i.inchide({ conturi, plan, panaLa: "2026-10-31", liniiAnterioare: [] });
+  if (!r.diferenta) rau("diferența n-a fost nici închisă, nici raportată");
+  else {
+    aprox("diferența ajunge pe 473", r.diferenta.suma, 7);
+    egal("și se spune pe ce cont", r.diferenta.cont, "473");
+    egal("sub prag, deci nu e alarmă", r.diferenta.peste_prag, false);
+  }
+  egal("balanța iese închisă", r.echilibrat, true);
+}
+{
+  const conturi = [cont("5121", "Bancă", { siD: 51000 }), cont("1012", "Capital", { siC: 1000 })];
+  const r = i.inchide({ conturi, plan, panaLa: "2026-10-31", liniiAnterioare: [] });
+  aprox("o diferență mare se închide tot", r.diferenta.suma, 50000);
+  egal("dar se marchează ca peste prag", r.diferenta.peste_prag, true);
+  egal("și balanța e închisă", r.echilibrat, true);
+}
+{
+  const conturi = [cont("5121", "Bancă", { siD: 1000 }), cont("1012", "Capital", { siC: 1000 })];
+  const r = i.inchide({ conturi, plan, panaLa: "2026-10-31", liniiAnterioare: [] });
+  egal("o balanță deja închisă nu primește nicio notă pe 473", r.diferenta, null);
+}
+
+console.log("\nZiua de ieri:");
+egal("ieri de 21.10", i.ieri("2026-10-21"), "2026-10-20");
+egal("ieri de 1 ale lunii trece în luna trecută", i.ieri("2026-10-01"), "2026-09-30");
+egal("ieri de 1 ianuarie trece în anul trecut", i.ieri("2027-01-01"), "2026-12-31");
 
 console.log("\n" + (rele ? rele + " probleme." : "Totul curat."));
 process.exit(rele ? 1 : 0);
