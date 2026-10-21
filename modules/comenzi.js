@@ -11,6 +11,18 @@ const livrare = require("../lib/livrare-partiala");
 const stari = require("../lib/comenzi-stari");
 const { STATUS_LABEL, poateFactura, bara: baraStatus } = stari;
 
+// Moneda comenzii și unitățile cu care se lucrează. Moneda stă pe comandă, nu
+// pe linie: o comandă în două monede n-are total, iar un total care nu se
+// poate aduna n-ajută pe nimeni. Unitatea stă pe linie, fiindcă acolo se
+// schimbă — aceeași folie se comandă și la rolă, și la kilogram.
+const MONEDE = ["RON", "EUR", "USD"];
+const UNITATI = ["buc", "kg", "ml", "mp", "rolă", "palet", "set", "litru", "tonă", "cutie", "bax"];
+const SIMBOL = { RON: "lei", EUR: "€", USD: "$" };
+const sumaIn = (v, moneda) =>
+  Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) +
+  " " +
+  (SIMBOL[moneda] || moneda || "lei");
+
 // ------------------------------------------------------------------
 // Anuntul de comanda noua
 // ------------------------------------------------------------------
@@ -80,13 +92,15 @@ async function anuntaComandaNoua(comandaId, user) {
 
   const linii = await db
     .prepare(
-      `SELECT cl.cantitate, cl.pret_unitar, pr.denumire, pr.unitate_masura
+      `SELECT cl.cantitate, cl.pret_unitar, cl.um, pr.denumire, pr.unitate_masura
          FROM comenzi_linii cl JOIN produse pr ON pr.id = cl.produs_id
         WHERE cl.comanda_id = ?`
     )
     .all(comandaId);
   const total = linii.reduce((s, l) => s + Number(l.cantitate) * Number(l.pret_unitar), 0);
-  const lei = (v) => Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+  // Emailul scrie moneda comenzii, nu „lei" din reflex: o comandă în euro
+  // anunțată în lei e o cifră greșită trimisă la trei oameni deodată.
+  const lei = (v) => sumaIn(v, c.moneda);
 
   const subiect = `Comandă nouă ${c.numar ? c.numar + " " : ""}#${c.id} — ${c.client}`;
   const corp = [
@@ -98,7 +112,7 @@ async function anuntaComandaNoua(comandaId, user) {
     `Livrare cerută: ${c.data_livrare_ceruta || "—"}`,
     ``,
     `Produse:`,
-    ...linii.map((l) => `  - ${l.denumire} — ${l.cantitate} ${l.unitate_masura || "buc"} × ${lei(l.pret_unitar)} = ${lei(Number(l.cantitate) * Number(l.pret_unitar))}`),
+    ...linii.map((l) => `  - ${l.denumire} — ${l.cantitate} ${l.um || l.unitate_masura || "buc"} × ${lei(l.pret_unitar)} = ${lei(Number(l.cantitate) * Number(l.pret_unitar))}`),
     ``,
     `Total fără TVA: ${lei(total)}`,
     c.observatii ? `\nObservații: ${c.observatii}` : "",
@@ -162,6 +176,8 @@ function lineRowsScript(produse) {
     String(p.denumire || ""),
     Number(p.pret_vanzare || 0),
     String(p.categorie || "").trim(),
+    "", // locul cheii de căutare, umplută mai jos
+    String(p.unitate_masura || "").trim(),
   ]);
   return `<script>
     var COMENZI_PRODUSE = ${JSON.stringify(date).replace(/</g, "\\u003c")};
@@ -266,6 +282,11 @@ function lineRowsScript(produse) {
       rand.querySelector('.rezultate-produs').hidden = true;
       var pretInput = rand.querySelector('input[name="pret_unitar[]"]');
       if (pretInput && pret && !pretInput.value) pretInput.value = pret;
+      // Unitatea vine din nomenclator, dar rămâne schimbabilă: se comandă și
+      // altfel decât e trecut pe produs (bobina în kg, deși produsul stă în
+      // bucăți). Ce a scris omul nu se rescrie.
+      var umInput = rand.querySelector('.um-linie');
+      if (umInput && !umInput.value && p && p[6]) umInput.value = p[6];
       var cant = rand.querySelector('input[name="cantitate[]"]');
       if (cant && !cant.value) cant.focus();
     }
@@ -365,7 +386,7 @@ function register(router) {
     // Produsele unificate (activ = 0) nu mai pot fi alese: altfel codul înghițit
     // ar renaște ca duplicat chiar din formularul de comandă.
     const produse = await db
-      .prepare("SELECT id, cod, denumire, pret_vanzare, categorie FROM produse WHERE activ = 1 ORDER BY denumire")
+      .prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire")
       .all();
     if (parteneri.length === 0 || produse.length === 0) {
       return send(
@@ -412,6 +433,10 @@ function register(router) {
       const p = produse.find((x) => String(x.id) === String(id));
       return p ? String(p.categorie || "").trim() : "";
     };
+    const unitateaProdusului = (id) => {
+      const p = produse.find((x) => String(x.id) === String(id));
+      return p ? String(p.unitate_masura || "").trim() : "";
+    };
 
     const randLinie = (l) => `<tr>
             <td style="min-width:150px">
@@ -427,6 +452,8 @@ function register(router) {
               </span>
             </td>
             <td><input type="number" step="0.01" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
+            <td><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
+                       value="${esc(l.um || unitateaProdusului(l.produs_id))}"></td>
             <td><input type="number" step="0.01" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
             <td><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
           </tr>`;
@@ -449,9 +476,14 @@ function register(router) {
           valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
         })}
       </label>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 140px;gap:14px">
         <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
         <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta" value="${esc(v.data_livrare_ceruta || "")}"></label>
+        <label class="field"><span>Moneda</span>
+          <select name="moneda">
+            ${MONEDE.map((m) => `<option value="${m}"${String(v.moneda || "RON") === m ? " selected" : ""}>${m}</option>`).join("")}
+          </select>
+        </label>
       </div>
       <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
         <legend style="font-size:13px;padding:0 4px">Dacă nu e toată marfa pe stoc, clientul acceptă livrare parțială?</legend>
@@ -472,7 +504,7 @@ function register(router) {
 
       <h2>Produse comandate</h2>
       <table class="table lines-table">
-        <thead><tr><th>Categorie</th><th>Produs</th><th>Cantitate</th><th>Preț unitar</th><th></th></tr></thead>
+        <thead><tr><th>Categorie</th><th>Produs</th><th>Cantitate</th><th>UM</th><th>Preț unitar</th><th></th></tr></thead>
         <tbody id="linii-body">
           ${linii.map(randLinie).join("")}
         </tbody>
@@ -484,6 +516,7 @@ function register(router) {
         <a href="/comenzi" class="btn secondary">Renunță</a>
       </div>
     </form>
+    <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
     ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
     ${lineRowsScript(produse)}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
@@ -498,6 +531,10 @@ function register(router) {
     const produsIds = asArray(ctx.body["produs_id[]"]);
     const cantitati = asArray(ctx.body["cantitate[]"]);
     const preturi = asArray(ctx.body["pret_unitar[]"]);
+    const unitati = asArray(ctx.body["um[]"]);
+    // Ce vine prin HTTP nu se crede pe cuvânt: o monedă necunoscută ar ajunge
+    // scrisă pe comandă și pe factura de după ea.
+    const moneda = MONEDE.includes(String(ctx.body.moneda || "")) ? String(ctx.body.moneda) : "RON";
 
     // ---- clientul e obligatoriu ------------------------------------------
     //
@@ -517,7 +554,8 @@ function register(router) {
       observatii,
       data_livrare_ceruta: ctx.body.data_livrare_ceruta,
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
-      linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i] })),
+      moneda,
+      linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i], um: unitati[i] })),
     };
     const idClient = parseInt(partener_id, 10);
     if (!idClient) {
@@ -589,7 +627,7 @@ function register(router) {
 
     const info = await db
       .prepare(
-        "INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala) VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
+        "INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, moneda) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id"
       )
       .run(
         partener_id,
@@ -597,17 +635,20 @@ function register(router) {
         observatii || "",
         ctx.user ? ctx.user.id : null,
         String(ctx.body.data_livrare_ceruta || "") || null,
-        valori.livrare_partiala
+        valori.livrare_partiala,
+        moneda
       );
     const comandaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
-      "INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (?, ?, ?, ?)"
+      "INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?, ?, ?, ?, ?)"
     );
     for (let i = 0; i < produsIds.length; i++) {
       const cant = Number(cantitati[i] || 0);
       const produsId = parseInt(produsIds[i], 10);
-      if (cant > 0 && produsId) await insertLinie.run(comandaId, produsId, cant, Number(preturi[i] || 0));
+      if (cant > 0 && produsId) {
+        await insertLinie.run(comandaId, produsId, cant, Number(preturi[i] || 0), String(unitati[i] || "").trim() || null);
+      }
     }
 
     // Anuntul pe email nu are voie sa strice plasarea comenzii: daca serverul
@@ -694,6 +735,7 @@ function register(router) {
           <div><div class="k">Client</div>${esc(comanda.partener_nume)}</div>
           <div><div class="k">Data</div>${esc(comanda.data)}</div>
           <div><div class="k">Status</div>${STATUS_LABEL[comanda.status] || esc(comanda.status)}</div>
+          <div><div class="k">Moneda</div>${esc(comanda.moneda || "RON")}</div>
           <div><div class="k">Livrare parțială</div>${livrare.eticheta(comanda)}${
             potiRaspundeLivrare && comanda.status !== "anulata" && !comanda.factura_id
               ? formLivrare(livrare.raspuns(comanda) ? "Schimbă" : "Răspunde")
@@ -727,14 +769,16 @@ function register(router) {
           return [
             esc(l.denumire),
             l.cantitate,
-            esc(l.unitate_masura),
-            money(l.pret_unitar),
-            money(l.cantitate * l.pret_unitar),
+            // Unitatea scrisă pe linie bate pe cea din nomenclator: acolo e
+            // unitatea în care ținem produsul, aici cea în care s-a comandat.
+            esc(l.um || l.unitate_masura),
+            sumaIn(l.pret_unitar, comanda.moneda),
+            sumaIn(l.cantitate * l.pret_unitar, comanda.moneda),
             stocTxt,
           ];
         })
       )}
-      <div class="totals"><span class="grand">Total: ${money(total)}</span></div>
+      <div class="totals"><span class="grand">Total: ${esc(sumaIn(total, comanda.moneda))}</span></div>
 
       ${
         comanda.verificata_depozit_la

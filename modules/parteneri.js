@@ -222,6 +222,32 @@ function register(router) {
     redirect(ctx.res, `/parteneri/${ctx.params.id}`);
   });
 
+  // Mai multe persoane de contact pe aceeași firmă, scrise dintr-o dată de pe
+  // fișa ei. Până acum se putea doar una pe rând, din Marketing → Contacte, cu
+  // numele firmei tastat din nou — de unde și contactele rămase nelegate de
+  // nicio fișă. Logica (cine e deja acolo, ce se completează) stă în marketing,
+  // lângă restul lucrurilor despre oameni; se cere la apel, nu sus, ca cele
+  // două module să nu se ceară în cerc.
+  router.post("/parteneri/:id/contacte", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const b = ctx.body || {};
+    const lista = (v) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+    const nume = lista(b["c_nume[]"]);
+    const functii = lista(b["c_functie[]"]);
+    const emailuri = lista(b["c_email[]"]);
+    const telefoane = lista(b["c_telefon[]"]);
+    const randuri = nume.map((_, i) => ({
+      nume: nume[i],
+      functie: functii[i],
+      email: emailuri[i],
+      telefon: telefoane[i],
+    }));
+    const r = await require("./marketing")
+      .adaugaContacte({ partenerId: id, randuri, userId: ctx.user ? ctx.user.id : null })
+      .catch(() => ({ adaugati: 0, completati: 0 }));
+    redirect(ctx.res, `/parteneri/${id}?contacte=${r.adaugati}&completate=${r.completati}`);
+  });
+
   // Pagină de detaliu — istoricul complet al unui partener: comenzi, facturi
   // (vânzare & achiziție), oportunități CRM și interacțiuni/follow-up-uri.
   // Înregistrată după registerCrud, ca să nu intre în conflict cu rutele

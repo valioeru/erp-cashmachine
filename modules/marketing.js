@@ -286,7 +286,6 @@ async function blocContacte(opts) {
     )
     .all(o.partenerId)
     .catch(() => []);
-  if (!oameni.length) return "";
 
   const DE_UNDE = {
     semnatura: "din semnătura unui email",
@@ -296,26 +295,124 @@ async function blocContacte(opts) {
     manual: "scris de un om",
   };
 
+  // Formularul de adăugare, cu mai multe rânduri deodată.
+  //
+  // Până acum blocul ăsta întorcea șir gol când firma n-avea niciun om, deci
+  // tocmai pe fișele unde lipseau contactele nu aveai de unde să le pui. Iar
+  // unde erau, se adăuga doar unul pe rând, prin Marketing → Contacte, cu
+  // firma scrisă din nou de mână — adică exact felul în care se nasc contacte
+  // nelegate de nicio fișă. O firmă are, în mod normal, trei oameni cu care
+  // vorbești: achiziții, contabilitate și cineva de pe depozit. Se scriu
+  // odată, de pe fișa lor.
+  const randContact = `
+    <div class="mk-rand-contact" style="display:grid;grid-template-columns:2fr 1.2fr 2fr 1.2fr;gap:8px;margin-bottom:8px">
+      <input name="c_nume[]" placeholder="nume și prenume" autocomplete="off">
+      <input name="c_functie[]" placeholder="funcție" autocomplete="off">
+      <input type="email" name="c_email[]" placeholder="email" autocomplete="off">
+      <input name="c_telefon[]" placeholder="telefon" autocomplete="off">
+    </div>`;
+
+  const formular = `
+    <details class="mk-contacte-nou" ${oameni.length ? "" : "open"} style="margin:10px 0 24px">
+      <summary style="cursor:pointer;font-weight:600">+ Adaugă persoane de contact</summary>
+      <form method="post" action="/parteneri/${Number(o.partenerId)}/contacte" style="max-width:860px;margin-top:10px">
+        <div id="mk-contacte-randuri">${randContact}${randContact}${randContact}</div>
+        <button type="button" class="btn small secondary"
+          onclick="var c=document.getElementById('mk-contacte-randuri');var r=c.firstElementChild.cloneNode(true);r.querySelectorAll('input').forEach(function(i){i.value='';});c.appendChild(r);">
+          + Încă o persoană
+        </button>
+        <button class="btn small" type="submit">Salvează</button>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:6px">
+          Rândurile goale se ignoră. Un om care are deja email-ul ăsta la firma asta nu se adaugă a doua oară —
+          i se completează doar ce lipsea.
+        </div>
+      </form>
+    </details>`;
+
   return `
     <h2>Oameni la firma asta (${oameni.length})
       <a class="btn small" href="/marketing/contacte?q=${encodeURIComponent(o.numePartener || "")}"
          style="font-weight:400;margin-left:8px">Vezi în Contacte</a>
     </h2>
-    ${table(
-      ["Nume", "Funcție", "Email", "Telefon", "De unde știm", ""],
-      oameni.map((c) => [
-        `<a href="/marketing/contact/${c.id}">${esc(c.nume || "—")}</a>`,
-        c.functie
-          ? `<strong>${esc(c.functie)}</strong>`
-          : '<span style="color:var(--text-muted)">—</span>',
-        c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—",
-        esc(c.telefon || "—"),
-        `<span style="font-size:12px;color:var(--text-muted)">${esc(DE_UNDE[c.sursa] || c.sursa || "—")}</span>`,
-        c.email
-          ? `<a class="link-btn" href="/crm/email/nou?partener_id=${Number(o.partenerId)}&catre=${encodeURIComponent(c.email)}">scrie-i</a>`
-          : "",
-      ])
-    )}`;
+    ${
+      oameni.length
+        ? table(
+            ["Nume", "Funcție", "Email", "Telefon", "De unde știm", ""],
+            oameni.map((c) => [
+              `<a href="/marketing/contact/${c.id}">${esc(c.nume || "—")}</a>`,
+              c.functie
+                ? `<strong>${esc(c.functie)}</strong>`
+                : '<span style="color:var(--text-muted)">—</span>',
+              c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—",
+              esc(c.telefon || "—"),
+              `<span style="font-size:12px;color:var(--text-muted)">${esc(DE_UNDE[c.sursa] || c.sursa || "—")}</span>`,
+              c.email
+                ? `<a class="link-btn" href="/crm/email/nou?partener_id=${Number(o.partenerId)}&catre=${encodeURIComponent(c.email)}">scrie-i</a>`
+                : "",
+            ])
+          )
+        : '<p style="color:var(--text-muted)">Nu știm încă pe nimeni la firma asta.</p>'
+    }
+    ${formular}`;
+}
+
+// Adăugarea mai multor contacte deodată pe o firmă.
+//
+// Ce se apără aici: ACELAȘI OM NU INTRĂ DE DOUĂ ORI. Emailul e cheia (e
+// singurul lucru care chiar e unic); dacă lipsește, numele. Pe cel care există
+// deja NU se scrie peste — se completează doar golurile, aceeași regulă ca la
+// importul din Monday. Cine a scris funcția pe fișă știe de ce, iar un import
+// sau o completare grăbită n-are dreptul s-o șteargă.
+async function adaugaContacte({ partenerId, randuri, userId }) {
+  const curat = (v) => String(v === null || v === undefined ? "" : v).trim();
+  const lista = (Array.isArray(randuri) ? randuri : []).filter((r) => curat(r.nume) || curat(r.email));
+  let adaugati = 0;
+  let completati = 0;
+
+  for (const r of lista) {
+    const nume = curat(r.nume);
+    const email = curat(r.email).toLowerCase();
+    const functie = curat(r.functie);
+    const telefon = curat(r.telefon);
+
+    let existent = null;
+    if (email) {
+      existent = await db
+        .prepare("SELECT * FROM mk_contacte WHERE partener_id = ? AND LOWER(COALESCE(email,'')) = ? AND activ = 1 LIMIT 1")
+        .get(partenerId, email)
+        .catch(() => null);
+    }
+    if (!existent && nume) {
+      existent = await db
+        .prepare("SELECT * FROM mk_contacte WHERE partener_id = ? AND LOWER(nume) = LOWER(?) AND activ = 1 LIMIT 1")
+        .get(partenerId, nume)
+        .catch(() => null);
+    }
+
+    if (existent) {
+      const de = {};
+      if (!curat(existent.email) && email) de.email = email;
+      if (!curat(existent.functie) && functie) de.functie = functie;
+      if (!curat(existent.telefon) && telefon) de.telefon = telefon;
+      const campuri = Object.keys(de);
+      if (campuri.length) {
+        await db
+          .prepare(`UPDATE mk_contacte SET ${campuri.map((c) => c + " = ?").join(", ")} WHERE id = ?`)
+          .run(...campuri.map((c) => de[c]), existent.id);
+        completati++;
+      }
+      continue;
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO mk_contacte (partener_id, nume, functie, email, telefon, sursa, creat_de)
+         VALUES (?, ?, ?, ?, ?, 'manual', ?)`
+      )
+      .run(partenerId, nume || email, functie || null, email || null, telefon || null, userId || null);
+    adaugati++;
+  }
+  return { adaugati, completati, primite: lista.length };
 }
 
 // ---- contactele care nu sunt oameni ----------------------------------------
@@ -1350,6 +1447,7 @@ module.exports = {
   normNume,
   // Curățenia de contacte care nu-s oameni: regula și lista, verificate în test.
   blocContacte,
+  adaugaContacte,
   nuEOm,
   contacteDeCuratat,
   // Legarea contactelor de firma lor, după domeniul din adresă.
