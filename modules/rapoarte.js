@@ -20,8 +20,9 @@ const grup = require("../lib/grup");
 const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
+const rez121 = require("../lib/rezultat-121");
 const { esc, money, layout, table, dataRo, dateleInText } = require("../lib/render");
-const { chipuriPerioada, ieri: ieriPer, azi: aziPer } = require("../lib/perioada");
+const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 
 // Subinterogări refolosite: totalul fiecărei facturi (calculat din liniile ei)
@@ -196,13 +197,7 @@ function intervalDinQuery(ctx, implicitLuni = 12, presetImplicit = null) {
   let panaLa = aziStr;
   const luna = Number(aziStr.slice(5, 7));
   const ultimaZi = (a, l) => `${a}-${String(l).padStart(2, "0")}-${new Date(Date.UTC(a, l, 0)).getUTCDate()}`;
-  if (preset === "azi") {
-    deLa = aziPer();
-    panaLa = deLa;
-  } else if (preset === "ieri") {
-    deLa = ieriPer();
-    panaLa = deLa;
-  } else if (preset === "luna_curenta") deLa = `${aziStr.slice(0, 7)}-01`;
+  if (preset === "luna_curenta") deLa = `${aziStr.slice(0, 7)}-01`;
   else if (preset === "luna_trecuta") {
     const a = luna === 1 ? an - 1 : an;
     const l = luna === 1 ? 12 : luna - 1;
@@ -549,11 +544,26 @@ function analizeazaBalanta(conturi, zile) {
     // ce trece efectiv prin stoc: materii prime, materiale, mărfuri
     if (cont.startsWith("601") || cont.startsWith("602") || cont.startsWith("607")) consumStocuri += r.d;
   }
-  // Fără coloane de total sume nu putem despărți veniturile închise de soldul
-  // inițial, deci rămâne soldul lui 121 — corect pentru balanțele cumulate,
-  // care sunt singurele fără totaluri.
-  const profit = are121 && areTotaluri ? venituriInchise - cheltuieli : profitSold;
-  const nepotrivireProfit = are121 ? profit - profitSold : 0;
+  // PROFITUL NU SE MAI SOCOTEȘTE DIN RULAJE BRUTE.
+  //
+  // „Venituri închise în 121 minus rulajul debitor al conturilor 6xx" pare
+  // corect și nu e: clasele 6 și 7 au, pe lângă închideri, mișcări interne
+  // (stornări, treceri dintr-un cont în altul), iar rulajul brut le numără pe
+  // toate. Pe nouă luni 2026, Σ7xx creditor era 20.666.093,74 dar în 121 s-au
+  // închis 15.874.666,43 — diferența nu e nici profit, nici pierdere.
+  // Formula aia dădea 336.205,14 lei în loc de 523.870,90.
+  //
+  // Adevărul stă în SOLDUL lui 121, după ce te asiguri că rezultatul anului
+  // trecut a plecat din el. Soldul e o poziție, nu o sumă de mișcări, deci
+  // nu-l poate umfla nicio mișcare internă. Regula, cu tot cu cum s-a greșit
+  // prima dată, e scrisă pe larg în lib/rezultat-121.js.
+  const r121 = rez121.rezultatPerioadei(conturi);
+  const profit = r121 ? r121.rezultat : are121 && areTotaluri ? venituriInchise - cheltuieli : profitSold;
+
+  // Controlul: mișcarea capitalurilor proprii, un drum care nu trece deloc
+  // prin 121. Dacă cele două nu duc în același loc, raportul o spune.
+  const control = rez121.verificarePeCapitaluri(conturi);
+  const nepotrivireProfit = are121 ? control.diferenta : 0;
 
   const totalActiv = F.activeImob + F.activeCirc;
   const totalDatorii = F.datoriiTL + F.datoriiCurente;
@@ -2891,19 +2901,20 @@ function register(router) {
         }</p>`
       : "";
 
-    // Al doilea control de bun-simț: profitul calculat din venituri și
-    // cheltuieli față de soldul contului 121. Cele două trebuie să dea același
-    // lucru. Când nu dau, e fiindcă în 121 a rămas rezultatul anului trecut
-    // nerepartizat, sau a trecut prin el ceva care nu e nici venit, nici
-    // cheltuială. Se spune, nu se ascunde.
+    // Al doilea control de bun-simț, și e unul serios: rezultatul citit din
+    // contul 121 față de cel care iese din mișcarea capitalurilor proprii
+    // (variație − aport de capital + dividende + corecții de erori). Al
+    // doilea drum nu trece deloc prin 121, deci dacă amândouă dau același
+    // leu, cifra e solidă. Când nu dau, a trecut prin capitaluri ceva ce
+    // raportul nu știe să numească — se spune, nu se netezește.
     const nepProfit = refLuna ? refLuna.nepotrivireProfit : 0;
     const notaProfit =
       refLuna && Math.abs(nepProfit) > Math.max(Math.abs(refLuna.profit) * 0.01, 100)
         ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">La ${esc(
             etichetaLuna(refLuna.pana)
-          )}, profitul socotit din venituri minus cheltuieli (${money(refLuna.profit)}) nu se potrivește cu soldul contului 121 (${money(
-            refLuna.profitSold
-          )}) — diferență de ${money(Math.abs(nepProfit))}. De obicei asta înseamnă că în 121 a rămas rezultatul anului trecut nerepartizat, sau că a trecut prin el ceva care nu e nici venit, nici cheltuială. Raportul folosește prima variantă, fiindcă aia e rezultatul PERIOADEI. Merită întrebată contabila.</div>`
+          )}, rezultatul din contul 121 (${money(refLuna.profit)}) nu se potrivește cu cel care iese din mișcarea capitalurilor proprii — diferență de ${money(
+            Math.abs(nepProfit)
+          )}. Cele două se socotesc pe drumuri care nu se ating, deci diferența înseamnă că prin capitaluri a mai trecut ceva (o repartizare, o ajustare) pe care raportul nu-l recunoaște. Merită întrebată contabila; până atunci, cifra afișată e cea din 121.</div>`
         : "";
 
     // Balanțele sărite se spun pe față. Altfel raportul pare că a pierdut o

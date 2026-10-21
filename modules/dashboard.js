@@ -14,6 +14,7 @@ const db = require("../lib/db");
 const { deschisa } = require("../lib/solduri");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const rez121 = require("../lib/rezultat-121");
 
 const LUNI = ["ian", "feb", "mar", "apr", "mai", "iun", "iul", "aug", "sep", "oct", "nov", "dec"];
 
@@ -281,41 +282,48 @@ async function profitContabil(an, panaLa) {
   if (!sn || !sn.eticheta) return null;
   const inchisa = eSfarsitDeLuna(sn.pana);
 
-  // RULAJELE NU SUNT MEREU DE LA 1 IANUARIE.
-  //
-  // Balanțele trase prin punte sunt cumulate pe an, deci la ele „rulaje"
-  // înseamnă de la 1 ianuarie. O balanță exportată din Conta pe o singură
-  // lună (01/09 – 30/09) are în coloana aia DOAR luna aia — iar profitul
-  // lunii septembrie afișat ca profitul anului e o cifră falsă care arată
-  // perfect normal. Pe balanța din 30.09.2026 diferența era între 237.164 lei
-  // (septembrie) și 150.078 lei (anul până la septembrie).
-  //
-  // „Total sume" e cumulat de la 1 ianuarie în amândouă, deci scăzând
-  // soldurile inițiale iese exact cumulatul anului, indiferent ce perioadă a
-  // ales omul la export. Aceeași regulă ca în rapoarte.js — acolo e scrisă
-  // pe larg, aici se respectă.
-  const areTotaluri = await db
-    .prepare("SELECT 1 AS da FROM balante_snapshot WHERE eticheta = ? AND (ts_d <> 0 OR ts_c <> 0) LIMIT 1")
-    .get(sn.eticheta)
-    .catch(() => null);
-  const cumulat = Boolean(areTotaluri && areTotaluri.da);
-  const D = cumulat ? "(ts_d - si_d)" : "r_d";
-  const C = cumulat ? "(ts_c - si_c)" : "r_c";
-
-  const c121 = await db
-    .prepare(`SELECT ${D} AS d, ${C} AS c FROM balante_snapshot WHERE eticheta = ? AND cont = '121' LIMIT 1`)
-    .get(sn.eticheta);
-  if (c121 && (Number(c121.c) || Number(c121.d))) {
-    const venituri = Number(c121.c) || 0;
-    const cheltuieli = Number(c121.d) || 0;
-    return { profit: venituri - cheltuieli, venituri, cheltuieli, pana: sn.pana, eticheta: sn.eticheta, inchisa, sursa: "contul 121" };
+  // Regula e în lib/rezultat-121.js, cu tot cu greșeala din care s-a născut:
+  // soldul inițial al lui 121 se scade DOAR dacă n-a fost deja virat în 117x.
+  // Pe 21.10.2026 îl scădeam necondiționat și ieșea 150.078,73 lei în loc de
+  // 523.870,90 — cu exact rezultatul anului trecut mai puțin.
+  const capitaluri = await db
+    .prepare(
+      `SELECT cont, si_d, si_c, r_d, r_c, ts_d, ts_c, sf_d, sf_c FROM balante_snapshot
+        WHERE eticheta = ? AND (cont LIKE '101%' OR cont LIKE '106%' OR cont LIKE '117%' OR cont = '121')`
+    )
+    .all(sn.eticheta)
+    .catch(() => []);
+  const r121 = rez121.rezultatPerioadei(capitaluri);
+  if (r121) {
+    const control = rez121.verificarePeCapitaluri(capitaluri);
+    const c121 = capitaluri.find((c) => String(c.cont) === "121") || {};
+    const cuTotaluri = capitaluri.some((c) => Number(c.ts_d) || Number(c.ts_c));
+    // Veniturile și cheltuielile ÎNCHISE în 121, nu rulajele brute ale
+    // claselor 6 și 7 — alea conțin și mișcări interne. Din debitul lui 121
+    // se scoate virarea rezultatului vechi, care nu e o cheltuială; după
+    // scăderea asta, venituri − cheltuieli dă exact rezultatul.
+    const venituri = rez121.BANI(cuTotaluri ? Number(c121.ts_c) - Number(c121.si_c) : Number(c121.r_c));
+    const cheltuieli = rez121.BANI(
+      (cuTotaluri ? Number(c121.ts_d) - Number(c121.si_d) : Number(c121.r_d)) - r121.viratInReportat
+    );
+    return {
+      profit: r121.rezultat,
+      venituri,
+      cheltuieli,
+      pana: sn.pana,
+      eticheta: sn.eticheta,
+      inchisa,
+      sursa: "contul 121",
+      explicatie: r121.explicatie,
+      nepotrivire: control.diferenta,
+    };
   }
 
   const r = await db
     .prepare(
       `SELECT
-         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN ${C} - ${D} ELSE 0 END), 0) AS venituri,
-         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN ${D} - ${C} ELSE 0 END), 0) AS cheltuieli
+         COALESCE(SUM(CASE WHEN cont LIKE '7%' THEN r_c - r_d ELSE 0 END), 0) AS venituri,
+         COALESCE(SUM(CASE WHEN cont LIKE '6%' THEN r_d - r_c ELSE 0 END), 0) AS cheltuieli
        FROM balante_snapshot WHERE eticheta = ? AND LENGTH(cont) <= 4`
     )
     .get(sn.eticheta);
@@ -523,6 +531,8 @@ function register(router) {
           valoare: r ? r.profit : 0,
           venituri: r ? r.venituri : 0,
           cheltuieli: r ? r.cheltuieli : 0,
+          explicatie: r ? r.explicatie || "" : "",
+          nepotrivire: r ? Number(r.nepotrivire || 0) : 0,
           nota: r
             ? `balanță la ${String(r.pana).slice(0, 10)}${r.inchisa ? "" : " — lună neînchisă"}`
             : "fără balanță",
@@ -742,7 +752,22 @@ function register(router) {
                              profitContabilPeAn[0] && profitContabilPeAn[0].venituri
                                ? ` — ${money(profitContabilPeAn[0].venituri)} venituri, ${money(profitContabilPeAn[0].cheltuieli)} cheltuieli`
                                : ""
-                           }.`
+                           }.${
+                             profitContabilPeAn[0] && profitContabilPeAn[0].explicatie
+                               ? ` <span style="color:var(--text-muted)">Cifra e ${esc(profitContabilPeAn[0].explicatie)}.</span>`
+                               : ""
+                           }${
+                             // Controlul pe capitaluri proprii: un drum care nu
+                             // trece prin 121. Când nu duce în același loc, se
+                             // spune aici, nu se tace.
+                             profitContabilPeAn[0] &&
+                             Math.abs(profitContabilPeAn[0].nepotrivire) >
+                               Math.max(Math.abs(profitContabilPeAn[0].valoare) * 0.01, 100)
+                               ? ` <span style="color:var(--warn)">Verificarea pe capitaluri proprii dă cu ${money(
+                                   Math.abs(profitContabilPeAn[0].nepotrivire)
+                                 )} altceva — merită întrebată contabila.</span>`
+                               : ""
+                           }`
                          : `Nu e încărcată nicio balanță. <a href="/rapoarte/balanta/istoric">Încarcă balanțele din Conta</a> ca să apară aici.`
                      }
                    </div>
