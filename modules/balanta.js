@@ -8,6 +8,7 @@
 // e mereu „la zi" fără să apeși nimic.
 const db = require("../lib/db");
 const conta = require("../lib/contabilitate");
+const inchidere = require("../lib/balanta-inchisa");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, parseNumar } = require("../lib/import-utils");
@@ -127,7 +128,54 @@ function register(router) {
     const panaLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.pana_la || "")) ? String(ctx.query.pana_la) : azi();
     const nivel = ctx.query.nivel === "clasa" ? "clasa" : "cont";
 
+    const inchisa = String(ctx.query.inchisa || "") === "1";
+
     let { conturi, total, verificari } = await conta.balanta(deLa, panaLa);
+
+    // Balanța cu conturile închise — estimare, nu contabilitate. Vezi
+    // lib/balanta-inchisa.js pentru ce face și, mai ales, ce nu face: nu
+    // scrie nicio notă în registru.
+    let inch = null;
+    if (inchisa) {
+      const ref = inchidere.lunaAnterioara(panaLa);
+      const plan = await conta.hartaConturi();
+      // Notele lunii pline anterioare care NU vin din documente: salarii,
+      // contribuții, dobânzi, amortizări. Facturile și încasările lunii
+      // curente sunt deja în ERP, deci estimate ar fi numărate de două ori.
+      const liniiAnterioare = await db
+        .prepare(
+          `SELECT cont, SUM(debit) AS debit, SUM(credit) AS credit
+             FROM inregistrari_contabile
+            WHERE data >= ? AND data <= ?
+              AND COALESCE(sursa,'') <> 'sold_initial'
+              AND COALESCE(document_tip,'') NOT IN ('factura_vanzare','factura_achizitie','incasare','plata_furnizor')
+            GROUP BY cont`
+        )
+        .all(ref.de, ref.la)
+        .catch(() => []);
+      // Conturile care s-au mișcat deja în luna curentă: pe alea nu le
+      // estimăm, fiindcă nota există.
+      const miscate = await db
+        .prepare(
+          `SELECT DISTINCT cont FROM inregistrari_contabile
+            WHERE data >= ? AND data <= ? AND COALESCE(sursa,'') <> 'sold_initial'`
+        )
+        .all(inchidere.inceputLunii(panaLa), panaLa)
+        .catch(() => []);
+      inch = inchidere.inchide({
+        conturi,
+        plan,
+        panaLa,
+        liniiAnterioare,
+        conturiMiscateLunaCurenta: new Set(miscate.map((x) => String(x.cont))),
+      });
+      conturi = inch.conturi;
+      total = inch.total;
+      verificari = [
+        { nume: "Rulaje debitoare = creditoare", d: total.rD, c: total.rC, diferenta: conta.BANI(total.rD - total.rC), ok: Math.abs(total.rD - total.rC) <= 0.01 },
+        { nume: "Solduri finale debitoare = creditoare", d: total.sfD, c: total.sfC, diferenta: conta.BANI(total.sfD - total.sfC), ok: Math.abs(total.sfD - total.sfC) <= 0.01 },
+      ];
+    }
 
     // Balanța pe clase (sintetic de grad zero) — utilă pentru o privire rapidă.
     if (nivel === "clasa") {
@@ -177,9 +225,58 @@ function register(router) {
           <option value="cont"${nivel === "cont" ? " selected" : ""}>Pe conturi</option>
           <option value="clasa"${nivel === "clasa" ? " selected" : ""}>Pe clase (rezumat)</option>
         </select>
+        ${inchisa ? '<input type="hidden" name="inchisa" value="1">' : ""}
         <button class="btn small" type="submit">Afișează</button>
         <a class="btn secondary small" href="/rapoarte/balanta?de_la=${esc(panaLa)}&pana_la=${esc(panaLa)}">Doar ziua de azi</a>
+        <a class="btn ${inchisa ? "secondary " : ""}small" href="/rapoarte/balanta?de_la=${esc(deLa)}&pana_la=${esc(panaLa)}&nivel=${esc(nivel)}${inchisa ? "" : "&inchisa=1"}">
+          ${inchisa ? "Înapoi la balanța brută" : "Închisă la zi (estimare)"}
+        </a>
       </form>
+
+      ${
+        inch
+          ? `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn);max-width:none">
+               <strong>Asta e o estimare, nu o balanță contabilă.</strong>
+               Clasele 6 și 7 sunt închise în 121, TVA-ul e decontat, iar
+               ${
+                 inch.lunaIncompleta
+                   ? `ce lipsea din luna în curs a fost completat cu cifrele din <b>${esc(inch.referinta.de.slice(0, 7))}</b>`
+                   : "luna e întreagă, deci nu s-a estimat nimic"
+               }.
+               Nu s-a scris nicio notă în registru — balanța reală e neatinsă, o vezi apăsând „Înapoi la balanța brută".
+               Nu o trimite nicăieri ca document: închiderea adevărată o face contabila.
+             </div>
+             <div class="cards" style="margin-bottom:12px">
+               <div class="card"><div class="label">Venituri (clasa 7)</div><div class="value">${money(inch.venituri)}</div></div>
+               <div class="card"><div class="label">Cheltuieli (clasa 6)</div><div class="value">${money(inch.cheltuieli)}</div></div>
+               <div class="card"><div class="label">Rezultat estimat</div>
+                 <div class="value" style="color:${inch.rezultat >= 0 ? "var(--verde,#1a7f42)" : "var(--rosu,#b3261e)"}">${money(inch.rezultat)}</div>
+                 <div style="font-size:12px">${inch.rezultat >= 0 ? "profit" : "pierdere"}, în contul 121</div></div>
+               <div class="card"><div class="label">Balanța închide</div>
+                 <div class="value">${inch.echilibrat ? "da" : "NU"}</div></div>
+             </div>
+             ${
+               inch.estimari.length
+                 ? `<details style="margin-bottom:12px"><summary style="cursor:pointer">
+                      <b>${inch.estimari.length}</b> conturi completate cu cifrele lunii ${esc(inch.referinta.de.slice(0, 7))} — vezi exact ce s-a estimat
+                    </summary>
+                    ${table(
+                      ["Cont", "Denumire", "Debit estimat", "Credit estimat"],
+                      inch.estimari.map((o) => [esc(o.cont), esc(o.denumire), nrRo(o.debit), nrRo(o.credit)])
+                    )}</details>`
+                 : `<p class="mic" style="color:var(--text-muted)">Nu s-a estimat nimic: fie luna e întreagă, fie notele lunii curente sunt deja scrise.</p>`
+             }
+             ${
+               inch.tva.length
+                 ? `<details style="margin-bottom:12px"><summary style="cursor:pointer">Decontarea TVA — ${inch.tva.length} operațiuni</summary>
+                    ${table(
+                      ["Cont", "Ce s-a făcut", "Debit", "Credit"],
+                      inch.tva.map((o) => [esc(o.cont), esc(o.denumire), nrRo(o.debit), nrRo(o.credit)])
+                    )}</details>`
+                 : ""
+             }`
+          : ""
+      }
 
       <div style="overflow-x:auto">
       <table class="table balanta">
