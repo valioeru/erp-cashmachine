@@ -4,6 +4,7 @@ const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const fuziune = require("../lib/produse-fuziune");
+const produsRapid = require("../lib/produs-rapid");
 
 const TIPURI = [["text", "text liber"], ["numar", "număr"], ["lista", "listă de valori"]];
 
@@ -220,6 +221,123 @@ function register(router) {
     const v = Number(String((ctx.body && ctx.body.adaos) || "").replace(",", "."));
     if (Number.isFinite(v) && v >= 0 && v < 1000) await scrieSetare("adaos_lista_implicit", v);
     return redirect(ctx.res, "/produse");
+  });
+
+  // ---- produsul scris direct pe comandă ---------------------------------
+  //
+  // Clientul cere ceva ce nu e în nomenclator. Până acum agentul se oprea
+  // aici: lista nu-l conținea, câmpul ascuns rămânea gol, comanda nu se
+  // salva. Ruta asta îl creează de pe linia de comandă și întoarce JSON, ca
+  // pagina să-l pună pe rând fără reîncărcare.
+  //
+  // Două lucruri o țin să nu strice nomenclatorul:
+  //   • caută întâi un produs existent cu aceeași denumire normalizată și îl
+  //     reutilizează. Fără asta, "banda adeziva 48" ar intra a cincea oară.
+  //   • ce chiar e nou intră cu provizoriu = 1, deci apare la
+  //     /produse/provizorii până îl completează cineva.
+  //
+  // Înregistrată înaintea lui /produse/:id — altfel "rapid" ar fi citit ca id.
+  router.post("/produse/rapid", async (ctx) => {
+    const raspunde = (stare, obiect) =>
+      send(ctx.res, stare, JSON.stringify(obiect), { "Content-Type": "application/json; charset=utf-8" });
+    if (!ctx.user) return raspunde(401, { eroare: "Nu ești autentificat." });
+
+    const v = produsRapid.validare(ctx.body || {});
+    if (v.eroare) return raspunde(400, { eroare: v.eroare });
+
+    // Toate produsele în joc, ca să comparăm pe denumirea normalizată. E o
+    // citire întreagă, dar se întâmplă doar când omul apasă anume butonul, iar
+    // formularul de comandă încarcă oricum aceeași listă la fiecare deschidere.
+    const existente = await db
+      .prepare("SELECT id, cod, denumire, categorie, unitate_masura, pret_vanzare, activ, fuzionat_in FROM produse")
+      .all()
+      .catch(() => []);
+    const gasit = produsRapid.potrivire(existente, v.cheie);
+    if (gasit) {
+      return raspunde(200, {
+        id: gasit.id,
+        cod: gasit.cod || "",
+        denumire: gasit.denumire,
+        categorie: String(gasit.categorie || "").trim(),
+        um: String(gasit.unitate_masura || "").trim(),
+        pret: Number(gasit.pret_vanzare || 0),
+        reutilizat: true,
+      });
+    }
+
+    const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const ins = await db
+      .prepare(
+        `INSERT INTO produse (denumire, categorie, unitate_masura, activ, provizoriu, creat_de, creat_la)
+         VALUES (?, ?, ?, 1, 1, ?, ?) RETURNING id`
+      )
+      .run(v.denumire, v.categorie, v.um, ctx.user.id, acum);
+    console.log(`[produse] provizoriu nou #${ins.lastInsertRowid} "${v.denumire}" de ${ctx.user.nume || ctx.user.id}`);
+    return raspunde(200, {
+      id: ins.lastInsertRowid,
+      cod: "",
+      denumire: v.denumire,
+      categorie: v.categorie || "",
+      um: v.um,
+      pret: 0,
+      reutilizat: false,
+    });
+  });
+
+  // Lista produselor provizorii. E coada de lucru a achizițiilor: fiecare rând
+  // de aici e un produs pe care l-a cerut un client și pe care încă nu l-a
+  // verificat nimeni. Dacă pagina asta rămâne goală, mecanismul e sănătos.
+  router.get("/produse/provizorii", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const randuri = await db
+      .prepare(
+        `SELECT p.id, p.denumire, p.categorie, p.unitate_masura, p.creat_la, u.nume AS creat_de_nume,
+                (SELECT COUNT(*) FROM comenzi_linii cl WHERE cl.produs_id = p.id) AS pe_comenzi
+           FROM produse p LEFT JOIN utilizatori u ON u.id = p.creat_de
+          WHERE p.provizoriu = 1 AND COALESCE(p.activ, 1) = 1
+          ORDER BY p.id DESC LIMIT 300`
+      )
+      .all()
+      .catch(() => []);
+
+    const body = `
+      <p style="max-width:780px;color:var(--text-muted)">
+        Produse pe care le-a cerut un client și le-a scris un agent direct pe comandă. Sunt bune de comandat,
+        dar n-au cod, preț de achiziție sau unitate verificată. Completează-le din fișa produsului, apoi apasă
+        „Confirmă" — atunci ies din lista asta.
+      </p>
+      ${
+        randuri.length
+          ? table(
+              ["#", "Denumire", "Categorie", "UM", "Pe comenzi", "Scris de", "Când", ""],
+              randuri.map((r) => [
+                String(r.id),
+                `<a href="/produse/${r.id}">${esc(r.denumire)}</a>`,
+                esc(r.categorie || "—"),
+                esc(r.unitate_masura || "—"),
+                String(Number(r.pe_comenzi || 0)),
+                esc(r.creat_de_nume || "—"),
+                esc(String(r.creat_la || "").slice(0, 16)),
+                `<form method="post" action="/produse/${r.id}/confirma" class="inline-form">
+                   <button type="submit" class="btn small">Confirmă</button>
+                 </form>`,
+              ])
+            )
+          : `<p style="color:var(--text-muted)">Niciun produs provizoriu. Nomenclatorul e curat.</p>`
+      }`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Produse de verificat", active: "/produse", body }));
+  });
+
+  // Scoaterea din provizorat. Nu se face singură la prima completare de câmp:
+  // cineva trebuie să se uite la produs și să spună „e în regulă". De-aia e un
+  // buton, nu un declanșator pe UPDATE.
+  router.post("/produse/:id/confirma", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const id = parseInt(ctx.params.id, 10);
+    if (!Number.isFinite(id)) return redirect(ctx.res, "/produse/provizorii");
+    await db.prepare("UPDATE produse SET provizoriu = 0 WHERE id = ?").run(id);
+    console.log(`[produse] provizoriu #${id} confirmat de ${ctx.user.nume || ctx.user.id}`);
+    return redirect(ctx.res, "/produse/provizorii");
   });
 
   // Pagină de detaliu produs: stoc pe depozite + rețetă de fabricație (BOM) —

@@ -257,7 +257,8 @@ function lineRowsScript(produse) {
         gasite.push(p);
       }
       if (!gasite.length) {
-        cutie.innerHTML = '<div class="rezultat-gol">Niciun produs aici. Schimbă categoria sau scrie altceva.</div>';
+        cutie.innerHTML = '<div class="rezultat-gol">Niciun produs aici. Schimbă categoria sau scrie altceva.</div>' +
+                          comenziButonNou(input.value);
         cutie.hidden = false;
         comenziAseaza(cutie, input);
         return;
@@ -267,9 +268,80 @@ function lineRowsScript(produse) {
         var catTxt = p[4] ? '<span class="rezultat-cat">' + p[4] + '</span>' : '';
         return '<button type="button" class="rezultat-produs" data-id="' + p[0] + '" data-pret="' + p[3] +
                '" onclick="comenziAlege(this)">' + cod + p[2] + ' ' + catTxt + '</button>';
-      }).join('');
+      }).join('') + comenziButonNou(input.value);
       cutie.hidden = false;
       comenziAseaza(cutie, input);
+    }
+
+    // „+ Adaugă ... ca produs nou"
+    //
+    // Butonul apare si cand lista ARE rezultate, nu doar cand e goala: cazul
+    // real e tocmai acela in care se vad patru benzi adezive si niciuna nu e
+    // aia ceruta. Daca ar aparea doar pe lista goala, omul ar trebui sa scrie
+    // intentionat o prostie ca sa ajunga la el.
+    function comenziEscHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function comenziButonNou(q) {
+      var t = String(q || '').trim();
+      if (t.length < 3) return '';
+      return '<button type="button" class="rezultat-nou" onclick="comenziProdusNou(this)">' +
+             '+ Adaugă „' + comenziEscHtml(t) + '" ca produs nou</button>';
+    }
+
+    // Ce scrie omul nu se interpoleaza in cod: butonul nu poarta denumirea cu
+    // el, o citeste din campul randului in momentul apasarii.
+    function comenziProdusNou(btn) {
+      var rand = comenziRand(btn);
+      var cautare = rand.querySelector('.cauta-produs');
+      var catSel = rand.querySelector('.cat-produs');
+      var umInput = rand.querySelector('.um-linie');
+      var cutie = rand.querySelector('.rezultate-produs');
+      var denumire = cautare.value.trim();
+      if (denumire.length < 3) return;
+      var cat = (catSel && catSel.value && catSel.value !== '\\u0000') ? catSel.value : '';
+
+      btn.disabled = true;
+      var textInitial = btn.textContent;
+      btn.textContent = 'Se adaugă…';
+      var opreste = function (mesaj) {
+        btn.disabled = false;
+        btn.textContent = textInitial;
+        var av = cutie.querySelector('.rezultat-eroare');
+        if (!av) { av = document.createElement('div'); av.className = 'rezultat-eroare'; cutie.appendChild(av); }
+        av.textContent = mesaj;
+      };
+
+      fetch('/produse/rapid', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ denumire: denumire, categorie: cat, um: umInput ? umInput.value.trim() : '' })
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.d || !res.d.id) {
+            return opreste((res.d && res.d.eroare) || 'Nu am putut adăuga produsul. Încearcă din nou.');
+          }
+          var d = res.d;
+          // Intra si in lista din pagina, ca sa fie gasibil pe celelalte randuri
+          // fara reincarcare. Fara asta, doua linii cu acelasi produs nou ar
+          // insemna doua apasari si doua cautari in baza.
+          if (!COMENZI_PRODUSE.some(function (x) { return String(x[0]) === String(d.id); })) {
+            var p = [d.id, d.cod || '', d.denumire, Number(d.pret || 0), d.categorie || '', '', d.um || ''];
+            p[5] = window.comenziFaraDiacritice(p[1] + ' ' + p[2]);
+            COMENZI_PRODUSE.push(p);
+          }
+          rand.querySelector('input[name="produs_id[]"]').value = d.id;
+          cautare.value = d.denumire;
+          if (umInput && !umInput.value && d.um) umInput.value = d.um;
+          var pretInput = rand.querySelector('input[name="pret_unitar[]"]');
+          if (pretInput && !pretInput.value && Number(d.pret) > 0) pretInput.value = d.pret;
+          cutie.hidden = true;
+          var cant = rand.querySelector('input[name="cantitate[]"]');
+          if (cant && !cant.value) cant.focus();
+        })
+        .catch(function () { opreste('Nu am putut adăuga produsul. Verifică legătura și încearcă din nou.'); });
     }
 
     function comenziAlege(btn) {
@@ -329,6 +401,14 @@ function lineRowsScript(produse) {
     .rezultat-cod { color:var(--text-muted); font-variant-numeric:tabular-nums; }
     .rezultat-cat { color:var(--text-muted); font-size:11px; }
     .rezultat-gol { padding:8px 10px; color:var(--text-muted); font-size:13px; }
+    /* Se desparte de rezultate printr-o linie: e o actiune, nu inca un produs
+       din lista peste care treci din greseala. */
+    .rezultat-nou { display:block; width:100%; text-align:left; padding:8px 10px; border:0;
+      border-top:1px solid var(--border,#ddd); background:none; cursor:pointer; font-size:13px;
+      color:var(--accent,#1a56db); font-weight:600; }
+    .rezultat-nou:hover { background:var(--accent-slab,#e8f0fe); }
+    .rezultat-nou[disabled] { opacity:.6; cursor:default; }
+    .rezultat-eroare { padding:6px 10px; color:var(--danger,#b42318); font-size:12px; }
   </style>`;
 }
 
