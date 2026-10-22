@@ -131,10 +131,20 @@ const unul = (s) => ruleaza(s, []).rows[0];
     dinSchema.push(`${m[1]}.${m[2]}`);
   }
   const acoperite = new Set(fuziune.TABELE.map((t) => `${t.tabel}.${t.coloana}`));
-  const lipsa = [...new Set(dinSchema)].filter((k) => !acoperite.has(k));
-  bine(`toate cele ${new Set(dinSchema).size} coloane de produs din schemă sunt în motor`, lipsa.length === 0, lipsa.join(", "));
+  // Nu orice coloană numită „produs_id" ține de nomenclator: cele din
+  // ALT_CATALOG trimit în alt tabel (consumabilele au catalogul lor). Sunt
+  // scutite aici, dar scutirea e scrisă în motor, cu referința cu tot — nu
+  // ascunsă în test, unde nimeni n-ar mai găsi-o.
+  const altundeva = new Set((fuziune.ALT_CATALOG || []).map((t) => `${t.tabel}.${t.coloana}`));
+  const deAcoperit = [...new Set(dinSchema)].filter((k) => !altundeva.has(k));
+  const lipsa = deAcoperit.filter((k) => !acoperite.has(k));
+  bine(`toate cele ${deAcoperit.length} coloane de produs din schemă sunt în motor`, lipsa.length === 0, lipsa.join(", "));
   const inPlus = [...acoperite].filter((k) => !dinSchema.includes(k));
   bine("motorul nu trimite la coloane care nu există", inPlus.length === 0, inPlus.join(", "));
+  // Și invers: o scutire pentru un tabel care nu mai există în schemă e o
+  // minciună care ne-ar ascunde mâine o coloană adevărată.
+  const scutiriMoarte = [...altundeva].filter((k) => !dinSchema.includes(k));
+  bine("scutirile din ALT_CATALOG există în schemă", scutiriMoarte.length === 0, scutiriMoarte.join(", "));
 
   // ---- pregătim datele ----------------------------------------------------
   sql(`DELETE FROM produse_fuziuni WHERE inghitit_cod LIKE 'TSTP%';
