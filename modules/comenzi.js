@@ -287,7 +287,7 @@ function lineRowsScript(produse) {
       var t = String(q || '').trim();
       if (t.length < 3) return '';
       return '<button type="button" class="rezultat-nou" onclick="comenziProdusNou(this)">' +
-             '+ Adaugă „' + comenziEscHtml(t) + '" ca produs nou</button>';
+             '+ Adaugă „' + comenziEscHtml(t) + '” ca produs nou</button>';
     }
 
     // Ce scrie omul nu se interpoleaza in cod: butonul nu poarta denumirea cu

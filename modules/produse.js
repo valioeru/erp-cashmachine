@@ -6,6 +6,10 @@ const { send, redirect } = require("../lib/router");
 const fuziune = require("../lib/produse-fuziune");
 const produsRapid = require("../lib/produs-rapid");
 
+// Cine scoate un produs din provizorat. Achizițiile (rolul „depozit") și
+// adminul — adică exact cine are de unde să-i ia codul și prețul de achiziție.
+const poateConfirma = (u) => Boolean(u && (u.rol === "admin" || u.rol === "depozit"));
+
 const TIPURI = [["text", "text liber"], ["numar", "număr"], ["lista", "listă de valori"]];
 
 // ---------------------------------------------------------------------------
@@ -303,8 +307,13 @@ function register(router) {
     const body = `
       <p style="max-width:780px;color:var(--text-muted)">
         Produse pe care le-a cerut un client și le-a scris un agent direct pe comandă. Sunt bune de comandat,
-        dar n-au cod, preț de achiziție sau unitate verificată. Completează-le din fișa produsului, apoi apasă
-        „Confirmă" — atunci ies din lista asta.
+        dar n-au cod, preț de achiziție sau unitate verificată. Se completează din fișa produsului, apoi se apasă
+        „Confirmă” — atunci ies din lista asta.
+        ${
+          poateConfirma(ctx.user)
+            ? ""
+            : `<br><span style="color:var(--text-muted)">Confirmarea o fac achizițiile — tu vezi aici doar ce așteaptă.</span>`
+        }
       </p>
       ${
         randuri.length
@@ -318,14 +327,16 @@ function register(router) {
                 String(Number(r.pe_comenzi || 0)),
                 esc(r.creat_de_nume || "—"),
                 esc(String(r.creat_la || "").slice(0, 16)),
-                `<form method="post" action="/produse/${r.id}/confirma" class="inline-form">
-                   <button type="submit" class="btn small">Confirmă</button>
-                 </form>`,
+                poateConfirma(ctx.user)
+                  ? `<form method="post" action="/produse/${r.id}/confirma" class="inline-form">
+                       <button type="submit" class="btn small">Confirmă</button>
+                     </form>`
+                  : "",
               ])
             )
           : `<p style="color:var(--text-muted)">Niciun produs provizoriu. Nomenclatorul e curat.</p>`
       }`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Produse de verificat", active: "/produse", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Produse de verificat", active: "/produse/provizorii", body }));
   });
 
   // Scoaterea din provizorat. Nu se face singură la prima completare de câmp:
@@ -333,6 +344,11 @@ function register(router) {
   // buton, nu un declanșator pe UPDATE.
   router.post("/produse/:id/confirma", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
+    // Lista se vede de oricine lucrează cu produse — e util ca agentul să știe
+    // că articolul lui încă n-a fost verificat. Dar APĂSAT nu poate fi de
+    // oricine: dacă agentul care a scris produsul în grabă îl poate declara
+    // bun tot el, verificarea nu există, există doar un buton în plus.
+    if (!poateConfirma(ctx.user)) return redirect(ctx.res, "/produse/provizorii");
     const id = parseInt(ctx.params.id, 10);
     if (!Number.isFinite(id)) return redirect(ctx.res, "/produse/provizorii");
     await db.prepare("UPDATE produse SET provizoriu = 0 WHERE id = ?").run(id);
@@ -586,4 +602,4 @@ function register(router) {
   });
 }
 
-module.exports = { register };
+module.exports = { register, poateConfirma };
