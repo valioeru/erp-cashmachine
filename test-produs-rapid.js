@@ -117,7 +117,34 @@ console.log("\n3. Potrivirea cu ce exista deja");
   );
 }
 
-console.log("\n4. Pe PostgreSQL real: ce scrie efectiv ruta");
+console.log("\n4. Cine vede lista si cine poate apasa pe ea");
+{
+  process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://postgres@127.0.0.1:5433/erp";
+  const { sectiune, poateAccesa } = require(path.join(RAD, "lib", "auth.js"));
+  const { poateConfirma } = require(path.join(RAD, "modules", "produse.js"));
+  const om = (rol) => ({ id: 1, nume: "Test", rol, sectiuni: null });
+
+  // Lista e coada de lucru a achizitiilor, deci se aprinde butonul Procurement
+  // din bara de sus - nu Vanzari, desi ruta incepe cu /produse.
+  bine("zona paginii e Procurement, nu Vanzari", sectiune("/produse/provizorii") === "/procurement",
+    sectiune("/produse/provizorii"));
+  bine("fisa unui produs ramane in Vanzari", sectiune("/produse/123") === "/crm", sectiune("/produse/123"));
+
+  // Vazutul e deschis: e util ca agentul sa stie ca articolul lui inca
+  // n-a fost verificat.
+  bine("agentul POATE deschide lista", poateAccesa(om("vanzari"), "/produse/provizorii") === true);
+  bine("achizitiile POT deschide lista", poateAccesa(om("depozit"), "/produse/provizorii") === true);
+
+  // Apasatul nu. Daca cel care a scris produsul in graba il poate declara bun
+  // tot el, verificarea nu exista - exista doar un buton in plus.
+  bine("achizitiile pot confirma", poateConfirma(om("depozit")) === true);
+  bine("adminul poate confirma", poateConfirma(om("admin")) === true);
+  bine("AGENTUL NU poate confirma", poateConfirma(om("vanzari")) === false);
+  bine("productia NU poate confirma", poateConfirma(om("productie")) === false);
+  bine("nelogat NU poate confirma", poateConfirma(null) === false);
+}
+
+console.log("\n5. Pe PostgreSQL real: ce scrie efectiv ruta");
 try {
   psql("SELECT 1");
 } catch (e) {
