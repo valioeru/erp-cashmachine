@@ -8,6 +8,7 @@ const db = require("../lib/db");
 const { esc, money, cantitate, unitate, layout, table, dateleInText, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
+const T = require("../lib/termene");
 const { comenziSpreAlocare, ore } = require("./utilaje");
 
 const STATUSURI = [
@@ -504,13 +505,19 @@ function register(router) {
     }
     const clauza = where.length ? "WHERE " + where.join(" AND ") : "";
 
+    // Ultima comanda adaugata sta prima. Lista era ordonata dupa data
+    // solicitata, iar o comanda scrisa acum, cu termen peste doua luni,
+    // ateriza undeva la mijloc — omul care tocmai o introdusese o cauta pe
+    // trei ecrane ca sa verifice ce a scris. Termenul se vede oricum pe
+    // fiecare rand si se poate filtra; ordinea de intrare nu se putea
+    // reconstitui din nimic.
     const comenzi = await db
       .prepare(
         `SELECT c.*, p.nume AS partener_nume, u.nume AS agent_nume FROM comenzi_productie c
          LEFT JOIN parteneri p ON p.id = c.partener_id
          LEFT JOIN utilizatori u ON u.id = c.agent_id
          ${clauza}
-         ORDER BY (c.data_solicitata IS NULL OR c.data_solicitata = ''), c.data_solicitata ASC, c.id DESC
+         ORDER BY c.id DESC
          LIMIT 400`
       )
       .all(...args);
@@ -643,7 +650,8 @@ function register(router) {
   router.get("/productie/cereri", async (ctx) => {
     const cereri = await db
       .prepare(
-        `SELECT a.*, p.denumire AS produs, p.unitate_masura, c.numar AS comanda_numar, cl.nume AS client
+        `SELECT a.*, p.denumire AS produs, p.unitate_masura, c.numar AS comanda_numar, cl.nume AS client,
+                c.data_livrare_promisa, c.data_livrare_ceruta
          FROM aprovizionari a
          JOIN produse p ON p.id = a.produs_id
          LEFT JOIN comenzi c ON c.id = a.comanda_id
@@ -654,18 +662,49 @@ function register(router) {
       )
       .all();
     const randuri = cereri.map((a) => {
+      // Ce i s-a promis clientului. Termenul cerut de depozit ar trebui sa
+      // vina de aici, dar a trecut prin mana unui om si poate fi altceva —
+      // de-aia verificarea se face fata de comanda, nu fata de cerere.
+      const dataClient = a.data_livrare_promisa || a.data_livrare_ceruta || null;
       const actiuni =
         a.status === "ceruta"
           ? `<form method="post" action="/productie/cereri/${a.id}/confirma" class="inline-form" style="gap:6px">
-               <input type="date" name="termen" value="${esc(a.termen_cerut || azi())}">
-               <button class="btn small" type="submit">Confirm termenul</button>
+               <input type="hidden" name="termen" value="${esc(a.termen_cerut || azi())}">
+               <button class="btn small" type="submit">Confirm ${esc(a.termen_cerut || azi())}</button>
              </form>
-             <form method="post" action="/productie/cereri/${a.id}/refuza" class="inline-form">
-               <button class="link-btn danger" type="submit">Nu pot în termen</button>
+             <details style="margin-top:6px">
+               <summary style="cursor:pointer;color:var(--danger);font-size:13px">Nu pot în termen</summary>
+               <form method="post" action="/productie/cereri/${a.id}/confirma" style="margin-top:8px;display:grid;gap:6px;max-width:260px">
+                 <label class="field" style="margin:0"><span style="font-size:12px">Când pot</span>
+                   <input type="date" name="termen" required value="${esc(a.termen_cerut || azi())}"></label>
+                 <label class="field" style="margin:0"><span style="font-size:12px">De ce</span>
+                   <input name="motiv" required placeholder="ex. așteptăm granulă" maxlength="200"></label>
+                 <button class="btn small" type="submit">Trimit alt termen</button>
+               </form>
+             </details>
+             <form method="post" action="/productie/cereri/${a.id}/refuza" class="inline-form" style="margin-top:6px">
+               <button class="link-btn danger" type="submit" style="font-size:12px">Nu putem face deloc</button>
              </form>`
           : a.status === "confirmata" && a.productie_id
             ? `<a class="btn small secondary" href="/productie/${a.productie_id}">Vezi comanda de producție</a>`
             : "";
+      // Doua verificari diferite, si cea de-a doua e cea care conteaza:
+      // productia poate confirma EXACT ce i s-a cerut — intern totul verde —
+      // si tot sa depaseasca data promisa clientului, daca termenul cerut
+      // era deja prea tarziu cand a plecat cererea din depozit.
+      const cmp = T.compara(a.termen_cerut, a.termen_confirmat);
+      const fataClient = a.termen_confirmat ? T.fataDeClient(a.termen_confirmat, dataClient) : null;
+      const raspunsCelula =
+        `${esc(a.termen_confirmat || "—")}` +
+        (a.termen_confirmat && cmp.fel !== "confirmat"
+          ? `<br><span class="badge ${cmp.culoare}" style="font-size:11px">${esc(cmp.eticheta)}</span>`
+          : "") +
+        (fataClient && fataClient.fel === "depaseste_clientul"
+          ? `<br><span class="badge rosu" style="font-size:11px">${esc(fataClient.eticheta)}</span>`
+          : "") +
+        (a.raspuns && /motiv:/.test(String(a.raspuns))
+          ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(String(a.raspuns).replace(/^.*motiv:\s*/, ""))}</span>`
+          : "");
       const stare =
         a.status === "ceruta"
           ? '<span class="badge gri">așteaptă răspunsul producției</span>'
@@ -681,20 +720,27 @@ function register(router) {
       return [
         esc(a.produs),
         `${a.cantitate} ${esc(a.unitate_masura || "")}`,
-        a.comanda_id ? `${esc(a.comanda_numar || "#" + a.comanda_id)}<br><span style="font-size:12px">${esc(a.client || "")}</span>` : "pentru stoc",
+        a.comanda_id
+          ? `${esc(a.comanda_numar || "#" + a.comanda_id)}<br><span style="font-size:12px">${esc(a.client || "")}</span>` +
+            (dataClient ? `<br><span style="font-size:11px;color:var(--text-muted)">promis clientului: ${esc(dataClient)}</span>` : "")
+          : "pentru stoc",
         esc(a.termen_cerut || "—"),
-        esc(a.termen_confirmat || "—"),
+        raspunsCelula,
         stare,
         actiuni,
       ];
     });
+    const eroare = String(ctx.query.eroare || "");
     const body = `
+      ${eroare ? `<p class="badge rosu" style="display:inline-block">${esc(eroare)}</p>` : ""}
       <p style="max-width:760px;color:var(--text-muted)">
         Ce cere depozitul de la producție, cu termenul pe care agentul l-a promis clientului. Dacă termenul se poate ține,
-        confirmă-l — comanda de producție se deschide automat. Dacă nu, refuz-o: comanda de vânzare rămâne în listă și
-        poate fi anulată de cel care a plasat-o.
+        confirmă-l — comanda de producție se deschide automat. Dacă nu, apasă „Nu pot în termen" și scrie când poți:
+        comanda de producție se deschide tot, dar cu data ta, iar depozitul vede negru pe alb cu câte zile s-a mutat.
+        „Nu putem face deloc" e altceva și se folosește rar — acolo comanda de vânzare rămâne în listă fără nimic în
+        spate și trebuie să se ocupe cineva de ea.
       </p>
-      ${table(["Produs", "Cantitate", "Pentru comanda", "Termen cerut", "Termen confirmat", "Stare", ""], randuri)}
+      ${table(["Produs", "Cantitate", "Pentru comanda", "Termen cerut", "Răspunsul producției", "Stare", ""], randuri)}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Cereri din depozit", active: "/productie/cereri", body }));
   });
@@ -704,7 +750,16 @@ function register(router) {
     const id = parseInt(ctx.params.id, 10);
     const a = await db.prepare("SELECT * FROM aprovizionari WHERE id = ?").get(id);
     if (!a || a.status !== "ceruta") return redirect(ctx.res, "/productie/cereri");
-    const termen = String((ctx.body || {}).termen || "").slice(0, 10) || a.termen_cerut || null;
+
+    // Raspunsul productiei: ori confirma termenul cerut, ori da altul. Daca
+    // da unul mai tarziu, motivul e obligatoriu — peste doua saptamani
+    // nimeni nu-si mai aminteste de ce s-a mutat, iar depozitul si agentul
+    // raman cu o data schimbata si fara explicatie.
+    const raspuns = T.validareRaspuns(ctx.body || {}, a.termen_cerut);
+    if (raspuns.eroare) {
+      return redirect(ctx.res, "/productie/cereri?eroare=" + encodeURIComponent(raspuns.eroare.slice(0, 200)));
+    }
+    const termen = raspuns.termen;
     const produs = await db.prepare("SELECT denumire, unitate_masura FROM produse WHERE id = ?").get(a.produs_id);
     const comanda = a.comanda_id
       ? await db
@@ -763,7 +818,14 @@ function register(router) {
       );
     await db
       .prepare("UPDATE aprovizionari SET status = 'confirmata', termen_confirmat = ?, productie_id = ?, raspuns = ? WHERE id = ?")
-      .run(termen, ins.lastInsertRowid, `confirmat de ${ctx.user.nume}`, id);
+      .run(
+        termen,
+        ins.lastInsertRowid,
+        raspuns.motiv
+          ? `${raspuns.comparatie.eticheta} de ${ctx.user.nume} — motiv: ${raspuns.motiv}`
+          : `confirmat de ${ctx.user.nume}`,
+        id
+      );
     if (a.comanda_id) {
       await db
         .prepare("UPDATE comenzi SET status = 'in_productie' WHERE id = ? AND status NOT IN ('facturata','livrata','anulata')")
