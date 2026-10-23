@@ -1093,12 +1093,28 @@ function register(router) {
           const titlu = ocupat
             ? `${l.adresa} · ${l.produs || l.produs_text || "marfă"} · ${nr(l.cantitate) || "?"} ${l.um || ""} · intrat ${l.data_intrare}`
             : `${l.adresa} · liber${l.categorie ? " · zonă " + l.categorie : ""}`;
-          pozitii += `<${ocupat ? `a href="/stocuri/ct-park/palet/${l.palet_id}"` : "div"} class="ct-loc${ocupat ? " ocupat" : " liber"}${nr(l.blocat) ? " blocat" : ""}"
-              title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
-              style="height:${hPx}px${ocupat ? `;background:${culoare}1f;border-color:${culoare}66` : ""}">
-              <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
-              ${ocupat ? `<span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, 22))}</span>` : ""}
-            </${ocupat ? "a" : "div"}>`;
+          // Locul OCUPAT ramane link catre paleta lui. Locul LIBER era un div
+          // mort: se vedea ca e liber si atat. Acum e o casuta bifabila —
+          // arati cu degetul unde vrei marfa, exact ca in hala, in loc sa
+          // speri ca propunerea automata nimereste raftul la care te gandeai.
+          if (ocupat) {
+            pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${nr(l.blocat) ? " blocat" : ""}"
+                title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
+                style="height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
+                <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
+                <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, 22))}</span>
+              </a>`;
+          } else if (nr(l.blocat)) {
+            pozitii += `<div class="ct-loc liber blocat" title="${esc(titlu)}" style="height:${hPx}px">
+                <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span></div>`;
+          } else {
+            pozitii += `<label class="ct-loc liber alegibil" title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
+                style="height:${hPx}px">
+                <input type="checkbox" name="loc" value="${l.id}" data-adresa="${esc(l.adresa)}"
+                       data-nivel="${nivel}" data-camp="${camp}" data-pozitie="${l.pozitie}">
+                <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
+              </label>`;
+          }
         }
         const zona = h.get(`${nivel}|${camp}|1`);
         celule += `<div class="ct-camp" data-nivel="${nivel}" data-camp="${camp}">
@@ -1136,15 +1152,60 @@ function register(router) {
         <a class="btn small secondary" href="/stocuri/ct-park/configurare/${r.id}">Înălțimi și paleți pe nivel</a>
       </div>
 
-      <div class="ct-fata">
-        <div class="ct-grila">${grila}</div>
-        <div class="ct-podea">pardoseală</div>
-      </div>
+      <form method="get" action="/stocuri/ct-park/intrare" id="forma-locuri">
+        <input type="hidden" name="rand" value="${r.id}">
+        <div class="ct-fata">
+          <div class="ct-grila">${grila}</div>
+          <div class="ct-podea">pardoseală</div>
+        </div>
+        <div class="bara-selectie" id="bara-locuri" hidden>
+          <span id="bara-locuri-text"></span>
+          <button class="btn small" type="submit" style="margin-left:8px">Pune marfă pe locurile astea</button>
+          <a href="#" id="bara-locuri-renunt" style="margin-left:10px;font-size:12px">renunț</a>
+        </div>
+      </form>
+      <script>
+        (function () {
+          var f = document.getElementById("forma-locuri");
+          var bara = document.getElementById("bara-locuri");
+          var txt = document.getElementById("bara-locuri-text");
+          function alese() {
+            return Array.prototype.filter.call(f.querySelectorAll('input[name="loc"]'), function (b) { return b.checked; });
+          }
+          f.addEventListener("change", function () {
+            var a = alese();
+            bara.hidden = a.length === 0;
+            if (!a.length) return;
+            var adrese = a.map(function (b) { return b.dataset.adresa; });
+            // Spune pe loc daca sunt lipite sau nu: o paleta lata are nevoie
+            // de pozitii vecine in acelasi camp si nivel, iar omul trebuie sa
+            // afle asta cand da click, nu la pasul urmator.
+            var lipite = true;
+            if (a.length > 1) {
+              var n = a[0].dataset.nivel, c = a[0].dataset.camp;
+              var poz = a.map(function (b) { return Number(b.dataset.pozitie); }).sort(function (x, y) { return x - y; });
+              lipite = a.every(function (b) { return b.dataset.nivel === n && b.dataset.camp === c; });
+              for (var i = 1; lipite && i < poz.length; i++) if (poz[i] !== poz[i - 1] + 1) lipite = false;
+            }
+            txt.innerHTML = a.length === 1
+              ? "Locul <strong>" + adrese[0] + "</strong>"
+              : a.length + " locuri: <strong>" + adrese.join(", ") + "</strong>" +
+                (lipite
+                  ? ' <span class="badge verde" style="font-size:10px">lipite — o paletă lată</span>'
+                  : ' <span class="badge galben" style="font-size:10px">nu sunt lipite — ies paleți separați</span>');
+          });
+          document.getElementById("bara-locuri-renunt").addEventListener("click", function (ev) {
+            ev.preventDefault();
+            alese().forEach(function (b) { b.checked = false; });
+            bara.hidden = true;
+          });
+        })();
+      </script>
 
       <p class="ct-legenda2">
         ${CATEGORII.map((c) => `<span><i style="background:${CULORI_CATEGORII[c]}"></i>${esc(c)}</span>`).join("")}
         <span><i style="background:#eceff3;border:1px solid var(--border)"></i>liber</span>
-        <span style="color:var(--text-muted)">Click pe un loc ocupat ca să vezi ce e pe el.</span>
+        <span style="color:var(--text-muted)">Click pe un loc <strong>liber</strong> ca să pui marfă acolo (poți alege mai multe) · click pe unul <strong>ocupat</strong> ca să vezi ce e pe el.</span>
       </p>
 
       <h2>Zone pe categorii</h2>
@@ -1717,13 +1778,43 @@ function register(router) {
 
     if (!randuri.length) return redirect(ctx.res, "/stocuri/ct-park");
 
+    // Locurile arătate cu degetul pe harta rândului. Când vin de acolo,
+    // ERP-ul nu mai propune nimic: omul a ales deja, iar a-i propune altceva
+    // peste alegerea lui e exact felul în care un ecran devine enervant.
+    const aleseDinHarta = String(ctx.query.locuri || "")
+      .split(",").map((x) => parseInt(x, 10)).filter(Boolean);
+    let locuriAlese = [];
+    if (aleseDinHarta.length) {
+      locuriAlese = await db
+        .prepare(
+          `SELECT l.*, r.numar AS rand_numar FROM ct_locuri l JOIN ct_randuri r ON r.id = l.rand_id
+            WHERE l.id IN (${aleseDinHarta.map(() => "?").join(",")})
+            ORDER BY l.nivel, l.camp, l.pozitie`
+        )
+        .all(...aleseDinHarta)
+        .catch(() => []);
+    }
+
     const body = `
       ${subtabs("/stocuri/ct-park/intrare")}
       <h1 style="margin:6px 0 2px">Intrare marfă în CT-Park</h1>
-      <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px">
-        Pasul 1: ce intră și pe câți paleți. Pasul 2: ERP-ul propune locurile libere, tu le confirmi și primești
-        etichetele de 100 × 150 mm cu adresa generată.
-      </p>
+      ${
+        locuriAlese.length
+          ? `<div class="detail-box" style="border-left:4px solid var(--accent,#2f6fde);margin-bottom:14px">
+               <strong>${locuriAlese.length === 1 ? "Locul ales" : locuriAlese.length + " locuri alese"} de pe hartă:</strong>
+               ${locuriAlese.map((l) => `<span class="badge albastru">${esc(l.adresa)}</span>`).join(" ")}
+               <p style="margin:8px 0 0;font-size:12px;color:var(--text-muted)">
+                 Marfa se pune fix aici — ERP-ul nu mai caută altundeva. Scrie mai jos ce intră.
+                 <a href="/stocuri/ct-park/rand/${locuriAlese[0].rand_id}">Înapoi la hartă</a> dacă vrei alte locuri.
+               </p>
+             </div>`
+          : `<p style="margin:0 0 14px;color:var(--text-muted);font-size:13px">
+               Pasul 1: ce intră și pe câți paleți. Pasul 2: ERP-ul propune locurile libere, tu le confirmi și primești
+               etichetele de 100 × 150 mm cu adresa generată.
+               <br>Sau deschide <a href="/stocuri/ct-park">harta</a>, dă click pe locurile libere unde vrei marfa, și
+               vino înapoi aici cu ele alese.
+             </p>`
+      }
 
       <form class="filtre" method="get" action="/stocuri/ct-park/intrare">
         <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută produsul în catalog…" style="min-width:280px">
@@ -1732,6 +1823,7 @@ function register(router) {
       </form>
 
       <form class="form" method="post" action="/stocuri/ct-park/intrare" style="max-width:900px">
+        <input type="hidden" name="locuri_alese" value="${esc(aleseDinHarta.join(","))}">
         ${
           gasite.length
             ? `<div class="field"><span>Produsul găsit</span>
@@ -1775,7 +1867,8 @@ function register(router) {
               ${CATEGORII.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")}
             </select>
           </label>
-          <label class="field">Câți paleți<input type="number" name="paleti" min="1" max="60" value="1" required></label>
+          <label class="field">Câți paleți<input type="number" name="paleti" min="1" max="60"
+                 value="${locuriAlese.length ? 1 : 1}" required></label>
           <label class="field">Locuri pe paletă
             <select name="locuri">
               <option value="1">1 — paletă normală</option>
@@ -1840,20 +1933,55 @@ function register(router) {
       return potrivitZona * 10 + potrivitRand * 3 + nr(grup[0].nivel);
     };
 
-    const grupuri = [];
-    for (const [, locuri] of peCamp) {
-      locuri.sort((x, y) => nr(x.pozitie) - nr(y.pozitie));
-      for (let i = 0; i + cateLocuri <= locuri.length; ) {
-        const felie = locuri.slice(i, i + cateLocuri);
-        const consecutive = felie.every((l, k) => k === 0 || nr(l.pozitie) === nr(felie[k - 1].pozitie) + 1);
-        if (consecutive) {
-          grupuri.push(felie);
-          i += cateLocuri;
-        } else i += 1;
+    // Locurile arătate cu degetul pe hartă. Când există, propunerea automată
+    // nu mai rulează deloc: omul a ales, iar a-i propune altceva peste
+    // alegerea lui e felul în care un ecran devine enervant.
+    //
+    // Se verifică DIN NOU că sunt libere. Între click și salvare poate trece
+    // un sfert de oră, iar altcineva poate pune marfă acolo — iar atunci un
+    // palet ar intra peste altul, în bază, fără ca nimeni să vadă.
+    const dinHarta = String(b.locuri_alese || "").split(",").map((x) => parseInt(x, 10)).filter(Boolean);
+    let alese;
+    let ocupateIntreTimp = [];
+    if (dinHarta.length) {
+      const libereDupaId = new Map(libere.map((l) => [Number(l.id), l]));
+      const bune = [];
+      for (const id of dinHarta) {
+        const l = libereDupaId.get(id);
+        if (l) bune.push(l);
+        else ocupateIntreTimp.push(id);
       }
+      // Locurile lipite, în același câmp și nivel, formează o paletă lată.
+      // Cele răzlețe ies ca paleți separați — exact ce spune și bara de pe
+      // hartă când le bifezi.
+      bune.sort((x, y) => nr(x.nivel) - nr(y.nivel) || nr(x.camp) - nr(y.camp) || nr(x.pozitie) - nr(y.pozitie));
+      alese = [];
+      let curent = [];
+      for (const l of bune) {
+        const ultim = curent[curent.length - 1];
+        const lipit =
+          ultim && nr(ultim.nivel) === nr(l.nivel) && nr(ultim.camp) === nr(l.camp) &&
+          nr(l.pozitie) === nr(ultim.pozitie) + 1 && curent.length < cateLocuri;
+        if (lipit) curent.push(l);
+        else { if (curent.length) alese.push(curent); curent = [l]; }
+      }
+      if (curent.length) alese.push(curent);
+    } else {
+      const grupuri = [];
+      for (const [, locuri] of peCamp) {
+        locuri.sort((x, y) => nr(x.pozitie) - nr(y.pozitie));
+        for (let i = 0; i + cateLocuri <= locuri.length; ) {
+          const felie = locuri.slice(i, i + cateLocuri);
+          const consecutive = felie.every((l, k) => k === 0 || nr(l.pozitie) === nr(felie[k - 1].pozitie) + 1);
+          if (consecutive) {
+            grupuri.push(felie);
+            i += cateLocuri;
+          } else i += 1;
+        }
+      }
+      grupuri.sort((a2, b2) => scor(a2) - scor(b2));
+      alese = grupuri.slice(0, catePaleti);
     }
-    grupuri.sort((a, b2) => scor(a) - scor(b2));
-    const alese = grupuri.slice(0, catePaleti);
 
     const produs = nr(b.produs_id)
       ? await db.prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE id = ?").get(nr(b.produs_id))
@@ -1884,7 +2012,16 @@ function register(router) {
       </p>
 
       ${
-        alese.length < catePaleti
+        ocupateIntreTimp.length
+          ? `<div class="detail-box" style="border-left:4px solid var(--danger)">
+              <strong>${ocupateIntreTimp.length} ${ocupateIntreTimp.length === 1 ? "loc ales nu mai e liber" : "locuri alese nu mai sunt libere"}.</strong>
+              Cineva a pus marfă acolo între timp. Restul se poate ocupa normal; pentru ce lipsește,
+              întoarce-te la hartă și alege altceva.
+            </div>`
+          : ""
+      }
+      ${
+        !dinHarta.length && alese.length < catePaleti
           ? `<div class="detail-box" style="border-left:4px solid var(--danger)">
               Am găsit doar <strong>${alese.length}</strong> ${alese.length === 1 ? "loc potrivit" : "locuri potrivite"} din ${catePaleti} cerute.
               ${cateLocuri > 1 ? "Marfa lată are nevoie de poziții lipite în același câmp — poate n-au mai rămas destule." : "Depozitul e aproape plin."}

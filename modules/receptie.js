@@ -19,7 +19,6 @@ const db = require("../lib/db");
 const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const R = require("../lib/receptie");
-const H = require("../lib/harta-depozit");
 
 const nr = (v) => Number(v || 0);
 function azi() {
@@ -582,179 +581,18 @@ function register(router) {
     redirect(ctx.res, "/depozit/receptie");
   });
 
-  // ---- Harta depozitului ---------------------------------------------------
+  // AICI A FOST o a doua hartă de depozit, pe care am construit-o fiindcă
+  // depozitul propriu n-avea rafturi definite. Vali a cerut s-o scot: harta
+  // care contează e cea din CT-Park (/stocuri/ct-park), care exista deja,
+  // are structura reală a halei — rânduri, niveluri cu înălțimi proprii,
+  // câmpuri — și pe care lucrează oamenii. Două hărți care arată același
+  // lucru în două feluri sunt mai rele decât una singură: oricare ar fi
+  // greșită, cineva s-ar uita la cealaltă.
   //
-  // Pana acum, ca sa pui marfa pe un raft, alegeai un cod dintr-o lista
-  // derulanta de cateva sute de intrari si sperai ca e liber. Harta arata
-  // raftul asa cum arata in hala: randuri, etaje de sus in jos, locuri pe
-  // etaj. Ce e ocupat e colorat si scrie ce sta acolo. Dai click pe unul sau
-  // pe mai multe locuri vecine — cat ocupa paletul — si continui direct cu
-  // intrarea marfii pe locurile alea.
-  router.get("/depozit/harta", async (ctx) => {
-    const locuri = await db.prepare("SELECT * FROM locuri_depozit ORDER BY cod LIMIT 4000").all();
-    const stoc = await db
-      .prepare(
-        `SELECT s.*, p.denumire AS produs_denumire
-           FROM stoc_locuri s LEFT JOIN produse p ON p.id = s.produs_id
-          WHERE s.cantitate > 0`
-      )
-      .all()
-      .catch(() => []);
-    const h = H.aranjeaza(locuri, stoc);
-    const toate = [];
-    for (const z of h.zone) for (const r of z.randuri) for (const n of r.niveluri) for (const c of n.celule) toate.push(c);
-    const z = H.rezumat(toate.concat(h.fara));
-
-    const celula = (c) => {
-      const ce = c.continut
-        .map((x) => esc(x.produs_denumire || x.produs_text || "marfă") + " " + Math.round(nr(x.cantitate)))
-        .join(" · ");
-      const clasa = c.blocat ? "loc blocat" : c.ocupat ? "loc ocupat" : "loc liber";
-      const titlu = c.blocat
-        ? c.cod + " — blocat"
-        : c.ocupat
-          ? c.cod + " — " + (ce || "ocupat")
-          : c.cod + " — liber";
-      return `<label class="${clasa}" title="${esc(titlu)}">
-                <input type="checkbox" name="loc_id" value="${c.id}" ${c.liber ? "" : "disabled"} data-cod="${esc(c.cod)}">
-                <span class="loc-cod">${esc(String(c.pozitie))}</span>
-                ${c.ocupat ? `<span class="loc-ce">${esc((c.continut[0] && (c.continut[0].produs_denumire || c.continut[0].produs_text)) || "ocupat")}</span>` : ""}
-              </label>`;
-    };
-
-    const desen = h.zone
-      .map(
-        (zona) => `
-        <h3 style="margin:22px 0 8px">Zona ${esc(zona.zona)}</h3>
-        ${zona.randuri
-          .map(
-            (r) => `
-          <div class="rand-raft">
-            <div class="rand-eticheta">Rândul ${r.rand}</div>
-            <div class="rand-etaje">
-              ${r.niveluri
-                .map(
-                  (n) => `<div class="etaj"><span class="etaj-eticheta">et. ${n.nivel}</span>
-                            <div class="etaj-locuri">${n.celule.map(celula).join("")}</div></div>`
-                )
-                .join("")}
-            </div>
-          </div>`
-          )
-          .join("")}`
-      )
-      .join("");
-
-    const parteneri = await db.prepare("SELECT id, nume FROM parteneri ORDER BY nume LIMIT 3000").all();
-    const body = `
-      ${subnavDepozit("/depozit/harta", ctx.user)}
-      ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:760px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
-      <p style="max-width:860px;color:var(--text-muted)">
-        Raftul, așa cum arată în hală: rânduri, etaje de sus în jos, locuri pe etaj. Verde e liber, galben are marfă,
-        gri e blocat. Dai click pe <strong>unul sau mai multe locuri vecine</strong> — cât ocupă paletul — și continui
-        direct cu intrarea mărfii pe ele.
-      </p>
-      <p>
-        <span class="badge verde">${z.libere} libere</span>
-        <span class="badge galben">${z.ocupate} ocupate</span>
-        ${z.blocate ? `<span class="badge gri">${z.blocate} blocate</span>` : ""}
-        <span style="color:var(--text-muted);font-size:13px">· ${z.procentOcupat}% din raft e plin</span>
-      </p>
-      ${
-        toate.length
-          ? `<form method="post" action="/depozit/harta/intrare" id="forma-harta">
-               ${desen}
-               <div class="bara-selectie" id="bara-harta" hidden>
-                 <span id="bara-text"></span>
-                 <select name="sursa" style="margin-left:10px">
-                   <option value="furnizor">de la furnizor</option>
-                   <option value="productie">din producție</option>
-                   <option value="retur_tert">retur de la client</option>
-                   <option value="retur_fulfilment">retur din fulfilment</option>
-                   <option value="inventar_initial">stoc inițial</option>
-                 </select>
-                 <select name="partener_id" style="margin-left:6px;max-width:220px">
-                   <option value="">— de la cine —</option>
-                   ${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}
-                 </select>
-                 <button class="btn small" type="submit" style="margin-left:8px">Intrare marfă aici</button>
-                 <a href="#" id="bara-renunt" style="margin-left:10px;font-size:12px">renunț</a>
-               </div>
-             </form>
-             <script>
-               (function () {
-                 var f = document.getElementById("forma-harta");
-                 var bara = document.getElementById("bara-harta");
-                 var txt = document.getElementById("bara-text");
-                 function alese() {
-                   return Array.prototype.filter.call(f.querySelectorAll('input[name="loc_id"]'), function (b) { return b.checked; });
-                 }
-                 f.addEventListener("change", function () {
-                   var a = alese();
-                   bara.hidden = a.length === 0;
-                   if (a.length) {
-                     txt.textContent = a.length === 1
-                       ? "Locul " + a[0].dataset.cod
-                       : a.length + " locuri: " + a.map(function (b) { return b.dataset.cod; }).join(", ");
-                   }
-                 });
-                 document.getElementById("bara-renunt").addEventListener("click", function (ev) {
-                   ev.preventDefault();
-                   alese().forEach(function (b) { b.checked = false; });
-                   bara.hidden = true;
-                 });
-               })();
-             </script>`
-          : `<p class="badge galben" style="display:block;max-width:760px;white-space:normal;line-height:1.5">
-               Nu e definit niciun loc cu cod de forma <code>A-01-2-1</code> (zonă, rând, etaj, loc).
-               <a href="/depozit/locuri">Generează rafturile</a> — se scriu o dată.
-             </p>`
-      }
-      ${
-        h.fara.length
-          ? `<h3 style="margin-top:26px">Locuri fără poziție pe hartă</h3>
-             <p style="max-width:760px;color:var(--text-muted);font-size:13px">
-               Au cod scris liber, deci nu se pot desena. Se pot folosi normal de pe pagina de recepție.
-             </p>
-             ${table(["Cod", "Ce e acolo"], h.fara.map((c) => [esc(c.cod), c.ocupat ? esc(c.continut.map((x) => x.produs_denumire || x.produs_text).join(", ")) : "liber"]))}`
-          : ""
-      }`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Harta depozitului", active: "/depozit/harta", body }));
-  });
-
-  // Din hartă direct în recepție, cu locurile deja alese.
-  router.post("/depozit/harta/intrare", async (ctx) => {
-    if (!poate(ctx.user)) return redirect(ctx.res, "/depozit/harta");
-    const b = ctx.body || {};
-    const ids = (Array.isArray(b.loc_id) ? b.loc_id : b.loc_id ? [b.loc_id] : []).map((x) => parseInt(x, 10)).filter(Boolean);
-    if (!ids.length) return redirect(ctx.res, "/depozit/harta");
-
-    const locuri = await db.prepare("SELECT * FROM locuri_depozit WHERE id IN (" + ids.join(",") + ")").all();
-    const stoc = await db.prepare("SELECT loc_id, cantitate FROM stoc_locuri WHERE cantitate > 0").all().catch(() => []);
-    const h = H.aranjeaza(locuri, stoc);
-    const celule = [];
-    for (const z of h.zone) for (const r of z.randuri) for (const n of r.niveluri) for (const c of n.celule) celule.push(c);
-    for (const c of h.fara) celule.push(c);
-
-    // Aceleasi reguli ca pe hartă, verificate si aici: cine trimite
-    // formularul de mana nu trece pe langa ele.
-    const v = H.validareSelectie(celule);
-    if (v.eroare) return redirect(ctx.res, "/depozit/harta?eroare=" + encodeURIComponent(v.eroare));
-
-    const id = await creeaza(
-      {
-        sursa: b.sursa,
-        partener_id: parseInt(b.partener_id, 10) || null,
-        anuntata_de: ctx.user.nume,
-        observatii: "Deschisă din hartă, pentru " + v.coduri.join(", "),
-      },
-      []
-    );
-    // Locurile alese se tin minte pe receptie, ca randurile adaugate sa le
-    // primeasca singure — altfel omul le-ar alege a doua oara, din lista.
-    await db.prepare("UPDATE receptii SET locuri_alese = ? WHERE id = ?").run(ids.join(","), id);
-    redirect(ctx.res, `/depozit/receptie/${id}`);
-  });
+  // Alegerea locurilor cu degetul, paleta lată pe mai multe locuri lipite și
+  // intrarea de marfă direct pe locurile alese stau ACUM în modules/ct-park.js,
+  // pe harta rândului. Ce a rămas aici e lista simplă de locuri, folosită de
+  // recepție pentru depozitul propriu.
 
   // ---- Locurile din depozit ------------------------------------------------
   router.get("/depozit/locuri", async (ctx) => {
@@ -810,9 +648,9 @@ function register(router) {
         <form method="post" action="/depozit/locuri/serie" class="form" style="max-width:760px;margin-top:10px">
           <p style="font-size:12px;color:var(--text-muted);max-width:620px">
             Scrie zona și câte rânduri, etaje și locuri pe etaj sunt; ies codurile de forma
-            <code>A-01-2-3</code> = zona A, rândul 1, etajul 2, al treilea palet pe etaj. Alea se desenează pe
-            <a href="/depozit/harta">hartă</a>. Cele care există deja se sar, deci se poate rula de două ori fără
-            să facă dubluri.
+            <code>A-01-2-3</code> = zona A, rândul 1, etajul 2, al treilea palet pe etaj. Cele care există deja
+            se sar, deci se poate rula de două ori fără să facă dubluri. Harta pe care se dă click ca să alegi
+            locurile e cea din <a href="/stocuri/ct-park">CT-Park</a>.
           </p>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1.4fr;gap:12px">
             <label class="field" style="margin:0"><span>Prefix</span><input name="prefix" required value="A"></label>
