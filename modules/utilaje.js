@@ -359,6 +359,172 @@ function register(router) {
       )
       .all();
 
+    // Fisa tehnica, din Utilaje_CashMachine_ERP.xlsx (vezi lib/utilaje-seed.js).
+    const parametri = await db
+      .prepare("SELECT * FROM utilaje_parametri WHERE utilaj_id = ? ORDER BY id")
+      .all(u.id)
+      .catch(() => []);
+    const setup = await db
+      .prepare("SELECT * FROM utilaje_setup WHERE utilaj_id = ? ORDER BY id")
+      .all(u.id)
+      .catch(() => []);
+    const consumabile = await db
+      .prepare("SELECT * FROM utilaje_consumabile WHERE utilaj_id = ? ORDER BY tip, denumire")
+      .all(u.id)
+      .catch(() => []);
+    const rute = await db
+      .prepare("SELECT * FROM utilaje_rute WHERE utilaj_id = ? ORDER BY prioritate, ruta_cod")
+      .all(u.id)
+      .catch(() => []);
+    const pasiFlux = await db
+      .prepare(
+        `SELECT p.pas_nr, p.operatie, p.tip_pas, f.cod, f.denumire
+           FROM fluxuri_pasi p JOIN fluxuri f ON f.id = p.flux_id
+          WHERE p.utilaj_id = ? OR p.utilaj_cod = ?
+          ORDER BY f.cod, p.pas_nr`
+      )
+      .all(u.id, u.cod || "")
+      .catch(() => []);
+
+    // O valoare PRESUPUSA si neconfirmata arata exact ca una masurata pana
+    // cand cineva incearca sa produca pe ea. De-aia se marcheaza.
+    const sigur = (sursa, confirmat) => {
+      const s = String(sursa || "").toUpperCase();
+      const c = String(confirmat || "").toUpperCase();
+      if (s === "PRESUPUS" || c === "NU") {
+        return ` <span class="badge rosu" style="font-size:10px">${esc(s === "PRESUPUS" ? "presupus" : "neconfirmat")}</span>`;
+      }
+      if (s === "CALCULAT") return ' <span class="badge gri" style="font-size:10px">calculat</span>';
+      return "";
+    };
+    const neconfirmate = parametri.filter(
+      (p) => String(p.sursa || "").toUpperCase() === "PRESUPUS" || String(p.confirmat || "").toUpperCase() === "NU"
+    ).length;
+
+    const fisaTehnica = `
+      <h2>Fișa tehnică</h2>
+      ${
+        u.status_date === "STANDBY"
+          ? '<div class="detail-box" style="border-left:4px solid var(--danger)">Utilajul e în <strong>STANDBY</strong>, fără date tehnice. Nu alocați comenzi pe el.</div>'
+          : ""
+      }
+      <div class="detail-box" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
+        <div><span style="font-size:12px;color:var(--text-muted)">Categorie</span><br>${esc(u.categorie || "—")}</div>
+        <div><span style="font-size:12px;color:var(--text-muted)">Regim</span><br>${esc(u.regim_lucru || "—")}</div>
+        <div><span style="font-size:12px;color:var(--text-muted)">Timp / schimb</span><br>${u.timp_disponibil_schimb_min ? Math.round(nr(u.timp_disponibil_schimb_min)) + " min" : "—"}</div>
+        <div><span style="font-size:12px;color:var(--text-muted)">Schimburi / zi</span><br>${u.schimburi_zi ? nr(u.schimburi_zi) : "—"}</div>
+        <div><span style="font-size:12px;color:var(--text-muted)">Operatori</span><br>${nr(u.operatori_necesari) || 0}${u.nr_helperi ? " + " + nr(u.nr_helperi) + " helper" : ""}</div>
+        <div><span style="font-size:12px;color:var(--text-muted)">Consum</span><br>${u.consum_kw ? nr(u.consum_kw) + " kW" : "—"}${u.consum_alt ? `<br><span style="font-size:12px">${esc(u.consum_alt)}</span>` : ""}</div>
+        <div><span style="font-size:12px;color:var(--text-muted)">Date</span><br>${esc(u.status_date || "—")}</div>
+      </div>
+      ${u.scop ? `<p style="max-width:860px;color:var(--text-muted)">${esc(u.scop)}</p>` : ""}
+      ${u.observatii ? `<p style="max-width:860px"><strong>Observație:</strong> ${esc(u.observatii)}</p>` : ""}
+
+      ${
+        parametri.length
+          ? `<h3>Parametri tehnici <span style="font-weight:400;color:var(--text-muted);font-size:13px">(${parametri.length})</span>${
+              neconfirmate
+                ? ` <span class="badge rosu" style="font-size:11px">${neconfirmate} de confirmat</span>`
+                : ""
+            }</h3>
+             <p style="font-size:12px;color:var(--text-muted);max-width:820px">
+               Astea decid DACĂ se poate face o comandă, nu doar cât de repede. O valoare marcată
+               „presupus" sau „neconfirmat" arată la fel ca una măsurată până când cineva încearcă să producă pe ea.
+             </p>
+             ${table(
+               ["Parametru", "Valoare", "Observații"],
+               parametri.map((p) => [
+                 esc(p.parametru || p.parametru_cod),
+                 (p.valoare_num != null ? `<strong>${esc(String(nr(p.valoare_num)))}</strong>` : esc(p.valoare_text || "—")) +
+                   (p.unitate ? ` ${esc(p.unitate)}` : "") +
+                   sigur(p.sursa, p.confirmat),
+                 `<span style="font-size:12px;color:var(--text-muted)">${esc(p.observatii || "")}</span>`,
+               ])
+             )}`
+          : ""
+      }
+
+      ${
+        setup.length
+          ? `<h3>Timpi de setup și timpi morți</h3>
+             <p style="font-size:12px;color:var(--text-muted);max-width:820px">
+               Diferența dintre <strong>per comandă</strong> și <strong>per rolă</strong> e toată planificarea:
+               setup-ul se plătește o dată, schimbarea rolei la fiecare rolă consumată.
+             </p>
+             ${table(
+               ["Ce se întâmplă", "Durată", "Cât de des", "Observații"],
+               setup.map((s) => [
+                 esc(s.descriere || s.eveniment_cod) + sigur(s.sursa, s.confirmat),
+                 nr(s.durata_min) + " min",
+                 esc(String(s.frecventa || "—").toLowerCase().replace(/_/g, " ")) +
+                   (s.interval_valoare ? ` <span style="color:var(--text-muted)">(la ${nr(s.interval_valoare)} ${esc(s.interval_unitate || "")})</span>` : ""),
+                 `<span style="font-size:12px;color:var(--text-muted)">${esc(s.observatii || "")}</span>`,
+               ])
+             )}`
+          : ""
+      }
+
+      ${
+        rute.length
+          ? `<h3>Capacitate pe schimb, pe produs</h3>
+             <p style="font-size:12px;color:var(--text-muted);max-width:820px">
+               Capacitatea <strong>declarată</strong> e măsurată în atelier și include deja pierderile curente — are
+               prioritate. Cea <strong>calculată</strong> iese din viteză și e un maxim teoretic. Capacitatea de plan
+               e cea declarată dacă există, altfel cea calculată, și <strong>nu include setup-ul de comandă</strong>:
+               ăla se adaugă o dată, separat.
+             </p>
+             ${table(
+               ["Produs", "Operație", "Plan / schimb", "Calculată", "Declarată", "Setup", "Observații"],
+               rute.map((r) => [
+                 esc(r.produs_cod || "—"),
+                 esc(r.descriere || ""),
+                 r.capacitate_plan_schimb == null
+                   ? "—"
+                   : `<strong>${cant(r.capacitate_plan_schimb)}</strong> ${esc(r.unitate || "")}` +
+                     (r.capacitate_declarata_schimb != null
+                       ? ' <span class="badge verde" style="font-size:10px">măsurat</span>'
+                       : ' <span class="badge gri" style="font-size:10px">calculat</span>'),
+                 r.capacitate_calculata_schimb == null ? "—" : cant(r.capacitate_calculata_schimb),
+                 r.capacitate_declarata_schimb == null ? "—" : cant(r.capacitate_declarata_schimb),
+                 r.setup_comanda_min == null ? "—" : nr(r.setup_comanda_min) + " min",
+                 `<span style="font-size:12px;color:var(--text-muted)">${esc(r.observatii || "")}</span>`,
+               ])
+             )}`
+          : ""
+      }
+
+      ${
+        pasiFlux.length
+          ? `<h3>În ce fluxuri intră</h3>
+             ${table(
+               ["Flux", "Pas", "Operație", "Fel"],
+               pasiFlux.map((p) => [
+                 `<a href="/fluxuri">${esc(p.denumire || p.cod)}</a>`,
+                 String(p.pas_nr),
+                 esc(p.operatie || ""),
+                 String(p.tip_pas || "").toUpperCase() === "OPTIONAL"
+                   ? '<span class="badge galben">opțional</span>'
+                   : '<span class="badge albastru">obligatoriu</span>',
+               ])
+             )}`
+          : ""
+      }
+
+      ${
+        consumabile.length
+          ? `<h3>Consumabile și scule</h3>
+             ${table(
+               ["Fel", "Denumire", "Observații"],
+               consumabile.map((c) => [
+                 `<span class="badge ${String(c.tip || "").toUpperCase() === "SCULA" ? "albastru" : "gri"}">${esc(String(c.tip || "").toLowerCase())}</span>`,
+                 esc(c.denumire),
+                 `<span style="font-size:12px;color:var(--text-muted)">${esc(c.observatii || "")}</span>`,
+               ])
+             )}`
+          : ""
+      }
+    `;
+
     const body = `
       ${subnavProductie("/productie/utilaje", ctx.user)}
       <div class="toolbar"><a class="btn secondary" href="/productie/utilaje">← Toate utilajele</a>
@@ -379,6 +545,8 @@ function register(router) {
         <label class="field">Descriere<textarea name="descriere" rows="2">${esc(u.descriere || "")}</textarea></label>
         <div class="form-actions"><button class="btn" type="submit">Salvează</button></div>
       </form>
+
+      ${fisaTehnica}
 
       <h2>Ce scoate pe oră</h2>
       <p style="font-size:12px;color:var(--text-muted);max-width:760px">

@@ -622,7 +622,12 @@ function register(router) {
           `<span class="cel-lung">${esc(c.reteta || "")}</span>`,
           `<span class="cel-lung">${esc(c.observatii || "")}</span>`,
           `<a class="btn small" href="/productie/${c.id}/pdf" target="_blank" title="Comanda de dat în producție, gata de printat">Comandă PDF</a>`,
-        ])
+        ]),
+        // Optsprezece coloane pe un ecran de laptop inseamna ca denumirea
+        // produsului intra pe trei randuri si clientul se taie. De aici se pot
+        // ascunde cele care nu intereseaza si trage de marginea celorlalte;
+        // alegerea se tine minte in browserul fiecaruia, nu pe firma.
+        { coloane: "comenzi-productie" }
       )}
       </div>
       <div class="toolbar" style="margin-top:10px">
