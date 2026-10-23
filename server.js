@@ -231,6 +231,10 @@ async function start() {
   // Fisa tehnica a utilajelor (Utilaje_CashMachine_ERP.xlsx). Pune doar ce
   // lipseste: o corectura facuta de om in ERP nu se rescrie la repornire.
   await require("./lib/utilaje-seed").seed().catch((e) => console.error("[utilaje-seed]", e.message));
+  // „SC" din fata numelor de parteneri: strica sortarea si cautarea dupa
+  // primele litere. Se taie o data; potrivirile pe nume ignora oricum
+  // prefixul de acum (lib/nume-firma.js), deci importul nu face duplicate.
+  await require("./lib/curata-nume").curata().catch((e) => console.error("[curata-nume]", e.message));
   require("./modules/warehouse").porneste();
   require("./modules/marketing").porneste();
   require("./modules/inbox").porneste();
