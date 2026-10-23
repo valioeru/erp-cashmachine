@@ -664,3 +664,41 @@ td.cal-azi .cal-nr { background: var(--primary); color: #fff; }
   td.cal-zi { height: auto; min-height: 0; border-left: none; border-right: none; }
   td.cal-goala { display: none; }
 }
+
+
+/* --- harta depozitului ---------------------------------------------------
+ *
+ * Raftul desenat cum arata in hala: randuri unul sub altul, etajele de sus
+ * in jos in fiecare rand, locurile de la stanga la dreapta pe etaj. Verde
+ * liber, galben ocupat, gri blocat — trei stari, trei culori, fara legenda
+ * de invatat.
+ */
+.rand-raft { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+.rand-eticheta { min-width: 92px; font-size: 13px; font-weight: 600; color: var(--text-muted); padding-top: 6px; }
+.rand-etaje { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.etaj { display: flex; align-items: center; gap: 8px; }
+.etaj-eticheta { font-size: 11px; color: var(--text-muted); min-width: 38px; }
+.etaj-locuri { display: flex; gap: 4px; flex-wrap: wrap; }
+.loc {
+  position: relative; display: flex; flex-direction: column; justify-content: center; align-items: center;
+  min-width: 74px; min-height: 40px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border, #d7dae0); font-size: 11px; line-height: 1.2; text-align: center;
+  user-select: none;
+}
+.loc input { position: absolute; opacity: 0; pointer-events: none; }
+.loc .loc-cod { font-weight: 700; font-size: 13px; }
+.loc .loc-ce { color: var(--text-muted); max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loc.liber { background: #eaf7ee; border-color: #9bd3ad; }
+.loc.ocupat { background: #fdf3e0; border-color: #e5bd72; cursor: not-allowed; }
+.loc.blocat { background: #f1f2f4; border-color: #cfd3d8; color: #9aa0a6; cursor: not-allowed; }
+.loc.liber:hover { border-color: var(--accent, #2f6fde); }
+/* Locul ales se vede de la distanta: cine alege trei locuri pentru un palet
+ * trebuie sa poata verifica dintr-o privire ca sunt chiar cele trei. */
+.loc.liber:has(input:checked) { background: var(--accent, #2f6fde); border-color: var(--accent, #2f6fde); color: #fff; }
+.loc.liber:has(input:checked) .loc-ce { color: rgba(255,255,255,.85); }
+/* Bara de jos apare doar cand s-a ales ceva, si ramane la vedere. */
+.bara-selectie {
+  position: sticky; bottom: 0; z-index: 10; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 16px; padding: 10px 12px; background: var(--surface, #fff);
+  border: 1px solid var(--accent, #2f6fde); border-radius: 8px; box-shadow: 0 -4px 14px rgba(0,0,0,.08);
+}
