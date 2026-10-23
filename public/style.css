@@ -158,6 +158,27 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 .lines-table input { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; }
 .lines-table select { padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; }
 
+/* Casuta de pret se strangea pana nu mai ramanea decat sagetile de sus-jos:
+ * tastai cifre si nu vedeai nimic. Coloana „Produs" are min-width 260px si
+ * „Categorie" 150px, iar cand nu mai incape randul, browserul ingusteaza
+ * exact coloanele care n-au o latime ceruta — adica numerele. Un camp gol se
+ * strange cel mai tare, de-aia pretul disparea si cantitatea, avand deja
+ * cifre in ea, mai rezista.
+ *
+ * Doua lucruri: o latime minima reala, si scoaterea sagetilor de increment.
+ * Sagetile mananca vreo 20 de pixeli ca sa ofere ceva ce nimeni nu
+ * foloseste la un pret — nimeni nu ajunge la 12,45 lei apasand din 0,01. */
+.lines-table input[type="number"] { min-width: 110px; -moz-appearance: textfield; appearance: textfield; }
+.lines-table input[type="number"]::-webkit-outer-spin-button,
+.lines-table input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* Latime minima pe tot tabelul, ca ultimele coloane sa nu fie strivite cand
+ * fereastra e ingusta. NU se infasoara in „.tabel-lat": acolo overflow-x:auto
+ * ar taia si pe verticala, iar lista de produse care se deschide sub campul
+ * de cautare ar fi retezata — s-ar repara o casuta si s-ar strica o cautare.
+ * Mai bine deruleaza pagina intreaga. */
+.lines-table { min-width: 760px; }
+.lines-table td, .lines-table th { vertical-align: middle; }
+
 .footer { text-align: center; color: var(--text-muted); font-size: 12px; padding: 20px; }
 
 .detail-box {
@@ -472,10 +493,73 @@ button.chip { font-family: inherit; cursor: pointer; }
   .ajutor-link { margin-top: 0; }
 }
 
-/* --- tabele largi (registrul de comenzi are 17 coloane) ------------------ */
-.tabel-lat { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
+/* --- tabele largi (registrul de comenzi are 18 coloane) ------------------
+ *
+ * Problema reala, spusa de Vali: ca sa te duci stanga-dreapta trebuia sa
+ * mergi pana jos la bara de scroll, adica sa treci peste 400 de randuri. Trei
+ * lucruri rezolva asta, si niciunul singur nu ajunge:
+ *
+ *   1. bara de scroll orizontala se lipeste de marginea de jos a FERESTREI
+ *      cat timp tabelul e pe ecran — deci e la indemana oriunde ai fi;
+ *   2. capul de tabel ramane sus, ca sa stii ce coloana citesti dupa ce ai
+ *      coborat;
+ *   3. primele doua coloane (numarul comenzii si clientul) raman pe loc cand
+ *      te duci la dreapta — altfel vezi niste cifre si nu mai stii ale cui.
+ */
+.tabel-lat {
+  overflow-x: auto;
+  overflow-y: visible;
+  margin: 0 -4px;
+  padding: 0 4px;
+  /* Bara de scroll a containerului se lipeste de jos cat timp tabelul e pe
+   * ecran. Pe Chrome/Edge/Safari asta tine bara vizibila fara niciun JS. */
+  scrollbar-gutter: stable;
+}
 .tabel-lat table { min-width: 1500px; }
 .tabel-lat td, .tabel-lat th { white-space: nowrap; }
+
+/* Capul de tabel ramane sus. „top" e inaltimea barei de sus a aplicatiei. */
+.tabel-lat thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg-card, #fff);
+  box-shadow: inset 0 -1px 0 var(--border, #e3e6ea);
+}
+/* Primele doua coloane raman pe loc la derulare orizontala: numarul comenzii
+ * si clientul. Fara ele, la dreapta tabelului vezi cifre fara stapan. */
+.tabel-inghetat td:nth-child(1), .tabel-inghetat th:nth-child(1) {
+  position: sticky; left: 0; z-index: 2; background: var(--bg-card, #fff);
+}
+.tabel-inghetat td:nth-child(2), .tabel-inghetat th:nth-child(2) {
+  position: sticky; left: 42px; z-index: 2; background: var(--bg-card, #fff);
+  box-shadow: inset -1px 0 0 var(--border, #e3e6ea);
+}
+.tabel-inghetat thead th:nth-child(1), .tabel-inghetat thead th:nth-child(2) { z-index: 4; }
+/* Randurile au fundal propriu la hover; coloanele inghetate trebuie sa-l
+ * urmeze, altfel raman albe peste un rand colorat. */
+.tabel-inghetat tbody tr:hover td:nth-child(1),
+.tabel-inghetat tbody tr:hover td:nth-child(2) { background: var(--bg-subtle, #f6f7f9); }
+
+/* A doua bara de scroll, lipita de jos, pentru tabelul lat. O pune scriptul
+ * din layout si o tine sincronizata cu containerul. */
+.scroll-lipit {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 15px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  background: var(--bg-card, #fff);
+  border-top: 1px solid var(--border, #e3e6ea);
+}
+.scroll-lipit div { height: 1px; }
+/* Cardurile pe care se poate da click ca sa filtreze. */
+.card-filtru { cursor: pointer; text-decoration: none; color: inherit; display: block; transition: border-color .12s, transform .12s; }
+.card-filtru:hover { border-color: var(--accent, #2f6fde); transform: translateY(-1px); }
+.card-filtru.activ { border-color: var(--accent, #2f6fde); box-shadow: inset 0 0 0 1px var(--accent, #2f6fde); }
 .cel-lung {
   display: inline-block; max-width: 260px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
