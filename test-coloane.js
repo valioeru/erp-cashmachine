@@ -84,5 +84,27 @@ console.log("\n5. Scriptul din pagina");
   bine("latimea minima nu lasa coloana sa dispara de tot", /Math\.max\(40,/.test(html));
 }
 
+console.log("\n6. Casuta de pret din formularul de comanda");
+{
+  // Vali a trimis poza: tastai pretul si nu vedeai nimic — ramasesera doar
+  // sagetile de increment. Coloana „Produs" cere 260px, „Categorie" 150px,
+  // iar cand nu mai incape randul browserul ingusteaza exact coloanele fara
+  // latime ceruta. Un camp GOL se strange cel mai tare, de-aia pretul
+  // disparea iar cantitatea, avand deja cifre, mai rezista.
+  const fs = require("fs");
+  const css = fs.readFileSync(require("path").join(__dirname, "public", "style.css"), "utf8");
+  bine("numerele din tabelele de linii au latime minima", /\.lines-table input\[type="number"\][^}]*min-width:\s*110px/.test(css));
+  bine("si nu mai au sagetile care mancau latimea", /inner-spin-button[^}]*-webkit-appearance:\s*none/.test(css));
+  bine("tabelul de linii are o latime minima", /\.lines-table \{[^}]*min-width:\s*760px/.test(css));
+
+  const comenzi = fs.readFileSync(require("path").join(__dirname, "modules", "comenzi.js"), "utf8");
+  bine("coloana de pret cere latime in antet", /min-width:130px">Preț unitar/.test(comenzi));
+  bine("si cea de cantitate", /min-width:120px">Cantitate/.test(comenzi));
+  // Capcana evitata: infasurat in .tabel-lat, overflow-x ar fi taiat si pe
+  // verticala, iar lista de produse de sub campul de cautare ar fi fost
+  // retezata. S-ar fi reparat o casuta si s-ar fi stricat o cautare.
+  bine("tabelul de linii NU e invelit in .tabel-lat", !/tabel-lat/.test(comenzi));
+}
+
 console.log(esecuri ? "\n" + esecuri + " ESEC(URI)\n" : "\nToate trecute.\n");
 process.exit(esecuri ? 1 : 0);

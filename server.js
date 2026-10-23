@@ -52,6 +52,10 @@ require("./modules/productie").register(router);
 require("./modules/banca").register(router);
 require("./modules/angajati").register(router);
 require("./modules/salarii").register(router);
+// Receptia marfii se inregistreaza INAINTEA depozitului: „/depozit/receptie/noua"
+// si „/depozit/locuri" sunt rute literale care trebuie sa fie gasite inaintea
+// oricarei rute cu parametru din warehouse. (Vezi test-rute.js.)
+require("./modules/receptie").register(router);
 require("./modules/warehouse").register(router);
 require("./modules/financiar").register(router);
 require("./modules/factoring").register(router);

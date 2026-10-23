@@ -79,7 +79,8 @@ function bine(descriere, conditie, detaliu) {
 }
 
 const TABELE = ["utilaje_parametri", "utilaje_setup", "utilaje_reguli", "utilaje_consumabile",
-                "cilindri_flexo", "utilaje_rute", "fluxuri_pasi", "fluxuri"];
+                "cilindri_flexo", "utilaje_rute", "fluxuri_pasi", "fluxuri",
+                "produse_fisa", "norme_consum", "formule_productie", "intrebari_deschise"];
 
 function curata() {
   for (const t of TABELE) q("DELETE FROM " + t);
@@ -99,6 +100,10 @@ function curata() {
     bine("30 de consumabile si scule", Number(unul("SELECT count(*) FROM utilaje_consumabile")) === D.CONSUMABILE.length);
     bine("4 tipuri de cilindri flexo", Number(unul("SELECT count(*) FROM cilindri_flexo")) === D.CILINDRI.length);
     bine("30 de rute produs x utilaj", Number(unul("SELECT count(*) FROM utilaje_rute")) === D.RUTE.length);
+    bine("22 de formate de produs", Number(unul("SELECT count(*) FROM produse_fisa")) === D.PRODUSE_FISA.length);
+    bine("37 de norme de consum", Number(unul("SELECT count(*) FROM norme_consum")) === D.NORME.length);
+    bine("10 formule, scrise in clar", Number(unul("SELECT count(*) FROM formule_productie")) === D.FORMULE.length);
+    bine("15 intrebari deschise", Number(unul("SELECT count(*) FROM intrebari_deschise")) === D.DESCHISE.length);
     bine("12 fluxuri cu 24 de pasi",
       Number(unul("SELECT count(*) FROM fluxuri")) === 12 && Number(unul("SELECT count(*) FROM fluxuri_pasi")) === D.FLUXURI.length,
       unul("SELECT count(*) FROM fluxuri") + " fluxuri / " + unul("SELECT count(*) FROM fluxuri_pasi") + " pasi");
@@ -151,6 +156,29 @@ function curata() {
     bine("si nu se leaga de niciunul dintre ele", pasi[3].utilaj_id === null, pasi[3].utilaj_id);
     const unic = q(`SELECT p.utilaj_id FROM fluxuri_pasi p JOIN fluxuri f ON f.id=p.flux_id WHERE f.cod='F-PUNGA' AND p.pas_nr=1`)[0];
     bine("iar pasul pe un singur utilaj se leaga", unic.utilaj_id !== null);
+  }
+
+  console.log("\n4b. Formatele, normele, formulele si intrebarile deschise");
+  {
+    const p = q("SELECT * FROM produse_fisa WHERE produs_cod = 'P-PG-300x400'")[0];
+    bine("punga 300x400 e in fisa", !!p);
+    // 2 x inaltime + clapa = 2x400 + 50 = 850. Daca iese altceva, formula
+    // FX04 nu se potriveste cu datele, si una din ele e gresita.
+    bine("latimea foliei desfasurate: 850 mm", Number(p.latime_folie_desfasurata_mm) === 850, p.latime_folie_desfasurata_mm);
+    bine("si masa pe bucata", Math.abs(Number(p.masa_folie_g_buc) - 10.557) < 0.01, p.masa_folie_g_buc);
+    bine("cu cilindrul pe care se imprima", Number(p.cilindru_flexo_mm) === 600);
+
+    // Normele sunt o reteta scrisa pe codurile fisei.
+    const n = q("SELECT count(*) AS c FROM norme_consum WHERE produs_cod LIKE 'P-AWB%'")[0];
+    bine("plicurile AWB au norme de consum", Number(n.c) > 0, n.c);
+
+    const f = q("SELECT * FROM formule_productie WHERE cod = 'FX04'")[0];
+    bine("formula latimii e scrisa in clar", !!f && /2 × inaltime \+ clapa/.test(f.expresie), f && f.expresie);
+
+    // Lista asta e jumatatea cinstita a fisei.
+    const d = q("SELECT * FROM intrebari_deschise WHERE cod = 'D08'")[0];
+    bine("intrebarile deschise intra si ele", !!d && /STANDBY/.test(d.descriere));
+    bine("si pornesc nerezolvate", Number(d.rezolvata) === 0);
   }
 
   console.log("\n5. A DOUA PORNIRE NU SCHIMBĂ NIMIC");
