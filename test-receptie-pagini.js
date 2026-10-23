@@ -275,88 +275,14 @@ function curata() {
     bine("pagina de locuri răspunde", locuri.cod === 200 && /T-01-1/.test(locuri.corp));
   }
 
-  console.log("\n8. Harta depozitului");
-  {
-    // Locurile „T-" din sectiunea 1 au si ele cod de harta, deci apar pe ea.
-    // Se sterg aici, ca numerele de mai jos sa fie ale acestui test.
-    q("DELETE FROM receptii_linii_locuri");
-    q("DELETE FROM stoc_locuri");
-    q("UPDATE receptii_linii SET loc_id = NULL");
-    q("DELETE FROM locuri_depozit WHERE cod LIKE 'H-%' OR cod LIKE 'T-%'");
-    // 2 randuri x 2 etaje x 3 locuri pe etaj = 12 locuri cu cod de harta.
-    await cer("/depozit/locuri/serie", {
-      metoda: "post", body: { prefix: "H", rafturi: "2", niveluri: "2", locuri: "3", zona: "Hala H", categorie: "produs intermediar" },
-    });
-    bine("s-au generat 12 locuri", Number(unul("SELECT count(*) FROM locuri_depozit WHERE cod LIKE 'H-%'")) === 12,
-      unul("SELECT count(*) FROM locuri_depozit WHERE cod LIKE 'H-%'"));
-    bine("cu cod de harta, zona-rand-etaj-loc", !!unul("SELECT id FROM locuri_depozit WHERE cod = 'H-02-1-3'"));
-    bine("si cu numerele puse, ca sa se poata desena",
-      Number(unul("SELECT rand_nr FROM locuri_depozit WHERE cod='H-02-1-3'")) === 2 &&
-      Number(unul("SELECT pozitie_nr FROM locuri_depozit WHERE cod='H-02-1-3'")) === 3);
-    bine("categoria „produs intermediar” se scrie",
-      unul("SELECT categorie FROM locuri_depozit WHERE cod='H-01-1-1'") === "produs intermediar");
-
-    const h = await cer("/depozit/harta", { query: {} });
-    bine("harta se deschide", h.cod === 200);
-    bine("si deseneaza randurile", /Rândul 1/.test(h.corp) && /Rândul 2/.test(h.corp));
-    bine("cu etajele", /et\. 2/.test(h.corp));
-    bine("toate libere la inceput", /12 libere/.test(h.corp), (h.corp.match(/\d+ libere/) || [])[0]);
-
-    // Trei locuri vecine = un palet lat.
-    const l1 = Number(unul("SELECT id FROM locuri_depozit WHERE cod='H-01-2-1'"));
-    const l2 = Number(unul("SELECT id FROM locuri_depozit WHERE cod='H-01-2-2'"));
-    const l3 = Number(unul("SELECT id FROM locuri_depozit WHERE cod='H-01-2-3'"));
-    const r1 = await cer("/depozit/harta/intrare", {
-      metoda: "post", body: { loc_id: [String(l1), String(l2), String(l3)], sursa: "furnizor" },
-    });
-    bine("trei locuri vecine duc in receptie", /\/depozit\/receptie\/\d+/.test(unde(r1)), unde(r1));
-    const rid = Number(unul("SELECT id FROM receptii ORDER BY id DESC LIMIT 1"));
-    bine("receptia tine minte locurile alese", unul("SELECT locuri_alese FROM receptii WHERE id=" + rid) === [l1, l2, l3].join(","));
-
-    // Locuri care NU sunt vecine: refuzate, cu motiv.
-    const depArte = Number(unul("SELECT id FROM locuri_depozit WHERE cod='H-02-1-1'"));
-    const r2 = await cer("/depozit/harta/intrare", {
-      metoda: "post", body: { loc_id: [String(l1), String(depArte)], sursa: "furnizor" },
-    });
-    bine("doua locuri de pe randuri diferite: refuzate", /eroare=/.test(unde(r2)), unde(r2));
-    bine("si se spune de ce", /un singur rând/.test(unde(r2)), unde(r2));
-
-    // Marfa intra pe cele trei locuri, impartita.
-    const produs = Number(unul("SELECT id FROM produse ORDER BY id LIMIT 1"));
-    await cer("/depozit/receptie/:id/linie", {
-      metoda: "post", params: { id: String(rid) }, body: { produs_id: String(produs), cantitate: "300", um: "buc" },
-    });
-    const li = Number(unul("SELECT id FROM receptii_linii WHERE receptie_id = " + rid));
-    // Locul NU se mai cere pe rand: a fost ales pe harta.
-    await cer("/depozit/receptie/:id/linie/:lid", {
-      metoda: "post", params: { id: String(rid), lid: String(li) }, body: { cantitate_primita: "300" },
-    });
-    bine("randul trece fara sa mai aleaga locul inca o data",
-      Number(unul(`SELECT cantitate_primita FROM receptii_linii WHERE id=${li}`)) === 300,
-      unul(`SELECT cantitate_primita FROM receptii_linii WHERE id=${li}`));
-    bine("si se leaga de toate trei locurile",
-      Number(unul(`SELECT count(*) FROM receptii_linii_locuri WHERE linie_id=${li}`)) === 3);
-
-    await cer("/depozit/receptie/:id/finalizeaza", { metoda: "post", params: { id: String(rid) } });
-    const peLocuri = q(`SELECT loc_id, cantitate FROM stoc_locuri WHERE receptie_linie_id = ${li} ORDER BY loc_id`);
-    bine("stocul se scrie pe toate trei locurile", peLocuri.length === 3, JSON.stringify(peLocuri));
-    // Impartit, nu copiat: altfel harta ar arata acelasi palet de trei ori.
-    bine("impartit intre ele, nu de trei ori cate 300",
-      peLocuri.every((x) => Math.abs(Number(x.cantitate) - 100) < 0.01), JSON.stringify(peLocuri.map((x) => x.cantitate)));
-
-    const h2 = await cer("/depozit/harta", { query: {} });
-    bine("harta arata acum 3 ocupate", /3 ocupate/.test(h2.corp), (h2.corp.match(/\d+ ocupate/) || [])[0]);
-    bine("si 9 libere", /9 libere/.test(h2.corp), (h2.corp.match(/\d+ libere/) || [])[0]);
-
-    // Nu se pune marfa peste marfa.
-    const r3 = await cer("/depozit/harta/intrare", { metoda: "post", body: { loc_id: [String(l1)], sursa: "furnizor" } });
-    bine("un loc ocupat nu se mai poate alege", /eroare=/.test(unde(r3)), unde(r3));
-    bine("cu mesajul care spune ce sa faca", /scoate întâi ce e acolo/.test(unde(r3)), unde(r3));
-
-    q("DELETE FROM stoc_locuri");
-    q("DELETE FROM receptii_linii_locuri");
-    q("DELETE FROM locuri_depozit WHERE cod LIKE 'H-%'");
-  }
+  // SECTIUNEA 8 verifica harta de depozit pe care am construit-o si pe care
+  // Vali a cerut s-o scot: harta care conteaza e cea din CT-Park, care
+  // exista deja si are structura reala a halei. Testele pentru alegerea
+  // locurilor cu degetul si pentru paleta lata stau acum in
+  // test-ct-park-harta.js, pe harta aia.
+  //
+  // Ce a ramas aici, si se verifica mai sus: generarea locurilor, receptia
+  // rand cu rand, si scrierea stocului pe loc.
 
   curata();
   console.log(esecuri ? "\n" + esecuri + " ESEC(URI)\n" : "\nToate trecute.\n");
