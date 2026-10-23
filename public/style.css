@@ -702,3 +702,18 @@ td.cal-azi .cal-nr { background: var(--primary); color: #fff; }
   margin-top: 16px; padding: 10px 12px; background: var(--surface, #fff);
   border: 1px solid var(--accent, #2f6fde); border-radius: 8px; box-shadow: 0 -4px 14px rgba(0,0,0,.08);
 }
+
+
+/* Locul liber de pe harta CT-Park, acum bifabil. Pana acum era un div mort:
+ * se vedea ca e liber si atat. Cand e ales se vede de la distanta — cine
+ * alege trei locuri pentru o paleta lata trebuie sa verifice dintr-o privire
+ * ca sunt chiar cele trei, lipite. */
+.ct-loc.alegibil { cursor: pointer; }
+.ct-loc.alegibil input { position: absolute; opacity: 0; pointer-events: none; }
+.ct-loc.alegibil:hover { border-color: var(--accent, #2f6fde); }
+.ct-loc.alegibil:has(input:checked) {
+  background: var(--accent, #2f6fde);
+  border-color: var(--accent, #2f6fde);
+  color: #fff;
+}
+.ct-loc.alegibil:has(input:checked) .ct-loc-adresa { color: #fff; }
