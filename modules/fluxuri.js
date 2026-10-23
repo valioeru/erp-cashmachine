@@ -202,6 +202,142 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Reguli de alocare", active: "/fluxuri/reguli", body }));
   });
 
+  // ---- Formatele de produs si normele de consum ---------------------------
+  //
+  // Randurile astea NU stau in nomenclatorul de produse, dinadins: codurile
+  // fisei (P-PG-300x400) nu sunt codurile din nomenclator, iar turnate acolo
+  // ar face 22 de dubluri peste produse reale. Si oricum ele nu descriu ce
+  // vindem, ci CUM SE FACE — latimea foliei desfasurate, masa pe bucata, ce
+  // cilindru trebuie. Se leaga de nomenclator cand se potriveste codul sau
+  // denumirea; pana atunci randul se vede ca nelegat, si asta e informatie.
+  router.get("/fluxuri/produse", async (ctx) => {
+    const fisa = await db
+      .prepare(
+        `SELECT f.*, p.denumire AS produs_nomenclator
+           FROM produse_fisa f LEFT JOIN produse p ON p.id = f.produs_id
+          ORDER BY f.familie, f.produs_cod`
+      )
+      .all();
+    const norme = await db.prepare("SELECT * FROM norme_consum ORDER BY produs_cod, id").all();
+    const peProdus = new Map();
+    for (const n of norme) {
+      const k = String(n.produs_cod);
+      if (!peProdus.has(k)) peProdus.set(k, []);
+      peProdus.get(k).push(n);
+    }
+
+    const randuri = fisa.map((f) => {
+      const n = peProdus.get(String(f.produs_cod)) || [];
+      return [
+        esc(f.produs_cod) +
+          (f.produs_id
+            ? `<br><span class="badge verde" style="font-size:10px">legat de nomenclator</span>`
+            : `<br><span class="badge galben" style="font-size:10px">nelegat</span>`),
+        esc(f.denumire || "") + (f.familie ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(f.familie)}</span>` : ""),
+        [f.latime_mm ? Math.round(nr(f.latime_mm)) : null, f.inaltime_mm ? Math.round(nr(f.inaltime_mm)) : null]
+          .filter((x) => x != null).join(" × ") + (f.clapa_mm ? ` + ${Math.round(nr(f.clapa_mm))} clapă` : "") || "—",
+        f.grosime_um ? nr(f.grosime_um) + " µm" : "—",
+        f.latime_folie_desfasurata_mm ? Math.round(nr(f.latime_folie_desfasurata_mm)) + " mm" : "—",
+        f.masa_folie_g_buc ? nr(f.masa_folie_g_buc).toFixed(3) + " g" : "—",
+        String(f.imprimabil || "").toUpperCase() === "DA"
+          ? `<span class="badge verde">da</span>${f.cilindru_flexo_mm ? ` <span style="font-size:11px">cil. ${Math.round(nr(f.cilindru_flexo_mm))}</span>` : ""}`
+          : '<span class="badge gri">nu</span>',
+        esc(f.utilaje_permise || "—"),
+        n.length ? `${n.length} ${n.length === 1 ? "material" : "materiale"}` : '<span style="color:var(--text-muted)">—</span>',
+      ];
+    });
+
+    const randuriNorme = norme.map((n) => [
+      esc(n.produs_cod),
+      esc(n.material),
+      esc(String(n.tip || "").toLowerCase().replace(/_/g, " ")),
+      `${nr(n.cantitate)} ${esc(n.unitate || "")}`,
+      esc(n.per || "—"),
+      esc(n.sursa || "—"),
+      `<span style="font-size:12px;color:var(--text-muted)">${esc(n.observatii || "")}</span>`,
+    ]);
+
+    const nelegate = fisa.filter((f) => !f.produs_id).length;
+    const body = `
+      <p style="max-width:860px;color:var(--text-muted)">
+        Formatele de produs din fișa tehnică: dimensiuni, lățimea foliei desfășurate, masa de folie pe bucată, pe ce
+        cilindru se imprimă. Nu sunt nomenclatorul de produse și nu-l înlocuiesc — descriu <strong>cum se face</strong>
+        un produs, nu ce vindem. Se leagă de nomenclator când se potrivește codul sau denumirea.
+      </p>
+      ${
+        nelegate
+          ? `<p class="badge galben" style="display:inline-block">${nelegate} ${nelegate === 1 ? "format nu e legat" : "formate nu sunt legate"} de niciun produs din nomenclator</p>`
+          : ""
+      }
+      ${table(["Cod", "Produs", "Dimensiuni", "Grosime", "Lățime folie", "Masă / buc", "Imprimabil", "Utilaje", "Norme"], randuri, { coloane: "fluxuri-produse" })}
+
+      <h3 style="margin-top:30px">Norme de consum</h3>
+      <p style="max-width:860px;color:var(--text-muted)">
+        Ce materiale intră într-o bucată. E o rețetă, dar scrisă pe codurile fișei, nu pe cele din nomenclator —
+        de-aia stă separat de <a href="/productie/retete">Rețete</a>, nu peste ele.
+      </p>
+      ${table(["Produs", "Material", "Fel", "Cantitate", "Per", "Sursa", "Observații"], randuriNorme, { coloane: "fluxuri-norme" })}`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Formate și norme", active: "/fluxuri/produse", body }));
+  });
+
+  // ---- Formulele si ce nu se stie inca ------------------------------------
+  router.get("/fluxuri/formule", async (ctx) => {
+    const formule = await db.prepare("SELECT * FROM formule_productie ORDER BY cod").all();
+    const deschise = await db.prepare("SELECT * FROM intrebari_deschise ORDER BY rezolvata, cod").all();
+
+    const randuriF = formule.map((f) => [
+      esc(f.cod),
+      esc(f.denumire || ""),
+      `<code style="font-size:12px;white-space:normal">${esc(f.expresie || "")}</code>`,
+      `<span style="font-size:12px;color:var(--text-muted)">${esc(f.folosita_in || "")}</span>`,
+    ]);
+
+    const randuriD = deschise.map((d) => [
+      esc(d.cod),
+      esc(d.referinta || "—"),
+      esc(d.descriere || ""),
+      Number(d.rezolvata)
+        ? `<span class="badge verde">rezolvată</span>${d.raspuns ? `<br><span style="font-size:12px">${esc(d.raspuns)}</span>` : ""}`
+        : '<span class="badge galben">deschisă</span>',
+      Number(d.rezolvata)
+        ? `<span style="font-size:11px;color:var(--text-muted)">${esc(d.rezolvata_de || "")} ${esc(d.rezolvata_la || "")}</span>`
+        : poate(ctx.user)
+          ? `<form method="post" action="/fluxuri/deschise/${d.id}/rezolva" style="display:grid;gap:4px;min-width:200px">
+               <input name="raspuns" required placeholder="care e răspunsul" maxlength="300" style="font-size:12px">
+               <button class="btn small" type="submit">Am aflat</button>
+             </form>`
+          : "",
+    ]);
+
+    const nerezolvate = deschise.filter((d) => !Number(d.rezolvata)).length;
+    const body = `
+      <h3 style="margin-top:0">Ce nu se știe încă ${nerezolvate ? `<span class="badge galben">${nerezolvate}</span>` : '<span class="badge verde">nimic</span>'}</h3>
+      <p style="max-width:860px;color:var(--text-muted)">
+        Lista asta e jumătatea cinstită a fișei tehnice. Un număr care lipsește și e scris ca lipsind e mult mai puțin
+        periculos decât unul inventat ca să nu rămână căsuța goală — pe al doilea cineva va planifica producție.
+        Când afli răspunsul, scrie-l aici: rămâne scris cine și când.
+      </p>
+      ${table(["Cod", "La ce", "Ce nu se știe", "Stare", ""], randuriD)}
+
+      <h3 style="margin-top:30px">Formulele după care s-au calculat cifrele</h3>
+      <p style="max-width:860px;color:var(--text-muted)">
+        Scrise în clar, ca peste un an să existe răspuns la „de unde iese 880 kg pe schimb". O capacitate fără
+        formula din spate e un număr pe care nimeni nu-l mai poate verifica.
+      </p>
+      ${table(["Cod", "Ce calculează", "Formula", "Unde se folosește"], randuriF)}`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Formule și întrebări deschise", active: "/fluxuri/formule", body }));
+  });
+
+  router.post("/fluxuri/deschise/:id/rezolva", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/fluxuri/formule");
+    const raspuns = text((ctx.body || {}).raspuns, 300);
+    if (!raspuns) return redirect(ctx.res, "/fluxuri/formule");
+    await db
+      .prepare("UPDATE intrebari_deschise SET rezolvata = 1, raspuns = ?, rezolvata_de = ?, rezolvata_la = ? WHERE id = ?")
+      .run(raspuns, ctx.user.nume, new Date().toISOString().slice(0, 10), parseInt(ctx.params.id, 10));
+    redirect(ctx.res, "/fluxuri/formule");
+  });
+
   // ---- Cilindrii flexo -----------------------------------------------------
   router.get("/fluxuri/cilindri", async (ctx) => {
     const c = await db.prepare("SELECT * FROM cilindri_flexo ORDER BY circumferinta_mm").all();

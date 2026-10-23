@@ -584,7 +584,7 @@ function register(router) {
 
       <h2>Produse comandate</h2>
       <table class="table lines-table">
-        <thead><tr><th>Categorie</th><th>Produs</th><th>Cantitate</th><th>UM</th><th>Preț unitar</th><th></th></tr></thead>
+        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:120px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:130px">Preț unitar</th><th></th></tr></thead>
         <tbody id="linii-body">
           ${linii.map(randLinie).join("")}
         </tbody>

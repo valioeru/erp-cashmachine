@@ -495,7 +495,15 @@ function register(router) {
     const where = [];
     const args = [];
     if (filtru === "deschise") where.push(`c.status IN ('${DESCHISE.join("','")}')`);
-    else if (filtru !== "toate") {
+    else if (filtru === "intarziate") {
+      // Cardul „Cu termenul depasit" duce aici. E singurul filtru care nu e o
+      // stare, ci o intrebare: ce e inca de lucrat si a trecut de data
+      // promisa. Starile sunt aceleasi cu cele din numaratoarea de pe card
+      // ("noua", "in_productie") — altfel cifra si lista ar fi spus lucruri
+      // diferite, iar omul ar fi crezut una dintre ele.
+      where.push("c.status IN ('noua','in_productie') AND c.data_livrare IS NOT NULL AND c.data_livrare <> '' AND c.data_livrare < ?");
+      args.push(azi());
+    } else if (filtru !== "toate") {
       where.push("c.status = ?");
       args.push(filtru);
     }
@@ -532,8 +540,21 @@ function register(router) {
     const aziStr = azi();
     // "Depășit" doar pentru ce e încă de lucrat — o comandă finalizată dar
     // nefacturată nu mai e o problemă de producție, ci de facturare.
+    //
+    // Se numără în BAZĂ, nu în lista de pe ecran. Lista e deja filtrată și
+    // tăiată la 400 de rânduri, deci cifra ar fi arătat „câte întârzieri
+    // sunt printre comenzile pe care le vezi acum" — adică altceva de
+    // fiecare dată când schimbai filtrul. Acum cardul e și buton, deci
+    // trebuie să ducă fix la ce numără.
     const ACTIVE = ["noua", "in_productie"];
-    const intarziate = comenzi.filter((c) => ACTIVE.includes(c.status) && c.data_solicitata && c.data_solicitata < aziStr);
+    const nrIntarziate = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM comenzi_productie
+          WHERE status IN ('${ACTIVE.join("','")}')
+            AND data_livrare IS NOT NULL AND data_livrare <> '' AND data_livrare < ?`
+      )
+      .get(aziStr);
+    const intarziate = { length: Number((nrIntarziate && nrIntarziate.n) || 0) };
 
     // „Comenzi spre alocare": ce e deschis și n-a fost încă pus pe o mașină.
     // Stă DEASUPRA comenzilor în lucru fiindcă asta e întrebarea de dimineață
@@ -568,8 +589,21 @@ function register(router) {
         <a href="/import" class="btn secondary">Import din Excel</a>
       </div>
       <div class="cards">
-        ${STATUSURI.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div></div>`).join("")}
-        <div class="card"><div class="label">Cu termenul depășit</div><div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div></div>
+        ${/* Cifrele de sus sunt acum butoane. Vedeai „14 in productie" si
+             trebuia sa cobori la filtru si sa alegi din lista aceeasi stare —
+             numarul era deja raspunsul, doar ca nu ducea nicaieri. */ ""}
+        ${STATUSURI.map(
+          ([v, t]) =>
+            `<a class="card card-filtru${filtru === v ? " activ" : ""}" href="/productie?status=${v}${cauta ? "&q=" + encodeURIComponent(cauta) : ""}"
+                title="Arată doar comenzile cu starea asta">
+               <div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div>
+             </a>`
+        ).join("")}
+        <a class="card card-filtru${filtru === "intarziate" ? " activ" : ""}" href="/productie?status=intarziate${cauta ? "&q=" + encodeURIComponent(cauta) : ""}"
+           title="Comenzi deschise cu data de livrare trecută">
+          <div class="label">Cu termenul depășit</div>
+          <div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div>
+        </a>
         <div class="card"><div class="label">Comenzi cu cost cunoscut</div>
           <div class="value">${cuRetetaN}<span class="mic"> din ${deschiseN} deschise</span></div>
           <div class="mic">restul n-au produs legat sau produsul n-are rețetă</div></div>
@@ -582,12 +616,13 @@ function register(router) {
         <select name="status" onchange="this.form.submit()">
           <option value="deschise"${filtru === "deschise" ? " selected" : ""}>Doar deschise</option>
           <option value="toate"${filtru === "toate" ? " selected" : ""}>Toate</option>
+          <option value="intarziate"${filtru === "intarziate" ? " selected" : ""}>Cu termenul depășit</option>
           ${STATUSURI.map(([v, t]) => `<option value="${v}"${filtru === v ? " selected" : ""}>${esc(t)}</option>`).join("")}
         </select>
         <button class="btn small" type="submit">Filtrează</button>
       </form>
       <form method="post" action="/productie/sterge" onsubmit="return confirm('Ștergi comenzile selectate? Nu se pot recupera.')">
-      <div class="tabel-lat">
+      <div class="tabel-lat tabel-inghetat">
       ${table(
         ["<input type=\"checkbox\" onclick=\"document.querySelectorAll('.sel-cmd').forEach(c=>c.checked=this.checked)\">",
          "Nr. comandă", "Client", "Reprezentant", "Produs comandat", "Caracteristici produs",
@@ -1642,6 +1677,21 @@ function register(router) {
           <div><div class="k">Livrare promisă</div>${esc(c.data_livrare || c.data_solicitata || "—")}</div>
           <div><div class="k">Finalizată la</div>${esc(c.data_finalizare || "—")}</div>
         </div>
+        ${
+          ["finalizata", "facturata"].includes(c.status)
+            ? c.trimisa_depozit_la
+              ? `<p style="margin-top:12px"><span class="badge verde">trimisă în depozit</span>
+                   la ${esc(c.trimisa_depozit_la)}${c.receptie_id ? ` · <a href="/depozit/receptie/${c.receptie_id}">vezi recepția</a>` : ""}</p>`
+              : `<form method="post" action="/productie/${c.id}/trimite-depozit" class="inline-form" style="margin-top:12px">
+                   <button class="btn" type="submit">Trimit marfa în depozit</button>
+                 </form>
+                 <p style="font-size:12px;color:var(--text-muted);max-width:620px;margin-top:6px">
+                   Deschide o recepție în depozit cu ce ai făcut și cât. Depozitul o preia rând cu rând, scrie cât a
+                   venit de fapt și pe ce raft a pus-o. Până atunci marfa nu e pe stoc — ceea ce e corect: nimeni
+                   n-a văzut-o încă.
+                 </p>`
+            : ""
+        }
         ${c.observatii ? `<p style="margin-top:12px;white-space:pre-wrap"><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
         ${c.reteta ? `<p style="white-space:pre-wrap"><strong>Rețetă / consum:</strong> ${esc(c.reteta)}</p>` : ""}
         ${
@@ -1816,6 +1866,43 @@ function register(router) {
     }
 
     redirect(ctx.res, `/productie/${ctx.params.id}`);
+  });
+
+  // Productia a terminat si trimite marfa in depozit. Nu scrie stoc: scrie o
+  // RECEPTIE, pe care depozitul o face rand cu rand. Pana atunci marfa nu e
+  // pe stoc, si asta e corect — n-a vazut-o inca nimeni de acolo.
+  router.post("/productie/:id/trimite-depozit", async (ctx) => {
+    if (!ctx.user || !["admin", "productie", "depozit"].includes(ctx.user.rol)) return redirect(ctx.res, "/productie");
+    const id = parseInt(ctx.params.id, 10);
+    const c = await db.prepare("SELECT * FROM comenzi_productie WHERE id = ?").get(id);
+    if (!c) return redirect(ctx.res, "/productie");
+    // A doua apasare n-are voie sa deschida a doua receptie: ar intra marfa
+    // de doua ori pe stoc, pe doua documente, si nimeni n-ar sti care e bun.
+    if (c.trimisa_depozit_la) return redirect(ctx.res, `/productie/${id}`);
+
+    const linii = await db
+      .prepare("SELECT * FROM comenzi_productie_linii WHERE comanda_id = ? ORDER BY ordine, id")
+      .all(id)
+      .catch(() => []);
+    const deTrimis = linii.length
+      ? linii.map((l) => ({ produs_id: l.produs_id || null, produs_text: l.denumire, cantitate: Number(l.cantitate) || 0, um: l.um }))
+      : [{ produs_id: c.produs_id || null, produs_text: c.tip_produs, cantitate: Number(c.cantitate) || 0, um: c.um }];
+
+    const receptieId = await require("./receptie").creeaza(
+      {
+        sursa: "productie",
+        comanda_productie_id: id,
+        comanda_id: c.comanda_id || null,
+        aprovizionare_id: c.aprovizionare_id || null,
+        anuntata_de: ctx.user.nume,
+        observatii: "Din comanda de producție " + (c.numar || "#" + id),
+      },
+      deTrimis
+    );
+    await db
+      .prepare("UPDATE comenzi_productie SET trimisa_depozit_la = ?, receptie_id = ? WHERE id = ?")
+      .run(azi(), receptieId, id);
+    redirect(ctx.res, `/depozit/receptie/${receptieId}`);
   });
 
 // ---- Import din REGISTRUL oficial de comenzi (modelul bun) ---------------
