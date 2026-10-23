@@ -12,6 +12,7 @@
 // /stocks) — pentru asta există un buton separat de sincronizare live, mai
 // jos ("Sincronizează stocul curent"), care chiar apelează SmartBill.
 const db = require("../lib/db");
+const numeFirma = require("../lib/nume-firma");
 const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const smartbill = require("../lib/smartbill");
@@ -648,7 +649,7 @@ function register(router) {
     const dupaNume = new Map();
     for (const p of await db.prepare("SELECT id, nume, cui, tip FROM parteneri").all()) {
       if (p.cui) dupaCui.set(String(p.cui).toLowerCase().trim(), p);
-      dupaNume.set(String(p.nume).toLowerCase().trim(), p);
+      dupaNume.set(numeFirma.cheieNume(p.nume), p);
     }
 
     // Partenerii ignorați nu se nasc și nu se folosesc: rândurile lor cad
@@ -664,7 +665,11 @@ function register(router) {
         continue;
       }
       const cheieCui = inr.cui.toLowerCase();
-      const cheieNume = inr.numeClient.toLowerCase();
+      // Potrivirea pe nume trece printr-o cheie care ignora prefixul „SC".
+      // In baza numele e scris acum fara el, dar facturile vin in continuare
+      // cu „SC AQUILA SRL" — fara pasul asta s-ar crea un partener nou la
+      // fiecare import, adica exact duplicatul pe care il evitam.
+      const cheieNume = numeFirma.cheieNume(inr.numeClient);
       const gasit = (cheieCui && dupaCui.get(cheieCui)) || dupaNume.get(cheieNume);
       if (gasit) {
         inr.partenerId = gasit.id;
@@ -687,7 +692,7 @@ function register(router) {
         .all(...args);
       for (const nou of inserate) {
         if (nou.cui) dupaCui.set(String(nou.cui).toLowerCase().trim(), nou);
-        dupaNume.set(String(nou.nume).toLowerCase().trim(), nou);
+        dupaNume.set(numeFirma.cheieNume(nou.nume), nou);
       }
     }
     for (const inr of inregistrari) {
