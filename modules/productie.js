@@ -765,7 +765,10 @@ function register(router) {
       return redirect(ctx.res, "/productie/cereri?eroare=" + encodeURIComponent(raspuns.eroare.slice(0, 200)));
     }
     const termen = raspuns.termen;
-    const produs = await db.prepare("SELECT denumire, unitate_masura FROM produse WHERE id = ?").get(a.produs_id);
+    // „id" era lipsa din SELECT, iar scrieLinii() scrie l.produs.id — deci
+    // linia comenzii de productie se nastea cu produs_id gol. Acelasi fel de
+    // greseala fusese deja prins o data pe randul parinte (vezi mai jos).
+    const produs = await db.prepare("SELECT id, denumire, unitate_masura FROM produse WHERE id = ?").get(a.produs_id);
     const comanda = a.comanda_id
       ? await db
           .prepare("SELECT c.numar, c.partener_id, c.agent_id, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
@@ -845,7 +848,12 @@ function register(router) {
     // O cerere din depozit e pentru un singur produs, dar se scrie ca linie, ca
     // să apară în tabelul de produse al comenzii ca toate celelalte.
     await scrieLinii(ins.lastInsertRowid, [
-      { produs, cantitate: String(a.cantitate), um: produs.unitate_masura || "buc", completate },
+      // „completate" sunt caracteristicile scrise de om in formularul de
+      // comanda noua. O cerere venita din depozit nu trece prin formularul
+      // ala, deci nu are niciuna — lista goala, nu o variabila care nu
+      // exista in acest scop. Asa cum era, handlerul arunca
+      // „completate is not defined" si confirmarea nu mergea deloc.
+      { produs, cantitate: String(a.cantitate), um: produs.unitate_masura || "buc", completate: [] },
     ]);
     redirect(ctx.res, `/productie/${ins.lastInsertRowid}`);
   });

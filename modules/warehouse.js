@@ -23,6 +23,7 @@
 const db = require("../lib/db");
 const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const T = require("../lib/termene");
 const livrare = require("../lib/livrare-partiala");
 const stari = require("../lib/comenzi-stari");
 
@@ -318,6 +319,8 @@ function register(router) {
 
     const body = `
       ${subnavDepozit("/depozit", ctx.user)}
+      ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:720px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
+      ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:720px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
       ${stari.bara(c)}
       <p style="color:var(--text-muted)">
         Status: ${stari.eticheta(c.status)} ·
@@ -390,17 +393,23 @@ function register(router) {
       .prepare("UPDATE comenzi SET status = ?, verificata_depozit_la = ?, verificata_depozit_de = ? WHERE id = ?")
       .run(status, acum(), ctx.user.nume, id);
 
+    // Ce s-a intamplat de fapt, scris o singura data si folosit in doua
+    // locuri: in istoricul partenerului (ca sa afle agentul) si pe pagina
+    // (ca sa afle omul care tocmai a apasat butonul). Pana acum exista doar
+    // primul: apasai „Confirmă", pagina se reincarca, si daca rezultatul era
+    // „asteapta marfa" parea ca n-a facut nimic.
+    const spune =
+      status === "in_stoc_depozit"
+        ? acoperiteTot
+          ? "Toată marfa e pe stoc — comanda pleacă spre livrare."
+          : "Marfa e doar parțial pe stoc, iar clientul acceptă livrare parțială — pleacă ce există."
+        : acoperitePartial
+          ? "Lipsește o parte din marfă, iar clientul vrea comanda completă — așteaptă aprovizionarea."
+          : "Nimic nu e pe stoc — comanda așteaptă aprovizionarea sau producția.";
+
     // Agentul trebuie să afle fără să întrebe pe telefon. Scrierea în istoric
     // nu are voie să rupă confirmarea: marfa e verificată oricum.
     try {
-      const spune =
-        status === "in_stoc_depozit"
-          ? acoperiteTot
-            ? "Toată marfa e pe stoc — comanda pleacă spre livrare."
-            : "Marfa e doar parțial pe stoc, iar clientul acceptă livrare parțială — pleacă ce există."
-          : acoperitePartial
-            ? "Lipsește o parte din marfă, iar clientul vrea comanda completă — așteaptă aprovizionarea."
-            : "Nimic nu e pe stoc — comanda așteaptă aprovizionarea sau producția.";
       await db
         .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
         .run(c.partener_id, `Comanda ${c.numar || "#" + c.id}: verificată de depozit`, spune, ctx.user.id);
@@ -408,7 +417,11 @@ function register(router) {
       console.error("[depozit] nu am putut scrie confirmarea in istoric:", e.message);
     }
 
-    redirect(ctx.res, `/depozit/comanda/${id}`);
+    redirect(
+      ctx.res,
+      `/depozit/comanda/${id}?ok=` +
+        encodeURIComponent("Verificat de depozit. " + spune + " Agentul a fost anunțat în istoricul clientului.")
+    );
   });
 
   // Producția n-a putut ține termenul: comanda se anulează, dar rămâne în
@@ -470,6 +483,26 @@ function register(router) {
     const cantitate = Number(b.cantitate) || 0;
     if (cantitate <= 0) return redirect(ctx.res, `/depozit/comanda/${id}`);
     const sursa = b.sursa === "productie" ? "productie" : "tert";
+
+    // Termenul cerut e obligatoriu. Pana acum se lua din comanda, iar daca
+    // aceasta n-avea data de livrare completata, cererea pleca spre productie
+    // sau spre furnizor FARA niciun termen. O cerere fara termen nu e o
+    // cerere, e o speranta: nu poate intarzia, deci nu poate fi urmarita,
+    // deci nimeni nu afla ca s-a uitat de ea. Se poate scrie si pe formular,
+    // daca pe comanda inca nu e trecuta.
+    const termen = T.validareTermenCerut(
+      String(b.termen_cerut || "").trim() || (c && (c.data_livrare_promisa || c.data_livrare_ceruta)) || "",
+      { azi: azi() }
+    );
+    if (termen.eroare) {
+      return redirect(
+        ctx.res,
+        `/depozit/comanda/${id}?eroare=` +
+          encodeURIComponent(
+            termen.eroare + " Comanda n-are dată de livrare, deci scrie termenul aici sau completeaz-o pe comandă."
+          )
+      );
+    }
     await db
       .prepare(
         `INSERT INTO aprovizionari (comanda_id, linie_id, produs_id, cantitate, sursa, furnizor_id, termen_cerut, status, cerut_de, creata_la)
@@ -481,8 +514,11 @@ function register(router) {
         linie.produs_id,
         cantitate,
         sursa,
+        // Furnizorul se pastra DOAR cand sursa era „tert", iar formularul
+        // lasa sa alegi „din productie" SI un furnizor — care se arunca in
+        // tacere. Operatorul credea ca a comandat de la el.
         sursa === "tert" ? parseInt(b.furnizor_id, 10) || null : null,
-        (c && c.data_livrare_ceruta) || null,
+        termen.termen,
         ctx.user ? ctx.user.nume : null,
         acum()
       );
@@ -494,7 +530,7 @@ function register(router) {
     const aprov = await db
       .prepare(
         `SELECT a.*, p.denumire AS produs, p.unitate_masura, f.nume AS furnizor, c.numar AS comanda_numar,
-                cl.nume AS client
+                cl.nume AS client, c.data_livrare_promisa, c.data_livrare_ceruta
          FROM aprovizionari a
          JOIN produse p ON p.id = a.produs_id
          LEFT JOIN parteneri f ON f.id = a.furnizor_id
@@ -516,24 +552,66 @@ function register(router) {
     const optDep = depozite.map((d) => `<option value="${d.id}">${esc(d.denumire)}</option>`).join("");
 
     const randuriA = aprov.map((a) => {
+      // Pe fluxul catre FURNIZOR nu exista pana acum niciun pas de
+      // confirmare: doar „intra in stoc" si „anuleaza". Adica termenul pe
+      // care l-a promis furnizorul la telefon nu se scria nicaieri, iar
+      // peste doua saptamani nimeni nu stia daca intarzie sau nu. Cererile
+      // catre productie se confirma la ei, in Productie · Cereri din depozit.
+      const confirmaTert =
+        poateDepozit(ctx.user) && a.sursa === "tert" && a.status === "ceruta"
+          ? `<form method="post" action="/depozit/aprovizionare/${a.id}/confirma" class="inline-form" style="gap:6px;flex-wrap:wrap">
+               <input type="hidden" name="termen" value="${esc(a.termen_cerut || azi())}">
+               <button class="btn small" type="submit">Furnizorul confirmă ${esc(a.termen_cerut || azi())}</button>
+             </form>
+             <details style="margin-top:6px">
+               <summary style="cursor:pointer;color:var(--danger);font-size:12px">Dă alt termen</summary>
+               <form method="post" action="/depozit/aprovizionare/${a.id}/confirma" style="margin-top:6px;display:grid;gap:5px;max-width:230px">
+                 <input type="date" name="termen" required value="${esc(a.termen_cerut || azi())}">
+                 <input name="motiv" required maxlength="200" placeholder="ce a zis furnizorul" style="font-size:12px">
+                 <button class="btn small" type="submit">Salvează termenul lui</button>
+               </form>
+             </details>`
+          : "";
       const actiuni =
         poateDepozit(ctx.user) && ["ceruta", "confirmata", "gata"].includes(a.status)
-          ? `<form method="post" action="/depozit/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px">
+          ? confirmaTert +
+            `<form method="post" action="/depozit/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px;margin-top:6px">
                <select name="depozit_id" style="width:120px">${optDep}</select>
-               <button class="btn small" type="submit">Intră în stoc</button>
+               <button class="btn small ${a.status === "ceruta" && a.sursa === "tert" ? "secondary" : ""}" type="submit">Intră în stoc</button>
              </form>
              <form method="post" action="/depozit/aprovizionare/${a.id}/anuleaza" class="inline-form">
                <button class="link-btn danger" type="submit">Anulează</button>
              </form>`
           : "";
+      // Doua verificari diferite. Prima: cat s-a mutat termenul fata de cat
+      // s-a cerut. A doua, si aia care conteaza: daca termenul raspuns trece
+      // de data promisa CLIENTULUI — caz in care cineva trebuie sa-l sune
+      // azi, chiar daca intern totul arata confirmat.
+      const cmp = T.compara(a.termen_cerut, a.termen_confirmat);
+      const dataClient = a.data_livrare_promisa || a.data_livrare_ceruta || null;
+      const fataClient = a.termen_confirmat ? T.fataDeClient(a.termen_confirmat, dataClient) : null;
       return [
         esc(a.produs),
         `${nr(a.cantitate)} ${esc(a.unitate_masura || "")}`,
         a.sursa === "productie" ? "producție" : "terț",
         esc(a.furnizor || "—"),
-        a.comanda_id ? `<a href="/depozit/comanda/${a.comanda_id}">${esc(a.comanda_numar || "#" + a.comanda_id)}</a><br><span style="font-size:12px">${esc(a.client || "")}</span>` : "pentru stoc",
-        esc(a.termen_cerut || "—"),
-        esc(a.termen_confirmat || "—"),
+        a.comanda_id
+          ? `<a href="/depozit/comanda/${a.comanda_id}">${esc(a.comanda_numar || "#" + a.comanda_id)}</a><br><span style="font-size:12px">${esc(a.client || "")}</span>` +
+            (dataClient ? `<br><span style="font-size:11px;color:var(--text-muted)">promis clientului: ${esc(dataClient)}</span>` : "")
+          : "pentru stoc",
+        a.termen_cerut
+          ? esc(a.termen_cerut)
+          : '<span class="badge rosu">fără termen</span>',
+        `${esc(a.termen_confirmat || "—")}` +
+          (a.termen_confirmat && cmp.fel !== "confirmat"
+            ? `<br><span class="badge ${cmp.culoare}" style="font-size:11px">${esc(cmp.eticheta)}</span>`
+            : "") +
+          (fataClient && fataClient.fel === "depaseste_clientul"
+            ? `<br><span class="badge rosu" style="font-size:11px">${esc(fataClient.eticheta)}</span>`
+            : "") +
+          (a.raspuns && /motiv:/.test(String(a.raspuns))
+            ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(String(a.raspuns).replace(/^.*motiv:\s*/, ""))}</span>`
+            : ""),
         STATUS_APROV[a.status] || esc(a.status),
         actiuni,
       ];
@@ -586,7 +664,7 @@ function register(router) {
                      <select name="produs_id" required>${produse.map((p) => `<option value="${p.id}">${esc(p.denumire)}</option>`).join("")}</select>
                    </label>
                    <label class="field"><span>Cantitate</span><input type="number" step="0.001" name="cantitate" required></label>
-                   <label class="field"><span>Termen dorit</span><input type="date" name="termen_cerut"></label>
+                   <label class="field"><span>Termen dorit</span><input type="date" name="termen_cerut" required></label>
                  </div>
                  <div style="display:grid;grid-template-columns:1fr 2fr;gap:14px">
                    <label class="field"><span>De unde</span>
@@ -602,7 +680,9 @@ function register(router) {
              </details>`
           : ""
       }
-      ${table(["Produs", "Cantitate", "Sursă", "Furnizor", "Pentru comanda", "Termen cerut", "Termen confirmat", "Status", ""], randuriA)}
+      ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:720px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
+      ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:720px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
+      ${table(["Produs", "Cantitate", "Sursă", "Furnizor", "Pentru comanda", "Termen cerut", "Răspunsul furnizorului", "Status", ""], randuriA)}
       <h2 id="materii">Materie primă cerută de producție</h2>
       ${table(["Produs / descriere", "Cantitate", "Cerut de", "Termen cerut", "Termen dat", "Status", ""], randuriM)}
     `;
@@ -617,6 +697,11 @@ function register(router) {
     const produsId = parseInt(b.produs_id, 10) || null;
     const cantitate = Number(b.cantitate) || 0;
     if (!produsId || cantitate <= 0) return redirect(ctx.res, "/depozit/aprovizionare");
+    // Si aici: fara termen, cererea nu se poate urmari.
+    const termenStoc = T.validareTermenCerut(b.termen_cerut, { azi: azi() });
+    if (termenStoc.eroare) {
+      return redirect(ctx.res, "/depozit/aprovizionare?eroare=" + encodeURIComponent(termenStoc.eroare));
+    }
     const sursa = b.sursa === "productie" ? "productie" : "tert";
     await db
       .prepare(
@@ -628,12 +713,53 @@ function register(router) {
         cantitate,
         sursa,
         sursa === "tert" ? parseInt(b.furnizor_id, 10) || null : null,
-        String(b.termen_cerut || "") || null,
+        termenStoc.termen,
         ctx.user.nume,
         acum(),
         String(b.observatii || "").trim().slice(0, 500) || null
       );
     redirect(ctx.res, "/depozit/aprovizionare");
+  });
+
+  // Furnizorul a raspuns cu un termen. Pasul asta lipsea cu totul: fluxul
+  // spre tert avea doar „intra in stoc" si „anuleaza", deci ce a promis
+  // furnizorul la telefon nu se scria nicaieri si nimeni nu putea spune, peste
+  // doua saptamani, daca intarzie sau nu. Cererile catre PRODUCTIE se confirma
+  // la ei, in Productie · Cereri din depozit — aici e doar jumatatea cealalta.
+  router.post("/depozit/aprovizionare/:id/confirma", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit/aprovizionare");
+    const id = parseInt(ctx.params.id, 10);
+    const a = await db.prepare("SELECT * FROM aprovizionari WHERE id = ?").get(id);
+    if (!a || a.status !== "ceruta") return redirect(ctx.res, "/depozit/aprovizionare");
+
+    // Un termen mai tarziu decat cel cerut are nevoie de motiv. Nu ca sa dea
+    // cineva socoteala, ci fiindca peste doua saptamani „de ce intarzie" e o
+    // intrebare la care trebuie sa existe raspuns scris.
+    const raspuns = T.validareRaspuns(ctx.body || {}, a.termen_cerut);
+    if (raspuns.eroare) {
+      return redirect(ctx.res, "/depozit/aprovizionare?eroare=" + encodeURIComponent(raspuns.eroare.slice(0, 200)));
+    }
+    await db
+      .prepare("UPDATE aprovizionari SET status = 'confirmata', termen_confirmat = ?, raspuns = ? WHERE id = ?")
+      .run(
+        raspuns.termen,
+        raspuns.motiv
+          ? `${raspuns.comparatie.eticheta} de furnizor, scris de ${ctx.user.nume} — motiv: ${raspuns.motiv}`
+          : `termen confirmat de furnizor, scris de ${ctx.user.nume}`,
+        id
+      );
+    redirect(
+      ctx.res,
+      "/depozit/aprovizionare?ok=" +
+        encodeURIComponent(
+          "Termen scris: " + raspuns.termen +
+            (raspuns.comparatie.fel === "amanat"
+              ? " — " + raspuns.comparatie.eticheta + " față de ce s-a cerut."
+              : raspuns.comparatie.fel === "devansat"
+                ? " — " + raspuns.comparatie.eticheta + " decât s-a cerut."
+                : " — exact cât s-a cerut.")
+        )
+    );
   });
 
   // Marfa a intrat: scriem intrarea de stoc și, dacă e cazul, deblocăm comanda.

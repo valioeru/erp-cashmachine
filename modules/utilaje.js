@@ -88,7 +88,7 @@ const NIVELURI = [
 // /productie — de-aia e exportată.
 // ---------------------------------------------------------------------------
 async function capacitati() {
-  return db
+  const scrise = await db
     .prepare(
       `SELECT c.*, u.denumire AS utilaj, u.cod AS utilaj_cod, u.operatori_necesari, u.ore_pe_zi,
               p.denumire AS produs_denumire, p.cod AS produs_cod
@@ -98,6 +98,63 @@ async function capacitati() {
         ORDER BY u.denumire`
     )
     .all();
+
+  // Si rutele din fisa tehnica (lib/utilaje-seed.js). Fara randurile astea,
+  // fisa statea in ERP si ecranul de alocare scria „niciun utilaj potrivit"
+  // la toate comenzile — datele erau acolo, dar in alt tabel decat se uita
+  // alocarea. Fisa da capacitatea PE SCHIMB; aici se imparte la orele
+  // schimbului, fiindca estimarea lucreaza in cantitate pe ora.
+  //
+  // Ce e scris de mana pe utilaj (utilaje_capacitate) BATE fisa: aia e cifra
+  // pe care a pus-o cineva uitandu-se la masina.
+  let dinFisa = [];
+  try {
+    dinFisa = await db
+      .prepare(
+        `SELECT r.*, u.denumire AS utilaj, u.cod AS utilaj_cod, u.operatori_necesari, u.ore_pe_zi
+           FROM utilaje_rute r
+           JOIN utilaje u ON u.id = r.utilaj_id AND u.activ = 1
+          WHERE r.capacitate_plan_schimb IS NOT NULL AND r.capacitate_plan_schimb > 0
+          ORDER BY u.denumire`
+      )
+      .all();
+  } catch (e) {
+    dinFisa = []; // baza n-are inca tabelul
+  }
+
+  const dejaScris = new Set(
+    scrise.map((c) => Number(c.utilaj_id) + "|" + normalizeaza(c.produs_text || c.produs_denumire || c.produs_cod))
+  );
+  const convertite = [];
+  for (const r of dinFisa) {
+    const minute = nr(r.timp_disponibil_min) > 0 ? nr(r.timp_disponibil_min) : 480;
+    const peOra = (nr(r.capacitate_plan_schimb) * 60) / minute;
+    if (!(peOra > 0)) continue;
+    // Fisa are coduri proprii de produs (P-PG-300x400) si o descriere a
+    // operatiei. Comenzile au text liber. Se incearca amandoua — potrivirea
+    // o face potriveste(), pe nume normalizat.
+    const cheie = Number(r.utilaj_id) + "|" + normalizeaza(r.produs_cod);
+    if (dejaScris.has(cheie)) continue;
+    convertite.push({
+      id: "fisa-" + r.id,
+      utilaj_id: r.utilaj_id,
+      utilaj: r.utilaj,
+      utilaj_cod: r.utilaj_cod,
+      operatori_necesari: r.operatori_necesari,
+      ore_pe_zi: r.ore_pe_zi,
+      produs_id: r.produs_id || null,
+      produs_text: r.produs_cod,
+      produs_denumire: r.descriere,
+      produs_cod: r.produs_cod,
+      cantitate_ora: Math.round(peOra * 1000) / 1000,
+      // Setup-ul de comanda e in minute in fisa, iar aici se socoteste in ore.
+      timp_pregatire: nr(r.setup_comanda_min) / 60,
+      um: r.unitate,
+      observatii: r.observatii,
+      din_fisa: true,
+    });
+  }
+  return scrise.concat(convertite);
 }
 
 function potriveste(cap, comanda) {
@@ -420,9 +477,10 @@ function register(router) {
       ${u.scop ? `<p style="max-width:860px;color:var(--text-muted)">${esc(u.scop)}</p>` : ""}
       ${u.observatii ? `<p style="max-width:860px"><strong>Observație:</strong> ${esc(u.observatii)}</p>` : ""}
 
+      <h3>Parametri tehnici${parametri.length ? "" : ' <span style="font-weight:400;color:var(--text-muted);font-size:13px">(niciunul încă)</span>'}</h3>
       ${
         parametri.length
-          ? `<h3>Parametri tehnici <span style="font-weight:400;color:var(--text-muted);font-size:13px">(${parametri.length})</span>${
+          ? `<span hidden>Parametri tehnici <span style="font-weight:400;color:var(--text-muted);font-size:13px">(${parametri.length})</span>${
               neconfirmate
                 ? ` <span class="badge rosu" style="font-size:11px">${neconfirmate} de confirmat</span>`
                 : ""
@@ -432,37 +490,96 @@ function register(router) {
                „presupus" sau „neconfirmat" arată la fel ca una măsurată până când cineva încearcă să producă pe ea.
              </p>
              ${table(
-               ["Parametru", "Valoare", "Observații"],
+               ["Parametru", "Valoare", "Unitate", "Sursă", "Observații", ""],
                parametri.map((p) => [
-                 esc(p.parametru || p.parametru_cod),
-                 (p.valoare_num != null ? `<strong>${esc(String(nr(p.valoare_num)))}</strong>` : esc(p.valoare_text || "—")) +
-                   (p.unitate ? ` ${esc(p.unitate)}` : "") +
+                 `<input form="par-${p.id}" name="parametru" value="${esc(p.parametru || p.parametru_cod)}" style="width:100%;min-width:150px">`,
+                 `<input form="par-${p.id}" name="valoare_num" type="number" step="any" value="${p.valoare_num == null ? "" : nr(p.valoare_num)}" style="width:90px" placeholder="nr">
+                  <input form="par-${p.id}" name="valoare_text" value="${esc(p.valoare_text || "")}" style="width:110px" placeholder="sau text">` +
                    sigur(p.sursa, p.confirmat),
-                 `<span style="font-size:12px;color:var(--text-muted)">${esc(p.observatii || "")}</span>`,
+                 `<input form="par-${p.id}" name="unitate" value="${esc(p.unitate || "")}" style="width:64px">`,
+                 `<select form="par-${p.id}" name="sursa" style="width:110px">
+                    ${["DECLARAT", "CALCULAT", "PRESUPUS", "CORECTAT"].map((v) => `<option${String(p.sursa || "") === v ? " selected" : ""}>${v}</option>`).join("")}
+                  </select>
+                  <select form="par-${p.id}" name="confirmat" style="width:62px">
+                    ${["DA", "NU"].map((v) => `<option${String(p.confirmat || "DA") === v ? " selected" : ""}>${v}</option>`).join("")}
+                  </select>`,
+                 `<input form="par-${p.id}" name="observatii" value="${esc(p.observatii || "")}" style="width:100%;min-width:140px">`,
+                 `<form id="par-${p.id}" method="post" action="/productie/utilaje/${u.id}/parametru">
+                    <input type="hidden" name="parametru_id" value="${p.id}">
+                    <button class="btn small" type="submit">Salvez</button>
+                  </form>
+                  <form method="post" action="/productie/utilaje/${u.id}/parametru/${p.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi parametrul?')">
+                    <button class="link-btn danger" type="submit">Șterge</button>
+                  </form>`,
                ])
-             )}`
+             )}
+             `
           : ""
       }
+      <details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Adaugă un parametru</summary>
+               <form method="post" action="/productie/utilaje/${u.id}/parametru" class="form" style="max-width:900px;margin-top:10px">
+                 <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:12px">
+                   <label class="field" style="margin:0"><span>Parametru</span><input name="parametru" required></label>
+                   <label class="field" style="margin:0"><span>Valoare (număr)</span><input type="number" step="any" name="valoare_num"></label>
+                   <label class="field" style="margin:0"><span>…sau text</span><input name="valoare_text"></label>
+                   <label class="field" style="margin:0"><span>Unitate</span><input name="unitate" placeholder="µm"></label>
+                   <label class="field" style="margin:0"><span>Sursă</span>
+                     <select name="sursa"><option>DECLARAT</option><option>CALCULAT</option><option>PRESUPUS</option></select></label>
+                 </div>
+          <label class="field"><span>Observații</span><input name="observatii"></label>
+          <button class="btn small" type="submit">Adaugă</button>
+        </form>
+      </details>
 
+      <h3>Timpi de setup și timpi morți${setup.length ? "" : ' <span style="font-weight:400;color:var(--text-muted);font-size:13px">(niciunul încă)</span>'}</h3>
       ${
         setup.length
-          ? `<h3>Timpi de setup și timpi morți</h3>
+          ? `<span hidden>x</span>
              <p style="font-size:12px;color:var(--text-muted);max-width:820px">
                Diferența dintre <strong>per comandă</strong> și <strong>per rolă</strong> e toată planificarea:
                setup-ul se plătește o dată, schimbarea rolei la fiecare rolă consumată.
              </p>
              ${table(
-               ["Ce se întâmplă", "Durată", "Cât de des", "Observații"],
-               setup.map((s) => [
-                 esc(s.descriere || s.eveniment_cod) + sigur(s.sursa, s.confirmat),
-                 nr(s.durata_min) + " min",
-                 esc(String(s.frecventa || "—").toLowerCase().replace(/_/g, " ")) +
-                   (s.interval_valoare ? ` <span style="color:var(--text-muted)">(la ${nr(s.interval_valoare)} ${esc(s.interval_unitate || "")})</span>` : ""),
-                 `<span style="font-size:12px;color:var(--text-muted)">${esc(s.observatii || "")}</span>`,
+               ["Ce se întâmplă", "Durată (min)", "Cât de des", "La fiecare", "Observații", ""],
+               setup.map((x) => [
+                 `<input form="set-${x.id}" name="descriere" value="${esc(x.descriere || x.eveniment_cod)}" style="width:100%;min-width:170px">` +
+                   sigur(x.sursa, x.confirmat),
+                 `<input form="set-${x.id}" name="durata_min" type="number" step="any" min="0" value="${nr(x.durata_min)}" style="width:76px">`,
+                 `<select form="set-${x.id}" name="frecventa" style="width:160px">
+                    ${["PER_COMANDA", "PER_ROLA", "PER_SCHIMBARE_TIP", "PER_PORNIRE", "PER_SCHIMB", "PER_ZI"].concat(x.frecventa && ["PER_COMANDA", "PER_ROLA", "PER_SCHIMBARE_TIP", "PER_PORNIRE", "PER_SCHIMB", "PER_ZI"].indexOf(x.frecventa) === -1 ? [x.frecventa] : [])
+                      .map((v) => `<option${String(x.frecventa || "") === v ? " selected" : ""}>${esc(v)}</option>`).join("")}
+                  </select>`,
+                 `<input form="set-${x.id}" name="interval_valoare" type="number" step="any" value="${x.interval_valoare == null ? "" : nr(x.interval_valoare)}" style="width:72px">
+                  <input form="set-${x.id}" name="interval_unitate" value="${esc(x.interval_unitate || "")}" style="width:56px" placeholder="kg">`,
+                 `<input form="set-${x.id}" name="observatii" value="${esc(x.observatii || "")}" style="width:100%;min-width:140px">`,
+                 `<form id="set-${x.id}" method="post" action="/productie/utilaje/${u.id}/setup">
+                    <input type="hidden" name="setup_id" value="${x.id}">
+                    <input type="hidden" name="sursa" value="${esc(x.sursa || "DECLARAT")}">
+                    <input type="hidden" name="confirmat" value="${esc(x.confirmat || "DA")}">
+                    <button class="btn small" type="submit">Salvez</button>
+                  </form>
+                  <form method="post" action="/productie/utilaje/${u.id}/setup/${x.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi timpul ăsta?')">
+                    <button class="link-btn danger" type="submit">Șterge</button>
+                  </form>`,
                ])
-             )}`
+             )}
+             `
           : ""
       }
+      <details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Adaugă un timp</summary>
+               <form method="post" action="/productie/utilaje/${u.id}/setup" class="form" style="max-width:900px;margin-top:10px">
+                 <div style="display:grid;grid-template-columns:2fr 1fr 1.4fr 1fr 1fr;gap:12px">
+                   <label class="field" style="margin:0"><span>Ce se întâmplă</span><input name="descriere" required></label>
+                   <label class="field" style="margin:0"><span>Durată (min)</span><input type="number" step="any" name="durata_min" required></label>
+                   <label class="field" style="margin:0"><span>Cât de des</span>
+                     <select name="frecventa">${["PER_COMANDA", "PER_ROLA", "PER_SCHIMBARE_TIP", "PER_PORNIRE", "PER_SCHIMB", "PER_ZI"].map((v) => `<option>${v}</option>`).join("")}</select></label>
+                   <label class="field" style="margin:0"><span>La fiecare</span><input type="number" step="any" name="interval_valoare"></label>
+                   <label class="field" style="margin:0"><span>Unitate</span><input name="interval_unitate" placeholder="kg"></label>
+                 </div>
+          <label class="field"><span>Observații</span><input name="observatii"></label>
+          <button class="btn small" type="submit">Adaugă</button>
+        </form>
+      </details>
 
       ${
         rute.length
@@ -474,7 +591,7 @@ function register(router) {
                ăla se adaugă o dată, separat.
              </p>
              ${table(
-               ["Produs", "Operație", "Plan / schimb", "Calculată", "Declarată", "Setup", "Observații"],
+               ["Produs", "Operație", "Plan / schimb", "Calculată", "Declarată (măsurată)", "Viteză /min", "Setup (min)", "Observații", ""],
                rute.map((r) => [
                  esc(r.produs_cod || "—"),
                  esc(r.descriere || ""),
@@ -485,11 +602,20 @@ function register(router) {
                        ? ' <span class="badge verde" style="font-size:10px">măsurat</span>'
                        : ' <span class="badge gri" style="font-size:10px">calculat</span>'),
                  r.capacitate_calculata_schimb == null ? "—" : cant(r.capacitate_calculata_schimb),
-                 r.capacitate_declarata_schimb == null ? "—" : cant(r.capacitate_declarata_schimb),
-                 r.setup_comanda_min == null ? "—" : nr(r.setup_comanda_min) + " min",
-                 `<span style="font-size:12px;color:var(--text-muted)">${esc(r.observatii || "")}</span>`,
+                 `<input form="ruta-${r.id}" name="capacitate_declarata_schimb" type="number" step="any" min="0" value="${r.capacitate_declarata_schimb == null ? "" : nr(r.capacitate_declarata_schimb)}" style="width:100px" placeholder="cât scoate">`,
+                 `<input form="ruta-${r.id}" name="viteza_plan_unit_min" type="number" step="any" min="0" value="${r.viteza_plan_unit_min == null ? "" : nr(r.viteza_plan_unit_min)}" style="width:84px">`,
+                 `<input form="ruta-${r.id}" name="setup_comanda_min" type="number" step="any" min="0" value="${r.setup_comanda_min == null ? "" : nr(r.setup_comanda_min)}" style="width:72px">`,
+                 `<input form="ruta-${r.id}" name="observatii" value="${esc(r.observatii || "")}" style="width:100%;min-width:140px">`,
+                 `<form id="ruta-${r.id}" method="post" action="/productie/utilaje/${u.id}/ruta/${r.id}">
+                    <button class="btn small" type="submit">Salvez</button>
+                  </form>`,
                ])
-             )}`
+             )}
+             <p style="font-size:12px;color:var(--text-muted);max-width:820px">
+               Scrie în „declarată" cât scoate mașina <strong>de fapt</strong>, măsurat la schimb. Din momentul în care
+               scrii o cifră acolo, ea devine capacitatea de plan și bate calculul — fiindcă include pierderile pe care
+               calculul nu le știe.
+             </p>`
           : ""
       }
 
@@ -514,15 +640,35 @@ function register(router) {
         consumabile.length
           ? `<h3>Consumabile și scule</h3>
              ${table(
-               ["Fel", "Denumire", "Observații"],
+               ["Fel", "Denumire", "Observații", ""],
                consumabile.map((c) => [
-                 `<span class="badge ${String(c.tip || "").toUpperCase() === "SCULA" ? "albastru" : "gri"}">${esc(String(c.tip || "").toLowerCase())}</span>`,
-                 esc(c.denumire),
-                 `<span style="font-size:12px;color:var(--text-muted)">${esc(c.observatii || "")}</span>`,
+                 `<select form="cons-${c.id}" name="tip" style="width:130px">
+                    ${["CONSUMABIL", "SCULA", "PIESA_SCHIMB"].map((v) => `<option${String(c.tip || "").toUpperCase() === v ? " selected" : ""}>${v}</option>`).join("")}
+                  </select>`,
+                 `<input form="cons-${c.id}" name="denumire" value="${esc(c.denumire)}" style="width:100%;min-width:200px">`,
+                 `<input form="cons-${c.id}" name="observatii" value="${esc(c.observatii || "")}" style="width:100%;min-width:150px">`,
+                 `<form id="cons-${c.id}" method="post" action="/productie/utilaje/${u.id}/consumabil">
+                    <input type="hidden" name="consumabil_id" value="${c.id}">
+                    <button class="btn small" type="submit">Salvez</button>
+                  </form>
+                  <form method="post" action="/productie/utilaje/${u.id}/consumabil/${c.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi rândul?')">
+                    <button class="link-btn danger" type="submit">Șterge</button>
+                  </form>`,
                ])
              )}`
           : ""
       }
+      <details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Adaugă un consumabil sau o sculă</summary>
+        <form method="post" action="/productie/utilaje/${u.id}/consumabil" class="form" style="max-width:760px;margin-top:10px">
+          <div style="display:grid;grid-template-columns:1fr 2fr 2fr;gap:12px">
+            <label class="field" style="margin:0"><span>Fel</span>
+              <select name="tip"><option>CONSUMABIL</option><option>SCULA</option><option>PIESA_SCHIMB</option></select></label>
+            <label class="field" style="margin:0"><span>Denumire</span><input name="denumire" required></label>
+            <label class="field" style="margin:0"><span>Observații</span><input name="observatii"></label>
+          </div>
+          <button class="btn small" type="submit">Adaugă</button>
+        </form>
+      </details>
     `;
 
     const body = `
@@ -538,11 +684,34 @@ function register(router) {
         </div>
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:14px">
           <label class="field">Locație<input name="locatie" value="${esc(u.locatie || "")}"></label>
-          <label class="field">Operatori<input type="number" name="operatori_necesari" min="0" step="1" value="${nr(u.operatori_necesari) || 1}"></label>
-          <label class="field">Ore pe zi<input type="number" name="ore_pe_zi" min="0" step="0.5" value="${nr(u.ore_pe_zi) || 8}"></label>
+          <label class="field">Categorie<input name="categorie" value="${esc(u.categorie || "")}" placeholder="Extrudare"></label>
+          <label class="field">Regim<select name="regim_lucru">
+            ${["", "NON-STOP", "CU PAUZE", "NECUNOSCUT"].map((v) => `<option value="${esc(v)}"${String(u.regim_lucru || "") === v ? " selected" : ""}>${esc(v || "—")}</option>`).join("")}
+          </select></label>
           <label class="field">Stare<select name="activ"><option value="1"${Number(u.activ) === 1 ? " selected" : ""}>activ</option><option value="0"${Number(u.activ) === 0 ? " selected" : ""}>scos din uz</option></select></label>
         </div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
+          <label class="field">Minute / schimb<input type="number" name="timp_disponibil_schimb_min" min="0" step="5" value="${u.timp_disponibil_schimb_min == null ? "" : nr(u.timp_disponibil_schimb_min)}"></label>
+          <label class="field">Schimburi / zi<input type="number" name="schimburi_zi" min="0" step="1" value="${u.schimburi_zi == null ? "" : nr(u.schimburi_zi)}"></label>
+          <label class="field">Operatori<input type="number" name="operatori_necesari" min="0" step="1" value="${nr(u.operatori_necesari) || 0}"></label>
+          <label class="field">Helperi<input type="number" name="nr_helperi" min="0" step="1" value="${u.nr_helperi == null ? "" : nr(u.nr_helperi)}"></label>
+          <label class="field">Ore pe zi<input type="number" name="ore_pe_zi" min="0" step="0.5" value="${nr(u.ore_pe_zi) || 8}"></label>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px;max-width:760px">
+          „Ore pe zi" e cifra pe care o folosește planificarea. La un utilaj non-stop pe 3 schimburi sunt 24, nu 8 —
+          dacă o lași pe 8, planificarea crede că ai o treime din capacitate. „Helperi" se numără separat de operatori:
+          la mașina de cartoane sunt doi oameni, dar numai unul o conduce.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:14px">
+          <label class="field">Consum (kW)<input type="number" name="consum_kw" min="0" step="0.1" value="${u.consum_kw == null ? "" : nr(u.consum_kw)}"></label>
+          <label class="field">Alt consum<input name="consum_alt" value="${esc(u.consum_alt || "")}" placeholder="0,66 RON / 1.000 buc"></label>
+          <label class="field">Starea datelor<select name="status_date">
+            ${["", "COMPLET", "PARȚIAL", "STANDBY"].map((v) => `<option value="${esc(v)}"${String(u.status_date || "") === v ? " selected" : ""}>${esc(v || "—")}</option>`).join("")}
+          </select></label>
+        </div>
+        <label class="field">La ce folosește<textarea name="scop" rows="2">${esc(u.scop || "")}</textarea></label>
         <label class="field">Descriere<textarea name="descriere" rows="2">${esc(u.descriere || "")}</textarea></label>
+        <label class="field">Observații<textarea name="observatii" rows="2">${esc(u.observatii || "")}</textarea></label>
         <div class="form-actions"><button class="btn" type="submit">Salvează</button></div>
       </form>
 
@@ -620,21 +789,232 @@ function register(router) {
 
   router.post("/productie/utilaje/:id", async (ctx) => {
     const b = ctx.body;
+    // Campul gol inseamna „nu stiu", si se scrie NULL — nu zero. Un consum de
+    // 0 kW si un consum necunoscut arata la fel intr-o coloana, dar nu sunt
+    // acelasi lucru: pe primul poti planifica, pe al doilea nu.
+    const numarSauNull = (v) => {
+      const s = String(v == null ? "" : v).trim().replace(",", ".");
+      if (s === "") return null;
+      const x = Number(s);
+      return isFinite(x) ? x : null;
+    };
+    const textSauNull = (v, max) => {
+      const s = String(v == null ? "" : v).trim();
+      return s ? s.slice(0, max || 300) : null;
+    };
     await db
       .prepare(
-        `UPDATE utilaje SET cod = ?, denumire = ?, descriere = ?, locatie = ?, operatori_necesari = ?, ore_pe_zi = ?, activ = ? WHERE id = ?`
+        `UPDATE utilaje SET cod = ?, denumire = ?, descriere = ?, locatie = ?, operatori_necesari = ?,
+                            ore_pe_zi = ?, activ = ?, scop = ?, categorie = ?, regim_lucru = ?,
+                            timp_disponibil_schimb_min = ?, schimburi_zi = ?, nr_helperi = ?,
+                            consum_kw = ?, consum_alt = ?, status_date = ?, observatii = ?
+          WHERE id = ?`
       )
       .run(
-        String(b.cod || "").trim() || null,
+        textSauNull(b.cod, 20),
         String(b.denumire || "").trim() || "Utilaj",
-        String(b.descriere || "").trim() || null,
-        String(b.locatie || "").trim() || null,
-        Math.max(0, Math.round(nr(b.operatori_necesari) || 1)),
+        textSauNull(b.descriere, 1000),
+        textSauNull(b.locatie, 120),
+        Math.max(0, Math.round(nr(b.operatori_necesari) || 0)),
         nr(b.ore_pe_zi) || 8,
         String(b.activ) === "0" ? 0 : 1,
+        textSauNull(b.scop, 500),
+        textSauNull(b.categorie, 60),
+        textSauNull(b.regim_lucru, 30),
+        numarSauNull(b.timp_disponibil_schimb_min),
+        numarSauNull(b.schimburi_zi),
+        b.nr_helperi === "" || b.nr_helperi == null ? null : Math.max(0, Math.round(nr(b.nr_helperi))),
+        numarSauNull(b.consum_kw),
+        textSauNull(b.consum_alt, 200),
+        textSauNull(b.status_date, 20),
+        textSauNull(b.observatii, 1000),
         ctx.params.id
       );
     redirect(ctx.res, `/productie/utilaje/${ctx.params.id}`);
+  });
+
+  // --- Parametrii tehnici: adaugare, modificare, stergere -----------------
+  //
+  // Fisa a intrat in ERP dintr-un Excel, dar din momentul asta ERP-ul e
+  // originalul, nu copia. Cineva masoara in atelier si vede ca grosimea maxima
+  // nu e 100, e 120 — trebuie sa poata scrie asta aici, nu sa trimita un mail
+  // ca sa modific eu fisierul. Seed-ul de la pornire nu rescrie nimic din ce
+  // exista deja (vezi lib/utilaje-seed.js), deci corectura ramane.
+  router.post("/productie/utilaje/:id/parametru", async (ctx) => {
+    const b = ctx.body || {};
+    const utilajId = parseInt(ctx.params.id, 10);
+    const cod = String(b.parametru_cod || "").trim().slice(0, 60);
+    const denumire = String(b.parametru || "").trim().slice(0, 160);
+    if (!utilajId || (!cod && !denumire)) return redirect(ctx.res, `/productie/utilaje/${utilajId}`);
+    const codFinal =
+      cod ||
+      denumire.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "_").slice(0, 60);
+    const valNum = String(b.valoare_num || "").trim().replace(",", ".");
+    const existent = parseInt(b.parametru_id, 10) || null;
+    const campuri = [
+      String(b.parametru || "").trim() || codFinal,
+      valNum === "" ? null : isFinite(Number(valNum)) ? Number(valNum) : null,
+      String(b.valoare_text || "").trim() || null,
+      String(b.unitate || "").trim().slice(0, 20) || null,
+      String(b.sursa || "").trim().slice(0, 20) || "DECLARAT",
+      String(b.confirmat || "").trim().slice(0, 4) || "DA",
+      String(b.observatii || "").trim().slice(0, 500) || null,
+    ];
+    if (existent) {
+      await db
+        .prepare(
+          `UPDATE utilaje_parametri SET parametru = ?, valoare_num = ?, valoare_text = ?, unitate = ?,
+                                        sursa = ?, confirmat = ?, observatii = ?
+            WHERE id = ? AND utilaj_id = ?`
+        )
+        .run(...campuri, existent, utilajId);
+    } else {
+      const dejaE = await db
+        .prepare("SELECT id FROM utilaje_parametri WHERE utilaj_id = ? AND parametru_cod = ?")
+        .get(utilajId, codFinal);
+      if (dejaE) {
+        await db
+          .prepare(
+            `UPDATE utilaje_parametri SET parametru = ?, valoare_num = ?, valoare_text = ?, unitate = ?,
+                                          sursa = ?, confirmat = ?, observatii = ? WHERE id = ?`
+          )
+          .run(...campuri, dejaE.id);
+      } else {
+        await db
+          .prepare(
+            `INSERT INTO utilaje_parametri (utilaj_id, parametru_cod, parametru, valoare_num, valoare_text,
+                                            unitate, sursa, confirmat, observatii)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(utilajId, codFinal, ...campuri);
+      }
+    }
+    redirect(ctx.res, `/productie/utilaje/${utilajId}`);
+  });
+
+  router.post("/productie/utilaje/:id/parametru/:pid/sterge", async (ctx) => {
+    await db
+      .prepare("DELETE FROM utilaje_parametri WHERE id = ? AND utilaj_id = ?")
+      .run(parseInt(ctx.params.pid, 10), parseInt(ctx.params.id, 10));
+    redirect(ctx.res, `/productie/utilaje/${ctx.params.id}`);
+  });
+
+  // --- Timpii de setup ----------------------------------------------------
+  router.post("/productie/utilaje/:id/setup", async (ctx) => {
+    const b = ctx.body || {};
+    const utilajId = parseInt(ctx.params.id, 10);
+    const descriere = String(b.descriere || "").trim().slice(0, 200);
+    if (!utilajId || !descriere) return redirect(ctx.res, `/productie/utilaje/${utilajId}`);
+    const existent = parseInt(b.setup_id, 10) || null;
+    const interval = String(b.interval_valoare || "").trim().replace(",", ".");
+    const campuri = [
+      descriere,
+      nr(b.durata_min) || 0,
+      String(b.frecventa || "PER_COMANDA").trim().slice(0, 40),
+      interval === "" ? null : isFinite(Number(interval)) ? Number(interval) : null,
+      String(b.interval_unitate || "").trim().slice(0, 20) || null,
+      String(b.sursa || "DECLARAT").trim().slice(0, 20),
+      String(b.confirmat || "DA").trim().slice(0, 4),
+      String(b.observatii || "").trim().slice(0, 500) || null,
+    ];
+    if (existent) {
+      await db
+        .prepare(
+          `UPDATE utilaje_setup SET descriere = ?, durata_min = ?, frecventa = ?, interval_valoare = ?,
+                                    interval_unitate = ?, sursa = ?, confirmat = ?, observatii = ?
+            WHERE id = ? AND utilaj_id = ?`
+        )
+        .run(...campuri, existent, utilajId);
+    } else {
+      const cod =
+        String(b.eveniment_cod || "").trim().slice(0, 60) ||
+        descriere.toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9]+/g, "_").slice(0, 60);
+      const dejaE = await db.prepare("SELECT id FROM utilaje_setup WHERE utilaj_id = ? AND eveniment_cod = ?").get(utilajId, cod);
+      if (dejaE) {
+        await db
+          .prepare(
+            `UPDATE utilaje_setup SET descriere = ?, durata_min = ?, frecventa = ?, interval_valoare = ?,
+                                      interval_unitate = ?, sursa = ?, confirmat = ?, observatii = ? WHERE id = ?`
+          )
+          .run(...campuri, dejaE.id);
+      } else {
+        await db
+          .prepare(
+            `INSERT INTO utilaje_setup (utilaj_id, eveniment_cod, descriere, durata_min, frecventa,
+                                        interval_valoare, interval_unitate, sursa, confirmat, observatii)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(utilajId, cod, ...campuri);
+      }
+    }
+    redirect(ctx.res, `/productie/utilaje/${utilajId}`);
+  });
+
+  router.post("/productie/utilaje/:id/setup/:sid/sterge", async (ctx) => {
+    await db
+      .prepare("DELETE FROM utilaje_setup WHERE id = ? AND utilaj_id = ?")
+      .run(parseInt(ctx.params.sid, 10), parseInt(ctx.params.id, 10));
+    redirect(ctx.res, `/productie/utilaje/${ctx.params.id}`);
+  });
+
+  // --- Consumabile si scule ------------------------------------------------
+  router.post("/productie/utilaje/:id/consumabil", async (ctx) => {
+    const b = ctx.body || {};
+    const utilajId = parseInt(ctx.params.id, 10);
+    const denumire = String(b.denumire || "").trim().slice(0, 200);
+    if (!utilajId || !denumire) return redirect(ctx.res, `/productie/utilaje/${utilajId}`);
+    const existent = parseInt(b.consumabil_id, 10) || null;
+    const tip = String(b.tip || "CONSUMABIL").trim().toUpperCase().slice(0, 20);
+    const obs = String(b.observatii || "").trim().slice(0, 400) || null;
+    if (existent) {
+      await db
+        .prepare("UPDATE utilaje_consumabile SET tip = ?, denumire = ?, observatii = ? WHERE id = ? AND utilaj_id = ?")
+        .run(tip, denumire, obs, existent, utilajId);
+    } else {
+      await db
+        .prepare("INSERT INTO utilaje_consumabile (utilaj_id, tip, denumire, observatii) VALUES (?, ?, ?, ?)")
+        .run(utilajId, tip, denumire, obs);
+    }
+    redirect(ctx.res, `/productie/utilaje/${utilajId}`);
+  });
+
+  router.post("/productie/utilaje/:id/consumabil/:cid/sterge", async (ctx) => {
+    await db
+      .prepare("DELETE FROM utilaje_consumabile WHERE id = ? AND utilaj_id = ?")
+      .run(parseInt(ctx.params.cid, 10), parseInt(ctx.params.id, 10));
+    redirect(ctx.res, `/productie/utilaje/${ctx.params.id}`);
+  });
+
+  // --- Capacitatea pe ruta produs x utilaj ---------------------------------
+  router.post("/productie/utilaje/:id/ruta/:rid", async (ctx) => {
+    const b = ctx.body || {};
+    const utilajId = parseInt(ctx.params.id, 10);
+    const numarSauNull2 = (v) => {
+      const s = String(v == null ? "" : v).trim().replace(",", ".");
+      if (s === "") return null;
+      const x = Number(s);
+      return isFinite(x) ? x : null;
+    };
+    // Capacitatea DECLARATA e cea masurata in atelier si bate calculul. De-aia
+    // e campul pe care omul din productie trebuie sa-l poata scrie fara sa
+    // ceara voie — restul raman cum le-a calculat fisa.
+    await db
+      .prepare(
+        `UPDATE utilaje_rute SET capacitate_declarata_schimb = ?, viteza_plan_unit_min = ?,
+                                 setup_comanda_min = ?, capacitate_plan_schimb = COALESCE(?, capacitate_calculata_schimb),
+                                 observatii = ?
+          WHERE id = ? AND utilaj_id = ?`
+      )
+      .run(
+        numarSauNull2(b.capacitate_declarata_schimb),
+        numarSauNull2(b.viteza_plan_unit_min),
+        numarSauNull2(b.setup_comanda_min),
+        numarSauNull2(b.capacitate_declarata_schimb),
+        String(b.observatii || "").trim().slice(0, 500) || null,
+        parseInt(ctx.params.rid, 10),
+        utilajId
+      );
+    redirect(ctx.res, `/productie/utilaje/${utilajId}`);
   });
 
   router.post("/productie/utilaje/:id/capacitate", async (ctx) => {
