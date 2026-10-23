@@ -70,6 +70,10 @@ require("./modules/comenzi-furnizor").register(router);
 // inregistreaza inaintea lui „/logistica/cursa/:id" chiar in modul — altfel
 // ruta cu id ar inghiti pagina de cursa noua. (Vezi test-rute.js.)
 require("./modules/logistica").register(router);
+// Fluxurile tehnologice: "/fluxuri/reguli" si "/fluxuri/cilindri" sunt rute
+// literale, deci ordinea fata de "/fluxuri" nu conteaza — dar "/fluxuri/:id/pas"
+// e POST, deci nu se bate cu ele.
+require("./modules/fluxuri").register(router);
 require("./modules/marketing").register(router);
 require("./modules/concurenta").register(router);
 // Culegerea și legarea domeniilor se înregistrează ÎNAINTEA inboxului: acolo
@@ -220,6 +224,9 @@ async function start() {
   // Istoricul comenzilor Sameday: se importă o singură dată, la prima
   // pornire în care tabelul e gol. Dacă pică, nu oprește aplicația.
   await require("./modules/comenzi-zi").seed().catch((e) => console.error("[comenzi-zi]", e.message));
+  // Fisa tehnica a utilajelor (Utilaje_CashMachine_ERP.xlsx). Pune doar ce
+  // lipseste: o corectura facuta de om in ERP nu se rescrie la repornire.
+  await require("./lib/utilaje-seed").seed().catch((e) => console.error("[utilaje-seed]", e.message));
   require("./modules/warehouse").porneste();
   require("./modules/marketing").porneste();
   require("./modules/inbox").porneste();

@@ -1,0 +1,88 @@
+"use strict";
+// Coloanele care se pot ascunde si trage de margine.
+//
+// CE APARA:
+//
+//   • UN TABEL FARA CHEIE RAMANE EXACT CUM ERA. Functia table() e chemata din
+//     vreo suta de locuri. Daca varianta fara optiuni s-ar schimba cu un
+//     caracter, as atinge toate paginile aplicatiei deodata.
+//
+//   • RANDUL GOL NU SE ASCUNDE. "Niciun rand inca" e un singur td cu colspan
+//     peste tot tabelul. Daca scriptul i-ar pune display:none pentru ca e pe
+//     pozitia unei coloane ascunse, tabelul gol ar arata ca o pagina stricata.
+//
+//   • TRAGEREA DE MARGINE NU SORTEAZA TABELUL. Capetele sunt sortabile la
+//     click, iar o tragere scurta e si un click.
+const path = require("path");
+const Module = require("module");
+process.env.DATABASE_URL = "postgres://postgres@127.0.0.1:5433/erp";
+const orig = Module._load;
+Module._load = function (req) {
+  if (req === "pg") return { Pool: function () { return { on: () => {}, query: async () => ({ rows: [] }) }; } };
+  return orig.apply(this, arguments);
+};
+const R = require(path.join(__dirname, "lib", "render.js"));
+
+let esecuri = 0;
+function bine(descriere, conditie, detaliu) {
+  if (conditie) console.log("  ok     " + descriere);
+  else { console.log("  ESEC   " + descriere + (detaliu !== undefined ? "  -> " + String(detaliu).slice(0, 200) : "")); esecuri++; }
+}
+
+const CAPETE = ["Nr", "Client", "Produs"];
+const RANDURI = [["1", "Aquila", "Folie"], ["2", "Profi", "Pungi"]];
+
+console.log("\n1. Fara cheie, nimic nu se schimba");
+{
+  const t = R.table(CAPETE, RANDURI);
+  bine("nu apare atributul data-tabel", !/data-tabel/.test(t));
+  bine("nu apare panoul de coloane", !/coloane-panou/.test(t));
+  bine("incepe direct cu tabelul", t.trim().startsWith("<table"), t.slice(0, 40));
+}
+
+console.log("\n2. Cu cheie, apar si panoul si marcajul");
+{
+  const t = R.table(CAPETE, RANDURI, { coloane: "comenzi-productie" });
+  bine("tabelul e marcat cu cheia", /<table class="table" data-tabel="comenzi-productie">/.test(t));
+  bine("panoul e legat de acelasi tabel", /data-coloane-pentru="comenzi-productie"/.test(t));
+  bine("panoul are unde sa-si puna bifele", /data-lista/.test(t));
+  bine("si un drum inapoi la toate coloanele", /data-reset/.test(t));
+  bine("panoul sta inaintea tabelului", t.indexOf("coloane-panou") < t.indexOf("<table"));
+  bine("randurile sunt neatinse", /Aquila/.test(t) && /Profi/.test(t));
+}
+
+console.log("\n3. Cheia se curata, nu se pune in pagina asa cum vine");
+{
+  // Cheia ajunge intr-un atribut HTML si intr-un selector CSS. Nu vine de la
+  // utilizator azi, dar peste un an cineva o va construi dintr-un parametru.
+  const t = R.table(CAPETE, RANDURI, { coloane: 'rau" onload="alert(1)' });
+  // Nu "nu contine cuvantul onload" — litere ca litere e in regula. Ce nu are
+  // voie sa existe e ghilimeaua care ar inchide atributul si ar deschide unul nou.
+  bine("ghilimeaua nu inchide atributul", !/onload=/.test(t) && !/data-tabel="[^"]*"[^>]*"/.test(t.match(/<table[^>]*>/)[0]), t.match(/<table[^>]*>/)[0]);
+  bine("ramane ceva utilizabil", /data-tabel="rauonloadalert1"/.test(t), (t.match(/data-tabel="[^"]*"/) || [])[0]);
+}
+
+console.log("\n4. Tabelul gol");
+{
+  const t = R.table(CAPETE, [], { coloane: "x" });
+  bine("are randul de gol", /class="empty"/.test(t));
+  // Scriptul sare peste td.empty cand ascunde coloane — altfel randul asta,
+  // care e un singur td cu colspan, ar disparea si tabelul ar parea stricat.
+  bine("si e marcat ca atare, ca scriptul sa-l ocoleasca", /colspan="3" class="empty"/.test(t));
+}
+
+console.log("\n5. Scriptul din pagina");
+{
+  const html = R.layout({ user: { id: 1, nume: "Vali", rol: "admin" }, title: "x", body: "", active: "/" });
+  bine("scriptul de coloane e in pagina", /tabel:" \+ tabel\.dataset\.tabel/.test(html));
+  bine("citirea din localStorage e in try/catch", /try \{ return JSON\.parse\(localStorage/.test(html));
+  bine("si scrierea la fel", /try \{ localStorage\.setItem/.test(html));
+  // O tragere scurta e si un click, iar capetele sunt sortabile la click.
+  bine("gripul opreste clickul ca sa nu sorteze", /grip\.addEventListener\("click", function \(ev\) \{ ev\.stopPropagation\(\)/.test(html));
+  bine("si mousedown-ul la fel", /mousedown[\s\S]{0,200}stopPropagation/.test(html));
+  bine("randul gol e ocolit la ascundere", /classList\.contains\("empty"\)/.test(html));
+  bine("latimea minima nu lasa coloana sa dispara de tot", /Math\.max\(40,/.test(html));
+}
+
+console.log(esecuri ? "\n" + esecuri + " ESEC(URI)\n" : "\nToate trecute.\n");
+process.exit(esecuri ? 1 : 0);
