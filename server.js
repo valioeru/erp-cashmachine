@@ -66,6 +66,10 @@ require("./modules/procurement").register(router);
 // și „/procurement/comenzi/preturi" înaintea lui „/procurement/comenzi/:id" —
 // altfel ruta cu id ar înghiți cele două pagini. (Vezi test-rute.js.)
 require("./modules/comenzi-furnizor").register(router);
+// Logistica: cine duce marfa si cu cat. „/logistica/cursa/noua" se
+// inregistreaza inaintea lui „/logistica/cursa/:id" chiar in modul — altfel
+// ruta cu id ar inghiti pagina de cursa noua. (Vezi test-rute.js.)
+require("./modules/logistica").register(router);
 require("./modules/marketing").register(router);
 require("./modules/concurenta").register(router);
 // Culegerea și legarea domeniilor se înregistrează ÎNAINTEA inboxului: acolo
