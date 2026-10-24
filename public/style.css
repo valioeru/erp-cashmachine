@@ -744,3 +744,21 @@ td.cal-azi .cal-nr { background: var(--primary); color: #fff; }
   color: #fff;
 }
 .ct-loc.alegibil:has(input:checked) .ct-loc-adresa { color: #fff; }
+
+/* Unde raftul nu urca pana sus.
+ *
+ * Un rand nu are acelasi numar de niveluri pe toata lungimea lui: 3 pe o
+ * bucata, 5 pe alta, 1 langa usa. Grila se deseneaza nivel cu nivel, deci
+ * campurile mai scunde trebuie sa lase un gol de aceeasi latime — altfel
+ * campurile de dupa ele urca cu un rand si desenul minte.
+ *
+ * Golul se vede, dar abia: un contur punctat foarte palid. Complet invizibil
+ * ar fi aratat ca o gaura in date; plin, ar fi aratat ca un loc. Asa se
+ * citeste exact ce e: aici nu e raft. */
+.ct-loc.fara-raft {
+  border: 1px dashed rgba(127, 134, 148, .20);
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+.ct-camp.gol .ct-camp-eticheta { visibility: hidden; }
