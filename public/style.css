@@ -123,7 +123,21 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
   flex-direction: column;
   gap: 14px;
 }
-.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-muted); }
+/* „min-width: 0" e linia care tine formularele in casetele lor.
+ *
+ * Bugul, si e acelasi pe toate paginile cu formular: intr-un grid,
+ * `1fr` inseamna de fapt `minmax(auto, 1fr)`, iar `auto` NU coboara sub
+ * latimea continutului. Un singur <select> cu „GUANGDONG TENGEN INDUSTRIAL
+ * GROUP CO.,LTD" in lista umfla coloana la latimea numelui ala, impinge
+ * celelalte coloane in afara casetei, si pe ecran raman „…sau scris liber"
+ * si „Lot" taiate de marginea paginii, cu o bara de scroll orizontala sub
+ * tot. Se vede cel mai urat la intrarea de marfa din CT-Park, unde lista de
+ * furnizori sta langa alte cinci campuri.
+ *
+ * Nu se repara pe fiecare pagina in parte: sunt zeci de formulare cu
+ * acelasi tipar. Se repara o data, aici, pe clasa pe care o au toate.
+ */
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-muted); min-width: 0; }
 .field input, .field select, .field textarea {
   font-size: 14px;
   padding: 8px 10px;
@@ -131,7 +145,20 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
   border-radius: 6px;
   color: var(--text);
   font-family: inherit;
+  /* Fara astea doua, controlul isi pastreaza latimea lui naturala si iese
+   * din coloana chiar si cu min-width:0 pe parinte. */
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
+/* Un <select> isi ia latimea din cea mai lunga optiune. Cu width:100% o ia
+ * din coloana, iar textul lung se taie cu „…" in loc sa impinga pagina. */
+.field select { width: 100%; text-overflow: ellipsis; }
+/* Aceeasi plasa si pentru formularele care pun direct grid-uri cu input-uri,
+ * fara clasa .field pe fiecare celula. */
+.form > div[style*="grid"] > *, .form > div[style*="grid"] > * > * { min-width: 0; }
+/* Si caseta in sine nu are voie sa iasa din ecran pe telefon. */
+.form { max-width: 100%; }
 .form-actions { display: flex; gap: 10px; margin-top: 6px; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 26px; }
