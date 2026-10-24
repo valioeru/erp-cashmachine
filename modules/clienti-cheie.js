@@ -41,8 +41,16 @@ function strans(nume) {
     .replace(/[^a-z0-9]+/g, "");
 }
 
-// Grupurile cerute. Fiecare are una sau mai multe bucăți de nume: se
+// Clienții urmăriți. Fiecare are una sau mai multe bucăți de nume: se
 // potrivește dacă numele strâns al partenerului conține oricare dintre ele.
+//
+// CUVÂNTUL „GRUP" NU SE FOLOSEȘTE AICI PENTRU EI. În pagina asta „grupul" e
+// grupul NOSTRU de firme (Cash Machine, Warehouse All etc.), ale cărui
+// facturi interne nu intră în raport. Vali a văzut titlul „Ce firme au intrat
+// în fiecare grup" și a spus, pe drept: „Poșta Română nu e grup" — e o
+// singură firmă, un client. Singurul loc unde chiar sunt mai multe firme la
+// un loc e Delivery + Cargus, și acolo scrie explicit. Deci: clienți în text,
+// grup doar pentru firmele noastre.
 //
 // Numele din bucăți sunt cele JURIDICE, nu cele de pe camion: eMAG Retail se
 // numește Dante International în facturi, iar dacă am căuta „emag" am rata
@@ -136,7 +144,7 @@ async function culege({ deLa, panaLa, prag, separat }) {
   };
 
   const scoase = { excluse: 0, sumaExcluse: 0, warehouse: 0, sumaWarehouse: 0 };
-  const numeGasite = new Map(); // ce firme au intrat în fiecare grup
+  const numeGasite = new Map(); // ce firme s-au potrivit la fiecare client
   let faraLinii = 0;
 
   for (const r of randuri) {
@@ -177,7 +185,14 @@ async function culege({ deLa, panaLa, prag, separat }) {
     }
   }
 
-  const ordonate = [...luni.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  // Cea mai recenta luna sus. Cheia e „YYYY-MM", deci sortarea pe text da
+  // ordinea cronologica — o intoarcem.
+  //
+  // De ce: tabelul porneste de acum un an, iar luna care intereseaza pe
+  // oricine deschide pagina e ultima. Cu cea mai veche sus, trebuia derulat
+  // pana jos de fiecare data ca sa vezi unde esti acum. Totalul de dedesubt
+  // nu se schimba — se aduna la fel, indiferent de ordine.
+  const ordonate = [...luni.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
   const total = lunaGoala();
   for (const [, L] of ordonate) {
     total.total += L.total;
@@ -233,7 +248,7 @@ function register(router) {
     const body = `
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:900px">
         Facturat <strong>fără TVA</strong> (cantitate × preț unitar), doar vânzări, fără facturile
-        între firmele grupului. Procentele se calculează <em>după</em> excluderi — altfel n-ar însemna nimic.
+        dintre firmele noastre. Procentele se calculează <em>după</em> excluderi — altfel n-ar însemna nimic.
       </p>
 
       <form class="filtre" method="get" action="/rapoarte/clienti-cheie" style="margin-bottom:6px">
@@ -284,11 +299,14 @@ function register(router) {
       <ul style="font-size:13px;line-height:1.7">
         <li>${EXCLUSE.map((e) => esc(e.nume)).join(" și ")}: <strong>${d.scoase.excluse}</strong> facturi, ${money(d.scoase.sumaExcluse)}</li>
         <li>Facturi Warehouse All peste ${money(prag)} fără TVA: <strong>${d.scoase.warehouse}</strong> facturi, ${money(d.scoase.sumaWarehouse)}</li>
-        <li style="color:var(--text-muted)">Facturile între firmele grupului nu intră niciodată în raport.</li>
+        <li style="color:var(--text-muted)">Facturile dintre firmele noastre (Cash Machine, Warehouse All etc.)
+          nu intră niciodată în raport.</li>
       </ul>
 
-      <h2>Ce firme au intrat în fiecare grup</h2>
+      <h2>Ce firme s-au potrivit la fiecare client</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">
+        Fiecare rând de mai jos e un <strong>client</strong>, nu un grup de firme — singura coloană care adună
+        două firme e „Delivery + Cargus", și numai cât timp sunt numărați împreună.
         Potrivirea se face pe nume, fără diacritice și fără punctuație. Dacă vezi aici o firmă care n-ar trebui,
         sau lipsește una, spune-mi și schimb bucata de nume.
       </p>
