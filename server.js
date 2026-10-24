@@ -74,6 +74,12 @@ require("./modules/comenzi-furnizor").register(router);
 // inregistreaza inaintea lui „/logistica/cursa/:id" chiar in modul — altfel
 // ruta cu id ar inghiti pagina de cursa noua. (Vezi test-rute.js.)
 require("./modules/logistica").register(router);
+// Fulfillment: alta gestiune decat CT-Park, si fizic alt loc. Rutele lui sunt
+// toate literale in afara de "/fulfillment/retururi/:id/decide", care e POST,
+// deci nu se bate cu nimic. Se inregistreaza dupa logistica fiindca inchiderea
+// de zi naste o cursa acolo, si e mai usor de citit asa, in ordinea in care
+// curge marfa.
+require("./modules/fulfillment").register(router);
 // Fluxurile tehnologice: "/fluxuri/reguli" si "/fluxuri/cilindri" sunt rute
 // literale, deci ordinea fata de "/fluxuri" nu conteaza — dar "/fluxuri/:id/pas"
 // e POST, deci nu se bate cu ele.
