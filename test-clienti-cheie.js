@@ -213,8 +213,22 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
     else ok("pagina arată grupurile, procentele și avertismentul (" + r.corp.length + " octeți)");
   }
   if (!fara.includes("DELIVERY SOLUTIONS S.A.") || !fara.includes("URGENT CARGUS SA"))
-    rau("pagina nu spune ce firme au intrat în grupul comun");
-  else ok("pagina spune ce firme au intrat în fiecare grup, inclusiv amândouă la curieri");
+    rau("pagina nu spune ce firme s-au potrivit la coloana comună");
+  else ok("pagina spune ce firme s-au potrivit la fiecare client, inclusiv amândouă la curieri");
+
+  // „Grup" înseamnă aici firmele NOASTRE, nu clienții. Vali s-a uitat la
+  // titlul vechi — „Ce firme au intrat în fiecare grup" — și a spus pe drept:
+  // „Poșta Română nu e grup". E o singură firmă, un client. Singurul loc unde
+  // chiar sunt două firme la un loc e Delivery + Cargus. Testul ăsta ține
+  // cuvântul la locul lui, ca să nu se întoarcă din copy-paste.
+  {
+    const titluri = (fara.match(/<h2>[^<]*<\/h2>/g) || []).join(" ");
+    if (/grup/i.test(titluri)) rau("un titlu numește clienții „grup”", titluri);
+    else ok("niciun titlu nu mai numește clienții grupuri");
+    if (!fara.includes("Fiecare rând de mai jos e un <strong>client</strong>"))
+      rau("lipsește lămurirea că rândurile sunt clienți, nu grupuri");
+    else ok("pagina spune explicit că un rând e un client, nu un grup de firme");
+  }
 
   const rs = await cer("/rapoarte/clienti-cheie", { query: { de_la: "2026-01-01", pana_la: "2026-02-28", separat: "1" } });
   if (!rs.corp.includes("Numără-i împreună")) rau("din pagina separată nu se poate reveni");
@@ -223,6 +237,23 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
   // eMAG se prinde după numele juridic, nu după cel de pe cutie.
   egal("eMAG Retail se recunoaște și ca Dante International",
     !!mod.potrivit(mod.grupuri(true), mod.strans("DANTE INTERNATIONAL S.A.")), true);
+
+  // Luna cea mai recentă stă sus. Tabelul pornește de acum un an, iar luna
+  // care interesează pe oricine deschide pagina e ultima — cu cea mai veche
+  // sus trebuia derulat până jos de fiecare dată.
+  {
+    const p = await cer("/rapoarte/clienti-cheie", { de_la: "2025-10-01", pana_la: "2026-10-24" });
+    const luni = (p.corp.match(/>(ian|feb|mar|apr|mai|iun|iul|aug|sep|oct|nov|dec) (\d{4})</g) || [])
+      .map((x) => x.replace(/[><]/g, ""));
+    if (luni.length < 2) ok("prea puține luni ca să verific ordinea (" + luni.length + ")");
+    else {
+      const L = ["ian","feb","mar","apr","mai","iun","iul","aug","sep","oct","nov","dec"];
+      const cheie = (t) => { const [m, a2] = t.split(" "); return Number(a2) * 12 + L.indexOf(m); };
+      const descrescator = luni.every((t, i) => i === 0 || cheie(t) <= cheie(luni[i - 1]));
+      if (descrescator) ok("lunile vin de la cea mai recentă în jos (" + luni[0] + " prima)");
+      else rau("lunile nu sunt în ordine inversă: " + luni.slice(0, 4).join(" → "));
+    }
+  }
 
   // --- curățenie după noi ----------------------------------------------------
   for (const s of [
