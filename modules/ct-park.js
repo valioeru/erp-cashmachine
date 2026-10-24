@@ -1154,6 +1154,14 @@ function register(router) {
 
       <form method="get" action="/stocuri/ct-park/intrare" id="forma-locuri">
         <input type="hidden" name="rand" value="${r.id}">
+        ${/* Casutele se cheama „loc" si sunt mai multe. Adresa iese
+             „loc=1&loc=2&loc=3", iar parserul de query al aplicatiei face
+             Object.fromEntries(searchParams.entries()) — care pastreaza
+             DOAR ULTIMA valoare. Adica din trei locuri alese ajungea unul,
+             si ala citit sub alt nume. De-aia exista campul ascuns de mai
+             jos: JS-ul lipeste id-urile cu virgula intr-o singura valoare,
+             care trece intreaga prin parser. */ ""}
+        <input type="hidden" name="locuri" id="locuri-lipite" value="">
         <div class="ct-fata">
           <div class="ct-grila">${grila}</div>
           <div class="ct-podea">pardoseală</div>
@@ -1172,8 +1180,11 @@ function register(router) {
           function alese() {
             return Array.prototype.filter.call(f.querySelectorAll('input[name="loc"]'), function (b) { return b.checked; });
           }
+          var lipite_camp = document.getElementById("locuri-lipite");
           f.addEventListener("change", function () {
             var a = alese();
+            // Valoarea care chiar ajunge la server.
+            lipite_camp.value = a.map(function (b) { return b.value; }).join(",");
             bara.hidden = a.length === 0;
             if (!a.length) return;
             var adrese = a.map(function (b) { return b.dataset.adresa; });
@@ -1197,6 +1208,7 @@ function register(router) {
           document.getElementById("bara-locuri-renunt").addEventListener("click", function (ev) {
             ev.preventDefault();
             alese().forEach(function (b) { b.checked = false; });
+            lipite_camp.value = "";
             bara.hidden = true;
           });
         })();
@@ -1781,7 +1793,11 @@ function register(router) {
     // Locurile arătate cu degetul pe harta rândului. Când vin de acolo,
     // ERP-ul nu mai propune nimic: omul a ales deja, iar a-i propune altceva
     // peste alegerea lui e exact felul în care un ecran devine enervant.
-    const aleseDinHarta = String(ctx.query.locuri || "")
+    // „locuri" e forma buna, lipita cu virgula de JS-ul hartii. „loc" e
+    // plasa de siguranta: daca JS-ul n-a apucat sa ruleze, parserul lasa
+    // macar ultima casuta bifata, si e mai bine sa pornim cu un loc decat
+    // cu niciunul si fara nicio explicatie.
+    const aleseDinHarta = String(ctx.query.locuri || ctx.query.loc || "")
       .split(",").map((x) => parseInt(x, 10)).filter(Boolean);
     let locuriAlese = [];
     if (aleseDinHarta.length) {
