@@ -579,7 +579,7 @@ function grupuriDinText(text) {
 // rândului. Funcția asta le pune la un loc, ca restul codului să nu mai știe
 // că sunt două surse. De-aia un depozit configurat înainte merge mai departe
 // fără nicio migrare.
-async function niveluriRand(r) {
+async function niveluriRand(r, pana) {
   let salvate = [];
   try {
     salvate = await db.prepare("SELECT * FROM ct_niveluri WHERE rand_id = ? ORDER BY nivel").all(r.id);
@@ -588,7 +588,11 @@ async function niveluriRand(r) {
   }
   const h = new Map((salvate || []).map((x) => [nr(x.nivel), x]));
   const out = [];
-  for (let i = 1; i <= nr(r.niveluri); i++) {
+  // `pana` e înălțimea celui mai înalt sector, când rândul are sectoare. Fără
+  // ea, un sector de 5 niveluri pe un rând declarat de 3 n-ar avea niciodată
+  // nivelurile 4 și 5 în listă, deci nici locuri generate acolo.
+  const varf = Math.max(1, Math.round(nr(pana) || nr(r.niveluri)));
+  for (let i = 1; i <= varf; i++) {
     const s = h.get(i) || {};
     out.push({
       nivel: i,
@@ -606,10 +610,90 @@ function inaltimeRand(niveluri) {
   return niveluri.reduce((s, n) => s + n.inaltime + GRINDA, 0);
 }
 
+// ---- Sectoare: porțiuni de rând cu alt număr de niveluri -------------------
+// „Trebuie sa pot configura pe acelasi rand si 3 si 2 si 5 si 1 nivel pe
+// orice interval adica nu sunt toate de 3." Un sector e un interval de
+// câmpuri cu numărul lui de niveluri; un câmp care nu cade în niciun sector
+// are câte niveluri are rândul.
+const NIVEL_MAX = 12;
+
+async function sectoareRand(randId) {
+  let brut = [];
+  try {
+    brut = await db.prepare("SELECT * FROM ct_sectoare WHERE rand_id = ? ORDER BY camp_de_la, id").all(randId);
+  } catch (e) {
+    // Tabelul lipsește pe o bază veche: rândul e uniform, ca înainte.
+    brut = [];
+  }
+  return (brut || [])
+    .map((x) => ({
+      id: Number(x.id),
+      de_la: Math.max(1, Math.round(nr(x.camp_de_la))),
+      pana_la: Math.max(1, Math.round(nr(x.camp_pana_la))),
+      niveluri: Math.max(1, Math.min(NIVEL_MAX, Math.round(nr(x.niveluri)))),
+    }))
+    .filter((x) => x.pana_la >= x.de_la);
+}
+
+// Câte niveluri are fiecare câmp. Sectoarele se aplică în ordine, deci dacă
+// două se suprapun câștigă ultimul — e singura regulă care se poate explica
+// în hală fără diagramă, iar formularul le salvează oricum sortate.
+function nivelurilePeCamp(r, sectoare, campuri) {
+  const cate = Math.max(1, Math.round(nr(campuri) || nr(r.campuri)));
+  const implicit = Math.max(1, Math.round(nr(r.niveluri)));
+  const h = new Map();
+  for (let c = 1; c <= cate; c++) h.set(c, implicit);
+  for (const s of sectoare || []) {
+    for (let c = Math.max(1, s.de_la); c <= Math.min(cate, s.pana_la); c++) h.set(c, s.niveluri);
+  }
+  return h;
+}
+
+// Tot ce trebuie știut despre forma unui rând, într-un singur loc, ca să nu
+// se citească sectoarele de trei ori pe pagină și să nu rămână vreun apelant
+// cu socoteala veche (toate câmpurile la fel de înalte).
+async function planRand(r, campuri) {
+  const sectoare = await sectoareRand(r.id);
+  const varf = Math.max(nr(r.niveluri), ...sectoare.map((s) => s.niveluri), 1);
+  const niveluri = await niveluriRand(r, varf);
+  const peCamp = nivelurilePeCamp(r, sectoare, campuri);
+  // Câte locuri ies din configurația asta: suma, câmp cu câmp, a locurilor
+  // de pe nivelurile care chiar există acolo.
+  let locuri = 0;
+  for (const [, n] of peCamp) for (let i = 1; i <= n; i++) locuri += niveluri[i - 1] ? niveluri[i - 1].locuri : 0;
+  return { sectoare, varf, niveluri, peCamp, locuri, uniform: sectoare.length === 0 };
+}
+
+// Bucățile de rând, citite din forma lui reală, nu din ce s-a scris în
+// formular: câmpurile vecine cu același număr de niveluri se strâng la un
+// loc. Așa se vede „1–4 cu 3 niveluri, 5–8 cu 5" chiar dacă sectoarele au
+// fost scrise bucată cu bucată sau se suprapun.
+function bucatiRand(peCamp, campuri) {
+  const out = [];
+  for (let c = 1; c <= campuri; c++) {
+    const n = peCamp.get(c) || 0;
+    const ultim = out[out.length - 1];
+    if (ultim && ultim.niveluri === n) ultim.pana_la = c;
+    else out.push({ de_la: c, pana_la: c, niveluri: n });
+  }
+  return out;
+}
+
+function rezumatSectoare(plan, campuri) {
+  return bucatiRand(plan.peCamp, campuri)
+    .map((b) => `<strong>${b.de_la === b.pana_la ? b.de_la : `${b.de_la}–${b.pana_la}`}</strong> cu ${b.niveluri} ${b.niveluri === 1 ? "nivel" : "niveluri"}`)
+    .join(", ");
+}
+
 // Locurile pe care stă marfă și care ar rămâne pe dinafară la o configurație
 // nouă. Aceeași verificare se face și când se salvează rândul, și când se
 // scoate un nivel — de-aia stă într-un singur loc.
-async function locuriInAfara(randId, campuri, niveluri, locuriPeNivel) {
+// `niveluriLaCamp` e o funcție, nu un număr: de când rândul poate avea 3
+// niveluri pe o porțiune și 5 pe alta, „nivelul e prea sus" se judecă pe
+// câmpul lui, nu pe rând. Se acceptă și un număr, pentru apelanții vechi.
+async function locuriInAfara(randId, campuri, niveluriLaCamp, locuriPeNivel) {
+  const cateNiveluri =
+    typeof niveluriLaCamp === "function" ? niveluriLaCamp : () => nr(niveluriLaCamp);
   const ocupate = await db
     .prepare(
       `SELECT l.adresa, l.nivel, l.camp, l.pozitie FROM ct_locuri l
@@ -618,7 +702,10 @@ async function locuriInAfara(randId, campuri, niveluri, locuriPeNivel) {
     )
     .all(randId);
   return ocupate.filter(
-    (l) => nr(l.camp) > campuri || nr(l.nivel) > niveluri || nr(l.pozitie) > locuriPeNivel(nr(l.nivel))
+    (l) =>
+      nr(l.camp) > campuri ||
+      nr(l.nivel) > (cateNiveluri(nr(l.camp)) || 0) ||
+      nr(l.pozitie) > locuriPeNivel(nr(l.nivel))
   );
 }
 
@@ -1056,7 +1143,9 @@ function register(router) {
     const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
     if (!r) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/stocuri/ct-park", body: "<p>Rândul nu există.</p>" }));
     const locuri = await locuriRand(r.id);
-    const niveluri = await niveluriRand(r);
+    const plan = await planRand(r);
+    const niveluri = plan.niveluri;
+    const peCamp = plan.peCamp;
 
     // Cheia „nivel|camp|pozitie" ca să pot desena grila fără să caut în listă.
     const h = new Map();
@@ -1081,6 +1170,19 @@ function register(router) {
       const hPx = inaltimePx(n.inaltime);
       let celule = "";
       for (let camp = 1; camp <= nr(r.campuri); camp++) {
+        // Câmpul ăsta nu urcă până aici: rândul e mai scund pe porțiunea lui.
+        // Desenăm un gol de aceeași lățime, ca să nu se decaleze grila și ca
+        // să se vadă silueta adevărată a raftului, nu una dreaptă inventată.
+        if (nivel > (peCamp.get(camp) || 0)) {
+          const goluri = new Array(n.locuri)
+            .fill(`<div class="ct-loc fara-raft" style="height:${hPx}px"></div>`)
+            .join("");
+          celule += `<div class="ct-camp gol" data-nivel="${nivel}" data-camp="${camp}" title="Câmpul ${camp} are ${peCamp.get(camp) || 0} niveluri — aici nu e raft">
+              <div class="ct-camp-locuri">${goluri}</div>
+              <div class="ct-camp-eticheta">&nbsp;</div>
+            </div>`;
+          continue;
+        }
         let pozitii = "";
         for (let poz = 1; poz <= n.locuri; poz++) {
           const l = h.get(`${nivel}|${camp}|${poz}`);
@@ -1141,8 +1243,14 @@ function register(router) {
       ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Rândul ${r.numar} ${pastila(r.eticheta)}</h1>
       <p style="margin:0 0 6px;color:var(--text-muted);font-size:13px">
-        ${r.campuri} câmpuri × ${niveluri.length} niveluri = <strong>${locuri.length} locuri</strong>, din care
-        <strong>${ocupate} ocupate</strong>. Înălțimea rândului: <strong>${(inaltimeRand(niveluri) / 1000).toFixed(2)} m</strong>.
+        ${
+          plan.uniform
+            ? `${r.campuri} câmpuri × ${niveluri.length} niveluri = <strong>${locuri.length} locuri</strong>`
+            : `${r.campuri} câmpuri, <strong>${locuri.length} locuri</strong> — rândul nu e la fel peste tot:
+               ${rezumatSectoare(plan, nr(r.campuri))}`
+        }, din care
+        <strong>${ocupate} ocupate</strong>. Înălțimea rândului: <strong>${(inaltimeRand(niveluri) / 1000).toFixed(2)} m</strong>
+        la cel mai înalt punct.
         Un loc de palet: ${nr(r.latime_loc)} × ${nr(r.adancime_loc)} mm, un câmp are ${(latimeCamp / 1000).toFixed(2)} m deschidere.
         ${niveluri.some((n) => n.propriu) ? "Nivelurile nu sunt toate la fel — vezi cotele din stânga desenului." : ""}
       </p>
@@ -2415,9 +2523,14 @@ function register(router) {
     }
 
     if (acum <= 1) return spune("eroare", "Rândul are un singur nivel, n-am ce scoate.");
-    const niv = await niveluriRand(r);
+    // Butonul schimbă cifra RÂNDULUI, adică numai câmpurile fără porțiune
+    // proprie. Un câmp dintr-un sector de 5 niveluri rămâne de 5 — de-aia
+    // verificarea se face pe harta de după, nu pe un singur număr.
+    const sect = await sectoareRand(r.id);
+    const viitor = nivelurilePeCamp({ ...r, niveluri: acum - 1 }, sect, nr(r.campuri));
+    const niv = await niveluriRand(r, Math.max(acum - 1, ...sect.map((s) => s.niveluri), 1));
     const h = new Map(niv.map((n) => [n.nivel, n.locuri]));
-    const afara = await locuriInAfara(r.id, nr(r.campuri), acum - 1, (n) => h.get(n) || nr(r.locuri_pe_camp));
+    const afara = await locuriInAfara(r.id, nr(r.campuri), (c) => viitor.get(c) || 0, (n) => h.get(n) || nr(r.locuri_pe_camp));
     if (afara.length) {
       return spune(
         "eroare",
@@ -2444,19 +2557,30 @@ function register(router) {
     const b = ctx.body || {};
     const inapoi = `/stocuri/ct-park/configurare/${r.id}`;
 
+    // Până la ce nivel merge formularul: nu până la cifra rândului, ci până
+    // la vârful lui real. Un sector de 5 niveluri pe un rând declarat de 3
+    // are nivelurile 4 și 5 în tabel, și ele trebuie să se poată configura.
+    const plan = await planRand(r);
+    const varf = plan.varf;
+
     // Întâi verificăm că nicio micșorare nu taie raftul de sub o paletă.
     const dorite = new Map();
-    for (let i = 1; i <= nr(r.niveluri); i++) {
+    for (let i = 1; i <= varf; i++) {
       const locuri = Math.max(1, Math.min(6, Math.round(nr(b[`n${i}_locuri`]) || nr(r.locuri_pe_camp))));
       dorite.set(i, locuri);
     }
-    const afara = await locuriInAfara(r.id, nr(r.campuri), nr(r.niveluri), (n) => dorite.get(n) || nr(r.locuri_pe_camp));
+    const afara = await locuriInAfara(
+      r.id,
+      nr(r.campuri),
+      (c) => plan.peCamp.get(c) || 0,
+      (n) => dorite.get(n) || nr(r.locuri_pe_camp)
+    );
     if (afara.length) {
       const mesaj = `Nu pot îngusta nivelurile: pe ${afara.slice(0, 8).map((a) => a.adresa).join(", ")}${afara.length > 8 ? "…" : ""} stă marfă.`;
       return redirect(ctx.res, `${inapoi}?eroare=${encodeURIComponent(mesaj)}`);
     }
 
-    for (let i = 1; i <= nr(r.niveluri); i++) {
+    for (let i = 1; i <= varf; i++) {
       const inaltime = Math.round(nr(b[`n${i}_inaltime`]));
       const eticheta = String(b[`n${i}_eticheta`] || "").trim().slice(0, 60) || null;
       const locuri = dorite.get(i);
@@ -2477,6 +2601,77 @@ function register(router) {
     redirect(ctx.res, `${inapoi}?ok=${encodeURIComponent("Nivelurile au fost salvate.")}`);
   });
 
+  // ---- Porțiuni de rând cu alt număr de niveluri --------------------------
+  // „Trebuie sa pot configura pe acelasi rand si 3 si 2 si 5 si 1 nivel pe
+  // orice interval adica nu sunt toate de 3."
+  //
+  // Se salvează toate deodată și se înlocuiesc cele vechi: formularul e
+  // adevărul, nu un adaos peste el. Un rând golit dispare, așa se șterge o
+  // porțiune. Ca peste tot în CT-Park, nu se taie raftul de sub marfă —
+  // dacă o porțiune ar coborî sub o paletă, nu se salvează nimic și se
+  // spune care paletă stă în drum.
+  router.post("/stocuri/ct-park/configurare/:id/sectoare", async (ctx) => {
+    const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
+    if (!r) return redirect(ctx.res, "/stocuri/ct-park/configurare");
+    const b = ctx.body || {};
+    const inapoi = `/stocuri/ct-park/configurare/${r.id}`;
+    const spune = (cheie, text) => redirect(ctx.res, `${inapoi}?${cheie}=${encodeURIComponent(text)}`);
+    const campuri = nr(r.campuri);
+
+    const dorite = [];
+    for (let i = 0; i < 40; i++) {
+      const deLa = Math.round(nr(b[`s${i}_de_la`]));
+      const panaLa = Math.round(nr(b[`s${i}_pana_la`]));
+      const niv = Math.round(nr(b[`s${i}_niveluri`]));
+      // Rând complet gol = rând șters. Rând pe jumătate completat = greșeală
+      // de tastare, și e mai bine să i se spună decât să fie înghițită.
+      if (!deLa && !panaLa && !niv) continue;
+      if (!deLa || !panaLa || !niv) return spune("eroare", `Porțiunea ${i + 1} e incompletă: completează și de la, și până la, și câte niveluri.`);
+      if (deLa < 1 || panaLa > campuri) return spune("eroare", `Rândul are ${campuri} câmpuri, iar porțiunea ${deLa}–${panaLa} iese din el.`);
+      if (panaLa < deLa) return spune("eroare", `Porțiunea ${deLa}–${panaLa} e scrisă invers: „până la" trebuie să fie cel puțin cât „de la".`);
+      if (niv < 1 || niv > NIVEL_MAX) return spune("eroare", `Un rând poate avea între 1 și ${NIVEL_MAX} niveluri, nu ${niv}.`);
+      dorite.push({ de_la: deLa, pana_la: panaLa, niveluri: niv });
+    }
+    dorite.sort((a, c) => a.de_la - c.de_la || a.pana_la - c.pana_la);
+
+    // Verificăm pe configurația VIITOARE, nu pe cea de acum.
+    const viitor = nivelurilePeCamp(r, dorite, campuri);
+    const varf = Math.max(nr(r.niveluri), ...dorite.map((s) => s.niveluri), 1);
+    const niv = await niveluriRand(r, varf);
+    const hLocuri = new Map(niv.map((n) => [n.nivel, n.locuri]));
+    const afara = await locuriInAfara(
+      r.id,
+      campuri,
+      (camp) => viitor.get(camp) || 0,
+      (n) => hLocuri.get(n) || nr(r.locuri_pe_camp)
+    );
+    if (afara.length) {
+      return spune(
+        "eroare",
+        `Nu pot scurta rândul: pe ${afara.slice(0, 8).map((a) => a.adresa).join(", ")}${afara.length > 8 ? "…" : ""} stă marfă. Scoate-o întâi din depozit.`
+      );
+    }
+
+    try {
+      await db.prepare("DELETE FROM ct_sectoare WHERE rand_id = ?").run(r.id);
+      for (const s of dorite) {
+        await db
+          .prepare("INSERT INTO ct_sectoare (rand_id, camp_de_la, camp_pana_la, niveluri) VALUES (?, ?, ?, ?)")
+          .run(r.id, s.de_la, s.pana_la, s.niveluri);
+      }
+    } catch (e) {
+      return spune("eroare", "Tabelul de porțiuni încă nu există în bază. Repornește aplicația și încearcă din nou.");
+    }
+    await regenereazaLocuri(r.id);
+    const dupa = await planRand(r);
+    return spune(
+      "ok",
+      dorite.length
+        ? `Salvat: câmpurile ${bucatiRand(dupa.peCamp, campuri).map((x) => `${x.de_la === x.pana_la ? x.de_la : x.de_la + "–" + x.pana_la} cu ${x.niveluri}`).join(", ")} niveluri. ${dupa.locuri} locuri în rând.`
+        : `Porțiunile au fost șterse — tot rândul are acum ${nr(r.niveluri)} niveluri, ${dupa.locuri} locuri.`
+    );
+  });
+
   router.get("/stocuri/ct-park/configurare/:id", async (ctx) => {
     const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
     if (!r) return redirect(ctx.res, "/stocuri/ct-park/configurare");
@@ -2487,9 +2682,25 @@ function register(router) {
           WHERE l.rand_id = ? ORDER BY l.nivel DESC, l.camp`
       )
       .all(r.id);
-    const niveluri = await niveluriRand(r);
+    const plan = await planRand(r);
+    const niveluri = plan.niveluri;
     const ocupatePeNivel = new Map();
     for (const o of ocupate) ocupatePeNivel.set(nr(o.nivel), (ocupatePeNivel.get(nr(o.nivel)) || 0) + 1);
+
+    // Sectoarele salvate, plus trei rânduri goale de adăugat. Se salvează
+    // toate deodată, iar un rând golit înseamnă „șterge-l" — un buton de
+    // ștergere pe fiecare rând ar fi fost încă patru rute și tot atâtea
+    // confirmări, pentru ceva ce se face o dată la montarea raftului.
+    const randuriSector = [...plan.sectoare.map((s) => ({ ...s })), {}, {}, {}].slice(0, Math.max(6, plan.sectoare.length + 3));
+    const formSectoare = randuriSector
+      .map(
+        (s, i) => `<tr>
+          <td><input class="ct-in" style="width:80px" type="number" name="s${i}_de_la" min="1" max="${nr(r.campuri)}" value="${s.de_la || ""}" placeholder="de la"></td>
+          <td><input class="ct-in" style="width:80px" type="number" name="s${i}_pana_la" min="1" max="${nr(r.campuri)}" value="${s.pana_la || ""}" placeholder="până la"></td>
+          <td><input class="ct-in" style="width:80px" type="number" name="s${i}_niveluri" min="1" max="${NIVEL_MAX}" value="${s.niveluri || ""}" placeholder="niveluri"></td>
+        </tr>`
+      )
+      .join("");
 
     const body = `
       ${subtabs("/stocuri/ct-park/configurare")}
@@ -2558,6 +2769,25 @@ function register(router) {
         <div class="form-actions"><button class="btn" type="submit">Salvează nivelurile</button></div>
       </form>
 
+      <h2 style="margin-top:26px">Porțiuni cu alt număr de niveluri</h2>
+      <p style="font-size:13px;color:var(--text-muted);max-width:880px;margin:0 0 10px">
+        Rândul nu e obligatoriu la fel pe toată lungimea lui: poate avea 3 niveluri pe o bucată, 5 pe alta și 1 lângă
+        ușă. Scrie aici de la ce câmp până la ce câmp și câte niveluri are porțiunea.
+        <strong>Câmpurile care nu apar în niciun interval rămân la ${nr(r.niveluri)} niveluri</strong>, cifra rândului de sus.
+        Ca să ștergi o porțiune, golește-i căsuțele și salvează.
+      </p>
+      <p style="font-size:13px;max-width:880px;margin:0 0 10px">
+        Cum arată rândul acum: ${plan.uniform ? `toate cele ${nr(r.campuri)} câmpuri cu ${nr(r.niveluri)} niveluri` : `câmpurile ${rezumatSectoare(plan, nr(r.campuri))}`}
+        — <strong>${plan.locuri} locuri</strong> în total.
+      </p>
+      <form class="form" method="post" action="/stocuri/ct-park/configurare/${r.id}/sectoare" style="max-width:560px">
+        <table class="table" style="margin-bottom:10px">
+          <thead><tr><th>De la câmpul</th><th>Până la câmpul</th><th>Câte niveluri</th></tr></thead>
+          <tbody>${formSectoare}</tbody>
+        </table>
+        <div class="form-actions"><button class="btn" type="submit">Salvează porțiunile</button></div>
+      </form>
+
       <style>
         .ct-in { width:110px; padding:4px 6px; font-size:13px; }
         .ct-niv-butoane { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
@@ -2576,16 +2806,16 @@ function register(router) {
 
     // Nu tăiem raftul de sub marfă. Dacă noile cifre ar lăsa pe dinafară un
     // loc pe care stă o paletă, refuzăm și spunem care.
-    const afara = await db
-      .prepare(
-        `SELECT l.adresa FROM ct_locuri l
-           JOIN ct_ocupari o ON o.loc_id = l.id JOIN ct_paleti p ON p.id = o.palet_id AND p.data_iesire IS NULL
-          WHERE l.rand_id = ? AND (l.camp > ? OR l.nivel > ? OR l.pozitie > ?)
-          ORDER BY l.nivel DESC, l.camp LIMIT 10`
-      )
-      .all(r.id, campuri, niveluri, perCamp);
+    //
+    // Verificarea era un singur SQL cu `l.nivel > ?`, și a devenit greșită
+    // când rândul a putut avea porțiuni de înălțimi diferite: cifra de aici
+    // e doar implicitul câmpurilor fără porțiune proprie, iar un câmp dintr-un
+    // sector de 5 niveluri nu trebuie tăiat fiindcă rândul a coborât la 3.
+    const sect = await sectoareRand(r.id);
+    const viitor = nivelurilePeCamp({ ...r, niveluri }, sect, campuri);
+    const afara = await locuriInAfara(r.id, campuri, (c) => viitor.get(c) || 0, () => perCamp);
     if (afara.length) {
-      const mesaj = `Nu pot micșora rândul: pe locurile ${afara.map((a) => a.adresa).join(", ")} stă marfă. Scoate-o întâi din depozit.`;
+      const mesaj = `Nu pot micșora rândul: pe locurile ${afara.slice(0, 10).map((a) => a.adresa).join(", ")} stă marfă. Scoate-o întâi din depozit.`;
       return redirect(ctx.res, `/stocuri/ct-park/configurare/${r.id}?eroare=${encodeURIComponent(mesaj)}`);
     }
 
@@ -2617,14 +2847,17 @@ function register(router) {
 async function regenereazaLocuri(randId) {
   const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(randId);
   if (!r) return;
-  const niveluri = await niveluriRand(r);
+  const { niveluri, peCamp } = await planRand(r);
 
   // Tot ce TREBUIE să existe după configurația de acum. Numărul de paleți pe
   // câmp se ia de pe nivel, nu de pe rând: nivelul de jos poate ține doi
-  // paleți lați, iar cel de sus trei înguste.
+  // paleți lați, iar cel de sus trei înguste. Iar ÎNĂLȚIMEA se ia de pe
+  // câmp, nu de pe rând: pe câmpurile dintr-un sector de 2 niveluri nu se
+  // generează locuri la nivelul 3, oricât de înalt ar fi restul rândului.
   const cerute = new Set();
   for (const n of niveluri) {
     for (let camp = 1; camp <= nr(r.campuri); camp++) {
+      if (n.nivel > (peCamp.get(camp) || 0)) continue;
       for (let poz = 1; poz <= n.locuri; poz++) cerute.add(`${n.nivel}|${camp}|${poz}`);
     }
   }
@@ -2657,4 +2890,18 @@ async function regenereazaLocuri(randId) {
   }
 }
 
-module.exports = { register, pozitii, ADANCIME, SPATE, CULOAR, adresaLoc };
+module.exports = {
+  register,
+  pozitii,
+  ADANCIME,
+  SPATE,
+  CULOAR,
+  adresaLoc,
+  // Exportate pentru teste: forma rândului se poate verifica fără să treci
+  // prin pagină, iar `bucatiRand` și `nivelurilePeCamp` sunt pur aritmetice.
+  nivelurilePeCamp,
+  bucatiRand,
+  sectoareRand,
+  planRand,
+  NIVEL_MAX,
+};
