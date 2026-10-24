@@ -41,16 +41,19 @@ function strans(nume) {
     .replace(/[^a-z0-9]+/g, "");
 }
 
-// Clienții urmăriți. Fiecare are una sau mai multe bucăți de nume: se
+// Grupurile urmărite. Fiecare are una sau mai multe bucăți de nume: se
 // potrivește dacă numele strâns al partenerului conține oricare dintre ele.
 //
-// CUVÂNTUL „GRUP" NU SE FOLOSEȘTE AICI PENTRU EI. În pagina asta „grupul" e
-// grupul NOSTRU de firme (Cash Machine, Warehouse All etc.), ale cărui
-// facturi interne nu intră în raport. Vali a văzut titlul „Ce firme au intrat
-// în fiecare grup" și a spus, pe drept: „Poșta Română nu e grup" — e o
-// singură firmă, un client. Singurul loc unde chiar sunt mai multe firme la
-// un loc e Delivery + Cargus, și acolo scrie explicit. Deci: clienți în text,
-// grup doar pentru firmele noastre.
+// „GRUP" ÎNSEAMNĂ DOUĂ LUCRURI DIFERITE ÎN PAGINA ASTA, și merită spus o
+// dată, limpede, fiindcă altfel se citește greșit:
+//   – un grup de AICI e un client mare urmărit separat, cu coloana lui:
+//     Delivery + Cargus, eMAG Retail, Depanero. Ăsta e și cuvântul lui Vali
+//     („depanero e grup cu emag si delivery").
+//   – „firmele grupului", în rândul despre facturile interne, înseamnă
+//     grupul NOSTRU — Cash Machine, Warehouse All etc. Ca să nu se încurce
+//     cu primul, în pagină scrie „firmele noastre", nu „firmele grupului".
+//
+// Cine intră și cine iese din lista de mai jos e decizia lui, nu a codului.
 //
 // Numele din bucăți sunt cele JURIDICE, nu cele de pe camion: eMAG Retail se
 // numește Dante International în facturi, iar dacă am căuta „emag" am rata
@@ -63,8 +66,16 @@ const GRUPURI_BAZA = [
   { cheie: "delivery", nume: "Delivery Solutions", bucati: ["deliverysolution"], impreuna: "curieri" },
   { cheie: "cargus", nume: "Cargus", bucati: ["cargus"], impreuna: "curieri" },
   { cheie: "emag", nume: "eMAG Retail", bucati: ["emagretail", "danteinternational"] },
-  { cheie: "posta", nume: "Poșta Română", bucati: ["postaromana"] },
+  // Depanero, pus pe 24.10.2026: „depanero e grup cu emag si delivery".
+  // Bucata „depanero" prinde și „DEPANERO SRL", și „Stoc Depanero" — a doua
+  // e contul de marfă în custodie al aceluiași client, deci intră la fel.
+  { cheie: "depanero", nume: "Depanero", bucati: ["depanero"] },
 ];
+// POȘTA ROMÂNĂ A IEȘIT dintre grupuri în aceeași zi: „posta romana nu e grup
+// [...] posta baga la altii". Nu e o ștergere de date — facturile ei se
+// adună de acum la „Ceilalți", unde se văd în total, doar că nu mai au
+// coloana lor. Dacă se răzgândește, rândul care o aducea înapoi e:
+//   { cheie: "posta", nume: "Poșta Română", bucati: ["postaromana"] },
 const NUME_IMPREUNA = { curieri: "Delivery + Cargus" };
 
 function grupuri(separat) {
@@ -118,6 +129,7 @@ async function culege({ deLa, panaLa, prag, separat }) {
   const randuri = await db
     .prepare(
       `SELECT SUBSTR(f.data_emiterii, 1, 7) AS luna,
+              p.id AS partener_id,
               p.nume AS partener,
               COALESCE(fi.nume, '') AS firma,
               COALESCE(l.net, 0) AS net,
@@ -137,14 +149,34 @@ async function culege({ deLa, panaLa, prag, separat }) {
 
   const luni = new Map();
   const cheile = GRUPURI.map((g) => g.cheie);
+  // `clienti` e un Set, nu un număr, fiindcă întrebarea e „câți clienți
+  // DISTINCȚI am facturat luna asta", nu „câte facturi". Un client cu zece
+  // facturi într-o lună e tot un client.
+  //
+  // Ce se pune în Set e ID-ul partenerului, nu numele. Am încercat întâi cu
+  // numele strâns și e greșit în ambele sensuri: „Posta Romana SA" și
+  // „COMPANIA NATIONALA POSTA ROMANA S.A." dau chei diferite (potrivirea pe
+  // grupuri merge pe `includes`, nu pe egalitate), deci n-ar fi unit nimic;
+  // iar dacă aș fi unit după grup, Delivery și Cargus — două firme diferite,
+  // adunate doar la bani — ar fi ajuns un singur client, ceea ce e fals.
+  //
+  // ID-ul răspunde exact la întrebarea pusă: câte fișe de client distincte
+  // au primit factură. Dacă aceeași firmă are două fișe în baza noastră,
+  // numără ca doi — dar asta e o problemă de curățenie în parteneri, care se
+  // rezolvă la sursă, nu ascunsă aici într-o coloană.
   const lunaGoala = () => {
-    const o = { total: 0, altii: 0, nr: 0, faraLinii: 0 };
+    const o = { total: 0, altii: 0, nr: 0, faraLinii: 0, clienti: new Set() };
     for (const c of cheile) o[c] = 0;
     return o;
   };
 
   const scoase = { excluse: 0, sumaExcluse: 0, warehouse: 0, sumaWarehouse: 0 };
-  const numeGasite = new Map(); // ce firme s-au potrivit la fiecare client
+  const numeGasite = new Map(); // ce firme au intrat în fiecare grup
+  // Clienții distincți pe toată perioada. NU e suma celor lunari: un client
+  // care cumpără în fiecare lună apare o dată aici și de douăsprezece ori în
+  // coloana lunară. De-aia rândul TOTAL se umple din Set-ul ăsta, nu prin
+  // adunare ca restul coloanelor.
+  const totiClientii = new Set();
   let faraLinii = 0;
 
   for (const r of randuri) {
@@ -171,6 +203,8 @@ async function culege({ deLa, panaLa, prag, separat }) {
     const L = luni.get(luna);
     L.total += net;
     L.nr++;
+    L.clienti.add(r.partener_id);
+    totiClientii.add(r.partener_id);
     if (Number(r.fara_linii)) {
       L.faraLinii++;
       faraLinii++;
@@ -201,6 +235,9 @@ async function culege({ deLa, panaLa, prag, separat }) {
     total.faraLinii += L.faraLinii;
     for (const c of cheile) total[c] += L[c];
   }
+  // Aici NU se adună: clienții distincți pe toată perioada sunt cei din
+  // Set-ul global, nu suma celor lunari (vezi comentariul de la declarare).
+  total.clienti = totiClientii;
   return { luni: ordonate, total, scoase, numeGasite, faraLinii, grupuri: GRUPURI };
 }
 
@@ -224,13 +261,14 @@ function register(router) {
       "/rapoarte/clienti-cheie?de_la=" + encodeURIComponent(deLa) + "&pana_la=" + encodeURIComponent(panaLa) +
       "&prag=" + prag + (extra || "");
 
-    const capete = ["Luna", ...GRUPURI.map((g) => g.nume), "Ceilalți", "Total lună", "Facturi"];
+    const capete = ["Luna", ...GRUPURI.map((g) => g.nume), "Ceilalți", "Total lună", "Facturi", "Clienți activi"];
     const randuri = d.luni.map(([luna, L]) => [
       `<strong>${esc(numeLuna(luna))}</strong>`,
       ...GRUPURI.map((g) => `${money(L[g.cheie])}<br>${pct(L[g.cheie], L.total)}`),
       `${money(L.altii)}<br>${pct(L.altii, L.total)}`,
       `<strong>${money(L.total)}</strong>`,
       String(L.nr) + (L.faraLinii ? ` <span style="color:var(--danger)" title="fără linii, valorează 0">(${L.faraLinii})</span>` : ""),
+      `<strong>${L.clienti.size}</strong>`,
     ]);
     randuri.push([
       "<strong>TOTAL</strong>",
@@ -238,6 +276,8 @@ function register(router) {
       `<strong>${money(d.total.altii)}</strong><br>${pct(d.total.altii, d.total.total)}`,
       `<strong>${money(d.total.total)}</strong>`,
       `<strong>${d.total.nr}</strong>`,
+      // Nu e suma coloanei de deasupra, și e bine să se vadă de ce.
+      `<strong>${d.total.clienti.size}</strong><br><span style="color:var(--text-muted);font-size:11px" title="Un client care cumpără în mai multe luni e numărat o singură dată aici, deși apare în fiecare lună mai sus.">distincți, nu suma</span>`,
     ]);
 
     const ceAIntrat = GRUPURI.map((g) => {
@@ -271,7 +311,7 @@ function register(router) {
 
       <div class="cards">
         <div class="card"><div class="label">Total fără TVA</div><div class="value">${money(d.total.total)}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${d.total.nr} facturi</div></div>
+          <div style="font-size:12px;color:var(--text-muted)">${d.total.nr} facturi · ${d.total.clienti.size} clienți</div></div>
         ${GRUPURI.map(
           (g) => `<div class="card"><div class="label">${esc(g.nume)}</div>
             <div class="value">${proc(d.total[g.cheie], d.total.total).toFixed(1).replace(".", ",")}%</div>
@@ -303,12 +343,15 @@ function register(router) {
           nu intră niciodată în raport.</li>
       </ul>
 
-      <h2>Ce firme s-au potrivit la fiecare client</h2>
+      <h2>Ce firme au intrat în fiecare grup</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">
-        Fiecare rând de mai jos e un <strong>client</strong>, nu un grup de firme — singura coloană care adună
-        două firme e „Delivery + Cargus", și numai cât timp sunt numărați împreună.
         Potrivirea se face pe nume, fără diacritice și fără punctuație. Dacă vezi aici o firmă care n-ar trebui,
         sau lipsește una, spune-mi și schimb bucata de nume.
+      </p>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">
+        <strong>Poșta Română</strong> nu mai are coloana ei din 24.10.2026 — facturile ei se adună la
+        <strong>Ceilalți</strong>, deci nu s-a pierdut nimic din total. <strong>Depanero</strong> a luat locul ei
+        printre grupuri.
       </p>
       <ul style="font-size:13px;line-height:1.7">${ceAIntrat}</ul>`;
 
