@@ -114,7 +114,9 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
        (96505,'Posta Romana SA','RO-CK-5','client'),
        (96506,'UN CLIENT OARECARE SRL','RO-CK-6','client'),
        (96507,'NEGRU AND NEGRU SRL','RO-CK-7','client'),
-       (96508,'BCR LEASING IFN SA','RO-CK-8','client')`,
+       (96508,'BCR LEASING IFN SA','RO-CK-8','client'),
+       (96520,'DEPANERO SRL','RO-CK-20','client'),
+       (96521,'Stoc Depanero','RO-CK-21','client')`,
   ]) exec(s);
 
   // O factură = un rând aici. Net-ul se scrie ca o singură linie, cu TVA 19%,
@@ -124,9 +126,16 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
     [96501, 96501, "2026-01-10", 96601, 10000],  // Delivery
     [96502, 96502, "2026-01-12", 96601, 5000],   // Cargus
     [96503, 96503, "2026-01-15", 96601, 3000],   // eMAG (Dante)
-    [96504, 96504, "2026-01-20", 96601, 1000],   // Poșta, nume lung
-    [96505, 96505, "2026-01-22", 96601, 1000],   // Poșta, alt nume — TOT Poșta
-    [96506, 96506, "2026-01-25", 96601, 5000],   // ceilalți
+    // Poșta nu mai e grup din 24.10.2026 — banii ei trebuie să apară la
+    // „Ceilalți", nu să dispară. Două nume scrise diferit, ca înainte: dacă
+    // vreodată se întoarce ca grup, tot o singură coloană trebuie să facă.
+    [96504, 96504, "2026-01-20", 96601, 1000],   // Poșta, nume lung → Ceilalți
+    [96505, 96505, "2026-01-22", 96601, 1000],   // Poșta, alt nume → Ceilalți
+    // Depanero, grupul nou. „Stoc Depanero" e contul de marfă în custodie al
+    // aceluiași client: aceeași bucată de nume, deci aceeași coloană.
+    [96520, 96520, "2026-01-23", 96601, 1200],   // DEPANERO SRL
+    [96521, 96521, "2026-01-24", 96601, 800],    // Stoc Depanero — TOT Depanero
+    [96506, 96506, "2026-01-25", 96601, 3000],   // ceilalți
     [96507, 96507, "2026-01-26", 96601, 90000],  // Negru and Negru — se scoate
     [96508, 96508, "2026-01-27", 96601, 70000],  // BCR Leasing — se scoate
     // februarie
@@ -157,14 +166,19 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
 
   // --- împreună (cum se vede din start) -------------------------------------
   const d = await mod.culege({ deLa: "2026-01-01", panaLa: "2026-02-28", prag: 100000 });
-  egal("Delivery și Cargus sunt o singură coloană",
-    d.grupuri.map((g) => g.nume), ["Delivery + Cargus", "eMAG Retail", "Poșta Română"]);
+  egal("grupurile sunt Delivery+Cargus, eMAG și Depanero — fără Poșta",
+    d.grupuri.map((g) => g.nume), ["Delivery + Cargus", "eMAG Retail", "Depanero"]);
 
   const ian = d.luni.find((x) => x[0] === "2026-01")[1];
   egal("ianuarie: sumele sunt fără TVA, cu curierii adunați",
-    [rot(ian.curieri), rot(ian.emag), rot(ian.posta), rot(ian.altii), rot(ian.total)],
+    [rot(ian.curieri), rot(ian.emag), rot(ian.depanero), rot(ian.altii), rot(ian.total)],
     [15000, 3000, 2000, 5000, 25000]);
-  ok("Poșta apare o singură dată, deși are două nume scrise diferit (1000 + 1000)");
+  ok("Depanero apare o singură dată, deși are două conturi (1200 + 800)");
+
+  // Poșta a ieșit dintre grupuri, dar banii ei nu s-au evaporat: 1000 + 1000
+  // trebuie să fie în „Ceilalți", lângă cei 3000 ai clientului oarecare.
+  egal("Poșta nu mai are coloană, dar cei 2000 ai ei sunt la Ceilalți", rot(ian.altii), 5000);
+  egal("și nu mai există deloc o cheie «posta» în lună", ian.posta === undefined, true);
 
   // 15000/25000 = 60%
   egal("procentele se calculează după excluderi", rot((ian.curieri / ian.total) * 100), 60);
@@ -188,7 +202,7 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
   // --- separat, la cerere ---------------------------------------------------
   const ds = await mod.culege({ deLa: "2026-01-01", panaLa: "2026-02-28", prag: 100000, separat: true });
   egal("cu separat=1 revin patru coloane",
-    ds.grupuri.map((g) => g.nume), ["Delivery Solutions", "Cargus", "eMAG Retail", "Poșta Română"]);
+    ds.grupuri.map((g) => g.nume), ["Delivery Solutions", "Cargus", "eMAG Retail", "Depanero"]);
   const ianS = ds.luni.find((x) => x[0] === "2026-01")[1];
   egal("separat, suma lor e aceeași ca împreună",
     rot(ianS.delivery + ianS.cargus), rot(ian.curieri));
@@ -207,27 +221,49 @@ const rot = (v) => Math.round(Number(v) * 100) / 100;
   if (r.cod !== 200) rau("pagina nu se deschide", String(r.cod));
   else if (/NaN|Infinity|undefined</.test(fara)) rau("NaN/undefined în pagină");
   else {
-    const lipsa = ["Delivery + Cargus", "eMAG Retail", "Poșta Română", "Ceilalți", "60,0%", "n-au nicio linie", "Vezi-i separat"]
+    const lipsa = ["Delivery + Cargus", "eMAG Retail", "Depanero", "Ceilalți", "60,0%", "n-au nicio linie", "Vezi-i separat"]
       .filter((b) => !fara.includes(b));
     if (lipsa.length) rau("lipsește din pagină", lipsa.join(", "));
     else ok("pagina arată grupurile, procentele și avertismentul (" + r.corp.length + " octeți)");
   }
+  // Atenție la verificarea asta: numele „Poșta Română" APARE în pagină, în
+  // rândul care explică de ce a ieșit. Ce nu trebuie să mai existe e CAPUL
+  // DE COLOANĂ. Prima variantă a testului căuta numele oriunde și se plângea
+  // de propria explicație.
+  if (/<th[^>]*>\s*Poșta Română\s*<\/th>/.test(fara))
+    rau("Poșta Română încă are coloană, deși a fost scoasă dintre grupuri");
+  else ok("Poșta Română nu mai are cap de coloană, doar lămurirea de dedesubt");
   if (!fara.includes("DELIVERY SOLUTIONS S.A.") || !fara.includes("URGENT CARGUS SA"))
-    rau("pagina nu spune ce firme s-au potrivit la coloana comună");
-  else ok("pagina spune ce firme s-au potrivit la fiecare client, inclusiv amândouă la curieri");
+    rau("pagina nu spune ce firme au intrat în grupul comun");
+  else ok("pagina spune ce firme au intrat în fiecare grup, inclusiv amândouă la curieri");
 
-  // „Grup" înseamnă aici firmele NOASTRE, nu clienții. Vali s-a uitat la
-  // titlul vechi — „Ce firme au intrat în fiecare grup" — și a spus pe drept:
-  // „Poșta Română nu e grup". E o singură firmă, un client. Singurul loc unde
-  // chiar sunt două firme la un loc e Delivery + Cargus. Testul ăsta ține
-  // cuvântul la locul lui, ca să nu se întoarcă din copy-paste.
+  // --- clienți activi -------------------------------------------------------
+  // „Nr de clienti activi (adica facturi la clienti distincti pe luna)".
+  //
+  // Ianuarie: opt facturi intră în raport, de la opt fișe de client —
+  // Delivery, Cargus, Dante, cele două fișe de Poșta, cele două de Depanero,
+  // clientul oarecare. Negru and Negru și BCR Leasing sunt scoase cu totul,
+  // deci nu se numără: coloana trebuie să arate clienții DIN raport, nu din
+  // facturier.
+  //
+  // Cele două fișe de Poșta și cele două de Depanero se numără separat,
+  // intenționat: sunt fișe distincte în baza de parteneri. Dacă e o
+  // dublare reală, se repară în parteneri, nu aici.
+  egal("ianuarie: 8 clienți distincți din 8 facturi care au intrat", [ian.clienti.size, ian.nr], [8, 8]);
+  // Februarie: Delivery o dată, clientul oarecare de trei ori (a patra lui
+  // factură e cea Warehouse, scoasă la pragul de 100.000). Patru facturi,
+  // doi clienți — exact ce trebuie să arate coloana.
+  egal("februarie: 4 facturi, dar numai 2 clienți", [feb.nr, feb.clienti.size], [4, 2]);
+  // Totalul NU e suma lunilor: Delivery și clientul oarecare cumpără în
+  // ambele luni, deci 8 + 2 ar da 10, iar distincți sunt 8.
+  egal("totalul numără clienții o singură dată, nu lună de lună",
+    [d.total.clienti.size, ian.clienti.size + feb.clienti.size], [8, 10]);
   {
-    const titluri = (fara.match(/<h2>[^<]*<\/h2>/g) || []).join(" ");
-    if (/grup/i.test(titluri)) rau("un titlu numește clienții „grup”", titluri);
-    else ok("niciun titlu nu mai numește clienții grupuri");
-    if (!fara.includes("Fiecare rând de mai jos e un <strong>client</strong>"))
-      rau("lipsește lămurirea că rândurile sunt clienți, nu grupuri");
-    else ok("pagina spune explicit că un rând e un client, nu un grup de firme");
+    if (!/<th[^>]*>\s*Clienți activi\s*<\/th>/.test(fara)) rau("lipsește coloana „Clienți activi” din tabel");
+    else if (!fara.includes("distincți, nu suma")) rau("totalul nu spune că nu e o sumă");
+    else ok("tabelul are coloana „Clienți activi”, iar totalul spune că nu e o sumă");
+    if (!fara.includes("facturi · 8 clienți")) rau("cardul de sus nu arată numărul de clienți");
+    else ok("cardul de sus arată și câți clienți distincți sunt");
   }
 
   const rs = await cer("/rapoarte/clienti-cheie", { query: { de_la: "2026-01-01", pana_la: "2026-02-28", separat: "1" } });
