@@ -311,7 +311,7 @@ const GHID = [
 "Scrii, dacă vrei, o observație (cine ridică, ce AWB).",
 "Apeși „Scoate paleții și tipărește etichetele”."
 ],
-"sfat":"Poți căuta în listă după marfă, cod de paletă sau lot — util când depozitul e plin."
+"sfat":"Poți căuta în listă după marfă, cod de palet sau lot — util când depozitul e plin."
 },
 {
 "t":"Eticheta de ieșire",

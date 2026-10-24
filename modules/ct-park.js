@@ -357,7 +357,7 @@ async function paginaSectiune(ctx) {
 // HARTA DE LUCRU: rânduri → locuri de palet → marfă
 //
 // Desenul de mai sus e planul de montaj: bun când se ridică raftul, inutil
-// când cauți o paletă. Partea asta e cealaltă jumătate — harta pe care o
+// când cauți un palet. Partea asta e cealaltă jumătate — harta pe care o
 // folosește omul din depozit.
 //
 // Structura e cea din hală, nu una inventată: un rând de raft are câmpuri
@@ -366,9 +366,9 @@ async function paginaSectiune(ctx) {
 // rândul 3, câmpul 5, nivelul 2, poziția 1. Aia se scrie pe etichetă și aia
 // se strigă în hală.
 //
-// Marfa lată stă pe două sau trei locuri, de-aia legătura paletă–loc e un
-// tabel separat (ct_ocupari), nu o coloană: o paletă poate ține mai multe
-// locuri, iar un loc e liber sau nu, indiferent câte locuri ține paleta de
+// Marfa lată stă pe două sau trei locuri, de-aia legătura palet–loc e un
+// tabel separat (ct_ocupari), nu o coloană: un palet poate ține mai multe
+// locuri, iar un loc e liber sau nu, indiferent câte locuri ține paletul de
 // pe el.
 // ===========================================================================
 
@@ -391,7 +391,7 @@ const CULORI_CATEGORII = {
   "produse intermediare": "#1a6e8e",
   consumabile: "#8a5cc4",
   "materie primă": "#c07018",
-  // Scrierea de pe ecranul de recepție, ca o paletă venită de acolo să-și
+  // Scrierea de pe ecranul de recepție, ca un palet venit de acolo să-și
   // păstreze culoarea în loc să cadă pe griul de „nu știu ce e".
   "produs intermediar": "#1a6e8e",
   "produs finit": "#2f7d4f",
@@ -420,7 +420,7 @@ function adresaLoc(rand, camp, nivel, pozitie) {
   return `R${rand}-${doua(camp)}-${nivel}-${pozitie}`;
 }
 
-function codPaleta(id, data) {
+function codPalet(id, data) {
   return `CT${String(data || aziStr()).replace(/-/g, "").slice(2)}-${String(id).padStart(4, "0")}`;
 }
 
@@ -480,7 +480,7 @@ function butoaneNivel(r, inapoi) {
     </span>`;
 }
 
-// Toate locurile unui rând, cu paleta de pe ele (dacă e vreuna). O paletă pe
+// Toate locurile unui rând, cu paletul de pe ele (dacă e vreunul). Un palet pe
 // trei locuri apare de trei ori — o dată pe fiecare loc — și se strânge la
 // desenare.
 async function locuriRand(randId) {
@@ -787,7 +787,7 @@ async function locuriInAfara(randId, campuri, niveluriLaCamp, locuriLa) {
 async function sumarRanduri() {
   const randuri = await db.prepare("SELECT * FROM ct_randuri WHERE activ = 1 ORDER BY numar").all();
   if (!randuri.length) return [];
-  // Câte locuri are rândul și câte sunt sub o paletă care încă e în depozit.
+  // Câte locuri are rândul și câte sunt sub un palet care încă e în depozit.
   // Două interogări separate fiindcă una singură ar trebui să numere și
   // rândurile fără nicio ocupare, iar un LEFT JOIN cu condiție pe tabelul din
   // dreapta se citește mai greu decât două numărători scurte.
@@ -1032,10 +1032,10 @@ function register(router) {
   router.get("/stocuri/ct-park/stoc", async (ctx) => {
     const cauta = String((ctx.query && ctx.query.q) || "").trim();
 
-    // Paleții din depozit. Locurile se aduc separat și se lipesc în JS: o
-    // paletă lată stă pe două-trei locuri, iar un JOIN ar multiplica rândul
+    // Paleții din depozit. Locurile se aduc separat și se lipesc în JS: un
+    // palet lat stă pe două-trei locuri, iar un JOIN ar multiplica rândul
     // și ar strica totalurile de cantitate și valoare.
-    // Furnizorul scris pe paletă există doar după ce a rulat migrarea. Până
+    // Furnizorul scris pe palet există doar după ce a rulat migrarea. Până
     // atunci pagina merge oricum, cu furnizorul dedus din facturi.
     const cuFurnizor = await areColoana("ct_paleti", "furnizor_id");
     const paleti = await db
@@ -1068,7 +1068,7 @@ function register(router) {
       peP.get(k).push(l);
     }
 
-    // Furnizorul, când nu e scris pe paletă. Se ia din ultima factură de
+    // Furnizorul, când nu e scris pe palet. Se ia din ultima factură de
     // ACHIZIȚIE în care apare produsul — e o deducție, nu un fapt, de-aia se
     // arată cu gri și cu „(dedus)". Ce se scrie la recepție bate deducția.
     const idProduse = [...new Set(paleti.map((p) => nr(p.produs_id)).filter(Boolean))];
@@ -1146,7 +1146,7 @@ function register(router) {
       r.adrese.length
         ? `<span title="${esc(r.adrese.join(", "))}">${esc(r.adrese[0])}${r.adrese.length > 1 ? ` <span style="font-size:11px;color:var(--text-muted)">+${r.adrese.length - 1}</span>` : ""}</span>
            <div style="font-size:11px;color:var(--text-muted)">rând ${esc(String(r.rand))} · câmp ${esc(String(r.camp))} · nivel ${esc(String(r.nivel))}</div>`
-        : '<span style="color:var(--danger,#b91c1c)">nicăieri — paletă fără loc</span>',
+        : '<span style="color:var(--danger,#b91c1c)">nicăieri — palet fără loc</span>',
       nr(r.pret_unitar)
         ? `${r.valoare.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei
            <div style="font-size:11px;color:var(--text-muted)">${nr(r.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} / ${esc(r.um || "UM")}</div>`
@@ -1177,7 +1177,7 @@ function register(router) {
       ${subtabs("/stocuri/ct-park/stoc")}
       <h1 style="margin:6px 0 2px">Stoc la zi</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:900px">
-        Tot ce e acum în depozit, grupat pe categorii. Pentru fiecare paletă: de la cine a venit, când a intrat
+        Tot ce e acum în depozit, grupat pe categorii. Pentru fiecare palet: de la cine a venit, când a intrat
         și pe ce raft stă. Căutarea merge în denumire, cod, lot, furnizor, categorie și adresă — deci poți căuta
         și „R3-05" ca să vezi ce e pe un anume loc.
       </p>
@@ -1186,7 +1186,7 @@ function register(router) {
         cuFurnizor
           ? ""
           : `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:880px">
-              Baza de date n-a primit încă migrarea pentru furnizorul scris pe paletă, deci toți furnizorii de mai jos
+              Baza de date n-a primit încă migrarea pentru furnizorul scris pe palet, deci toți furnizorii de mai jos
               sunt <strong>deduși din facturile de achiziție</strong>. Se rezolvă singur la următoarea pornire a aplicației,
               după ce ajunge pe server versiunea nouă a fișierului <code>lib/db.js</code>.
             </div>`
@@ -1228,11 +1228,11 @@ function register(router) {
 
     const paletiRand = new Map();
     for (const l of locuri) if (l.palet_id) paletiRand.set(Number(l.palet_id), l);
-    // Câte locuri ține fiecare paletă din rândul ăsta. Îl pun pe fiecare
+    // Câte locuri ține fiecare palet din rândul ăsta. Îl pun pe fiecare
     // căsuță ocupată, ca modul de mutare să poată spune din prima „mai alege
     // două" în loc să trimită la server și să întoarcă o eroare.
-    const cateLocuriArePaleta = new Map();
-    for (const l of locuri) if (l.palet_id) cateLocuriArePaleta.set(Number(l.palet_id), (cateLocuriArePaleta.get(Number(l.palet_id)) || 0) + 1);
+    const cateLocuriArePalet = new Map();
+    for (const l of locuri) if (l.palet_id) cateLocuriArePalet.set(Number(l.palet_id), (cateLocuriArePalet.get(Number(l.palet_id)) || 0) + 1);
 
     const ocupate = locuri.filter((l) => l.palet_id).length;
     const latimeCamp = nr(r.latime_loc) * nr(r.locuri_pe_camp);
@@ -1279,7 +1279,7 @@ function register(router) {
           const titlu = ocupat
             ? `${l.adresa} · ${l.produs || l.produs_text || "marfă"} · ${nr(l.cantitate) || "?"} ${l.um || ""} · intrat ${l.data_intrare}`
             : `${l.adresa} · liber${l.categorie ? " · zonă " + l.categorie : ""}`;
-          // Locul OCUPAT ramane link catre paleta lui. Locul LIBER era un div
+          // Locul OCUPAT ramane link catre paletul lui. Locul LIBER era un div
           // mort: se vedea ca e liber si atat. Acum e o casuta bifabila —
           // arati cu degetul unde vrei marfa, exact ca in hala, in loc sa
           // speri ca propunerea automata nimereste raftul la care te gandeai.
@@ -1288,7 +1288,7 @@ function register(router) {
           if (ocupat) {
             pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${nr(l.blocat) ? " blocat" : ""}"
                 title="${esc(titlu)}" data-adresa="${esc(l.adresa)}" data-loc="${l.id}" data-ocupat="1"
-                data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePaleta.get(Number(l.palet_id)) || 1}"
+                data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}"
                 data-marfa="${esc(String(l.produs || l.produs_text || "marfă").slice(0, 40))}"
                 style="height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
                 <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
@@ -1352,7 +1352,7 @@ function register(router) {
       </div>
       <div id="panou-mutare" hidden style="margin:0 0 10px;padding:10px 12px;border:1px solid #c07018;border-radius:8px;background:rgba(192,112,24,.06)">
         <div style="font-size:13px"><strong>Muți marfă.</strong>
-          <span id="mut-pas">Click pe paleta pe care vrei s-o muți.</span></div>
+          <span id="mut-pas">Click pe paletul pe care vrei să-l muți.</span></div>
       </div>
       <div id="panou-editare" hidden style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--accent,#2f6fde);border-radius:8px;background:rgba(47,111,222,.05)">
         <div style="font-size:13px;margin-bottom:6px">
@@ -1449,7 +1449,7 @@ function register(router) {
             bara.hidden = a.length === 0;
             if (!a.length) return;
             var adrese = a.map(function (b) { return b.dataset.adresa; });
-            // Spune pe loc daca sunt lipite sau nu: o paleta lata are nevoie
+            // Spune pe loc daca sunt lipite sau nu: un palet lat are nevoie
             // de pozitii vecine in acelasi camp si nivel, iar omul trebuie sa
             // afle asta cand da click, nu la pasul urmator.
             var lipite = true;
@@ -1463,7 +1463,7 @@ function register(router) {
               ? "Locul <strong>" + adrese[0] + "</strong>"
               : a.length + " locuri: <strong>" + adrese.join(", ") + "</strong>" +
                 (lipite
-                  ? ' <span class="badge verde" style="font-size:10px">lipite — o paletă lată</span>'
+                  ? ' <span class="badge verde" style="font-size:10px">lipite — un palet lat</span>'
                   : ' <span class="badge galben" style="font-size:10px">nu sunt lipite — ies paleți separați</span>');
           });
           document.getElementById("bara-locuri-renunt").addEventListener("click", function (ev) {
@@ -1614,8 +1614,8 @@ function register(router) {
         // Doi pasi, exact cum i-a cerut Vali: „alegi pe harta marfa si apoi
         // alegi unde sa o muti si validezi".
         //
-        // Pasul 1 e un click pe o paleta. Casuta ocupata e un LINK catre
-        // pagina paletei, deci clickul trebuie oprit — altfel pleaca pagina
+        // Pasul 1 e un click pe un palet. Casuta ocupata e un LINK catre
+        // pagina paletului, deci clickul trebuie oprit — altfel pleaca pagina
         // de sub tine fix cand voiai s-o muti.
         //
         // Pasul 2 foloseste aceleasi casute de locuri libere ca intrarea de
@@ -1643,7 +1643,7 @@ function register(router) {
           }
           function arata() {
             if (!sursa) {
-              pas.textContent = "Click pe paleta pe care vrei s-o muți.";
+              pas.textContent = "Click pe paletul pe care vrei să-l muți.";
               bara.hidden = true;
               return;
             }
@@ -1671,7 +1671,7 @@ function register(router) {
             for (var i = 1; lipite && i < poz.length; i++) if (poz[i] !== poz[i - 1] + 1) lipite = false;
             txt.innerHTML = adrese.join(", ") + (lipite || alese.length === 1
               ? ' <span class="badge verde" style="font-size:10px">încape</span>'
-              : ' <span class="badge galben" style="font-size:10px">nu sunt lipite — nu încape o paletă lată</span>');
+              : ' <span class="badge galben" style="font-size:10px">nu sunt lipite — nu încape un palet lat</span>');
           }
 
           function porneste(pornit) {
@@ -1688,7 +1688,7 @@ function register(router) {
           }
           buton.addEventListener("click", function () { porneste(!mut); });
 
-          // Pasul 1: paleta.
+          // Pasul 1: paletul.
           document.addEventListener("click", function (ev) {
             if (!mut) return;
             var o = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
@@ -1794,7 +1794,7 @@ function register(router) {
         body.ct-editez .ct-loc[data-loc]:hover { outline:2px solid var(--danger,#c0392b); }
         body.ct-editez .ct-loc.blocat[data-loc]:hover { outline-color:var(--accent,#2f6fde); }
 
-        /* În mutare, paleta se alege cu un click, deci casetele ocupate
+        /* În mutare, paletul se alege cu un click, deci casetele ocupate
            trebuie să arate că sunt de apăsat, nu de citit. */
         body.ct-mut .ct-loc[data-palet] { cursor:grab; }
         body.ct-mut .ct-loc[data-palet]:hover { outline:2px solid #c07018; }
@@ -1825,12 +1825,12 @@ function register(router) {
     redirect(ctx.res, `/stocuri/ct-park/rand/${r.id}`);
   });
 
-  // ---- O paletă ----------------------------------------------------------
+  // ---- Un palet ----------------------------------------------------------
   router.get("/stocuri/ct-park/palet/:id", async (ctx) => {
     const p = await db
       .prepare("SELECT p.*, pr.denumire AS produs, pr.cod AS produs_cod, pr.unitate_masura FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id WHERE p.id = ?")
       .get(ctx.params.id);
-    if (!p) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/stocuri/ct-park", body: "<p>Paleta nu există.</p>" }));
+    if (!p) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/stocuri/ct-park", body: "<p>Paletul nu există.</p>" }));
     const locuri = await db
       .prepare(
         `SELECT l.*, r.numar AS rand_numar, r.id AS rand_id FROM ct_ocupari o
@@ -1847,7 +1847,7 @@ function register(router) {
       ${subtabs("/stocuri/ct-park")}
       <div class="toolbar">
         <a class="btn secondary" href="${locuri.length ? `/stocuri/ct-park/rand/${locuri[0].rand_id}` : "/stocuri/ct-park"}">← Înapoi la rând</a>
-        ${!p.data_iesire && locuri.length ? `<a class="btn" href="/stocuri/ct-park/muta?palet=${p.id}">Mut-o în alt loc</a>` : ""}
+        ${!p.data_iesire && locuri.length ? `<a class="btn" href="/stocuri/ct-park/muta?palet=${p.id}">Mut-l în alt loc</a>` : ""}
         <a class="btn secondary" href="/stocuri/ct-park/etichete?paleti=${p.id}" target="_blank">Tipărește eticheta</a>
       </div>
       <div class="detail-box">
@@ -1866,7 +1866,7 @@ function register(router) {
               ? `${nr(p.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} lei / ${esc(p.um || p.unitate_masura || "UM")}<br><span style="color:var(--text-muted);font-size:11px">${esc(p.pret_sursa || "")}</span>`
               : "—"
           }</div>
-          <div><div class="k">Valoarea paletei</div>${
+          <div><div class="k">Valoarea paletului</div>${
             nr(p.pret_unitar) && nr(p.cantitate)
               ? `${(nr(p.cantitate) * nr(p.pret_unitar)).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei`
               : "—"
@@ -1894,7 +1894,7 @@ function register(router) {
           ? ""
           : // Scoaterea trece prin ecranul de ieșire, ca să se aleagă destinația.
             // Un buton care doar „scoate" ar lăsa marfa fără drum scris nicăieri.
-            `<a class="btn secondary" href="/stocuri/ct-park/iesire?palet=${p.id}">Scoate paleta din depozit →</a>`
+            `<a class="btn secondary" href="/stocuri/ct-park/iesire?palet=${p.id}">Scoate paletul din depozit →</a>`
       }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: esc(p.cod), active: "/stocuri/ct-park", body }));
@@ -1910,7 +1910,7 @@ function register(router) {
   // ---- Ieșirea de marfă ---------------------------------------------------
   //
   // Simetric cu intrarea, cu o singură diferență care contează: la ieșire
-  // trebuie spus OBLIGATORIU unde se duce paleta. Marfa care „a plecat" fără
+  // trebuie spus OBLIGATORIU unde se duce paletul. Marfa care „a plecat" fără
   // să se știe unde e marfă pierdută pe hârtie, chiar dacă în realitate a
   // ajuns unde trebuia.
   //
@@ -1945,7 +1945,7 @@ function register(router) {
   // in partea aia."
   //
   // DE CE O RUTĂ SEPARATĂ, și nu ieșire + intrare: o mutare schimbă DOAR
-  // locurile. Paleta rămâne aceeași, cu aceeași dată de intrare, același lot
+  // locurile. Paletul rămâne aceeași, cu aceeași dată de intrare, același lot
   // și același preț lipit de ea. Scoasă și reintrodusă, ar pierde toate trei,
   // FIFO ar lua-o de la capăt, iar costul la ieșire ar fi altul.
   //
@@ -1954,8 +1954,8 @@ function register(router) {
   // într-un fișier, nu în rută.
   const mutare = require("../lib/ct-mutare");
 
-  // Locurile unei palete, acum.
-  const locurilePaletei = (paletId) =>
+  // Locurile unui palet, acum.
+  const locurilePaletului = (paletId) =>
     db
       .prepare(
         `SELECT l.* FROM ct_locuri l JOIN ct_ocupari o ON o.loc_id = l.id
@@ -1963,8 +1963,8 @@ function register(router) {
       )
       .all(paletId);
 
-  // Locurile cerute, cu cine stă pe ele. `ocupat_de` e paleta care le ține,
-  // ca validarea să poată trece peste propriile locuri ale paletei mutate.
+  // Locurile cerute, cu cine stă pe ele. `ocupat_de` e paletul care le ține,
+  // ca validarea să poată trece peste propriile locuri ale paletului mutate.
   const locuriCuOcupant = (ids) => {
     if (!ids.length) return Promise.resolve([]);
     const semne = ids.map(() => "?").join(",");
@@ -1979,7 +1979,7 @@ function register(router) {
       .all(...ids);
   };
 
-  const paletaCuNume = (id) =>
+  const paletCuNume = (id) =>
     db
       .prepare(
         `SELECT p.*, COALESCE(pr.denumire, p.produs_text, 'marfă') AS nume
@@ -1992,11 +1992,11 @@ function register(router) {
     const q = ctx.query || {};
     const cauta = String(q.q || "").trim();
     const paletId = nr(q.palet) || null;
-    const palet = paletId ? await paletaCuNume(paletId) : null;
-    const acum = palet ? await locurilePaletei(palet.id) : [];
+    const palet = paletId ? await paletCuNume(paletId) : null;
+    const acum = palet ? await locurilePaletului(palet.id) : [];
     const randuri = await db.prepare("SELECT * FROM ct_randuri WHERE activ = 1 ORDER BY numar").all();
 
-    // Lista din care se alege paleta, când nu vine una din hartă.
+    // Lista din care se alege paletul, când nu vine unul din hartă.
     const lista = palet
       ? []
       : await db
@@ -2042,15 +2042,15 @@ function register(router) {
       ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Mută marfă</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:900px">
-        Mutarea schimbă doar locul. Paleta rămâne aceeași — aceeași dată de intrare, același lot, același preț
+        Mutarea schimbă doar locul. Paletul rămâne același — aceeași dată de intrare, același lot, același preț
         lipit de ea. De-aia nu se scoate și nu se reintroduce: așa s-ar pierde toate trei, iar FIFO ar lua-o
-        de la capăt. O paletă lată se mută doar unde are <strong>locuri lipite, în același câmp și nivel</strong>.
+        de la capăt. Un palet lat se mută doar unde are <strong>locuri lipite, în același câmp și nivel</strong>.
       </p>
 
       ${
         !palet
           ? `<form class="filtre" method="get" action="/stocuri/ct-park/muta" style="margin-bottom:10px">
-               <label>Caută paleta <input name="q" value="${esc(cauta)}" placeholder="marfă, cod, lot sau adresă (R1-02-1-3)" style="width:320px"></label>
+               <label>Caută paletul <input name="q" value="${esc(cauta)}" placeholder="marfă, cod, lot sau adresă (R1-02-1-3)" style="width:320px"></label>
                <button class="btn secondary small" type="submit">Caută</button>
                ${cauta ? `<a class="btn secondary small" href="/stocuri/ct-park/muta">renunț</a>` : ""}
              </form>
@@ -2065,14 +2065,14 @@ function register(router) {
                        `<code>${esc(p.adrese || "—")}</code>`,
                        String(nr(p.locuri)),
                        esc(String(p.data_intrare || "").slice(0, 10)),
-                       `<a class="btn small" href="/stocuri/ct-park/muta?palet=${p.id}">Mut-o</a>`,
+                       `<a class="btn small" href="/stocuri/ct-park/muta?palet=${p.id}">Mut-l</a>`,
                      ])
                    )
-                 : `<p>${cauta ? "Nicio paletă care să semene cu „" + esc(cauta) + "”." : "Nu e nicio paletă în depozit."}</p>`
+                 : `<p>${cauta ? "Niciun palet care să semene cu „" + esc(cauta) + "”." : "Nu e niciun palet în depozit."}</p>`
              }
              <p style="font-size:12px;color:var(--text-muted);margin-top:10px">
                Se poate și invers: deschizi <a href="/stocuri/ct-park">harta</a>, apeși „Mut marfă",
-               dai click pe paletă și apoi pe locurile unde s-o duci.
+               dai click pe palet și apoi pe locurile unde s-o duci.
              </p>`
           : `<div class="card" style="max-width:900px;margin-bottom:14px">
                <div class="label">Se mută</div>
@@ -2113,13 +2113,13 @@ function register(router) {
                         <a class="btn secondary" href="/stocuri/ct-park/muta">renunț</a></div>
                     </form>`
                  : `<p style="color:var(--danger)">Nu încap ${acum.length} locuri lipite nicăieri${randAles ? " în rândul ales" : ""}.
-                      ${acum.length > 1 ? "Paleta ține mai multe locuri, deci are nevoie de tot atâtea poziții una lângă alta, în același câmp." : ""}
+                      ${acum.length > 1 ? "Paletul ține mai multe locuri, deci are nevoie de tot atâtea poziții una lângă alta, în același câmp." : ""}
                       Alege alt rând sau eliberează locuri.</p>`
              }
 
              <h2 style="margin-top:24px">…sau scrie unde</h2>
              <p style="font-size:12px;color:var(--text-muted);max-width:760px;margin:0 0 8px">
-               Dacă știi adresa, n-are rost s-o cauți în listă. Pentru o paletă de mai multe locuri scrie
+               Dacă știi adresa, n-are rost s-o cauți în listă. Pentru un palet de mai multe locuri scrie
                <strong>prima poziție</strong>; restul se iau în continuare, la dreapta. Dacă nu sunt libere, îți spune.
              </p>
              <form class="form" method="post" action="/stocuri/ct-park/muta" style="max-width:720px">
@@ -2140,9 +2140,9 @@ function register(router) {
   router.post("/stocuri/ct-park/muta", async (ctx) => {
     const b = ctx.body || {};
     const inapoi = (extra) => `/stocuri/ct-park/muta${extra || ""}`;
-    const palet = await paletaCuNume(nr(b.palet));
-    if (!palet) return redirect(ctx.res, inapoi(`?eroare=${encodeURIComponent("Paleta nu mai e în depozit.")}`));
-    const acum = await locurilePaletei(palet.id);
+    const palet = await paletCuNume(nr(b.palet));
+    if (!palet) return redirect(ctx.res, inapoi(`?eroare=${encodeURIComponent("Paletul nu mai e în depozit.")}`));
+    const acum = await locurilePaletului(palet.id);
     const laPalet = (mesaj, fel) => redirect(ctx.res, inapoi(`?palet=${palet.id}&${fel || "eroare"}=${encodeURIComponent(mesaj)}`));
 
     // Două feluri de a spune unde: id-uri de locuri (din hartă sau din
@@ -2200,7 +2200,7 @@ function register(router) {
     const argCauta = cauta ? [`%${cauta}%`, `%${cauta}%`, `%${cauta}%`] : [];
 
     // FIFO: primul intrat, primul ieșit. Lista se ordonează pe marfă, iar în
-    // interiorul fiecărei mărfi de la cea mai veche paletă la cea mai nouă —
+    // interiorul fiecărei mărfi de la cel mai vechi palet la cel mai nou —
     // nu de la ultima introdusă, cum era înainte. Așa, ce trebuie scos e
     // mereu primul rând al grupului lui, nu ceva de căutat prin listă.
     const paleti = await db
@@ -2215,7 +2215,7 @@ function register(router) {
       )
       .all(...argCauta);
 
-    // Care e „la rând" pentru fiecare marfă: cea mai veche paletă neieșită.
+    // Care e „la rând" pentru fiecare marfă: cel mai vechi palet neieșit.
     // Marfa scrisă liber se compară după text, fiindcă n-are produs în catalog.
     const cheieMarfa = (x) => String(x.marfa || "—").trim().toLowerCase();
     const laRand = new Map();
@@ -2249,14 +2249,14 @@ function register(router) {
       </p>
       <p class="explic" style="max-width:820px">
         Lista e pusă în ordinea <strong>FIFO — primul intrat, primul ieșit</strong>: pe fiecare marfă, cea mai veche
-        paletă e prima, cu semnul <span class="badge verde">prima la rând</span>. Regula e aceeași pentru materie primă,
-        consumabile, marfă de vânzare <strong>și produs finit</strong> — orice iese din depozit. Poți sări peste una mai veche — depozitul are motive reale, o paletă blocată în
+        palet e primul, cu semnul <span class="badge verde">primul la rând</span>. Regula e aceeași pentru materie primă,
+        consumabile, marfă de vânzare <strong>și produs finit</strong> — orice iese din depozit. Poți sări peste unul mai vechi — depozitul are motive reale, un palet blocat în
         spate sau un lot cerut de client — dar atunci scrii de ce, iar motivul rămâne scris pe ieșire. Costul care pleacă
-        din depozit se ia cu prețul paletei ăsteia, nu cu o medie.
+        din depozit se ia cu prețul paletului ăsta, nu cu o medie.
       </p>
 
       <form class="filtre" method="get" action="/stocuri/ct-park/iesire">
-        <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după marfă, cod de paletă sau lot…" style="min-width:300px">
+        <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după marfă, cod de palet sau lot…" style="min-width:300px">
         <button class="btn small" type="submit">Caută</button>
         ${cauta ? `<a class="btn secondary small" href="/stocuri/ct-park/iesire">Arată tot</a>` : ""}
       </form>
@@ -2295,7 +2295,7 @@ function register(router) {
         ${
           paleti.length
             ? table(
-                ['<input type="checkbox" id="bifa-toti">', "Paletă", "Marfă", "Cantitate", "Lot", "Adresă", "Intrată la", "Cost", "Rând"],
+                ['<input type="checkbox" id="bifa-toti">', "Palet", "Marfă", "Cantitate", "Lot", "Adresă", "Intrată la", "Cost", "Rând"],
                 paleti.map((p) => {
                   const adr = ha.get(Number(p.id)) || [];
                   const prima = laRand.get(cheieMarfa(p)) === Number(p.id);
@@ -2313,7 +2313,7 @@ function register(router) {
                     nr(p.pret_unitar)
                       ? `${val.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei<br><span style="color:var(--text-muted);font-size:11px">${nr(p.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} / ${esc(p.um || "UM")}</span>`
                       : `<span style="color:var(--text-muted)">fără preț</span>`,
-                    prima ? `<span class="badge verde">prima la rând</span>` : `<span style="color:var(--text-muted);font-size:12px">după</span>`,
+                    prima ? `<span class="badge verde">primul la rând</span>` : `<span style="color:var(--text-muted);font-size:12px">după</span>`,
                   ];
                 })
               )
@@ -2322,8 +2322,8 @@ function register(router) {
 
         <label class="field" id="camp-peste-rand" style="display:none;border-left:3px solid var(--warn);padding-left:10px">
           <span>De ce scoți peste rând</span>
-          <input name="peste_rand" placeholder="ex. paleta veche e blocată în spate, clientul cere lotul ăsta">
-          <span class="ajutor">Ai bifat o paletă deși există una mai veche din aceeași marfă. Scrie motivul — rămâne pe ieșire.</span>
+          <input name="peste_rand" placeholder="ex. paletul vechi e blocat în spate, clientul cere lotul ăsta">
+          <span class="ajutor">Ai bifat un palet deși există unul mai vechi din aceeași marfă. Scrie motivul — rămâne pe ieșire.</span>
         </label>
 
         <div class="form-actions">
@@ -2341,9 +2341,9 @@ function register(router) {
           peste();
         });
 
-        // FIFO, verificat în pagină înainte de trimitere: dacă bifezi o paletă
+        // FIFO, verificat în pagină înainte de trimitere: dacă bifezi un palet
         // și rămâne nebifată una mai veche din aceeași marfă, apare câmpul de
-        // motiv. Nu blocăm — depozitul are motive reale să sară peste (paleta
+        // motiv. Nu blocăm — depozitul are motive reale să sară peste (paletul
         // din spate, lotul cerut de client) — dar motivul se scrie și rămâne.
         var campPeste = document.getElementById("camp-peste-rand");
         function sarite() {
@@ -2353,7 +2353,7 @@ function register(router) {
           for (var i = 0; i < b.length; i++) {
             var x = b[i];
             if (x.checked || !bifate[x.dataset.marfa]) continue;
-            // paleta asta e mai veche decât cel puțin una bifată din marfa ei?
+            // paletul ăsta e mai vechi decât cel puțin unul bifat din marfa lui?
             for (var j = 0; j < b.length; j++) {
               var y = b[j];
               if (!y.checked || y.dataset.marfa !== x.dataset.marfa) continue;
@@ -2373,7 +2373,7 @@ function register(router) {
           if (inp) inp.required = l.length > 0;
           var aj = campPeste.querySelector(".ajutor");
           if (aj && l.length) {
-            aj.textContent = "Rămân în depozit palete mai vechi din aceeași marfă: " + l.slice(0, 6).join(", ") +
+            aj.textContent = "Rămân în depozit paleți mai vechi din aceeași marfă: " + l.slice(0, 6).join(", ") +
               (l.length > 6 ? " și încă " + (l.length - 6) : "") + ". Scrie de ce le sari — motivul rămâne pe ieșire.";
           }
         }
@@ -2420,7 +2420,7 @@ function register(router) {
       if (!comanda) return inapoi("Comanda aleasă nu mai există.");
     }
 
-    // Adresa de unde pleacă fiecare paletă, luată ÎNAINTE de a elibera
+    // Adresa de unde pleacă fiecare palet, luată ÎNAINTE de a elibera
     // locurile — după ștergere n-am mai avea de unde s-o scriem pe etichetă.
     const adrese = await db
       .prepare(
@@ -2450,7 +2450,7 @@ function register(router) {
         .get(id);
       if (!p) continue; // deja ieșit între timp — nu-l scoatem de două ori
 
-      // FIFO, verificat și pe server: câte palete mai vechi din aceeași marfă
+      // FIFO, verificat și pe server: câți paleți mai vechi din aceeași marfă
       // rămân în depozit după ieșirea asta. Verificarea din pagină e o
       // comoditate; asta e cea care ajunge în date.
       const maiVechi = await db
@@ -2465,9 +2465,9 @@ function register(router) {
         .catch(() => ({ n: 0 }));
       const sarite = Number((maiVechi && maiVechi.n) || 0);
 
-      // Costul care iese efectiv din depozit, cu prețul paletei ăsteia.
+      // Costul care iese efectiv din depozit, cu prețul paletului ăsta.
       const cost = nr(p.cantitate) * nr(p.pret_unitar);
-      const temei = nr(p.pret_unitar) ? p.pret_sursa || "preț pe paletă" : "fără preț la intrare";
+      const temei = nr(p.pret_unitar) ? p.pret_sursa || "preț pe palet" : "fără preț la intrare";
 
       await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
       await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
@@ -2489,7 +2489,7 @@ function register(router) {
           cine,
           cost > 0 ? Math.round(cost * 100) / 100 : null,
           temei,
-          sarite ? `${sarite} ${sarite === 1 ? "paletă mai veche rămasă" : "palete mai vechi rămase"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
+          sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
         );
       scoase.push(id);
     }
@@ -2522,7 +2522,7 @@ function register(router) {
       ha.get(k).push(a.adresa);
     }
 
-    // Valoarea stocului: din prețul cu care a intrat fiecare paletă, nu dintr-o
+    // Valoarea stocului: din prețul cu care a intrat fiecare palet, nu dintr-o
     // medie pe produs. Spunem și câți paleți n-au preț, ca să se vadă cât din
     // cifră lipsește.
     const inDepozit = paleti.filter((p) => !p.data_iesire);
@@ -2536,7 +2536,7 @@ function register(router) {
         <div class="card"><div class="label">Paleți în depozit</div><div class="value">${inDepozit.length}</div></div>
         <div class="card"><div class="label">Valoarea stocului</div>
           <div class="value">${valoare.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</div>
-          <div class="mic">${faraPret ? `${faraPret} ${faraPret === 1 ? "paletă n-are" : "paleți n-au"} preț la intrare, deci nu ${faraPret === 1 ? "e" : "sunt"} la socoteală` : "toți paleții au preț la intrare"}</div></div>
+          <div class="mic">${faraPret ? `${faraPret} ${faraPret === 1 ? "palet n-are" : "paleți n-au"} preț la intrare, deci nu ${faraPret === 1 ? "e" : "sunt"} la socoteală` : "toți paleții au preț la intrare"}</div></div>
       </div>
       ${table(
         ["Cod", "Marfă", "Cantitate", "Lot", "Categorie", "Adresă", "Intrată", "Valoare", "Stare", ""],
@@ -2569,7 +2569,7 @@ function register(router) {
   router.get("/stocuri/ct-park/intrare", async (ctx) => {
     const randuri = await sumarRanduri();
     // Furnizorii, ca să se poată alege la recepție de unde a venit marfa.
-    // Fără asta, „de la cine e paleta asta" se poate doar deduce din facturi.
+    // Fără asta, „de la cine e paletul ăsta" se poate doar deduce din facturi.
     const furnizori = await db
       .prepare("SELECT id, nume FROM parteneri WHERE tip = 'furnizor' ORDER BY nume")
       .all()
@@ -2658,8 +2658,8 @@ function register(router) {
           <label class="field">Preț de achiziție (lei / UM)<input type="number" name="pret_unitar" min="0" step="0.0001" placeholder="ex. 7,35"></label>
         </div>
         <p class="explic" style="margin-top:-6px">
-          Prețul rămâne lipit de paleta asta. Când marfa iese, se scoate cu costul cu care a intrat — ăsta e
-          rostul lui FIFO. Dacă îl lași gol, se ia prețul de achiziție de pe produs, iar pe paletă scrie
+          Prețul rămâne lipit de paletul ăsta. Când marfa iese, se scoate cu costul cu care a intrat — ăsta e
+          rostul lui FIFO. Dacă îl lași gol, se ia prețul de achiziție de pe produs, iar pe palet scrie
           că e luat de acolo, nu de pe factura ei.
         </p>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px">
@@ -2679,9 +2679,9 @@ function register(router) {
           </label>
           <label class="field">Câți paleți<input type="number" name="paleti" min="1" max="60"
                  value="${locuriAlese.length ? 1 : 1}" required></label>
-          <label class="field">Locuri pe paletă
+          <label class="field">Locuri pe palet
             <select name="locuri">
-              <option value="1">1 — paletă normală</option>
+              <option value="1">1 — palet normal</option>
               <option value="2">2 — marfă lată</option>
               <option value="3">3 — marfă foarte lată</option>
             </select>
@@ -2703,7 +2703,7 @@ function register(router) {
   });
 
   // Pasul 2: propunerea. Caută grupuri de locuri libere lipite în același
-  // câmp și nivel — o paletă lată nu se poate rupe în două câmpuri.
+  // câmp și nivel — un palet lat nu se poate rupe în două câmpuri.
   router.post("/stocuri/ct-park/intrare", async (ctx) => {
     const b = ctx.body;
     const catePaleti = Math.min(60, Math.max(1, Math.round(nr(b.paleti) || 1)));
@@ -2761,7 +2761,7 @@ function register(router) {
         if (l) bune.push(l);
         else ocupateIntreTimp.push(id);
       }
-      // Locurile lipite, în același câmp și nivel, formează o paletă lată.
+      // Locurile lipite, în același câmp și nivel, formează un palet lat.
       // Cele răzlețe ies ca paleți separați — exact ce spune și bara de pe
       // hartă când le bifezi.
       bune.sort((x, y) => nr(x.nivel) - nr(y.nivel) || nr(x.camp) - nr(y.camp) || nr(x.pozitie) - nr(y.pozitie));
@@ -2798,7 +2798,7 @@ function register(router) {
       : null;
     const numeMarfa = produs ? produs.denumire : String(b.produs_text || "").trim() || "marfă";
     const cantitateTotala = nr(b.cantitate);
-    const perPaleta = catePaleti > 0 ? cantitateTotala / catePaleti : 0;
+    const perPalet = catePaleti > 0 ? cantitateTotala / catePaleti : 0;
 
     const ascunse = `
       <input type="hidden" name="produs_id" value="${produs ? produs.id : ""}">
@@ -2817,7 +2817,7 @@ function register(router) {
       <h1 style="margin:6px 0 2px">${esc(numeMarfa)}</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px">
         ${catePaleti} palet${catePaleti === 1 ? "ă" : "e"} × ${cateLocuri} loc${cateLocuri === 1 ? "" : "uri"}
-        ${cantitateTotala ? `· ${cantitateTotala.toLocaleString("ro-RO")} ${esc(String(b.um || ""))} în total, ${perPaleta.toLocaleString("ro-RO", { maximumFractionDigits: 2 })} pe paletă` : ""}
+        ${cantitateTotala ? `· ${cantitateTotala.toLocaleString("ro-RO")} ${esc(String(b.um || ""))} în total, ${perPalet.toLocaleString("ro-RO", { maximumFractionDigits: 2 })} pe palet` : ""}
         ${categorie ? "· " + esc(categorie) : ""}
       </p>
 
@@ -2842,7 +2842,7 @@ function register(router) {
 
       <form class="form" method="post" action="/stocuri/ct-park/ocupa" style="max-width:960px">
         ${ascunse}
-        <input type="hidden" name="cantitate_paleta" value="${perPaleta}">
+        <input type="hidden" name="cantitate_palet" value="${perPalet}">
         <p style="font-size:13px;color:var(--text-muted);margin-top:0">
           Bifate sunt locurile propuse. Debifează ce nu-ți convine — se ocupă doar ce rămâne bifat.
         </p>
@@ -2875,17 +2875,17 @@ function register(router) {
 
     const data = aziStr();
 
-    // Costul cu care intră paleta. Prima variantă e ce a scris omul pe
+    // Costul cu care intră paletul. Prima variantă e ce a scris omul pe
     // formularul de intrare — ăla vine de pe factura furnizorului. Dacă n-a
     // scris nimic, împrumutăm prețul de achiziție de pe produs și spunem pe
-    // paletă de unde e luat, ca nimeni să nu creadă că e prețul ei real.
-    let pretPaleta = nr(b.pret_unitar) || null;
-    let pretSursa = pretPaleta ? "scris la intrare" : null;
-    if (!pretPaleta && nr(b.produs_id)) {
+    // palet de unde e luat, ca nimeni să nu creadă că e prețul ei real.
+    let pretPalet = nr(b.pret_unitar) || null;
+    let pretSursa = pretPalet ? "scris la intrare" : null;
+    if (!pretPalet && nr(b.produs_id)) {
       const pr = await db.prepare("SELECT pret_achizitie FROM produse WHERE id = ?").get(nr(b.produs_id)).catch(() => null);
       const p2 = pr ? nr(pr.pret_achizitie) : 0;
       if (p2 > 0) {
-        pretPaleta = p2;
+        pretPalet = p2;
         pretSursa = "preț de achiziție de pe produs";
       }
     }
@@ -2913,20 +2913,20 @@ function register(router) {
         .run(
           nr(b.produs_id) || null,
           String(b.produs_text || "").trim() || null,
-          nr(b.cantitate_paleta) || null,
+          nr(b.cantitate_palet) || null,
           String(b.um || "").trim() || null,
           String(b.lot || "").trim() || null,
           CATEGORII.includes(String(b.categorie || "")) ? String(b.categorie) : null,
           data,
           String(b.observatii || "").trim() || null,
           ctx.user ? ctx.user.nume : null,
-          pretPaleta,
+          pretPalet,
           pretSursa,
           ...(cuFurnizorLaIntrare ? [nr(b.furnizor_id) || null, String(b.furnizor_text || "").trim() || null] : [])
         );
       const id = r.lastInsertRowid;
       if (!id) continue;
-      await db.prepare("UPDATE ct_paleti SET cod = ? WHERE id = ?").run(codPaleta(id, data), id);
+      await db.prepare("UPDATE ct_paleti SET cod = ? WHERE id = ?").run(codPalet(id, data), id);
       for (const locId of locuri) await db.prepare("INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (?, ?)").run(id, locId);
       idPaleti.push(id);
     }
@@ -2963,7 +2963,7 @@ function register(router) {
       ha.get(k).push(a.adresa);
     }
 
-    // Dacă paleta a ieșit, eticheta arată ALTCEVA: nu adresa din depozit (care
+    // Dacă paletul a ieșit, eticheta arată ALTCEVA: nu adresa din depozit (care
     // nu mai există), ci unde se duce marfa. Pe comandă apar și clientul, și
     // numărul comenzii, și data ei — astea sunt cerute pe eticheta de livrare.
     const iesiri = await db
@@ -3254,7 +3254,7 @@ function register(router) {
     const plan = await planRand(r);
     const varf = plan.varf;
 
-    // Întâi verificăm că nicio micșorare nu taie raftul de sub o paletă.
+    // Întâi verificăm că nicio micșorare nu taie raftul de sub un palet.
     const dorite = new Map();
     for (let i = 1; i <= varf; i++) {
       const locuri = Math.max(1, Math.min(6, Math.round(nr(b[`n${i}_locuri`]) || nr(r.locuri_pe_camp))));
@@ -3441,8 +3441,8 @@ function register(router) {
   // Se salvează toate deodată și se înlocuiesc cele vechi: formularul e
   // adevărul, nu un adaos peste el. Un rând golit dispare, așa se șterge o
   // porțiune. Ca peste tot în CT-Park, nu se taie raftul de sub marfă —
-  // dacă o porțiune ar coborî sub o paletă, nu se salvează nimic și se
-  // spune care paletă stă în drum.
+  // dacă o porțiune ar coborî sub un palet, nu se salvează nimic și se
+  // spune care palet stă în drum.
   router.post("/stocuri/ct-park/configurare/:id/sectoare", async (ctx) => {
     const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
     if (!r) return redirect(ctx.res, "/stocuri/ct-park/configurare");
@@ -3651,7 +3651,7 @@ function register(router) {
     const perCamp = Math.max(1, Math.round(nr(b.locuri_pe_camp) || r.locuri_pe_camp));
 
     // Nu tăiem raftul de sub marfă. Dacă noile cifre ar lăsa pe dinafară un
-    // loc pe care stă o paletă, refuzăm și spunem care.
+    // loc pe care stă un palet, refuzăm și spunem care.
     //
     // Verificarea era un singur SQL cu `l.nivel > ?`, și a devenit greșită
     // când rândul a putut avea porțiuni de înălțimi diferite: cifra de aici
@@ -3705,7 +3705,7 @@ async function regenereazaLocuri(randId) {
   // de 2 niveluri nu se generează locuri la nivelul 3, iar într-un câmp de
   // 2 paleți nu se generează poziția 3 — oricât de înalt sau de larg ar fi
   // restul rândului. Un loc generat degeaba nu e inofensiv: e o adresă pe
-  // care sistemul o propune, iar omul se duce cu paleta la un raft care nu
+  // care sistemul o propune, iar omul se duce cu paletul la un raft care nu
   // există acolo.
   const cerute = new Set();
   for (const n of niveluri) {

@@ -414,7 +414,7 @@ function register(router) {
     const d = await cost.detaliuReteta(c.produs_id);
     if (!d.linii.length) return gol(`Produsul <a href="/productie/retete/${c.produs_id}">${esc(c.produs_denumire || "")}</a> n-are încă rețetă. Scrie-o și necesarul apare singur.`);
 
-    // Ce e în depozit din fiecare componentă, paletă cu paletă, cele mai vechi
+    // Ce e în depozit din fiecare componentă, palet cu palet, cele mai vechi
     // întâi — exact ordinea în care ar trebui scoase.
     const compIds = d.linii.map((l) => Number(l.componenta_id)).filter(Boolean);
     const paleti = compIds.length
@@ -441,8 +441,8 @@ function register(router) {
     const randuri = d.linii.map((l) => {
       const nevoie = Number(l.cantitate) * cant;
       const stoc = peProdus.get(Number(l.componenta_id)) || [];
-      // Paletele de luat: cele mai vechi, până se acoperă nevoia. Paletul se ia
-      // întreg — depozitul nu ține fracțiuni de paletă — deci ultimul depășește
+      // Paleții de luat: cele mai vechi, până se acoperă nevoia. Paletul se ia
+      // întreg — depozitul nu ține fracțiuni de palet — deci ultimul depășește
       // de obicei nevoia, și spunem cât rămâne.
       let strans = 0;
       const luate = [];
@@ -460,7 +460,7 @@ function register(router) {
         `<a href="/productie/retete/${l.componenta_id}">${esc(l.denumire)}</a>`,
         `${nrf(Number(l.cantitate))} ${esc(l.um || "")}`,
         `<b>${nrf(nevoie)}</b> ${esc(l.um || "")}`,
-        `${nrf(inStoc)} ${esc(l.um || "")}<br><span class="mic">${stoc.length} ${stoc.length === 1 ? "paletă" : "palete"}</span>`,
+        `${nrf(inStoc)} ${esc(l.um || "")}<br><span class="mic">${stoc.length} ${stoc.length === 1 ? "palet" : "paleți"}</span>`,
         lipsa > 0
           ? `<span class="badge rosu">lipsesc ${nrf(lipsa)} ${esc(l.um || "")}</span>`
           : `<span class="badge verde">acoperit</span>`,
@@ -482,13 +482,13 @@ function register(router) {
           <div class="mic">${d.lipsa ? `${d.lipsa} ${d.lipsa === 1 ? "componentă n-are" : "componente n-au"} cost — e o limită de jos` : "toate componentele au cost"}</div></div>
       </div>
       ${table(
-        ["Componentă", "Pe bucată", "Necesar", "În depozit", "Acoperire", "Palete de luat, FIFO", "Cost"],
+        ["Componentă", "Pe bucată", "Necesar", "În depozit", "Acoperire", "Paleți de luat, FIFO", "Cost"],
         randuri
       )}
       <p class="explic">
         Lista asta <b>nu scoate nimic</b> din depozit — doar spune ce trebuie luat. Scoaterea se face din
-        <a href="/stocuri/ct-park/iesire">Depozit → Ieșire marfă</a>, cu destinația <b>producție</b>, bifând paletele de mai sus.
-        Paletele se scot întregi, așa că la ultima paletă rămâne de obicei o diferență — e scrisă pe rândul ei.
+        <a href="/stocuri/ct-park/iesire">Depozit → Ieșire marfă</a>, cu destinația <b>producție</b>, bifând paleții de mai sus.
+        Paleții se scot întregi, așa că la ultimul palet rămâne de obicei o diferență — e scrisă pe rândul ei.
       </p>`;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Necesar comanda ${c.numar || c.id}`, active: "/productie", body }));
   });

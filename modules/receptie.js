@@ -589,7 +589,7 @@ function register(router) {
   // lucru în două feluri sunt mai rele decât una singură: oricare ar fi
   // greșită, cineva s-ar uita la cealaltă.
   //
-  // Alegerea locurilor cu degetul, paleta lată pe mai multe locuri lipite și
+  // Alegerea locurilor cu degetul, paletul lat pe mai multe locuri lipite și
   // intrarea de marfă direct pe locurile alese stau ACUM în modules/ct-park.js,
   // pe harta rândului. Ce a rămas aici e lista simplă de locuri, folosită de
   // recepție pentru depozitul propriu.
