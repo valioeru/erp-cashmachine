@@ -616,6 +616,7 @@ function inaltimeRand(niveluri) {
 // câmpuri cu numărul lui de niveluri; un câmp care nu cade în niciun sector
 // are câte niveluri are rândul.
 const NIVEL_MAX = 12;
+const PALETI_MAX = 6;
 
 async function sectoareRand(randId) {
   let brut = [];
@@ -630,9 +631,13 @@ async function sectoareRand(randId) {
       id: Number(x.id),
       de_la: Math.max(1, Math.round(nr(x.camp_de_la))),
       pana_la: Math.max(1, Math.round(nr(x.camp_pana_la))),
-      niveluri: Math.max(1, Math.min(NIVEL_MAX, Math.round(nr(x.niveluri)))),
+      // Amândouă sunt opționale: un sector poate schimba doar înălțimea,
+      // doar lățimea, sau pe amândouă. `null` înseamnă „lasă cum e rândul",
+      // și e altceva decât 0 — de-aia nu se trece prin nr(), care face 0.
+      niveluri: x.niveluri == null || x.niveluri === "" ? null : Math.max(1, Math.min(NIVEL_MAX, Math.round(nr(x.niveluri)))),
+      locuri: x.locuri_pe_camp == null || x.locuri_pe_camp === "" ? null : Math.max(1, Math.min(PALETI_MAX, Math.round(nr(x.locuri_pe_camp)))),
     }))
-    .filter((x) => x.pana_la >= x.de_la);
+    .filter((x) => x.pana_la >= x.de_la && (x.niveluri !== null || x.locuri !== null));
 }
 
 // Câte niveluri are fiecare câmp. Sectoarele se aplică în ordine, deci dacă
@@ -644,9 +649,37 @@ function nivelurilePeCamp(r, sectoare, campuri) {
   const h = new Map();
   for (let c = 1; c <= cate; c++) h.set(c, implicit);
   for (const s of sectoare || []) {
+    if (s.niveluri === null || s.niveluri === undefined) continue;
     for (let c = Math.max(1, s.de_la); c <= Math.min(cate, s.pana_la); c++) h.set(c, s.niveluri);
   }
   return h;
+}
+
+// Câți paleți intră în fiecare câmp. Deschiderea raftului nu e la fel peste
+// tot: „acum ia 3 paleti peste tot trebuie sa pot pune si 2 si 1".
+//
+// Trei surse, în ordinea asta — de la cea mai precisă la cea mai generală:
+//   1. sectorul câmpului, dacă are lățimea scrisă (bucata aia de raft);
+//   2. nivelul, din ct_niveluri (jos paleți lați, sus cutii înguste);
+//   3. cifra rândului.
+// Sectorul bate nivelul fiindcă e despre un anumit raft montat într-un
+// anumit loc, pe când nivelul e o regulă pentru tot rândul.
+function paletiPeCamp(r, sectoare, campuri) {
+  const cate = Math.max(1, Math.round(nr(campuri) || nr(r.campuri)));
+  const h = new Map();
+  for (const s of sectoare || []) {
+    if (s.locuri === null || s.locuri === undefined) continue;
+    for (let c = Math.max(1, s.de_la); c <= Math.min(cate, s.pana_la); c++) h.set(c, s.locuri);
+  }
+  return h;
+}
+
+// Aceeași regulă de precedență, pentru rutele care verifică o configurație
+// VIITOARE și n-au de unde s-o ia din planRand. Stă aici ca să nu existe
+// două socoteli care se pot despărți pe drum.
+function locuriLaViitor(r, sectoare, campuri, locuriPeNivel) {
+  const paleti = paletiPeCamp(r, sectoare, campuri);
+  return (camp, nivel) => (paleti.has(camp) ? paleti.get(camp) : locuriPeNivel(nivel));
 }
 
 // Tot ce trebuie știut despre forma unui rând, într-un singur loc, ca să nu
@@ -654,46 +687,69 @@ function nivelurilePeCamp(r, sectoare, campuri) {
 // cu socoteala veche (toate câmpurile la fel de înalte).
 async function planRand(r, campuri) {
   const sectoare = await sectoareRand(r.id);
-  const varf = Math.max(nr(r.niveluri), ...sectoare.map((s) => s.niveluri), 1);
+  const varf = Math.max(nr(r.niveluri), ...sectoare.map((s) => s.niveluri || 0), 1);
   const niveluri = await niveluriRand(r, varf);
   const peCamp = nivelurilePeCamp(r, sectoare, campuri);
-  // Câte locuri ies din configurația asta: suma, câmp cu câmp, a locurilor
-  // de pe nivelurile care chiar există acolo.
+  const paleti = paletiPeCamp(r, sectoare, campuri);
+
+  // Câți paleți intră în căsuța (câmp, nivel). Singurul loc din cod care
+  // răspunde la întrebarea asta — generarea locurilor, desenul și
+  // verificarea „nu tăia raftul de sub marfă" o cheamă pe ea, ca să nu
+  // ajungă vreodată să numere altfel una decât alta.
+  const locuriLa = (camp, nivel) => {
+    if (paleti.has(camp)) return paleti.get(camp);
+    const n = niveluri[nivel - 1];
+    return n ? n.locuri : Math.max(1, nr(r.locuri_pe_camp) || 1);
+  };
+
+  // Câte locuri ies din configurația asta: căsuță cu căsuță, pe nivelurile
+  // care chiar există în câmpul ăla.
   let locuri = 0;
-  for (const [, n] of peCamp) for (let i = 1; i <= n; i++) locuri += niveluri[i - 1] ? niveluri[i - 1].locuri : 0;
-  return { sectoare, varf, niveluri, peCamp, locuri, uniform: sectoare.length === 0 };
+  for (const [camp, n] of peCamp) for (let i = 1; i <= n; i++) locuri += locuriLa(camp, i);
+  return { sectoare, varf, niveluri, peCamp, paleti, locuriLa, locuri, uniform: sectoare.length === 0 };
 }
 
 // Bucățile de rând, citite din forma lui reală, nu din ce s-a scris în
 // formular: câmpurile vecine cu același număr de niveluri se strâng la un
 // loc. Așa se vede „1–4 cu 3 niveluri, 5–8 cu 5" chiar dacă sectoarele au
 // fost scrise bucată cu bucată sau se suprapun.
-function bucatiRand(peCamp, campuri) {
+function bucatiRand(peCamp, campuri, locuriLa) {
   const out = [];
   for (let c = 1; c <= campuri; c++) {
     const n = peCamp.get(c) || 0;
+    // Lățimea bucății se citește de la nivelul 1, care există peste tot.
+    const p = locuriLa ? locuriLa(c, 1) : null;
     const ultim = out[out.length - 1];
-    if (ultim && ultim.niveluri === n) ultim.pana_la = c;
-    else out.push({ de_la: c, pana_la: c, niveluri: n });
+    if (ultim && ultim.niveluri === n && ultim.paleti === p) ultim.pana_la = c;
+    else out.push({ de_la: c, pana_la: c, niveluri: n, paleti: p });
   }
   return out;
 }
 
 function rezumatSectoare(plan, campuri) {
-  return bucatiRand(plan.peCamp, campuri)
-    .map((b) => `<strong>${b.de_la === b.pana_la ? b.de_la : `${b.de_la}–${b.pana_la}`}</strong> cu ${b.niveluri} ${b.niveluri === 1 ? "nivel" : "niveluri"}`)
+  return bucatiRand(plan.peCamp, campuri, plan.locuriLa)
+    .map((b) => {
+      const cat = `<strong>${b.de_la === b.pana_la ? b.de_la : `${b.de_la}–${b.pana_la}`}</strong>`;
+      const niv = `${b.niveluri} ${b.niveluri === 1 ? "nivel" : "niveluri"}`;
+      const pal = b.paleti == null ? "" : ` × ${b.paleti} ${b.paleti === 1 ? "palet" : "paleți"}`;
+      return `${cat} cu ${niv}${pal}`;
+    })
     .join(", ");
 }
 
 // Locurile pe care stă marfă și care ar rămâne pe dinafară la o configurație
 // nouă. Aceeași verificare se face și când se salvează rândul, și când se
 // scoate un nivel — de-aia stă într-un singur loc.
-// `niveluriLaCamp` e o funcție, nu un număr: de când rândul poate avea 3
-// niveluri pe o porțiune și 5 pe alta, „nivelul e prea sus" se judecă pe
-// câmpul lui, nu pe rând. Se acceptă și un număr, pentru apelanții vechi.
-async function locuriInAfara(randId, campuri, niveluriLaCamp, locuriPeNivel) {
-  const cateNiveluri =
-    typeof niveluriLaCamp === "function" ? niveluriLaCamp : () => nr(niveluriLaCamp);
+// Locurile pe care stă marfă și care ar rămâne pe dinafară la o configurație
+// nouă. Aceeași verificare se face peste tot unde se schimbă forma rândului.
+//
+// Amândouă limitele sunt FUNCȚII, nu numere, fiindcă rândul nu mai e uniform
+// nici pe înălțime, nici pe lățime: „nivelul e prea sus" se judecă pe câmpul
+// lui, iar „poziția e prea la dreapta" pe căsuța (câmp, nivel). Se acceptă
+// și numere, pentru apelanții care chiar lucrează cu un rând uniform.
+async function locuriInAfara(randId, campuri, niveluriLaCamp, locuriLa) {
+  const cateNiveluri = typeof niveluriLaCamp === "function" ? niveluriLaCamp : () => nr(niveluriLaCamp);
+  const catiPaleti = typeof locuriLa === "function" ? locuriLa : () => nr(locuriLa);
   const ocupate = await db
     .prepare(
       `SELECT l.adresa, l.nivel, l.camp, l.pozitie FROM ct_locuri l
@@ -705,7 +761,7 @@ async function locuriInAfara(randId, campuri, niveluriLaCamp, locuriPeNivel) {
     (l) =>
       nr(l.camp) > campuri ||
       nr(l.nivel) > (cateNiveluri(nr(l.camp)) || 0) ||
-      nr(l.pozitie) > locuriPeNivel(nr(l.nivel))
+      nr(l.pozitie) > (catiPaleti(nr(l.camp), nr(l.nivel)) || 0)
   );
 }
 
@@ -1174,7 +1230,7 @@ function register(router) {
         // Desenăm un gol de aceeași lățime, ca să nu se decaleze grila și ca
         // să se vadă silueta adevărată a raftului, nu una dreaptă inventată.
         if (nivel > (peCamp.get(camp) || 0)) {
-          const goluri = new Array(n.locuri)
+          const goluri = new Array(plan.locuriLa(camp, nivel))
             .fill(`<div class="ct-loc fara-raft" style="height:${hPx}px"></div>`)
             .join("");
           celule += `<div class="ct-camp gol" data-nivel="${nivel}" data-camp="${camp}" title="Câmpul ${camp} are ${peCamp.get(camp) || 0} niveluri — aici nu e raft">
@@ -1184,7 +1240,11 @@ function register(router) {
           continue;
         }
         let pozitii = "";
-        for (let poz = 1; poz <= n.locuri; poz++) {
+        // Câți paleți intră AICI, nu pe nivel în general: un câmp dintr-un
+        // sector de 2 paleți are două căsuțe, nu trei. Cum .ct-camp e
+        // flex:1 și .ct-loc la fel, cele două ies mai late în aceeași
+        // deschidere — adică exact ce se vede în hală.
+        for (let poz = 1; poz <= plan.locuriLa(camp, nivel); poz++) {
           const l = h.get(`${nivel}|${camp}|${poz}`);
           if (!l) {
             pozitii += `<div class="ct-loc lipsa" style="height:${hPx}px"></div>`;
@@ -1199,19 +1259,22 @@ function register(router) {
           // mort: se vedea ca e liber si atat. Acum e o casuta bifabila —
           // arati cu degetul unde vrei marfa, exact ca in hala, in loc sa
           // speri ca propunerea automata nimereste raftul la care te gandeai.
+          // `data-loc` e pentru modul de editare: acolo un click pe loc nu-l
+          // mai alege pentru marfă, ci îl scoate din uz sau îl repune.
           if (ocupat) {
             pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${nr(l.blocat) ? " blocat" : ""}"
-                title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
+                title="${esc(titlu)}" data-adresa="${esc(l.adresa)}" data-loc="${l.id}" data-ocupat="1"
                 style="height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
                 <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
                 <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, 22))}</span>
               </a>`;
           } else if (nr(l.blocat)) {
-            pozitii += `<div class="ct-loc liber blocat" title="${esc(titlu)}" style="height:${hPx}px">
+            pozitii += `<div class="ct-loc liber blocat" title="${esc(titlu)} · scos din uz" data-adresa="${esc(l.adresa)}"
+                data-loc="${l.id}" data-blocat="1" style="height:${hPx}px">
                 <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span></div>`;
           } else {
             pozitii += `<label class="ct-loc liber alegibil" title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
-                style="height:${hPx}px">
+                data-loc="${l.id}" style="height:${hPx}px">
                 <input type="checkbox" name="loc" value="${l.id}" data-adresa="${esc(l.adresa)}"
                        data-nivel="${nivel}" data-camp="${camp}" data-pozitie="${l.pozitie}">
                 <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
@@ -1258,6 +1321,26 @@ function register(router) {
         ${butoaneNivel(r, "rand")}
         <span style="font-size:12px;color:var(--text-muted)">niveluri — adaugă unul deasupra sau scoate-l pe cel de sus</span>
         <a class="btn small secondary" href="/stocuri/ct-park/configurare/${r.id}">Înălțimi și paleți pe nivel</a>
+        <button class="btn small" type="button" id="buton-editez">Editez raftul</button>
+      </div>
+      <div id="panou-editare" hidden style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--accent,#2f6fde);border-radius:8px;background:rgba(47,111,222,.05)">
+        <div style="font-size:13px;margin-bottom:6px">
+          <strong>Editezi raftul.</strong> Sub fiecare câmp ai câte niveluri și câți paleți are —
+          apeși − sau + și <strong>se salvează pe loc</strong>. Click pe un loc îl scoate din uz
+          (sau îl repune). Bifează numerele câmpurilor ca să schimbi mai multe deodată.
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px">
+          <button class="btn small secondary" type="button" data-rand-camp="adauga">+ încă un câmp</button>
+          <button class="btn small secondary" type="button" data-rand-camp="scoate">− ultimul câmp</button>
+          <span id="editare-stare" style="color:var(--text-muted)"></span>
+        </div>
+        <div id="editare-interval" hidden style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:13px">
+          <span id="editare-interval-text"></span>
+          <label style="margin-left:10px">niveluri <input class="ct-in" style="width:64px" type="number" min="1" max="${NIVEL_MAX}" id="interval-niveluri" placeholder="—"></label>
+          <label style="margin-left:6px">paleți <input class="ct-in" style="width:64px" type="number" min="1" max="${PALETI_MAX}" id="interval-paleti" placeholder="—"></label>
+          <button class="btn small" type="button" id="interval-aplica" style="margin-left:6px">Aplică</button>
+          <a href="#" id="interval-renunt" style="margin-left:8px;font-size:12px">renunț</a>
+        </div>
       </div>
 
       <form method="get" action="/stocuri/ct-park/intrare" id="forma-locuri">
@@ -1272,6 +1355,29 @@ function register(router) {
         <input type="hidden" name="locuri" id="locuri-lipite" value="">
         <div class="ct-fata">
           <div class="ct-grila">${grila}</div>
+          ${/* Banda de comenzi pe câmp. Are aceeași structură ca un nivel —
+               etichetă în stânga, câmpurile în dreapta — ca să se alinieze
+               exact sub coloanele desenului, fără calcule de pixeli. */ ""}
+          <div class="ct-nivel ct-banda-editare" hidden>
+            <div class="ct-nivel-eticheta"><span style="font-size:11px">pe câmp</span></div>
+            <div class="ct-nivel-campuri">
+              ${Array.from({ length: nr(r.campuri) }, (_, i) => i + 1)
+                .map(
+                  (camp) => `<div class="ct-camp ct-camp-editare">
+                    <label class="ct-camp-bifa"><input type="checkbox" class="bifa-camp" value="${camp}"> ${camp}</label>
+                    <div class="ct-camp-rand"><button type="button" class="ct-mic" data-camp="${camp}" data-ce="niveluri" data-pas="-1">−</button>
+                      <span class="ct-camp-cifra" data-camp="${camp}" data-ce="niveluri">${peCamp.get(camp) || 0}</span>
+                      <button type="button" class="ct-mic" data-camp="${camp}" data-ce="niveluri" data-pas="1">+</button>
+                      <span class="ct-camp-um">niv</span></div>
+                    <div class="ct-camp-rand"><button type="button" class="ct-mic" data-camp="${camp}" data-ce="paleti" data-pas="-1">−</button>
+                      <span class="ct-camp-cifra" data-camp="${camp}" data-ce="paleti">${plan.locuriLa(camp, 1)}</span>
+                      <button type="button" class="ct-mic" data-camp="${camp}" data-ce="paleti" data-pas="1">+</button>
+                      <span class="ct-camp-um">pal</span></div>
+                  </div>`
+                )
+                .join("")}
+            </div>
+          </div>
           <div class="ct-podea">pardoseală</div>
         </div>
         <div class="bara-selectie" id="bara-locuri" hidden>
@@ -1318,6 +1424,141 @@ function register(router) {
             alese().forEach(function (b) { b.checked = false; });
             lipite_camp.value = "";
             bara.hidden = true;
+          });
+        })();
+
+        // ---- Modul de editare: schimbi raftul cu degetul, se salveaza singur
+        //
+        // Doua moduri pe aceeasi pagina. In mod normal un click pe un loc il
+        // ALEGE pentru marfa; in mod editare, acelasi click il SCOATE DIN
+        // USO sau il repune. De-aia, cand se intra in editare, selectia de
+        // marfa se goleste si bara ei se ascunde: daca ar ramane amandoua
+        // active, un click ar face doua lucruri deodata si n-ai sti care.
+        (function () {
+          var RAND = ${r.id};
+          var buton = document.getElementById("buton-editez");
+          var panou = document.getElementById("panou-editare");
+          var banda = document.querySelector(".ct-banda-editare");
+          var stare = document.getElementById("editare-stare");
+          var barăMarfa = document.getElementById("bara-locuri");
+          var intervalPanou = document.getElementById("editare-interval");
+          var intervalText = document.getElementById("editare-interval-text");
+          var editez = false;
+          var ocupat = false;
+
+          function spune(text, rau) {
+            stare.textContent = text || "";
+            stare.style.color = rau ? "var(--danger)" : "var(--text-muted)";
+          }
+
+          // Orice schimbare rescrie locurile in baza, deci pagina trebuie sa
+          // se reciteasca — altfel desenul ar ramane cel vechi si urmatorul
+          // click ar porni de la cifre gresite. Mesajul se duce mai departe
+          // prin adresa, ca sa se vada dupa reincarcare.
+          async function trimite(date, text) {
+            if (ocupat) return;
+            ocupat = true;
+            spune(text || "salvez…");
+            try {
+              var r = await fetch("/stocuri/ct-park/rand/" + RAND + "/editeaza", {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams(date).toString(),
+              });
+              var j = await r.json();
+              if (!j.ok) { spune(j.mesaj || "N-a mers.", true); ocupat = false; return; }
+              var u = new URL(location.href);
+              u.searchParams.set("ok", j.mesaj);
+              u.hash = "editez";
+              location.href = u.toString();
+            } catch (e) {
+              spune("N-am putut salva: " + e.message, true);
+              ocupat = false;
+            }
+          }
+
+          function porneste(pornit) {
+            editez = pornit;
+            panou.hidden = !pornit;
+            if (banda) banda.hidden = !pornit;
+            document.body.classList.toggle("ct-editez", pornit);
+            buton.textContent = pornit ? "Gata, am terminat" : "Editez raftul";
+            if (pornit) {
+              // Golim selectia de marfa, ca sa nu se amestece cele doua moduri.
+              Array.prototype.forEach.call(document.querySelectorAll('input[name="loc"]'), function (b) { b.checked = false; });
+              document.getElementById("locuri-lipite").value = "";
+              if (barăMarfa) barăMarfa.hidden = true;
+            }
+          }
+          buton.addEventListener("click", function () { porneste(!editez); });
+          // Dupa o salvare pagina se reincarca; o aducem inapoi in editare.
+          if (location.hash === "#editez") porneste(true);
+
+          // − si + pe un camp.
+          document.addEventListener("click", function (ev) {
+            var b = ev.target.closest && ev.target.closest(".ct-mic");
+            if (!b || !editez) return;
+            ev.preventDefault();
+            var camp = b.dataset.camp, ce = b.dataset.ce, pas = Number(b.dataset.pas);
+            var cifra = document.querySelector('.ct-camp-cifra[data-camp="' + camp + '"][data-ce="' + ce + '"]');
+            var acum = Number(cifra.textContent) || 1;
+            var nou = acum + pas;
+            if (nou < 1) return spune(ce === "paleti" ? "Un câmp are cel puțin un palet." : "Un câmp are cel puțin un nivel.", true);
+            var date = { ce: "camp", camp: camp };
+            date[ce] = nou;
+            trimite(date, "câmpul " + camp + ": " + nou + " " + (ce === "paleti" ? "paleți" : "niveluri") + "…");
+          });
+
+          // Click pe un loc, in editare: scoate din uz / repune in uz.
+          document.addEventListener("click", function (ev) {
+            if (!editez) return;
+            var l = ev.target.closest && ev.target.closest(".ct-loc[data-loc]");
+            if (!l) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (l.dataset.ocupat) return spune("Pe " + (l.dataset.adresa || "locul ăsta") + " stă marfă. Scoate-o întâi.", true);
+            trimite({ ce: "loc", loc: l.dataset.loc }, (l.dataset.blocat ? "repun " : "scot ") + (l.dataset.adresa || "") + "…");
+          }, true);
+
+          // + / − un camp la capatul randului.
+          Array.prototype.forEach.call(document.querySelectorAll("[data-rand-camp]"), function (b) {
+            b.addEventListener("click", function () { trimite({ ce: b.dataset.randCamp }); });
+          });
+
+          // Mai multe campuri deodata: bifezi numerele, scrii o cifra, aplici.
+          function bifate() {
+            return Array.prototype.filter.call(document.querySelectorAll(".bifa-camp"), function (b) { return b.checked; })
+              .map(function (b) { return Number(b.value); }).sort(function (x, y) { return x - y; });
+          }
+          document.addEventListener("change", function (ev) {
+            if (!ev.target.classList || !ev.target.classList.contains("bifa-camp")) return;
+            var a = bifate();
+            intervalPanou.hidden = a.length === 0;
+            if (!a.length) return;
+            // Daca sunt vecine le spunem ca interval, altfel le insiram: tot
+            // la fel se trimit, dar omul vede ce a bifat.
+            var vecine = a.every(function (v, i) { return i === 0 || v === a[i - 1] + 1; });
+            intervalText.innerHTML = vecine && a.length > 1
+              ? "Câmpurile <strong>" + a[0] + "–" + a[a.length - 1] + "</strong>:"
+              : "Câmpurile <strong>" + a.join(", ") + "</strong>:";
+          });
+          document.getElementById("interval-aplica").addEventListener("click", function () {
+            var a = bifate();
+            if (!a.length) return;
+            var niv = document.getElementById("interval-niveluri").value;
+            var pal = document.getElementById("interval-paleti").value;
+            if (!niv && !pal) return spune("Scrie câte niveluri, câți paleți, sau amândouă.", true);
+            var vecine = a.every(function (v, i) { return i === 0 || v === a[i - 1] + 1; });
+            if (!vecine) return spune("Deocamdată doar câmpuri lipite. Ai bifat " + a.join(", ") + ".", true);
+            var date = { ce: "interval", de_la: a[0], pana_la: a[a.length - 1] };
+            if (niv) date.niveluri = niv;
+            if (pal) date.paleti = pal;
+            trimite(date, "câmpurile " + a[0] + "–" + a[a.length - 1] + "…");
+          });
+          document.getElementById("interval-renunt").addEventListener("click", function (ev) {
+            ev.preventDefault();
+            Array.prototype.forEach.call(document.querySelectorAll(".bifa-camp"), function (b) { b.checked = false; });
+            intervalPanou.hidden = true;
           });
         })();
       </script>
@@ -1376,6 +1617,24 @@ function register(router) {
         .ct-podea { margin-top:6px; margin-left:66px; border-top:3px solid #8a8f98; font-size:11px; color:var(--text-muted); padding-top:2px; }
         .ct-legenda2 { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12px; margin:10px 0 18px; }
         .ct-legenda2 i { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+
+        /* Banda de comenzi pe câmp. Are aceeași structură ca un nivel, deci
+           se aliniază singură sub coloanele desenului. */
+        .ct-banda-editare { margin-top:8px; padding-top:8px; border-top:1px dashed var(--border); }
+        .ct-camp-editare { display:flex; flex-direction:column; align-items:center; gap:2px; font-size:11px; }
+        .ct-camp-bifa { display:flex; align-items:center; gap:3px; font-weight:600; cursor:pointer; }
+        .ct-camp-rand { display:flex; align-items:center; gap:2px; }
+        .ct-camp-cifra { min-width:14px; text-align:center; font-weight:600; }
+        .ct-camp-um { color:var(--text-muted); font-size:10px; }
+        .ct-mic { width:18px; height:18px; line-height:1; padding:0; border:1px solid var(--border);
+                  background:#fff; border-radius:3px; cursor:pointer; font-size:12px; }
+        .ct-mic:hover { border-color:var(--accent,#2f6fde); color:var(--accent,#2f6fde); }
+
+        /* În editare, un click pe un loc nu-l mai alege pentru marfă: îl
+           scoate din uz. Cursorul trebuie să spună asta înainte de click. */
+        body.ct-editez .ct-loc.alegibil { cursor:not-allowed; }
+        body.ct-editez .ct-loc[data-loc]:hover { outline:2px solid var(--danger,#c0392b); }
+        body.ct-editez .ct-loc.blocat[data-loc]:hover { outline-color:var(--accent,#2f6fde); }
       </style>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `CT-Park · rândul ${r.numar}`, active: "/stocuri/ct-park", body }));
@@ -2528,9 +2787,14 @@ function register(router) {
     // verificarea se face pe harta de după, nu pe un singur număr.
     const sect = await sectoareRand(r.id);
     const viitor = nivelurilePeCamp({ ...r, niveluri: acum - 1 }, sect, nr(r.campuri));
-    const niv = await niveluriRand(r, Math.max(acum - 1, ...sect.map((s) => s.niveluri), 1));
+    const niv = await niveluriRand(r, Math.max(acum - 1, ...sect.map((s) => s.niveluri || 0), 1));
     const h = new Map(niv.map((n) => [n.nivel, n.locuri]));
-    const afara = await locuriInAfara(r.id, nr(r.campuri), (c) => viitor.get(c) || 0, (n) => h.get(n) || nr(r.locuri_pe_camp));
+    const afara = await locuriInAfara(
+      r.id,
+      nr(r.campuri),
+      (c) => viitor.get(c) || 0,
+      locuriLaViitor(r, sect, nr(r.campuri), (n) => h.get(n) || nr(r.locuri_pe_camp))
+    );
     if (afara.length) {
       return spune(
         "eroare",
@@ -2573,7 +2837,9 @@ function register(router) {
       r.id,
       nr(r.campuri),
       (c) => plan.peCamp.get(c) || 0,
-      (n) => dorite.get(n) || nr(r.locuri_pe_camp)
+      // Un câmp care are lățimea scrisă în sectorul lui nu se îngustează de
+      // aici: cifra nivelului e pentru câmpurile fără porțiune proprie.
+      locuriLaViitor(r, plan.sectoare, nr(r.campuri), (n) => dorite.get(n) || nr(r.locuri_pe_camp))
     );
     if (afara.length) {
       const mesaj = `Nu pot îngusta nivelurile: pe ${afara.slice(0, 8).map((a) => a.adresa).join(", ")}${afara.length > 8 ? "…" : ""} stă marfă.`;
@@ -2601,6 +2867,146 @@ function register(router) {
     redirect(ctx.res, `${inapoi}?ok=${encodeURIComponent("Nivelurile au fost salvate.")}`);
   });
 
+  // ---- Editarea raftului cu degetul, de pe desen --------------------------
+  //
+  // „Fa sa pot configura si de aici sa sterg spre exemplu spatii si sa se
+  // salveze automat configuratia sau sa adaug, mai exact sa activez inca o
+  // coloana sau interval."
+  //
+  // Formularul de porțiuni e bun când știi dinainte ce vrei. Când te uiți la
+  // raft și vezi că al treilea câmp are două locuri, nu trei, vrei să apeși
+  // acolo, nu să numeri câmpurile și să scrii un interval.
+  //
+  // Ruta asta ia o singură schimbare și o salvează pe loc. Răspunde JSON, ca
+  // pagina să poată spune ce s-a întâmplat fără să se reîncarce; dacă JS-ul
+  // nu merge, formularul mare face același lucru, deci nu se pierde nimic.
+  //
+  // Ce poate face:
+  //   camp     — câte niveluri / câți paleți are UN câmp (scrie un sector
+  //              de un singur câmp, ca omul să nu scrie intervale)
+  //   interval — același lucru, pe mai multe câmpuri deodată
+  //   loc      — scoate din uz sau repune în uz UN loc anume
+  //   adauga   — încă un câmp la capătul rândului
+  //   scoate   — câmpul de la capăt, dacă e gol
+  router.post("/stocuri/ct-park/rand/:id/editeaza", async (ctx) => {
+    const raspunde = (cod, obj) => send(ctx.res, cod, JSON.stringify(obj), { "Content-Type": "application/json; charset=utf-8" });
+    const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(ctx.params.id);
+    if (!r) return raspunde(404, { ok: false, mesaj: "Rândul nu există." });
+    const b = ctx.body || {};
+    const ce = String(b.ce || "");
+    const campuri = nr(r.campuri);
+
+    // Un loc scos din uz: „sterg spatii". Nu se șterge rândul din tabel —
+    // se marchează blocat, ca adresa să rămână a lui și eticheta lipită pe
+    // raft să nu mintă. Se poate repune oricând.
+    if (ce === "loc") {
+      const l = await db.prepare("SELECT * FROM ct_locuri WHERE id = ? AND rand_id = ?").get(b.loc, r.id);
+      if (!l) return raspunde(404, { ok: false, mesaj: "Locul nu e în rândul ăsta." });
+      const ocupat = await db
+        .prepare(
+          `SELECT 1 AS da FROM ct_ocupari o JOIN ct_paleti p ON p.id = o.palet_id AND p.data_iesire IS NULL WHERE o.loc_id = ?`
+        )
+        .get(l.id);
+      if (ocupat && !nr(l.blocat)) return raspunde(409, { ok: false, mesaj: `Pe ${l.adresa} stă marfă. Scoate-o întâi.` });
+      const nou = nr(l.blocat) ? 0 : 1;
+      await db.prepare("UPDATE ct_locuri SET blocat = ? WHERE id = ?").run(nou, l.id);
+      return raspunde(200, { ok: true, mesaj: nou ? `${l.adresa} e scos din uz.` : `${l.adresa} e iar în uz.`, reincarca: true });
+    }
+
+    if (ce === "adauga" || ce === "scoate") {
+      const nouCampuri = ce === "adauga" ? campuri + 1 : campuri - 1;
+      if (nouCampuri < 1) return raspunde(400, { ok: false, mesaj: "Rândul are un singur câmp, n-am ce scoate." });
+      if (nouCampuri > 60) return raspunde(400, { ok: false, mesaj: "Un rând poate avea cel mult 60 de câmpuri." });
+      if (ce === "scoate") {
+        const sect = await sectoareRand(r.id);
+        const viitor = nivelurilePeCamp(r, sect, nouCampuri);
+        const nivv = await niveluriRand(r, Math.max(nr(r.niveluri), ...sect.map((s) => s.niveluri || 0), 1));
+        const hl = new Map(nivv.map((n) => [n.nivel, n.locuri]));
+        const afara = await locuriInAfara(r.id, nouCampuri, (c) => viitor.get(c) || 0, locuriLaViitor(r, sect, nouCampuri, (n) => hl.get(n) || nr(r.locuri_pe_camp)));
+        if (afara.length) return raspunde(409, { ok: false, mesaj: `Pe câmpul ${campuri} stă marfă (${afara.slice(0, 3).map((a) => a.adresa).join(", ")}). Scoate-o întâi.` });
+      }
+      await db.prepare("UPDATE ct_randuri SET campuri = ? WHERE id = ?").run(nouCampuri, r.id);
+      // Porțiunile care ies complet din rând se curăță, ca să nu rămână
+      // scrise undeva unde nu mai e nimic.
+      try {
+        await db.prepare("DELETE FROM ct_sectoare WHERE rand_id = ? AND camp_de_la > ?").run(r.id, nouCampuri);
+        await db.prepare("UPDATE ct_sectoare SET camp_pana_la = ? WHERE rand_id = ? AND camp_pana_la > ?").run(nouCampuri, r.id, nouCampuri);
+      } catch (e) {
+        /* bază veche fără tabelul de porțiuni */
+      }
+      await regenereazaLocuri(r.id);
+      return raspunde(200, { ok: true, mesaj: ce === "adauga" ? `Câmpul ${nouCampuri} a fost activat.` : `Câmpul ${campuri} a fost scos.`, reincarca: true });
+    }
+
+    if (ce !== "camp" && ce !== "interval") return raspunde(400, { ok: false, mesaj: "Nu știu ce să fac." });
+
+    const deLa = Math.round(nr(ce === "camp" ? b.camp : b.de_la));
+    const panaLa = Math.round(nr(ce === "camp" ? b.camp : b.pana_la));
+    if (!deLa || !panaLa || deLa < 1 || panaLa > campuri || panaLa < deLa)
+      return raspunde(400, { ok: false, mesaj: `Rândul are ${campuri} câmpuri; ${deLa}–${panaLa} nu e un interval bun.` });
+
+    // Ce are câmpul ACUM, ca să schimbăm doar ce s-a cerut.
+    const plan = await planRand(r);
+    const nivAcum = plan.peCamp.get(deLa) || nr(r.niveluri);
+    const palAcum = plan.locuriLa(deLa, 1);
+    const niv = b.niveluri === undefined || b.niveluri === "" ? nivAcum : Math.round(nr(b.niveluri));
+    const pal = b.paleti === undefined || b.paleti === "" ? palAcum : Math.round(nr(b.paleti));
+    if (niv < 1 || niv > NIVEL_MAX) return raspunde(400, { ok: false, mesaj: `Între 1 și ${NIVEL_MAX} niveluri.` });
+    if (pal < 1 || pal > PALETI_MAX) return raspunde(400, { ok: false, mesaj: `Între 1 și ${PALETI_MAX} paleți pe câmp.` });
+
+    // Porțiunile de după schimbare: scoatem câmpurile atinse din toate
+    // porțiunile existente și punem una nouă peste ele. Așa două apăsări pe
+    // același câmp nu lasă în urmă un morman de intervale suprapuse.
+    const vechi = await sectoareRand(r.id);
+    const ramase = [];
+    for (const s of vechi) {
+      // Bucata dinainte și bucata de după intervalul atins.
+      if (s.de_la < deLa) ramase.push({ ...s, pana_la: Math.min(s.pana_la, deLa - 1) });
+      if (s.pana_la > panaLa) ramase.push({ ...s, de_la: Math.max(s.de_la, panaLa + 1) });
+    }
+    const nouSector = {
+      de_la: deLa,
+      pana_la: panaLa,
+      niveluri: niv === nr(r.niveluri) ? null : niv,
+      locuri: pal === nr(r.locuri_pe_camp) ? null : pal,
+    };
+    const dorite = ramase.filter((s) => s.pana_la >= s.de_la && (s.niveluri !== null || s.locuri !== null));
+    // Un câmp care a ajuns exact pe cifrele rândului nu mai are nevoie de
+    // porțiune: o lăsăm să dispară, ca lista să rămână scurtă și citibilă.
+    if (nouSector.niveluri !== null || nouSector.locuri !== null) dorite.push(nouSector);
+    dorite.sort((a, c) => a.de_la - c.de_la || a.pana_la - c.pana_la);
+
+    const viitor = nivelurilePeCamp(r, dorite, campuri);
+    const varf = Math.max(nr(r.niveluri), ...dorite.map((s) => s.niveluri || 0), 1);
+    const nivv = await niveluriRand(r, varf);
+    const hl = new Map(nivv.map((n) => [n.nivel, n.locuri]));
+    const afara = await locuriInAfara(r.id, campuri, (c) => viitor.get(c) || 0, locuriLaViitor(r, dorite, campuri, (n) => hl.get(n) || nr(r.locuri_pe_camp)));
+    if (afara.length)
+      return raspunde(409, {
+        ok: false,
+        mesaj: `Nu pot: pe ${afara.slice(0, 5).map((a) => a.adresa).join(", ")}${afara.length > 5 ? "…" : ""} stă marfă.`,
+      });
+
+    try {
+      await db.prepare("DELETE FROM ct_sectoare WHERE rand_id = ?").run(r.id);
+      for (const s of dorite) {
+        await db
+          .prepare("INSERT INTO ct_sectoare (rand_id, camp_de_la, camp_pana_la, niveluri, locuri_pe_camp) VALUES (?, ?, ?, ?, ?)")
+          .run(r.id, s.de_la, s.pana_la, s.niveluri, s.locuri);
+      }
+    } catch (e) {
+      return raspunde(500, { ok: false, mesaj: "Tabelul de porțiuni nu există în bază. Repornește aplicația." });
+    }
+    await regenereazaLocuri(r.id);
+    const dupa = await planRand(r);
+    const unde = deLa === panaLa ? `Câmpul ${deLa}` : `Câmpurile ${deLa}–${panaLa}`;
+    return raspunde(200, {
+      ok: true,
+      mesaj: `${unde}: ${niv} ${niv === 1 ? "nivel" : "niveluri"} × ${pal} ${pal === 1 ? "palet" : "paleți"}. ${dupa.locuri} locuri în rând.`,
+      reincarca: true,
+    });
+  });
+
   // ---- Porțiuni de rând cu alt număr de niveluri --------------------------
   // „Trebuie sa pot configura pe acelasi rand si 3 si 2 si 5 si 1 nivel pe
   // orice interval adica nu sunt toate de 3."
@@ -2623,27 +3029,31 @@ function register(router) {
       const deLa = Math.round(nr(b[`s${i}_de_la`]));
       const panaLa = Math.round(nr(b[`s${i}_pana_la`]));
       const niv = Math.round(nr(b[`s${i}_niveluri`]));
-      // Rând complet gol = rând șters. Rând pe jumătate completat = greșeală
-      // de tastare, și e mai bine să i se spună decât să fie înghițită.
-      if (!deLa && !panaLa && !niv) continue;
-      if (!deLa || !panaLa || !niv) return spune("eroare", `Porțiunea ${i + 1} e incompletă: completează și de la, și până la, și câte niveluri.`);
+      const pal = Math.round(nr(b[`s${i}_paleti`]));
+      // Rând complet gol = rând șters. Interval fără nicio cifră = rând care
+      // n-ar spune nimic. Jumătate de interval = greșeală de tastare, și e
+      // mai bine să i se spună decât să fie înghițită.
+      if (!deLa && !panaLa && !niv && !pal) continue;
+      if (!deLa || !panaLa) return spune("eroare", `Porțiunea ${i + 1} e incompletă: completează și de la ce câmp, și până la ce câmp.`);
+      if (!niv && !pal) return spune("eroare", `Porțiunea ${deLa}–${panaLa} nu schimbă nimic: scrie câte niveluri are, câți paleți intră într-un câmp, sau amândouă.`);
       if (deLa < 1 || panaLa > campuri) return spune("eroare", `Rândul are ${campuri} câmpuri, iar porțiunea ${deLa}–${panaLa} iese din el.`);
       if (panaLa < deLa) return spune("eroare", `Porțiunea ${deLa}–${panaLa} e scrisă invers: „până la" trebuie să fie cel puțin cât „de la".`);
-      if (niv < 1 || niv > NIVEL_MAX) return spune("eroare", `Un rând poate avea între 1 și ${NIVEL_MAX} niveluri, nu ${niv}.`);
-      dorite.push({ de_la: deLa, pana_la: panaLa, niveluri: niv });
+      if (niv && (niv < 1 || niv > NIVEL_MAX)) return spune("eroare", `Un rând poate avea între 1 și ${NIVEL_MAX} niveluri, nu ${niv}.`);
+      if (pal && (pal < 1 || pal > PALETI_MAX)) return spune("eroare", `Într-un câmp intră între 1 și ${PALETI_MAX} paleți, nu ${pal}.`);
+      dorite.push({ de_la: deLa, pana_la: panaLa, niveluri: niv || null, locuri: pal || null });
     }
     dorite.sort((a, c) => a.de_la - c.de_la || a.pana_la - c.pana_la);
 
     // Verificăm pe configurația VIITOARE, nu pe cea de acum.
     const viitor = nivelurilePeCamp(r, dorite, campuri);
-    const varf = Math.max(nr(r.niveluri), ...dorite.map((s) => s.niveluri), 1);
+    const varf = Math.max(nr(r.niveluri), ...dorite.map((s) => s.niveluri || 0), 1);
     const niv = await niveluriRand(r, varf);
     const hLocuri = new Map(niv.map((n) => [n.nivel, n.locuri]));
     const afara = await locuriInAfara(
       r.id,
       campuri,
       (camp) => viitor.get(camp) || 0,
-      (n) => hLocuri.get(n) || nr(r.locuri_pe_camp)
+      locuriLaViitor(r, dorite, campuri, (n) => hLocuri.get(n) || nr(r.locuri_pe_camp))
     );
     if (afara.length) {
       return spune(
@@ -2656,8 +3066,8 @@ function register(router) {
       await db.prepare("DELETE FROM ct_sectoare WHERE rand_id = ?").run(r.id);
       for (const s of dorite) {
         await db
-          .prepare("INSERT INTO ct_sectoare (rand_id, camp_de_la, camp_pana_la, niveluri) VALUES (?, ?, ?, ?)")
-          .run(r.id, s.de_la, s.pana_la, s.niveluri);
+          .prepare("INSERT INTO ct_sectoare (rand_id, camp_de_la, camp_pana_la, niveluri, locuri_pe_camp) VALUES (?, ?, ?, ?, ?)")
+          .run(r.id, s.de_la, s.pana_la, s.niveluri, s.locuri);
       }
     } catch (e) {
       return spune("eroare", "Tabelul de porțiuni încă nu există în bază. Repornește aplicația și încearcă din nou.");
@@ -2667,8 +3077,10 @@ function register(router) {
     return spune(
       "ok",
       dorite.length
-        ? `Salvat: câmpurile ${bucatiRand(dupa.peCamp, campuri).map((x) => `${x.de_la === x.pana_la ? x.de_la : x.de_la + "–" + x.pana_la} cu ${x.niveluri}`).join(", ")} niveluri. ${dupa.locuri} locuri în rând.`
-        : `Porțiunile au fost șterse — tot rândul are acum ${nr(r.niveluri)} niveluri, ${dupa.locuri} locuri.`
+        ? `Salvat: câmpurile ${bucatiRand(dupa.peCamp, campuri, dupa.locuriLa)
+            .map((x) => `${x.de_la === x.pana_la ? x.de_la : x.de_la + "–" + x.pana_la} cu ${x.niveluri} niv. × ${x.paleti} pal.`)
+            .join(", ")}. ${dupa.locuri} locuri în rând.`
+        : `Porțiunile au fost șterse — tot rândul are acum ${nr(r.niveluri)} niveluri și ${nr(r.locuri_pe_camp)} paleți pe câmp, ${dupa.locuri} locuri.`
     );
   });
 
@@ -2697,7 +3109,8 @@ function register(router) {
         (s, i) => `<tr>
           <td><input class="ct-in" style="width:80px" type="number" name="s${i}_de_la" min="1" max="${nr(r.campuri)}" value="${s.de_la || ""}" placeholder="de la"></td>
           <td><input class="ct-in" style="width:80px" type="number" name="s${i}_pana_la" min="1" max="${nr(r.campuri)}" value="${s.pana_la || ""}" placeholder="până la"></td>
-          <td><input class="ct-in" style="width:80px" type="number" name="s${i}_niveluri" min="1" max="${NIVEL_MAX}" value="${s.niveluri || ""}" placeholder="niveluri"></td>
+          <td><input class="ct-in" style="width:80px" type="number" name="s${i}_niveluri" min="1" max="${NIVEL_MAX}" value="${s.niveluri || ""}" placeholder="ca rândul"></td>
+          <td><input class="ct-in" style="width:80px" type="number" name="s${i}_paleti" min="1" max="${PALETI_MAX}" value="${s.locuri || ""}" placeholder="ca rândul"></td>
         </tr>`
       )
       .join("");
@@ -2769,24 +3182,30 @@ function register(router) {
         <div class="form-actions"><button class="btn" type="submit">Salvează nivelurile</button></div>
       </form>
 
-      <h2 style="margin-top:26px">Porțiuni cu alt număr de niveluri</h2>
+      <h2 style="margin-top:26px">Porțiuni de rând: alt număr de niveluri, alt număr de paleți</h2>
       <p style="font-size:13px;color:var(--text-muted);max-width:880px;margin:0 0 10px">
         Rândul nu e obligatoriu la fel pe toată lungimea lui: poate avea 3 niveluri pe o bucată, 5 pe alta și 1 lângă
-        ușă. Scrie aici de la ce câmp până la ce câmp și câte niveluri are porțiunea.
-        <strong>Câmpurile care nu apar în niciun interval rămân la ${nr(r.niveluri)} niveluri</strong>, cifra rândului de sus.
-        Ca să ștergi o porțiune, golește-i căsuțele și salvează.
+        ușă, iar deschiderea câmpului poate ține 3 paleți într-un loc și 2 sau 1 în altul.
+        Scrie de la ce câmp până la ce câmp, apoi ce e altfel acolo.
+        <strong>O căsuță lăsată goală înseamnă „ca rândul"</strong> — ${nr(r.niveluri)} niveluri și ${nr(r.locuri_pe_camp)} paleți pe câmp,
+        cifrele de sus. Poți schimba doar înălțimea, doar lățimea, sau pe amândouă.
+        Ca să ștergi o porțiune, golește-i tot rândul și salvează.
       </p>
       <p style="font-size:13px;max-width:880px;margin:0 0 10px">
-        Cum arată rândul acum: ${plan.uniform ? `toate cele ${nr(r.campuri)} câmpuri cu ${nr(r.niveluri)} niveluri` : `câmpurile ${rezumatSectoare(plan, nr(r.campuri))}`}
+        Cum arată rândul acum: ${plan.uniform ? `toate cele ${nr(r.campuri)} câmpuri cu ${nr(r.niveluri)} niveluri × ${nr(r.locuri_pe_camp)} paleți` : `câmpurile ${rezumatSectoare(plan, nr(r.campuri))}`}
         — <strong>${plan.locuri} locuri</strong> în total.
       </p>
-      <form class="form" method="post" action="/stocuri/ct-park/configurare/${r.id}/sectoare" style="max-width:560px">
+      <form class="form" method="post" action="/stocuri/ct-park/configurare/${r.id}/sectoare" style="max-width:640px">
         <table class="table" style="margin-bottom:10px">
-          <thead><tr><th>De la câmpul</th><th>Până la câmpul</th><th>Câte niveluri</th></tr></thead>
+          <thead><tr><th>De la câmpul</th><th>Până la câmpul</th><th>Câte niveluri</th><th>Câți paleți / câmp</th></tr></thead>
           <tbody>${formSectoare}</tbody>
         </table>
         <div class="form-actions"><button class="btn" type="submit">Salvează porțiunile</button></div>
       </form>
+      <p style="font-size:12px;color:var(--text-muted);max-width:880px;margin:8px 0 0">
+        Aceleași lucruri se pot face și cu degetul, direct pe desen:
+        <a href="/stocuri/ct-park/rand/${r.id}">deschide fața rândului</a> și apasă „Editez raftul".
+      </p>
 
       <style>
         .ct-in { width:110px; padding:4px 6px; font-size:13px; }
@@ -2813,7 +3232,12 @@ function register(router) {
     // sector de 5 niveluri nu trebuie tăiat fiindcă rândul a coborât la 3.
     const sect = await sectoareRand(r.id);
     const viitor = nivelurilePeCamp({ ...r, niveluri }, sect, campuri);
-    const afara = await locuriInAfara(r.id, campuri, (c) => viitor.get(c) || 0, () => perCamp);
+    const afara = await locuriInAfara(
+      r.id,
+      campuri,
+      (c) => viitor.get(c) || 0,
+      locuriLaViitor(r, sect, campuri, () => perCamp)
+    );
     if (afara.length) {
       const mesaj = `Nu pot micșora rândul: pe locurile ${afara.slice(0, 10).map((a) => a.adresa).join(", ")} stă marfă. Scoate-o întâi din depozit.`;
       return redirect(ctx.res, `/stocuri/ct-park/configurare/${r.id}?eroare=${encodeURIComponent(mesaj)}`);
@@ -2847,18 +3271,20 @@ function register(router) {
 async function regenereazaLocuri(randId) {
   const r = await db.prepare("SELECT * FROM ct_randuri WHERE id = ?").get(randId);
   if (!r) return;
-  const { niveluri, peCamp } = await planRand(r);
+  const { niveluri, peCamp, locuriLa } = await planRand(r);
 
-  // Tot ce TREBUIE să existe după configurația de acum. Numărul de paleți pe
-  // câmp se ia de pe nivel, nu de pe rând: nivelul de jos poate ține doi
-  // paleți lați, iar cel de sus trei înguste. Iar ÎNĂLȚIMEA se ia de pe
-  // câmp, nu de pe rând: pe câmpurile dintr-un sector de 2 niveluri nu se
-  // generează locuri la nivelul 3, oricât de înalt ar fi restul rândului.
+  // Tot ce TREBUIE să existe după configurația de acum. Și înălțimea, și
+  // lățimea se iau de pe CÂMP, nu de pe rând: pe câmpurile dintr-un sector
+  // de 2 niveluri nu se generează locuri la nivelul 3, iar într-un câmp de
+  // 2 paleți nu se generează poziția 3 — oricât de înalt sau de larg ar fi
+  // restul rândului. Un loc generat degeaba nu e inofensiv: e o adresă pe
+  // care sistemul o propune, iar omul se duce cu paleta la un raft care nu
+  // există acolo.
   const cerute = new Set();
   for (const n of niveluri) {
     for (let camp = 1; camp <= nr(r.campuri); camp++) {
       if (n.nivel > (peCamp.get(camp) || 0)) continue;
-      for (let poz = 1; poz <= n.locuri; poz++) cerute.add(`${n.nivel}|${camp}|${poz}`);
+      for (let poz = 1; poz <= locuriLa(camp, n.nivel); poz++) cerute.add(`${n.nivel}|${camp}|${poz}`);
     }
   }
 
@@ -2900,8 +3326,10 @@ module.exports = {
   // Exportate pentru teste: forma rândului se poate verifica fără să treci
   // prin pagină, iar `bucatiRand` și `nivelurilePeCamp` sunt pur aritmetice.
   nivelurilePeCamp,
+  paletiPeCamp,
   bucatiRand,
   sectoareRand,
   planRand,
   NIVEL_MAX,
+  PALETI_MAX,
 };
