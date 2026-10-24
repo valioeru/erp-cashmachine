@@ -129,6 +129,16 @@ function curata() {
     bine("legenda spune ce se poate face", /Click pe un loc <strong>liber<\/strong>/.test(p.corp));
     // Fiecare casuta stie unde e, ca bara sa poata spune daca sunt lipite.
     bine("fiecare loc își știe nivelul, câmpul și poziția", /data-nivel="1" data-camp="1" data-pozitie="1"/.test(p.corp));
+
+    // BUGUL PRINS DE VALI: casutele se cheama „loc" si sunt mai multe, deci
+    // adresa iese „loc=1&loc=2&loc=3". Parserul de query al aplicatiei face
+    // Object.fromEntries(searchParams.entries()), care pastreaza DOAR
+    // ULTIMA valoare — din trei locuri alese ajungea unul, si ala citit sub
+    // alt nume. De-aia exista campul ascuns lipit cu virgula.
+    bine("există câmpul ascuns care duce toate locurile deodată", /id="locuri-lipite"/.test(p.corp));
+    bine("și se numește cum îl citește pagina următoare", /name="locuri" id="locuri-lipite"/.test(p.corp));
+    bine("JS-ul îl umple la fiecare bifă", /lipite_camp\.value = a\.map/.test(p.corp));
+    bine("și îl golește la renunț", /lipite_camp\.value = ""/.test(p.corp));
   }
 
   const loc = (nivel, camp, poz) => Number(unul(`SELECT id FROM ct_locuri WHERE rand_id=${rand} AND nivel=${nivel} AND camp=${camp} AND pozitie=${poz}`));
@@ -142,6 +152,11 @@ function curata() {
     bine("cu adresele lor", /TH-1-2-1/.test(p.corp) && /TH-1-2-2/.test(p.corp));
     bine("și le duce mai departe în formular", new RegExp('name="locuri_alese" value="' + a + "," + b2 + '"').test(p.corp));
     bine("scrie clar că nu mai caută altundeva", /nu mai caută altundeva/.test(p.corp));
+
+    // Plasa de siguranta: daca JS-ul n-a rulat, parserul lasa o singura
+    // casuta („loc"). Mai bine un loc decat niciunul si fara explicatie.
+    const unSingur = await cer("/stocuri/ct-park/intrare", { query: { rand: String(rand), loc: String(a) } });
+    bine("merge și forma veche, cu un singur loc", /1 loc|locul ales/i.test(unSingur.corp) || /TH-1-2-1/.test(unSingur.corp), "nu recunoaste loc=");
 
     // Fara locuri alese, pagina ramane cum era.
     const f = await cer("/stocuri/ct-park/intrare", { query: {} });

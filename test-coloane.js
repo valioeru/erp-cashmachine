@@ -106,5 +106,26 @@ console.log("\n6. Casuta de pret din formularul de comanda");
   bine("tabelul de linii NU e invelit in .tabel-lat", !/tabel-lat/.test(comenzi));
 }
 
+console.log("\n7. Formularele nu ies din casetă");
+{
+  // Bugul, acelasi pe toate paginile cu formular: intr-un grid, `1fr`
+  // inseamna `minmax(auto, 1fr)`, iar `auto` NU coboara sub latimea
+  // continutului. Un <select> cu „GUANGDONG TENGEN INDUSTRIAL GROUP CO.,LTD"
+  // in lista umfla coloana la latimea numelui ala si impinge restul campurilor
+  // in afara casetei — pe ecran raman taiate de marginea paginii.
+  const fs = require("fs");
+  const css = fs.readFileSync(require("path").join(__dirname, "public", "style.css"), "utf8");
+  const campul = (css.match(/\.field \{[^}]*\}/) || [""])[0];
+  bine("clasa .field are min-width: 0", /min-width:\s*0/.test(campul), campul);
+  const controale = (css.match(/\.field input, \.field select, \.field textarea \{[^}]*\}/) || [""])[0];
+  bine("și controalele din ea la fel", /min-width:\s*0/.test(controale));
+  // Fara box-sizing, padding-ul de 10px se adauga peste 100% si tot iese.
+  bine("cu box-sizing, ca padding-ul să nu împingă", /box-sizing:\s*border-box/.test(controale));
+  bine("și max-width 100%", /max-width:\s*100%/.test(controale));
+  // Selectul isi ia latimea din cea mai lunga optiune daca nu-i spui altfel.
+  bine("selectul se încadrează în coloană", /\.field select \{[^}]*width:\s*100%/.test(css));
+  bine("iar textul lung se taie, nu împinge", /\.field select \{[^}]*text-overflow:\s*ellipsis/.test(css));
+}
+
 console.log(esecuri ? "\n" + esecuri + " ESEC(URI)\n" : "\nToate trecute.\n");
 process.exit(esecuri ? 1 : 0);
