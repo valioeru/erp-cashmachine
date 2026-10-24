@@ -10,6 +10,35 @@
 // respinsă. Singurul mod sigur e să lăsăm pagina raportului să-și facă
 // singură cererea, iar noi doar îi rescriem perioada înainte să plece.
 //
+// CE S-A STRICAT ȘI CUM S-A REPARAT (24.10.2026)
+//
+// Din 23.09 sincronizarea de noapte cădea în fiecare zi cu „Raportul
+// /raport/facturi/ n-a răspuns în timp util." Nu SmartBill era de vină:
+// verificat pe viu, adresa se potrivea cu tiparul, iar raportul răspundea în
+// sub 9 secunde cu 38 KB. Ce nu mergea era declanșarea.
+//
+// Vechiul mers era: încarcă iframe-ul complet → pune petecul pe XHR →
+// cheamă fnDraw() ca să ceară din nou datele. Pasul trei e cel care pica.
+// `reincarca()` se declara mulțumit de îndată ce exista `$(tabel).dataTable`
+// — adică de îndată ce pluginul DataTables era încărcat, nu de îndată ce
+// TABELUL era pornit ca DataTable cu sursă pe server. Chemat prea devreme,
+// `$(t).dataTable()` nu redesenează tabelul existent, ci pornește unul nou,
+// local, fără sAjaxSource. fnDraw() al lui redesenează în pagină și nu cere
+// nimic de la server. Nicio cerere, niciun răspuns, 45 de secunde de
+// așteptare și eroarea de mai sus — care arăta spre SmartBill, deși vina era
+// la noi.
+//
+// Mersul nou nu mai are nevoie de pasul trei deloc. Petecul se pune DEVREME,
+// cât documentul din iframe e încă la `readyState: "loading"`, deci înainte
+// ca pagina să-și facă singură prima cerere. Cererea aia, a ei, primește
+// perioada noastră înainte să plece, iar răspunsul ei e răspunsul nostru. Nu
+// mai declanșăm nimic: lăsăm pagina să facă ce ar fi făcut oricum.
+// Măsurat pe /raport/facturi/: petec pus la 723 ms, răspuns complet la 4,6 s.
+//
+// fnDraw a rămas ca plasă de siguranță, pentru cazul în care o pagină nu
+// cere nimic de la sine — dar acum se cheamă doar după ce tabelul chiar e un
+// DataTable cu sursă pe server, și doar dacă n-a plecat nicio cerere.
+//
 // Cum se folosește:
 //   fetch("https://erp-cashmachine-app.onrender.com/punte/sincronizare.js").then(r=>r.text()).then(eval)
 //   await window.__sync.tot(14)      // ultimele 14 zile
@@ -64,25 +93,33 @@
     });
   }
 
-  // Deschide raportul într-un iframe ascuns, îi rescrie filtrul și îi întoarce
-  // răspunsul JSON. `declanseaza` primește documentul iframe-ului și apasă
-  // butonul care cere din nou datele.
+  // Deschide raportul într-un iframe ascuns, îi rescrie perioada în prima lui
+  // cerere și îi întoarce răspunsul JSON. `declanseaza` a rămas ca plasă de
+  // siguranță: se folosește doar dacă pagina n-a cerut nimic de la sine.
   async function raport(cale, potrivesteUrl, filtru, declanseaza) {
+    const dorm = (ms) => new Promise((r) => setTimeout(r, ms));
     const cadru = document.createElement("iframe");
     cadru.style.cssText = "position:fixed;left:-9999px;top:0;width:1200px;height:800px;opacity:0";
     cadru.src = cale;
     document.body.appendChild(cadru);
-    try {
-      const w = await asteapta(
-        () => (cadru.contentWindow && cadru.contentDocument && cadru.contentDocument.readyState === "complete" ? cadru.contentWindow : null),
-        `Raportul ${cale} nu s-a încărcat.`,
-        30000
-      );
-      const actiune = await asteapta(() => declanseaza(cadru.contentDocument, w), `Nu am găsit cum să reîmprospătez raportul ${cale}.`, 30000);
 
-      let raspuns = null;
-      const os = w.XMLHttpRequest.prototype.send;
+    // Ce s-a întâmplat, pas cu pas. Dacă pică, mesajul de eroare spune exact
+    // unde s-a oprit — nu mai arătăm cu degetul spre SmartBill pentru o
+    // greșeală de-a noastră, cum s-a întâmplat o lună întreagă.
+    const urma = { petecLaMs: null, readyStateLaPetec: null, cereri: 0, incarcat: false, redesenat: false };
+    let raspuns = null;
+    let pus = false;
+    const t0 = Date.now();
+
+    const pune = () => {
+      if (pus) return;
+      const w = cadru.contentWindow;
+      const d = cadru.contentDocument;
+      // `about:blank` e documentul de dinainte de navigare: dacă punem
+      // petecul pe el, se pierde când sosește documentul adevărat.
+      if (!w || !d || !d.URL || d.URL.indexOf("about:blank") !== -1 || !w.XMLHttpRequest) return;
       const oo = w.XMLHttpRequest.prototype.open;
+      const os = w.XMLHttpRequest.prototype.send;
       w.XMLHttpRequest.prototype.open = function (m, u) {
         // unele rapoarte cer o cale relativă ("ajax/"), altele una absolută;
         // o aducem la aceeași formă, altfel filtrul nu recunoaște cererea
@@ -95,6 +132,7 @@
       };
       w.XMLHttpRequest.prototype.send = function (b) {
         if (potrivesteUrl.test(String(this.__u || ""))) {
+          urma.cereri++;
           try {
             const p = new URLSearchParams(b);
             for (const [k, v] of Object.entries(filtru)) p.set(k, v);
@@ -102,16 +140,64 @@
           } catch (e) {
             /* raport cu alt format de corp: îl lăsăm cum e */
           }
-          this.addEventListener("load", () => {
+          this.addEventListener("load", function () {
             raspuns = this.responseText;
           });
         }
         return os.call(this, b);
       };
+      pus = true;
+      urma.petecLaMs = Date.now() - t0;
+      urma.readyStateLaPetec = d.readyState;
+    };
 
-      if (typeof actiune === "function") actiune();
-      else actiune.click();
-      await asteapta(() => raspuns, `Raportul ${cale} n-a răspuns în timp util.`, 45000);
+    try {
+      // Pasul 1: prindem documentul cât e încă în „loading" și punem petecul
+      // înainte să plece prima cerere a paginii.
+      while (Date.now() - t0 < 30000 && !pus) {
+        try {
+          pune();
+        } catch (e) {
+          /* documentul încă nu e al nostru: mai încercăm */
+        }
+        if (!pus) await dorm(20);
+      }
+      if (!pus) throw new Error(`Raportul ${cale} nu s-a încărcat deloc în 30 s.`);
+
+      // Pasul 2: așteptăm răspunsul cererii pe care și-o face singură pagina.
+      while (Date.now() - t0 < 45000 && !raspuns) {
+        if (cadru.contentDocument && cadru.contentDocument.readyState === "complete") urma.incarcat = true;
+        await dorm(100);
+      }
+
+      // Pasul 3, doar dacă n-a plecat nicio cerere: împingem noi tabelul.
+      // Condiția e mai strictă decât înainte — `declanseaza` întoarce ceva
+      // numai când tabelul chiar e pornit cu sursă pe server.
+      if (!raspuns && !urma.cereri) {
+        let actiune = null;
+        try {
+          actiune = declanseaza(cadru.contentDocument, cadru.contentWindow);
+        } catch (e) {
+          actiune = null;
+        }
+        if (actiune) {
+          urma.redesenat = true;
+          if (typeof actiune === "function") actiune();
+          else actiune.click();
+          const t1 = Date.now();
+          while (Date.now() - t1 < 45000 && !raspuns) await dorm(100);
+        }
+      }
+
+      if (!raspuns) {
+        throw new Error(
+          `Raportul ${cale} n-a răspuns în timp util. ` +
+            `Petec pus la ${urma.petecLaMs} ms (readyState ${urma.readyStateLaPetec}), ` +
+            `pagina ${urma.incarcat ? "s-a încărcat" : "NU s-a încărcat complet"}, ` +
+            `${urma.cereri} cereri potrivite, redesenare ${urma.redesenat ? "încercată" : "nu a fost nevoie"}.`
+        );
+      }
+      log(`${cale}: cules`, { ms: Date.now() - t0, cereri: urma.cereri, petecLaMs: urma.petecLaMs });
       return JSON.parse(raspuns);
     } finally {
       cadru.remove();
@@ -135,15 +221,30 @@
     return log(`${tip}: trimis`, { randuri: randuri.length, lot, raspuns: lot ? undefined : t.slice(0, 200) });
   }
 
-  // Cum îi cerem raportului să se reîncarce: dacă tabelul e un DataTables cu
-  // date luate de pe server, îi cerem chiar lui să deseneze din nou — e mai
-  // sigur decât să căutăm un buton care se poate redenumi oricând. Dacă nu
-  // găsim tabelul, apăsăm butonul, ca înainte.
+  // Cum îi cerem raportului să se reîncarce, dacă ajungem până acolo.
+  //
+  // AICI A FOST GREȘEALA care a oprit sincronizarea o lună. Verificarea era
+  // `typeof $(t).dataTable === "function"` — adevărată de îndată ce pluginul
+  // DataTables e încărcat, chiar dacă TABELUL n-a fost încă pornit. Pe un
+  // tabel nepornit, `$(t).dataTable()` nu redesenează nimic: pornește un
+  // DataTable nou, local, fără sAjaxSource. fnDraw() al lui nu cere nimic de
+  // la server, deci nu venea niciun răspuns și cădea cu „n-a răspuns în timp
+  // util", arătând spre SmartBill.
+  //
+  // Acum căutăm tabelul în `$.fn.dataTableSettings` — lista tabelelor chiar
+  // pornite — și cerem redesenarea doar dacă are sursă pe server. Altfel
+  // întoarcem null, iar `raport()` spune limpede că n-a găsit ce să apese.
+  const dtPornit = (win, t) => {
+    const $ = win.jQuery;
+    if (!$ || !t) return null;
+    const toate = ($.fn && $.fn.dataTableSettings) || [];
+    for (const s of toate) if (s && s.nTable === t && s.sAjaxSource) return s;
+    return null;
+  };
   const reincarca = (idTabel, text) => (doc, win) => {
     try {
-      const $ = win.jQuery;
       const t = idTabel ? doc.getElementById(idTabel) : null;
-      if ($ && t && typeof $(t).dataTable === "function") return () => $(t).dataTable().fnDraw();
+      if (dtPornit(win, t)) return () => win.jQuery(t).dataTable().fnDraw();
     } catch (e) {
       /* pagina n-are jQuery: mergem pe buton */
     }
@@ -159,7 +260,7 @@
     const j = await raport(
       "/raport/facturi/",
       /\/raport\/facturi\/ajax/,
-      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "2000" },
+      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "5000" },
       reincarca("invoices_datatable")
     );
     const firma = S.firma();
@@ -184,7 +285,7 @@
     const j = await raport(
       "/raport/incasari/",
       /\/raport\/incasari\/ajax/,
-      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "2000" },
+      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "5000" },
       reincarca("payments_datatable")
     );
     const firma = S.firma();
