@@ -463,6 +463,147 @@ function curata() {
     bine("intrarea în editare golește selecția de marfă", /golim selectia de marfa|Golim selectia de marfa/i.test(p.corp));
   }
 
+  console.log("\n13. Categoriile de zonă");
+  {
+    // „Sa fie si produse intermediare aici in lista." Lista e sursa unică:
+    // o singură constantă hrănește lista derulantă de pe zone, eticheta
+    // rândului, formularul de intrare, legenda ȘI filtrul care validează ce
+    // se salvează. Testul se uită în toate, nu doar în prima.
+    const p = await cer("/stocuri/ct-park/rand/:id", { params: { id: String(rand) } });
+    const optiuniZone = [...p.corp.matchAll(/<option value="([^"]+)"[^>]*>[^<]*<\/option>/g)].map((m) => m[1]);
+    for (const c of ["produse finite", "produse intermediare", "consumabile", "materie primă"])
+      bine("zonele pot fi „" + c + "”", optiuniZone.includes(c), optiuniZone.slice(0, 8).join(" | "));
+    bine("și categoria nouă are culoarea ei în legendă, nu grina implicită",
+      /background:#1a6e8e"><\/i>produse intermediare/.test(p.corp),
+      (p.corp.match(/<span><i style="background:[^"]+"><\/i>[^<]+<\/span>/g) || []).join(" "));
+
+    // Filtrul de validare e același lista: dacă ar fi rămas pe trei, zona
+    // s-ar fi salvat ca NULL și omul ar fi crezut că n-a mers click-ul.
+    const nivelUnu = 1;
+    await cer("/stocuri/ct-park/rand/:id/zone", {
+      params: { id: String(rand) },
+      metoda: "post",
+      body: { [`z_${nivelUnu}_1`]: "produse intermediare" },
+    });
+    egal("o zonă chiar se salvează pe categoria nouă",
+      String(unul(`SELECT categorie FROM ct_locuri WHERE rand_id=${rand} AND nivel=${nivelUnu} AND camp=1 AND pozitie=1`)),
+      "produse intermediare");
+
+    // Și lista de pe intrarea de marfă, care e alt ecran cu aceeași sursă.
+    const i = await cer("/stocuri/ct-park/intrare", { query: { rand: String(rand) } });
+    bine("și la intrarea de marfă se poate alege", />produse intermediare</.test(i.corp));
+  }
+
+  console.log("\n14. Mutarea unei palete, pe rute reale");
+  {
+    // Rândul vine din secțiunile de dinainte ciopârțit — câmpul 2 avea 4
+    // niveluri × 1 palet, 8–10 un singur nivel. Îl aducem la o formă știută
+    // înainte să ne legăm de adrese, altfel testul ăsta se strică de fiecare
+    // dată când se schimbă unul de mai sus, și pare că e vina mutării.
+    await cer("/stocuri/ct-park/configurare/:id/sectoare", {
+      params: { id: String(rand) }, metoda: "post",
+      body: { s0_de_la: "", s0_pana_la: "", s0_niveluri: "", s0_paleti: "" },
+    });
+    egal("pornim de la un rând uniform: 10 × 3 × 2",
+      Number(unul(`SELECT COUNT(*) FROM ct_locuri WHERE rand_id = ${rand}`)), 60);
+
+    // Punem o paletă lată de 2 locuri în câmpul 2, nivelul 1, și o mutăm.
+    q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, um, data_intrare) VALUES ('TS-M', 'TEST-SECTOARE', 10, 'buc', '2026-10-24')`);
+    const palet = Number(unul("SELECT id FROM ct_paleti WHERE cod = 'TS-M'"));
+    const locul = (c, n, p) => Number(unul(`SELECT id FROM ct_locuri WHERE rand_id=${rand} AND camp=${c} AND nivel=${n} AND pozitie=${p}`));
+    const a1 = locul(2, 1, 1), a2 = locul(2, 1, 2);
+    q(`INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (${palet}, ${a1}), (${palet}, ${a2})`);
+
+    const unde = (r) => ((r.antet && (r.antet.Location || r.antet.location)) || "");
+
+    // Pagina de mutare o găsește în listă.
+    let p = await cer("/stocuri/ct-park/muta", {});
+    bine("meniul «Mută marfă» se deschide", p.cod === 200, p.cod);
+    bine("și paleta e în listă cu adresele ei", /TEST-SECTOARE|marfă/.test(p.corp) && p.corp.includes("Mut-o"), p.corp.length);
+
+    // Cu paleta aleasă, propune unde încape.
+    p = await cer("/stocuri/ct-park/muta", { query: { palet: String(palet) } });
+    bine("cu paleta aleasă, spune pe ce stă acum", p.cod === 200 && /2 locuri/.test(p.corp), p.cod);
+    bine("și propune ferestre de câte 2 locuri lipite", (p.corp.match(/name="locuri" value="\d+,\d+"/g) || []).length > 0,
+      (p.corp.match(/name="locuri" value="[^"]*"/g) || []).slice(0, 3).join(" "));
+    bine("are și formularul scris, cu rând/nivel/câmp/poziție",
+      /name="rand_id"/.test(p.corp) && /name="nivel"/.test(p.corp) && /name="camp"/.test(p.corp) && /name="pozitie"/.test(p.corp));
+
+    // Mutare scrisă: rândul, nivelul 2, câmpul 4, poziția 1.
+    p = await cer("/stocuri/ct-park/muta", {
+      metoda: "post",
+      body: { palet: String(palet), rand_id: String(rand), nivel: "2", camp: "4", pozitie: "1" },
+    });
+    bine("mutarea scrisă duce înapoi la rând, cu mesaj", /\/stocuri\/ct-park\/rand\/\d+\?ok=/.test(unde(p)), unde(p));
+    egal("paleta stă acum pe nivelul 2, câmpul 4, pozițiile 1-2",
+      q(`SELECT l.nivel, l.camp, l.pozitie FROM ct_ocupari o JOIN ct_locuri l ON l.id=o.loc_id
+           WHERE o.palet_id=${palet} ORDER BY l.pozitie`).map((x) => [Number(x.nivel), Number(x.camp), Number(x.pozitie)]),
+      [[2, 4, 1], [2, 4, 2]]);
+    egal("și locurile vechi sunt libere",
+      Number(unul(`SELECT COUNT(*) FROM ct_ocupari WHERE loc_id IN (${a1},${a2})`)), 0);
+
+    // Paleta nu trebuie să se spargă: un câmp cu o singură poziție liberă
+    // de la cea cerută încolo n-o poate primi. Câmpurile 8-10 au 1 nivel ×
+    // 2 paleți; cerem poziția 2, deci rămâne o singură poziție.
+    p = await cer("/stocuri/ct-park/muta", {
+      metoda: "post",
+      body: { palet: String(palet), rand_id: String(rand), nivel: "1", camp: "9", pozitie: "2" },
+    });
+    bine("nu o mută unde nu încap amândouă locurile", /eroare=/.test(unde(p)) && /sunt doar 1/.test(decodeURIComponent(unde(p))),
+      decodeURIComponent(unde(p)));
+
+    // Peste altă marfă: nu.
+    q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, um, data_intrare) VALUES ('TS-M2', 'TEST-SECTOARE', 1, 'buc', '2026-10-24')`);
+    const palet2 = Number(unul("SELECT id FROM ct_paleti WHERE cod = 'TS-M2'"));
+    const b1 = locul(6, 1, 1);
+    q(`INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (${palet2}, ${b1})`);
+    p = await cer("/stocuri/ct-park/muta", {
+      metoda: "post",
+      body: { palet: String(palet), locuri: b1 + "," + locul(6, 1, 2) },
+    });
+    bine("nu o mută peste altă paletă", /eroare=/.test(unde(p)) && /stă deja altă marfă/.test(decodeURIComponent(unde(p))),
+      decodeURIComponent(unde(p)));
+
+    // Locuri răzlețe: „atentie daca ocupa mai multe spatii sa aibe loc in
+    // partea aia". Două locuri din câmpuri diferite nu fac o paletă lată.
+    p = await cer("/stocuri/ct-park/muta", {
+      metoda: "post",
+      body: { palet: String(palet), locuri: locul(3, 1, 1) + "," + locul(5, 1, 1) },
+    });
+    bine("nu o mută pe locuri răzlețe", /eroare=/.test(unde(p)) && /nu sunt lipite/.test(decodeURIComponent(unde(p))),
+      decodeURIComponent(unde(p)));
+
+    // Un loc scos din uz nu primește marfă nici prin mutare.
+    const blocat = locul(3, 1, 1);
+    q(`UPDATE ct_locuri SET blocat = 1 WHERE id = ${blocat}`);
+    p = await cer("/stocuri/ct-park/muta", {
+      metoda: "post",
+      body: { palet: String(palet), locuri: blocat + "," + locul(3, 1, 2) },
+    });
+    bine("nici pe un loc scos din uz", /eroare=/.test(unde(p)) && /scos din uz/.test(decodeURIComponent(unde(p))),
+      decodeURIComponent(unde(p)));
+    q(`UPDATE ct_locuri SET blocat = 0 WHERE id = ${blocat}`);
+
+    // Mutarea cu un loc mai încolo, peste propriile locuri: trebuie să meargă.
+    p = await cer("/stocuri/ct-park/muta", {
+      metoda: "post",
+      body: { palet: String(palet), locuri: locul(4, 2, 2) + "," + locul(4, 2, 1) },
+    });
+    bine("mutarea în aceleași locuri se refuză cu «e deja acolo»",
+      /eroare=/.test(unde(p)) && /deja acolo/.test(decodeURIComponent(unde(p))), decodeURIComponent(unde(p)));
+
+    // Harta rândului știe ce paletă e pe fiecare loc și câte locuri ține.
+    const h = await cer("/stocuri/ct-park/rand/:id", { params: { id: String(rand) } });
+    bine("harta are butonul «Mut marfă»", /id="buton-mut"/.test(h.corp));
+    bine("și fiecare paletă își spune câte locuri ține", /data-palet-locuri="2"/.test(h.corp),
+      (h.corp.match(/data-palet-locuri="\d+"/g) || []).slice(0, 4).join(" "));
+    bine("bara de mutare duce la ruta de mutare", /action="\/stocuri\/ct-park\/muta"/.test(h.corp));
+    bine("iar bara de intrare tace cât timp se mută", /classList.contains\("ct-mut"\)/.test(h.corp));
+
+    q(`DELETE FROM ct_ocupari WHERE palet_id IN (${palet}, ${palet2})`);
+    q(`DELETE FROM ct_paleti WHERE id IN (${palet}, ${palet2})`);
+  }
+
   curata();
   console.log(esecuri ? `\n${esecuri} probleme.\n` : "\nTotul curat.\n");
   process.exit(esecuri ? 1 : 0);
