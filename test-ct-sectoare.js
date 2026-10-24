@@ -124,7 +124,9 @@ function curata() {
        rand_id INTEGER NOT NULL REFERENCES ct_randuri(id),
        camp_de_la INTEGER NOT NULL,
        camp_pana_la INTEGER NOT NULL,
-       niveluri INTEGER NOT NULL)`);
+       niveluri INTEGER)`);
+  q("ALTER TABLE ct_sectoare ADD COLUMN IF NOT EXISTS locuri_pe_camp INTEGER");
+  q("ALTER TABLE ct_sectoare ALTER COLUMN niveluri DROP NOT NULL");
   curata();
 
   console.log("\n1. Socoteala curată, fără bază de date");
@@ -156,6 +158,19 @@ function curata() {
     const h3 = mod.nivelurilePeCamp({ campuri: 4, niveluri: 3 }, [{ de_la: 2, pana_la: 99, niveluri: 1 }], 4);
     egal("o porțiune care trece de capăt se oprește la ultimul câmp",
       [1, 2, 3, 4].map((c) => h3.get(c)), [3, 1, 1, 1]);
+
+    // Lățimea: aceeași socoteală, pe paleți. „Acum ia 3 paleti peste tot
+    // trebuie sa pot pune si 2 si 1."
+    const p = mod.paletiPeCamp(r, [{ de_la: 2, pana_la: 3, locuri: 2 }, { de_la: 9, pana_la: 10, locuri: 1 }], 10);
+    egal("paleții se pun tot pe interval",
+      [1, 2, 3, 4, 9, 10].map((c) => (p.has(c) ? p.get(c) : null)), [null, 2, 2, null, 1, 1]);
+    // `null` nu e 0: înseamnă „lasă cum e rândul". Un sector care schimbă
+    // doar înălțimea nu trebuie să atingă lățimea, și invers.
+    const doarNiv = mod.paletiPeCamp(r, [{ de_la: 1, pana_la: 5, niveluri: 2, locuri: null }], 10);
+    egal("un sector care schimbă doar nivelurile nu atinge paleții", doarNiv.size, 0);
+    const doarPal = mod.nivelurilePeCamp(r, [{ de_la: 1, pana_la: 5, niveluri: null, locuri: 2 }], 10);
+    egal("și invers: unul doar de paleți lasă nivelurile rândului",
+      [1, 2, 3].map((c) => doarPal.get(c)), [3, 3, 3]);
   }
 
   // Un rând adevărat: 10 câmpuri, 3 niveluri implicit, 2 paleți pe câmp.
@@ -307,9 +322,145 @@ function curata() {
     bine("are formularul de porțiuni", /action="\/stocuri\/ct-park\/configurare\/\d+\/sectoare"/.test(p.corp));
     bine("cu porțiunea salvată completată în el", /name="s0_de_la"[^>]*value="8"/.test(p.corp));
     bine("și cu rânduri goale pentru încă una", /name="s1_de_la"[^>]*value=""/.test(p.corp));
-    bine("spune cum arată rândul acum", /câmpurile <strong>1–7<\/strong> cu 3 niveluri, <strong>8–10<\/strong> cu 1 nivel/.test(p.corp),
+    bine("spune cum arată rândul acum, cu niveluri ȘI paleți",
+      /câmpurile <strong>1–7<\/strong> cu 3 niveluri × 2 paleți, <strong>8–10<\/strong> cu 1 nivel × 2 paleți/.test(p.corp),
       p.corp.slice(p.corp.indexOf("Cum arată rândul"), p.corp.indexOf("Cum arată rândul") + 220));
-    bine("zice limpede ce se întâmplă cu câmpurile nelistate", /rămân la 3 niveluri/.test(p.corp));
+    bine("zice limpede ce înseamnă o căsuță lăsată goală",
+      /înseamnă „ca rândul"/.test(p.corp) && /3 niveluri și 2 paleți pe câmp/.test(p.corp));
+    bine("are și coloana de paleți în formular", /name="s0_paleti"/.test(p.corp));
+    bine("și trimite spre editarea de pe desen", /apasă „Editez raftul"/.test(p.corp));
+  }
+
+  console.log("\n9. Paleți pe interval: 3 peste tot, dar 2 aici și 1 dincolo");
+  {
+    const p = await cer("/stocuri/ct-park/configurare/:id/sectoare", {
+      params: { id: String(rand) },
+      metoda: "post",
+      body: {
+        s0_de_la: "3", s0_pana_la: "4", s0_paleti: "1",
+        s1_de_la: "5", s1_pana_la: "6", s1_niveluri: "2", s1_paleti: "1",
+      },
+    });
+    bine("se salvează", mesajul(p).fel === "ok", mesajul(p).text);
+    // Rândul are 2 paleți pe câmp implicit, 3 niveluri.
+    const peCamp = q(`SELECT camp, MAX(nivel) AS sus, MAX(pozitie) AS lat, COUNT(*) AS n
+                        FROM ct_locuri WHERE rand_id = ${rand} GROUP BY camp ORDER BY camp`);
+    egal("câmpurile 3-4 au un singur palet, restul doi",
+      peCamp.map((x) => Number(x.lat)), [2, 2, 1, 1, 1, 1, 2, 2, 2, 2]);
+    egal("iar 5-6 au și nivelurile tăiate la 2",
+      peCamp.map((x) => Number(x.sus)), [3, 3, 3, 3, 2, 2, 3, 3, 3, 3]);
+    egal("locurile per câmp ies pe măsură",
+      peCamp.map((x) => Number(x.n)), [6, 6, 3, 3, 2, 2, 6, 6, 6, 6]);
+    const fantome = Number(unul(`SELECT COUNT(*) FROM ct_locuri WHERE rand_id = ${rand} AND camp IN (3,4,5,6) AND pozitie > 1`));
+    egal("niciun loc fantomă la dreapta într-un câmp îngust", fantome, 0);
+  }
+
+  console.log("\n10. Desenul păstrează lățimea câmpului îngust");
+  {
+    const p = await cer("/stocuri/ct-park/rand/:id", { params: { id: String(rand) } });
+    const nivele = p.corp.split('<div class="ct-nivel">').slice(1);
+    const jos = nivele[nivele.length - 1];
+    const campuri = jos.split(/class="ct-camp(?:"| gol")/).slice(1);
+    egal("la nivelul 1 sunt tot 10 câmpuri", campuri.length, 10);
+    // Un câmp de 1 palet are o căsuță, unul de 2 are două — dar .ct-camp e
+    // flex:1, deci câmpul rămâne la fel de lat. Asta nu se poate verifica
+    // din HTML, așa că verificăm ce se poate: numărul de căsuțe.
+    egal("câte căsuțe are fiecare câmp jos",
+      campuri.map((c) => (c.match(/class="ct-loc /g) || []).length), [2, 2, 1, 1, 1, 1, 2, 2, 2, 2]);
+    bine("rezumatul spune și paleții", /cu 3 niveluri × 2 paleți/.test(p.corp) && /cu 2 niveluri × 1 palet/.test(p.corp),
+      p.corp.slice(p.corp.indexOf("nu e la fel"), p.corp.indexOf("nu e la fel") + 240));
+  }
+
+  console.log("\n11. Editarea de pe hartă, cu salvare pe loc");
+  {
+    const json = (r) => { try { return JSON.parse(r.corp); } catch (e) { return { ok: false, corp: r.corp.slice(0, 120) }; } };
+
+    // Un câmp, dintr-o apăsare: fără interval scris de mână.
+    let p = await cer("/stocuri/ct-park/rand/:id/editeaza", {
+      params: { id: String(rand) }, metoda: "post", body: { ce: "camp", camp: "8", paleti: "1" },
+    });
+    let j = json(p);
+    bine("− pe un câmp îi scade paleții și spune ce a ieșit", j.ok === true, JSON.stringify(j));
+    egal("câmpul 8 are acum un palet pe nivel",
+      Number(unul(`SELECT MAX(pozitie) FROM ct_locuri WHERE rand_id=${rand} AND camp=8`)), 1);
+    egal("și restul n-au fost atinse",
+      Number(unul(`SELECT MAX(pozitie) FROM ct_locuri WHERE rand_id=${rand} AND camp=7`)), 2);
+
+    // A doua apăsare pe același câmp nu trebuie să lase porțiuni suprapuse.
+    await cer("/stocuri/ct-park/rand/:id/editeaza", {
+      params: { id: String(rand) }, metoda: "post", body: { ce: "camp", camp: "8", niveluri: "1" },
+    });
+    const peCamp8 = q(`SELECT MAX(nivel) AS sus, MAX(pozitie) AS lat FROM ct_locuri WHERE rand_id=${rand} AND camp=8`)[0];
+    egal("a doua apăsare o ține pe prima: 1 nivel × 1 palet", [Number(peCamp8.sus), Number(peCamp8.lat)], [1, 1]);
+    const cateSectoare = Number(unul(`SELECT COUNT(*) FROM ct_sectoare WHERE rand_id=${rand} AND camp_de_la=8 AND camp_pana_la=8`));
+    egal("și nu lasă două porțiuni peste același câmp", cateSectoare, 1);
+
+    // Un interval, dintr-o apăsare.
+    p = await cer("/stocuri/ct-park/rand/:id/editeaza", {
+      params: { id: String(rand) }, metoda: "post", body: { ce: "interval", de_la: "1", pana_la: "2", niveluri: "4", paleti: "1" },
+    });
+    bine("intervalul se aplică la toate câmpurile din el", json(p).ok === true, JSON.stringify(json(p)));
+    egal("1 și 2 au acum 4 niveluri × 1 palet",
+      q(`SELECT camp, MAX(nivel) AS sus, MAX(pozitie) AS lat FROM ct_locuri WHERE rand_id=${rand} AND camp IN (1,2) GROUP BY camp ORDER BY camp`)
+        .map((x) => [Number(x.sus), Number(x.lat)]), [[4, 1], [4, 1]]);
+
+    // Un câmp întors exact pe cifrele rândului nu mai are nevoie de porțiune.
+    await cer("/stocuri/ct-park/rand/:id/editeaza", {
+      params: { id: String(rand) }, metoda: "post", body: { ce: "camp", camp: "1", niveluri: "3", paleti: "2" },
+    });
+    egal("câmpul întors la cifrele rândului își pierde porțiunea",
+      Number(unul(`SELECT COUNT(*) FROM ct_sectoare WHERE rand_id=${rand} AND camp_de_la=1`)), 0);
+    egal("dar locurile lui sunt cele ale rândului",
+      [Number(unul(`SELECT MAX(nivel) FROM ct_locuri WHERE rand_id=${rand} AND camp=1`)),
+       Number(unul(`SELECT MAX(pozitie) FROM ct_locuri WHERE rand_id=${rand} AND camp=1`))], [3, 2]);
+
+    // Un loc scos din uz: „sterg spatii".
+    const unLoc = Number(unul(`SELECT id FROM ct_locuri WHERE rand_id=${rand} AND camp=7 AND nivel=1 AND pozitie=1`));
+    p = await cer("/stocuri/ct-park/rand/:id/editeaza", { params: { id: String(rand) }, metoda: "post", body: { ce: "loc", loc: String(unLoc) } });
+    bine("un loc se scoate din uz dintr-un click", json(p).ok === true, JSON.stringify(json(p)));
+    egal("și chiar e marcat blocat", Number(unul(`SELECT blocat FROM ct_locuri WHERE id=${unLoc}`)), 1);
+    // Scos din uz, nu șters: adresa rămâne a lui, eticheta de pe raft nu minte.
+    bine("dar nu e șters din tabel", Number(unul(`SELECT COUNT(*) FROM ct_locuri WHERE id=${unLoc}`)) === 1);
+    p = await cer("/stocuri/ct-park/rand/:id/editeaza", { params: { id: String(rand) }, metoda: "post", body: { ce: "loc", loc: String(unLoc) } });
+    egal("al doilea click îl repune în uz", Number(unul(`SELECT blocat FROM ct_locuri WHERE id=${unLoc}`)), 0);
+
+    // Încă o coloană, din buton.
+    const inainte = Number(unul(`SELECT campuri FROM ct_randuri WHERE id=${rand}`));
+    p = await cer("/stocuri/ct-park/rand/:id/editeaza", { params: { id: String(rand) }, metoda: "post", body: { ce: "adauga" } });
+    bine("se activează încă un câmp", json(p).ok === true, JSON.stringify(json(p)));
+    egal("rândul are un câmp în plus", Number(unul(`SELECT campuri FROM ct_randuri WHERE id=${rand}`)), inainte + 1);
+    bine("și chiar are locuri pe el", Number(unul(`SELECT COUNT(*) FROM ct_locuri WHERE rand_id=${rand} AND camp=${inainte + 1}`)) > 0);
+    await cer("/stocuri/ct-park/rand/:id/editeaza", { params: { id: String(rand) }, metoda: "post", body: { ce: "scoate" } });
+    egal("și se poate scoate la loc", Number(unul(`SELECT campuri FROM ct_randuri WHERE id=${rand}`)), inainte);
+
+    // Marfa oprește și editarea de pe hartă, nu doar formularul.
+    q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, um, data_intrare) VALUES ('TS-2', 'TEST-SECTOARE', 1, 'buc', '2026-10-24')`);
+    const palet = Number(unul("SELECT id FROM ct_paleti WHERE cod = 'TS-2'"));
+    const locLat = Number(unul(`SELECT id FROM ct_locuri WHERE rand_id=${rand} AND camp=7 AND nivel=1 AND pozitie=2`));
+    q(`INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (${palet}, ${locLat})`);
+    p = await cer("/stocuri/ct-park/rand/:id/editeaza", { params: { id: String(rand) }, metoda: "post", body: { ce: "camp", camp: "7", paleti: "1" } });
+    j = json(p);
+    bine("nu îngustează un câmp de sub o paletă", j.ok === false && /stă marfă/.test(j.mesaj || ""), JSON.stringify(j));
+    p = await cer("/stocuri/ct-park/rand/:id/editeaza", { params: { id: String(rand) }, metoda: "post", body: { ce: "loc", loc: String(locLat) } });
+    j = json(p);
+    bine("nici nu scoate din uz un loc ocupat", j.ok === false && /stă marfă/.test(j.mesaj || ""), JSON.stringify(j));
+    q(`DELETE FROM ct_ocupari WHERE palet_id = ${palet}`);
+    q(`DELETE FROM ct_paleti WHERE id = ${palet}`);
+  }
+
+  console.log("\n12. Pagina are cu ce se edita");
+  {
+    const p = await cer("/stocuri/ct-park/rand/:id", { params: { id: String(rand) } });
+    bine("are butonul de editare", /id="buton-editez"/.test(p.corp));
+    bine("are banda de comenzi pe câmp", /class="ct-nivel ct-banda-editare"/.test(p.corp));
+    bine("cu − și + pe niveluri și pe paleți",
+      /data-ce="niveluri" data-pas="-1"/.test(p.corp) && /data-ce="paleti" data-pas="1"/.test(p.corp));
+    bine("cu butoane de câmp nou și de scos", /data-rand-camp="adauga"/.test(p.corp) && /data-rand-camp="scoate"/.test(p.corp));
+    bine("cu bife pentru mai multe câmpuri deodată", /class="bifa-camp"/.test(p.corp));
+    bine("fiecare loc își știe id-ul, ca să poată fi scos din uz", /class="ct-loc liber alegibil"[\s\S]{0,160}data-loc="\d+"/.test(p.corp));
+    // Cele două moduri nu trebuie să se calce: în editare, selecția de marfă
+    // se golește, altfel un click ar face două lucruri deodată.
+    bine("intrarea în editare golește selecția de marfă", /golim selectia de marfa|Golim selectia de marfa/i.test(p.corp));
   }
 
   curata();
