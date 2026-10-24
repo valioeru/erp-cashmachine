@@ -2,7 +2,7 @@
 // Harta rândului din CT-Park: alegerea locurilor cu degetul.
 // Pe PostgreSQL real (prin psql).
 //
-// Pana acum locurile OCUPATE erau linkuri (click → vezi ce e pe paleta), iar
+// Pana acum locurile OCUPATE erau linkuri (click → vezi ce e pe palet), iar
 // cele LIBERE erau div-uri moarte: se vedea ca sunt libere si atat. Ca sa pui
 // marfa, scriai „randul preferat" intr-o lista derulanta si ERP-ul iti
 // propunea el niste locuri — nu neaparat raftul la care te gandeai.
@@ -178,9 +178,9 @@ function curata() {
     bine("nu se plânge că n-a găsit destule", !/Am găsit doar/.test(p.corp));
   }
 
-  console.log("\n4. Lipite fac o paletă lată, răzlețe fac paleți separați");
+  console.log("\n4. Lipite fac un palet lat, răzlețe fac paleți separați");
   {
-    // Trei locuri lipite, acelasi camp si nivel → o singura paleta lata.
+    // Trei locuri lipite, acelasi camp si nivel → un singur palet lat.
     const t = [loc(1, 1, 1), loc(1, 1, 2), loc(1, 1, 3)].join(",");
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",

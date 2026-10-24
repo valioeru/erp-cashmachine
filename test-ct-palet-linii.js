@@ -51,7 +51,7 @@ console.log("\n1. Cifra scrisa de om");
   bine("virgula si punctul sunt acelasi numar", L.cifra("12,5") === 12.5 && L.cifra("12.5") === 12.5);
   bine("campul gol NU e zero", L.cifra("") === null && L.cifra(null) === null && L.cifra("   ") === null);
   bine("zero scris explicit e zero", L.cifra("0") === 0);
-  bine("textul nu trece", L.cifra("doua palete") === null);
+  bine("textul nu trece", L.cifra("doi paleti") === null);
 }
 
 console.log("\n2. Verificarea unei linii");

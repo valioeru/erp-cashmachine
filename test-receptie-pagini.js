@@ -278,7 +278,7 @@ function curata() {
   // SECTIUNEA 8 verifica harta de depozit pe care am construit-o si pe care
   // Vali a cerut s-o scot: harta care conteaza e cea din CT-Park, care
   // exista deja si are structura reala a halei. Testele pentru alegerea
-  // locurilor cu degetul si pentru paleta lata stau acum in
+  // locurilor cu degetul si pentru paletul lat stau acum in
   // test-ct-park-harta.js, pe harta aia.
   //
   // Ce a ramas aici, si se verifica mai sus: generarea locurilor, receptia

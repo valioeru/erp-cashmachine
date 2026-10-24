@@ -1,10 +1,10 @@
 "use strict";
-// Regulile mutării unei palete. Aritmetică pură, fără bază de date.
+// Regulile mutării unui palet. Aritmetică pură, fără bază de date.
 //
 // CE APĂRĂ. Vali, când a cerut mutarea: „atentie daca ocupa mai multe spatii
-// sa aibe loc in partea aia si sa alegi la fel". Asta e miezul: o paletă lată
+// sa aibe loc in partea aia si sa alegi la fel". Asta e miezul: un palet lat
 // stă pe locuri LIPITE, în același rând, nivel și câmp. Dacă validarea ar
-// lăsa să treacă trei locuri răzlețe, în bază ar apărea o paletă întinsă
+// lăsa să treacă trei locuri răzlețe, în bază ar apărea un palet întins
 // peste două câmpuri — ceva ce fizic nu există, și care s-ar descoperi abia
 // la inventar, când cineva se duce la raft și nu găsește marfa.
 const mod = require("./lib/ct-mutare");
@@ -40,7 +40,7 @@ console.log("\n1. Ce înseamnă „lipite\"");
     mod.grupeazaLipite([loc(1, 1, 3, 1), loc(1, 1, 3, 3)]).map((g) => g.length), [1, 1]);
 }
 
-console.log("\n2. Mutarea unei palete de un singur loc");
+console.log("\n2. Mutarea unui palet de un singur loc");
 {
   const acum = [loc(1, 1, 2, 1)];
   const r = mod.validareMutare(PALET, acum, [loc(1, 3, 5, 2)]);
@@ -57,7 +57,7 @@ console.log("\n2. Mutarea unei palete de un singur loc");
   bine("mutarea în același loc se spune, nu se face", acolo.ok === false && /deja acolo/.test(acolo.motiv), acolo.motiv);
 }
 
-console.log("\n3. Paleta lată: „sa aibe loc in partea aia\"");
+console.log("\n3. Paletul lat: „sa aibe loc in partea aia\"");
 {
   // Trei locuri ocupate acum, în câmpul 2.
   const acum = [loc(1, 1, 2, 1), loc(1, 1, 2, 2), loc(1, 1, 2, 3)];
@@ -92,7 +92,7 @@ console.log("\n3. Paleta lată: „sa aibe loc in partea aia\"");
 
 console.log("\n4. Mutarea cu un loc mai încolo, peste propriile locuri");
 {
-  // Cazul subtil: paleta stă pe 1-2-3 și se mută pe 2-3-4. Locurile 2 și 3
+  // Cazul subtil: paletul stă pe 1-2-3 și se mută pe 2-3-4. Locurile 2 și 3
   // sunt „ocupate" — dar de ea însăși. Dacă validarea n-ar ști asta, ar
   // refuza o mutare perfect normală, iar omul ar scoate marfa din depozit
   // ca s-o poată muta cu 80 de centimetri.
@@ -111,10 +111,10 @@ console.log("\n4. Mutarea cu un loc mai încolo, peste propriile locuri");
 console.log("\n5. Ce se refuză din start");
 {
   const acum = [loc(1, 1, 2, 1)];
-  bine("fără paletă", mod.validareMutare(null, acum, [loc(1, 1, 3, 1)]).ok === false);
+  bine("fără palet", mod.validareMutare(null, acum, [loc(1, 1, 3, 1)]).ok === false);
   bine("fără destinație", mod.validareMutare(PALET, acum, []).ok === false);
   const fara = mod.validareMutare(PALET, [], [loc(1, 1, 3, 1)]);
-  bine("o paletă care nu stă nicăieri", fara.ok === false && /n-are de unde/.test(fara.motiv), fara.motiv);
+  bine("un palet care nu stă nicăieri", fara.ok === false && /n-are de unde/.test(fara.motiv), fara.motiv);
 }
 
 console.log("\n6. Unde încape, ca să putem propune");
@@ -124,7 +124,7 @@ console.log("\n6. Unde încape, ca să putem propune");
     loc(1, 1, 1, 1), loc(1, 1, 1, 2), loc(1, 1, 1, 3), loc(1, 1, 1, 4),
     loc(1, 1, 2, 1), loc(1, 1, 2, 2),
   ];
-  egal("pentru o paletă de 3 locuri sunt două ferestre în câmpul 1",
+  egal("pentru un palet de 3 locuri sunt două ferestre în câmpul 1",
     mod.undeIncape(libere, 3).map((g) => g.map((x) => x.pozitie)), [[1, 2, 3], [2, 3, 4]]);
   egal("pentru una de 2 locuri sunt mai multe",
     mod.undeIncape(libere, 2).length, 4);
