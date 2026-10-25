@@ -49,6 +49,7 @@ function subtabs(activ) {
     [`${CALE}/stoc`, "Stoc"],
     [`${CALE}/intrare`, "Intrare din depozit"],
     [`${CALE}/retururi`, "Retururi"],
+    [`${CALE}/etichete`, "Etichete AWB"],
   ];
   return `<div class="subnav" style="margin-top:-6px">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
@@ -1001,6 +1002,236 @@ function register(router) {
       )}`
     );
   });
+
+  // ---- Etichetele AWB, pentru Zebra -------------------------------------
+  //
+  // CE NU POATE FACE ERP-UL, ȘI DE CE PAGINA ARATĂ AȘA. ERP-ul rulează pe
+  // Render, în alt oraș decât imprimanta. Un server din cloud nu poate
+  // trimite nimic într-o imprimantă din depozit — între ele e tot internetul
+  // și un router care nu lasă pe nimeni înăuntru. Deci „automat" nu poate
+  // însemna „serverul printează"; înseamnă „pagina asta, lăsată deschisă pe
+  // calculatorul de lângă Zebra, se uită singură dacă a apărut ceva nou și
+  // îl scoate la imprimantă". Asta chiar merge, și merge fără dialog dacă
+  // Chrome-ul de pe acel calculator e pornit cu --kiosk-printing și Zebra e
+  // imprimanta implicită.
+  //
+  // Butonul rămâne, pentru cele două situații în care automatul nu ajută:
+  // fila a fost închisă peste noapte, sau s-a stricat un teanc și trebuie
+  // scos din nou.
+
+  router.get(`${CALE}/etichete`, async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const fisiere = await etichetePdf(14);
+    const neprintate = fisiere.filter((f) => !f.printat_la).length;
+
+    const randuri = fisiere.map((f) => [
+      `<strong>${dataRo(f.zi)}</strong> <span style="color:var(--text-muted)">${esc(String(f.ora || ""))}</span>`,
+      `<a href="${CALE}/etichete/${f.id}/pdf" target="_blank">${esc(f.nume)}</a>`,
+      f.marime ? Math.round(nr(f.marime) / 1024).toLocaleString("ro-RO") + " KB" : "—",
+      f.printat_la
+        ? `<span class="badge verde">printat ${esc(String(f.printat_la).slice(0, 16))}</span>${
+            f.automat ? " <span style=\"color:var(--text-muted);font-size:12px\">automat</span>" : ""
+          }${nr(f.exemplare) > 1 ? ` <span style="color:var(--text-muted);font-size:12px">×${nr(f.exemplare)}</span>` : ""}`
+        : '<span class="badge">neprintat</span>',
+      `<button class="btn secondary" type="button" data-print="${f.id}">${f.printat_la ? "Printează din nou" : "Printează"}</button>`,
+    ]);
+
+    const body = `
+      ${subtabs(`${CALE}/etichete`)}
+      ${mesaje(ctx.query)}
+      <h1 style="margin:6px 0 2px">Etichete AWB${
+        neprintate ? ` — <span style="color:var(--warn)">${neprintate} ${neprintate === 1 ? "teanc neprintat" : "teancuri neprintate"}</span>` : ""
+      }</h1>
+      <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:920px">
+        Teancurile de etichete vin de la Sameday imediat după miezul nopții, câteva emailuri pe noapte, fiecare
+        cu un <code>awbs.pdf</code>. Ele ajung singure în Drive; aici se vede doar ce-a ieșit la imprimantă și
+        ce nu. Un teanc se printează întreg — nu se taie pe AWB-uri, ca să nu existe un al doilea loc în care
+        se pot pierde etichete.
+      </p>
+      <div class="card" style="margin-bottom:14px;max-width:920px">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:600">
+          <input type="checkbox" id="auto"> Printează singur ce apare
+        </label>
+        <p style="margin:6px 0 0;font-size:13px;color:var(--text-muted)">
+          Lasă fila asta deschisă pe calculatorul de lângă Zebra. Verifică din cinci în cinci minute și scoate
+          teancurile noi. Ca să nu ceară de fiecare dată imprimanta, Chrome-ul de pe acel calculator trebuie
+          pornit cu <code>--kiosk-printing</code>, iar Zebra să fie imprimanta implicită — altfel apare
+          dialogul obișnuit de print. Bifa se ține pe calculatorul ăsta, nu pe cont.
+        </p>
+        <p style="margin:6px 0 0;font-size:13px" id="stare-auto"></p>
+      </div>
+      ${
+        randuri.length
+          ? table(["Ziua emailului", "Fișier", "Mărime", "Stare", ""], randuri)
+          : "<p>N-a venit niciun teanc de etichete în ultimele două săptămâni.</p>"
+      }
+      <iframe id="tipar" style="position:fixed;width:0;height:0;border:0;left:-9999px"></iframe>
+      <script>
+      (function () {
+        var sus = document.getElementById("stare-auto");
+        var bifa = document.getElementById("auto");
+        var cadru = document.getElementById("tipar");
+        var ocupat = false;
+        function spune(t) { sus.textContent = t; }
+        try { bifa.checked = localStorage.getItem("ff-print-auto") === "1"; } catch (e) {}
+        bifa.addEventListener("change", function () {
+          try { localStorage.setItem("ff-print-auto", bifa.checked ? "1" : "0"); } catch (e) {}
+          spune(bifa.checked ? "Pornit. Verific acum…" : "Oprit.");
+          if (bifa.checked) verifica();
+        });
+
+        // Printarea unui teanc: se încarcă PDF-ul în cadrul ascuns, se dă
+        // print, și abia DUPĂ aceea se scrie în ERP că a ieșit. Invers, o
+        // pagină care cade între marcaj și imprimantă ar lăsa un teanc
+        // marcat printat pe care nu l-a văzut nimeni.
+        function printeaza(id) {
+          return new Promise(function (gata, rau) {
+            var ceas = setTimeout(function () { rau(new Error("PDF-ul nu s-a încărcat")); }, 60000);
+            cadru.onload = function () {
+              clearTimeout(ceas);
+              try {
+                cadru.contentWindow.focus();
+                cadru.contentWindow.print();
+                gata();
+              } catch (e) { rau(e); }
+            };
+            cadru.src = ${JSON.stringify(CALE)} + "/etichete/" + id + "/pdf#toolbar=0";
+          });
+        }
+        function marcheaza(id, automat, eroare) {
+          return fetch(${JSON.stringify(CALE)} + "/etichete/" + id + "/printat", {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ automat: automat ? 1 : 0, eroare: eroare || "" }),
+          });
+        }
+        async function unul(id, automat) {
+          try { await printeaza(id); await marcheaza(id, automat, ""); return true; }
+          catch (e) { await marcheaza(id, automat, String(e && e.message || e)); return false; }
+        }
+        document.addEventListener("click", async function (ev) {
+          var b = ev.target.closest("[data-print]");
+          if (!b) return;
+          b.disabled = true; b.textContent = "Se printează…";
+          var ok = await unul(b.getAttribute("data-print"), false);
+          b.textContent = ok ? "Printat" : "N-a mers";
+          if (ok) setTimeout(function () { location.reload(); }, 1200);
+          else b.disabled = false;
+        });
+
+        async function verifica() {
+          if (!bifa.checked || ocupat) return;
+          ocupat = true;
+          try {
+            var r = await fetch(${JSON.stringify(CALE)} + "/etichete/noi.json", { credentials: "same-origin", cache: "no-store" });
+            var d = await r.json();
+            if (!d.fisiere || !d.fisiere.length) {
+              spune("Nimic nou. Ultima verificare " + new Date().toLocaleTimeString("ro-RO") + ".");
+            } else {
+              spune(d.fisiere.length + " teancuri noi, le scot la imprimantă…");
+              var n = 0;
+              for (var i = 0; i < d.fisiere.length; i++) { if (await unul(d.fisiere[i].id, true)) n++; }
+              spune("Am printat " + n + " din " + d.fisiere.length + " la " + new Date().toLocaleTimeString("ro-RO") + ".");
+              setTimeout(function () { location.reload(); }, 2500);
+            }
+          } catch (e) {
+            spune("Nu pot verifica: " + (e && e.message || e));
+          }
+          ocupat = false;
+        }
+        setInterval(verifica, 5 * 60 * 1000);
+        if (bifa.checked) setTimeout(verifica, 2000);
+      })();
+      </script>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Etichete AWB", active: CALE, body }));
+  });
+
+  // PDF-ul, servit de pe acelasi domeniu. Nu se trimite omul pe Drive: un
+  // link de Drive se deschide in vizualizatorul lor, pe alt domeniu, de unde
+  // pagina asta nu mai poate da print fara ca cineva sa apese.
+  router.get(`${CALE}/etichete/:id/pdf`, async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const a = await db
+      .prepare("SELECT id, nume, drive_id FROM email_atasamente WHERE id = ?")
+      .get(Number(ctx.params.id));
+    if (!a || !a.drive_id) return send(ctx.res, 404, "Nu găsesc fișierul.");
+    let f;
+    try {
+      f = await drive.descarca(a.drive_id);
+    } catch (e) {
+      return send(ctx.res, 502, "Drive nu dă fișierul: " + String(e.message || e));
+    }
+    ctx.res.writeHead(200, {
+      "Content-Type": "application/pdf",
+      "Content-Length": f.continut.length,
+      "Content-Disposition": `inline; filename="${String(a.nume || "awbs.pdf").replace(/[^\w.\-]/g, "_")}"`,
+      "Cache-Control": "private, max-age=600",
+    });
+    ctx.res.end(f.continut);
+  });
+
+  router.post(`${CALE}/etichete/:id/printat`, async (ctx) => {
+    if (!ctx.user) return send(ctx.res, 403, "{}");
+    const id = Number(ctx.params.id);
+    const b = ctx.body || {};
+    const eroare = String(b.eroare || "").slice(0, 300) || null;
+    const automat = Number(b.automat) ? 1 : 0;
+    // O eroare NU marcheaza teancul ca printat: se scrie doar motivul, ca
+    // urmatoarea verificare sa-l mai incerce o data.
+    await db
+      .prepare(
+        `INSERT INTO ff_printari (atasament_id, printat_la, printat_de, automat, exemplare, eroare)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (atasament_id) DO UPDATE SET
+           printat_la = COALESCE(EXCLUDED.printat_la, ff_printari.printat_la),
+           printat_de = COALESCE(EXCLUDED.printat_de, ff_printari.printat_de),
+           automat = EXCLUDED.automat,
+           exemplare = ff_printari.exemplare + EXCLUDED.exemplare,
+           eroare = EXCLUDED.eroare`
+      )
+      .run(id, eroare ? null : acum(), eroare ? null : ctx.user.id, automat, eroare ? 0 : 1, eroare);
+    ctx.res.writeHead(200, { "Content-Type": "application/json" });
+    ctx.res.end(JSON.stringify({ ok: !eroare }));
+  });
+
+  router.get(`${CALE}/etichete/noi.json`, async (ctx) => {
+    if (!ctx.user) return send(ctx.res, 403, "{}");
+    const fisiere = (await etichetePdf(3)).filter((f) => !f.printat_la);
+    ctx.res.writeHead(200, { "Content-Type": "application/json" });
+    ctx.res.end(JSON.stringify({ fisiere: fisiere.map((f) => ({ id: f.id, nume: f.nume, zi: f.zi })) }));
+  });
+}
+
+// Teancurile de etichete din ultimele `zile` zile, cu starea lor de printare.
+//
+// Acelasi fisier ajunge in doua casute (Sameday@ si office@ sunt amandoua pe
+// email), deci acelasi drive_id apare de doua ori. Se tine o singura data —
+// altfel s-ar printa de doua ori acelasi teanc.
+async function etichetePdf(zile) {
+  const de = new Date(Date.now() - nr(zile) * 86400000).toISOString().slice(0, 10);
+  const randuri = await db
+    .prepare(
+      `SELECT a.id, a.nume, a.marime, a.drive_id, m.data,
+              p.printat_la, p.automat, p.exemplare
+         FROM email_atasamente a
+         JOIN email_mesaje m ON m.id = a.mesaj_id
+         LEFT JOIN ff_printari p ON p.atasament_id = a.id
+        WHERE a.drive_id IS NOT NULL
+          AND a.nume ILIKE 'awbs%.pdf'
+          AND m.data >= ?
+        ORDER BY m.data DESC, a.id DESC`
+    )
+    .all(de);
+  const vazute = new Set();
+  const out = [];
+  for (const r of randuri) {
+    if (vazute.has(r.drive_id)) continue;
+    vazute.add(r.drive_id);
+    const d = String(r.data || "");
+    out.push({ ...r, zi: d.slice(0, 10), ora: d.slice(11, 16) });
+  }
+  return out;
 }
 
 module.exports = { register, stocCurent, comenziZi, CALE };
