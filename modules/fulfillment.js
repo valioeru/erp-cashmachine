@@ -1059,7 +1059,18 @@ function register(router) {
           dialogul obișnuit de print. Bifa se ține pe calculatorul ăsta, nu pe cont.
         </p>
         <p style="margin:6px 0 0;font-size:13px" id="stare-auto"></p>
+        <p style="margin:6px 0 0;font-size:13px;color:var(--text-muted)">
+          Automatul se uită numai la ultimele 36 de ore. Teancurile mai vechi se scot cu butonul din dreapta
+          lor — sau, dacă au fost deja printate de mână, se trec ca făcute fără hârtie.
+        </p>
       </div>
+      ${
+        neprintate && ctx.user.rol === "admin"
+          ? `<form method="post" action="${CALE}/etichete/marcheaza-tot" style="margin:-6px 0 14px">
+               <button class="btn secondary" type="submit">Marchează toate cele ${neprintate} ca făcute, fără să printezi</button>
+             </form>`
+          : ""
+      }
       ${
         randuri.length
           ? table(["Ziua emailului", "Fișier", "Mărime", "Stare", ""], randuri)
@@ -1195,11 +1206,42 @@ function register(router) {
     ctx.res.end(JSON.stringify({ ok: !eroare }));
   });
 
+  // Automatul se uita numai la ULTIMELE 36 DE ORE, nu la toata lista.
+  // Altfel, prima data cand cineva bifeaza „printeaza singur", imprimanta ar
+  // scoate doua saptamani de etichete vechi — adica exact genul de surpriza
+  // dupa care nimeni nu mai bifeaza nimic. Restul se scot cu butonul, sau se
+  // marcheaza ca facute fara sa se printeze.
   router.get(`${CALE}/etichete/noi.json`, async (ctx) => {
     if (!ctx.user) return send(ctx.res, 403, "{}");
-    const fisiere = (await etichetePdf(3)).filter((f) => !f.printat_la);
+    const limita = new Date(Date.now() - 36 * 3600000).toISOString().slice(0, 16).replace("T", " ");
+    const fisiere = (await etichetePdf(3)).filter((f) => !f.printat_la && String(f.data || "") >= limita);
     ctx.res.writeHead(200, { "Content-Type": "application/json" });
     ctx.res.end(JSON.stringify({ fisiere: fisiere.map((f) => ({ id: f.id, nume: f.nume, zi: f.zi })) }));
+  });
+
+  // Curatarea restantelor, fara hartie. Util o singura data, la pornire:
+  // teancurile vechi au fost oricum printate de mana, pe vremea cand ERP-ul
+  // nu tinea minte.
+  router.post(`${CALE}/etichete/marcheaza-tot`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, `${CALE}/etichete`);
+    const fisiere = (await etichetePdf(60)).filter((f) => !f.printat_la);
+    for (const f of fisiere) {
+      await db
+        .prepare(
+          `INSERT INTO ff_printari (atasament_id, printat_la, printat_de, automat, exemplare, eroare)
+           VALUES (?, ?, ?, 0, 0, 'marcat fara printare')
+           ON CONFLICT (atasament_id) DO NOTHING`
+        )
+        .run(f.id, acum(), ctx.user.id);
+    }
+    return redirect(
+      ctx.res,
+      `${CALE}/etichete?ok=${encodeURIComponent(
+        fisiere.length
+          ? `${fisiere.length} teancuri marcate ca făcute, fără să se printeze nimic.`
+          : "Nu era niciun teanc neprintat."
+      )}`
+    );
   });
 }
 
