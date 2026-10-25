@@ -1496,8 +1496,9 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         Dă întâi „probă uscată": îți arată ziua calculată, fără să scrie nimic. Dacă un articol nu e recunoscut,
         nu se scrie nimic — nici parțial.
       </p>
-      <form method="post" action="${CALE}/awb" class="form">
+      <form method="post" action="${CALE}/awb" enctype="multipart/form-data" class="form">
         <textarea name="json" rows="5" style="width:100%;font-family:ui-monospace,monospace;font-size:12px" placeholder="[ … ]"></textarea>
+        <label style="display:block;margin-top:8px">…sau încarcă fișierul <code>.json</code><input type="file" name="fisier" accept=".json,application/json"></label>
         <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
           <button class="btn secondary" type="submit" name="uscat" value="1">Probă uscată</button>
           <button class="btn" type="submit">Scrie zilele</button>
@@ -1742,7 +1743,12 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     const b = ctx.body || {};
     let etichete;
     try {
-      etichete = JSON.parse(String(b.json || "[]"));
+      // Lista poate veni scrisă în casetă sau urcată ca fișier. Fișierul e
+      // pentru zilele mari: o zi de 300 de etichete nu încape comod într-un
+      // textarea, iar jobul care le aduce lucrează oricum cu un fișier.
+      const f = ((b.__files && b.__files.fisier) || [])[0];
+      const brut = f && f.data && f.data.length ? f.data.toString("utf8") : String(b.json || "[]");
+      etichete = JSON.parse(brut);
       if (!Array.isArray(etichete)) throw new Error("JSON-ul trebuie să fie o listă de etichete");
     } catch (e) {
       return send(
