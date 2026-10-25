@@ -26,6 +26,7 @@ const db = require("../lib/db");
 const { esc, layout, table, money } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const F = require("../lib/fulfillment");
+const drive = require("../lib/drive");
 
 const nr = (v) => {
   const x = Number(v);
@@ -73,6 +74,7 @@ async function stocCurent() {
       `SELECT m.produs_id, SUM(m.cantitate) AS cantitate,
               p.denumire, p.cod, p.unitate_masura
          FROM ff_miscari m JOIN produse p ON p.id = m.produs_id
+        WHERE COALESCE(m.test, 0) = 0
         GROUP BY m.produs_id, p.denumire, p.cod, p.unitate_masura
         ORDER BY p.denumire`
     )
@@ -298,7 +300,7 @@ function register(router) {
 
   // ---- Stocul din fulfillment -------------------------------------------
   router.get(`${CALE}/stoc`, async (ctx) => {
-    const { randuri } = await stocCurent();
+    const { randuri, harta } = await stocCurent();
     const ultimele = await db
       .prepare(
         `SELECT m.*, p.denumire FROM ff_miscari m JOIN produse p ON p.id = m.produs_id
@@ -307,11 +309,16 @@ function register(router) {
       .all();
 
     const FELURI = {
+      stoc_initial: "stoc inițial",
       intrare_depozit: "din depozit",
       consum_comanda: "pe o comandă",
       retur: "retur",
       corectie: "corecție",
     };
+    const produse = await db
+      .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 800")
+      .all();
+    const areInitial = await db.prepare("SELECT 1 AS x FROM ff_miscari WHERE fel = 'stoc_initial' LIMIT 1").get();
 
     const body = `
       ${subtabs(`${CALE}/stoc`)}
@@ -337,6 +344,74 @@ function register(router) {
       }
       ${randuri.some((r) => nr(r.cantitate) < 0) ? `<p style="color:var(--danger);font-size:13px">Un stoc negativ nu e o cantitate, e o greșeală de operare — se vede aici tocmai ca s-o poată repara cineva.</p>` : ""}
 
+      <h2 style="margin-top:22px">Stoc inițial</h2>
+      <p style="font-size:13px;color:var(--text-muted);max-width:900px;margin:0 0 10px">
+        Ce era deja în fulfillment când a pornit evidența. Se scrie o dată, din numărătoare, și de la el încolo
+        totul se mișcă singur: intrări din depozit, consum pe comenzi, retururi.
+        ${
+          areInitial
+            ? `<strong>S-a mai scris un stoc inițial.</strong> Poți adăuga și pe alte produse, dar dacă rescrii
+               unul deja numărat, cantitățile se adună — nu se înlocuiesc. Pentru o corecție, scrie diferența,
+               cu minus dacă e mai puțin.`
+            : "Încă nu s-a scris niciunul."
+        }
+      </p>
+      ${
+        produse.length
+          ? `<form class="form" method="post" action="${CALE}/stoc-initial" style="max-width:860px">
+               ${/* Lista intreaga de produse, cu o casuta langa fiecare.
+                    A fost intai un formular cu cinci liste derulante, si Vali
+                    a taiat-o scurt: „Trebuie sa fie ceva simplu, lista de
+                    produse si stoc initial si aia e." Avea dreptate — la o
+                    numaratoare te plimbi prin depozit cu lista in fata si
+                    scrii cifra unde o gasesti, nu alegi produsul din meniu
+                    de cinci ori si o iei de la capat. */ ""}
+               <input type="search" id="cauta-produs" placeholder="caută în listă…" autocomplete="off"
+                      style="width:100%;max-width:360px;padding:6px 8px;margin-bottom:8px">
+               <table class="table" style="margin-bottom:10px">
+                 <thead><tr><th>Produs</th><th>Cod</th><th style="width:120px">Stoc acum</th><th style="width:140px">Stoc inițial</th></tr></thead>
+                 <tbody id="lista-initial">
+                   ${produse
+                     .map((p) => {
+                       const are = harta.get(Number(p.id)) || 0;
+                       return `<tr data-cauta="${esc(((p.denumire || "") + " " + (p.cod || "")).toLowerCase())}">
+                         <td>${esc(p.denumire)}</td>
+                         <td style="color:var(--text-muted);font-size:12px">${esc(p.cod || "—")}</td>
+                         <td style="color:var(--text-muted)">${are ? cant(are) + " " + esc(p.unitate_masura || "") : "—"}</td>
+                         <td><input type="number" name="q_${p.id}" step="0.001" placeholder="0"
+                                    style="width:110px;padding:4px 6px"></td>
+                       </tr>`;
+                     })
+                     .join("")}
+                 </tbody>
+               </table>
+               <label class="field" style="max-width:220px">Când s-a numărat<input type="date" name="data" value="${esc(azi())}"></label>
+               <div class="form-actions"><button class="btn" type="submit">Scrie stocul inițial</button></div>
+             </form>
+             <script>
+               (function () {
+                 var c = document.getElementById("cauta-produs");
+                 if (!c) return;
+                 c.addEventListener("input", function () {
+                   var t = c.value.trim().toLowerCase();
+                   var randuri = document.querySelectorAll("#lista-initial tr");
+                   for (var i = 0; i < randuri.length; i++) {
+                     var r = randuri[i];
+                     // Un rand cu cifra scrisa NU se ascunde niciodata, oricat
+                     // ai filtra: altfel cauti altceva, dispare din ochi, si
+                     // crezi ca n-ai scris-o. Cifra pleaca oricum la salvare,
+                     // fiindca ascunsul tot in formular e — dar omul trebuie
+                     // sa vada ce a completat.
+                     var inp = r.querySelector("input");
+                     var scrisa = inp && inp.value !== "";
+                     r.hidden = !scrisa && t && r.dataset.cauta.indexOf(t) === -1;
+                   }
+                 });
+               })();
+             </script>`
+          : "<p>Nu e niciun produs activ în nomenclator.</p>"
+      }
+
       <h2 style="margin-top:22px">Ultimele mișcări</h2>
       ${
         ultimele.length
@@ -354,6 +429,47 @@ function register(router) {
       }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Stoc fulfillment", active: CALE, body }));
+  });
+
+  // ---- Stocul inițial ----------------------------------------------------
+  //
+  // Prima numărare: ce era deja acolo când a pornit evidența. Nu e o
+  // corecție, e punctul de la care începe socoteala — de-aia are felul lui
+  // în mișcări. Peste un an trebuie să se poată spune ce a fost inventar de
+  // pornire și ce a fost pierdere, iar asta e exact ce se întreabă la
+  // primul control de gestiune.
+  router.post(`${CALE}/stoc-initial`, async (ctx) => {
+    const b = ctx.body || {};
+    const inapoi = (fel, text) => redirect(ctx.res, `${CALE}/stoc?${fel}=${encodeURIComponent(text)}`);
+    const data = /^\d{4}-\d{2}-\d{2}$/.test(String(b.data || "")) ? String(b.data) : azi();
+
+    // Formularul trimite o căsuță pentru FIECARE produs din listă, numită
+    // „q_<id>". Se iau doar cele completate: restul vin goale și nu înseamnă
+    // „zero bucăți", ci „n-am numărat produsul ăsta". Diferența contează —
+    // un zero scris ar fi o afirmație, iar un gol e tăcere.
+    const peProdus = new Map();
+    for (const cheie of Object.keys(b)) {
+      if (!/^q_\d+$/.test(cheie)) continue;
+      const brut = String(b[cheie]).trim();
+      if (brut === "") continue;
+      const cantitate = nr(brut);
+      if (!isFinite(cantitate)) continue;
+      peProdus.set(Number(cheie.slice(2)), cantitate);
+    }
+    if (!peProdus.size) return inapoi("eroare", "N-ai scris nicio cantitate.");
+
+    for (const [produsId, cantitate] of peProdus) {
+      await db
+        .prepare(
+          `INSERT INTO ff_miscari (produs_id, cantitate, fel, referinta, data, creat_de, observatii)
+           VALUES (?, ?, 'stoc_initial', 'numărătoare de pornire', ?, ?, ?)`
+        )
+        .run(produsId, cantitate, data, ctx.user ? ctx.user.id : null, String(b.observatii || "").slice(0, 200) || null);
+    }
+    return inapoi(
+      "ok",
+      `Stoc inițial scris pe ${peProdus.size} ${peProdus.size === 1 ? "produs" : "produse"}, numărat la ${dataRo(data)}.`
+    );
   });
 
   // ---- Intrare din depozit ----------------------------------------------
@@ -510,6 +626,13 @@ function register(router) {
     const produse = await db
       .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 500")
       .all();
+    const cateProba = await db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM ff_retururi WHERE COALESCE(test,0) = 1)
+              + (SELECT COUNT(*) FROM ff_miscari WHERE COALESCE(test,0) = 1) AS n`
+      )
+      .get();
+    const deProba = nr(cateProba && cateProba.n);
 
     const selectProdus = (nume, val) =>
       `<select name="${nume}" required><option value="">— alege produsul —</option>${produse
@@ -527,10 +650,31 @@ function register(router) {
         caută un control, iar singurul moment în care poza se poate face e cât coletul e încă pe masă.
       </p>
 
+      ${
+        deProba
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn,#b8860b);max-width:980px;margin-bottom:12px">
+               <strong>Ai ${deProba} ${deProba === 1 ? "rând de probă" : "rânduri de probă"} în fulfillment.</strong>
+               Nu ating stocul și nu intră în nicio socoteală — dar stau în listă până le ștergi.
+               <form method="post" action="${CALE}/proba/sterge" style="display:inline;margin-left:8px">
+                 <button class="btn small secondary" type="submit">Șterge tot ce am făcut în probă</button>
+               </form>
+             </div>`
+          : ""
+      }
+
       <form class="form" method="post" action="${CALE}/retururi/scan" style="max-width:620px;margin-bottom:18px">
         <label class="field">Scanează AWB-ul returului
           <input name="awb" id="awb-retur" autofocus autocomplete="off" placeholder="scanează sau scrie AWB-ul"
                  style="font-size:18px;font-family:ui-monospace,monospace" required>
+        </label>
+        ${/* Modul de probă: scanezi cu AWB-uri adevărate, pe datele
+             adevărate, dar nimic nu ajunge în stoc. „Sa am posibilitatea sa
+             scanez awb si sa fac doar test si roll back apoi."
+             Un test pe altă bază n-ar fi spus nimic — abia pe datele reale
+             se vede dacă AWB-ul tău chiar se recunoaște. */ ""}
+        <label style="display:flex;align-items:center;gap:7px;font-size:13px;margin:-4px 0 10px">
+          <input type="checkbox" name="test" value="1"${deProba ? " checked" : ""}>
+          <span><strong>Doar probă</strong> — scanez ca să văd ce iese, fără să ating stocul. Se poate șterge tot, dintr-un buton.</span>
         </label>
         <div class="form-actions"><button class="btn" type="submit">A sosit</button></div>
       </form>
@@ -605,6 +749,7 @@ function register(router) {
                               enctype="multipart/form-data" style="max-width:980px;border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px">
                   <div style="font-size:15px;font-weight:600;margin-bottom:8px">
                     <code>${esc(r.awb || "fără AWB")}</code>
+                    ${nr(r.test) ? '<span class="badge galben" style="font-size:10px">probă</span>' : ""}
                     <span style="font-weight:400;font-size:12px;color:var(--text-muted)">· scanat ${esc(String(r.scanat_la).slice(0, 16))}</span>
                   </div>
                   <div style="display:grid;grid-template-columns:3fr 1fr;gap:12px">
@@ -647,15 +792,21 @@ function register(router) {
           ? table(
               ["AWB", "Produs", "Cantitate", "Ce s-a făcut", "Motiv", "Poză", "Când"],
               rezolvate.map((r) => [
-                `<code>${esc(r.awb || "—")}</code>`,
+                `<code>${esc(r.awb || "—")}</code>${nr(r.test) ? ' <span class="badge galben" style="font-size:10px">probă</span>' : ""}`,
                 esc(r.denumire || "—"),
                 cant(r.cantitate),
                 r.stare === "in_stoc"
                   ? '<span class="badge verde">înapoi în stoc</span>'
                   : '<span class="badge rosu">deteriorată, scoasă</span>',
                 esc(r.motiv || "—"),
+                // O poză din Drive e un link, nu o imagine pe care o putem
+                // pune în pagină: Drive nu servește fișierul direct. Cele
+                // rămase în bază (când Drive n-a răspuns) sunt data-URL și
+                // se pot arăta ca miniatură.
                 r.poza
-                  ? `<a href="${esc(r.poza)}" target="_blank"><img src="${esc(r.poza)}" alt="poza returului" style="height:38px;border-radius:3px;border:1px solid var(--border)"></a>`
+                  ? /^data:/.test(r.poza)
+                    ? `<a href="${esc(r.poza)}" target="_blank"><img src="${esc(r.poza)}" alt="poza returului" style="height:38px;border-radius:3px;border:1px solid var(--border)"></a> <span style="font-size:10px;color:var(--warn)">în bază</span>`
+                    : `<a href="${esc(r.poza)}" target="_blank">vezi în Drive</a>`
                   : "—",
                 esc(String(r.decis_la || "").slice(0, 16)),
               ])
@@ -686,18 +837,20 @@ function register(router) {
       )
       .get(awb, expeditia);
 
+    const test = String((ctx.body || {}).test || "") === "1" ? 1 : 0;
     await db
       .prepare(
-        `INSERT INTO ff_retururi (awb, produs_id, cantitate, stare, scanat_la, scanat_de)
-         VALUES (?, ?, ?, 'de_decis', ?, ?)`
+        `INSERT INTO ff_retururi (awb, produs_id, cantitate, stare, scanat_la, scanat_de, test)
+         VALUES (?, ?, ?, 'de_decis', ?, ?, ?)`
       )
-      .run(awb, linie ? linie.produs_id : null, linie ? nr(linie.cantitate) : null, acum(), ctx.user ? ctx.user.id : null);
+      .run(awb, linie ? linie.produs_id : null, linie ? nr(linie.cantitate) : null, acum(), ctx.user ? ctx.user.id : null, test);
 
+    const prefix = test ? "PROBĂ: " : "";
     return inapoi(
       "ok",
       linie
-        ? `Returul ${awb} a fost înregistrat, cu ce scria pe comanda lui. Verifică și alege ce faci cu marfa.`
-        : `Returul ${awb} a fost înregistrat. Nu cunosc AWB-ul ăsta, deci spune tu ce s-a întors.`
+        ? `${prefix}Returul ${awb} a fost înregistrat, cu ce scria pe comanda lui. Verifică și alege ce faci cu marfa.`
+        : `${prefix}Returul ${awb} a fost înregistrat. Nu cunosc AWB-ul ăsta, deci spune tu ce s-a întors.`
     );
   });
 
@@ -708,19 +861,60 @@ function register(router) {
     if (!r) return inapoi("eroare", "Returul nu există.");
     if (r.stare !== "de_decis") return inapoi("eroare", "Returul ăsta a fost deja rezolvat.");
 
-    // Poza vine fie micșorată din browser (câmpul ascuns), fie întreagă, ca
-    // fișier, dacă JS-ul n-a mers. A doua cale se taie la 4 MB: nu ca să
-    // economisim, ci fiindcă o bază umflată cu poze de 5 MB devine lentă
-    // pentru toată lumea, iar dovada se vede la fel de bine și micșorată.
-    const MAX = 4 * 1024 * 1024;
-    let poza = String(b.poza_cale || "").trim();
+    // POZA MERGE ÎN DRIVE, NU ÎN BAZĂ.
+    //
+    // Prima variantă o ținea ca data-URL într-o coloană. Vali: „Salveaz-o în
+    // drive nu în browser, ca să nu se încarce baza pe Render." Are dreptate:
+    // câteva sute de retururi pe an înseamnă sute de megaocteți de poze
+    // într-o bază care trebuie să fie rapidă la cu totul altceva, iar un
+    // backup de bază se face și se restaurează mult mai des decât se deschid
+    // pozele. În Drive stau ieftin, se văd dintr-un link, și nu încetinesc
+    // nimic.
+    //
+    // Micșorarea din browser rămâne: 3-5 MB devin 200-400 KB, deci urcarea e
+    // instantanee chiar și de pe terminal, pe WiFi-ul din depozit.
+    const MAX = 8 * 1024 * 1024;
+    let octeti = null;
+    let mime = "image/jpeg";
+    const dataUrl = String(b.poza_cale || "").trim();
     const fisier = (b.__files && b.__files.poza && b.__files.poza[0]) || null;
-    if (!poza && fisier && fisier.data && fisier.data.length) {
+    if (dataUrl) {
+      const m = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl);
+      if (!m) return inapoi("eroare", "Poza n-a ajuns întreagă. Încearcă din nou.");
+      mime = m[1];
+      octeti = Buffer.from(m[2], "base64");
+    } else if (fisier && fisier.data && fisier.data.length) {
+      if (!/^image\//.test(fisier.contentType || "")) return inapoi("eroare", "Fișierul atașat nu e o poză.");
       if (fisier.data.length > MAX)
         return inapoi("eroare", `Poza are ${Math.round(fisier.data.length / 1048576)} MB, prea mult. Fă-o din nou — pe telefon se micșorează singură.`);
-      if (!/^image\//.test(fisier.contentType || ""))
-        return inapoi("eroare", "Fișierul atașat nu e o poză.");
-      poza = `data:${fisier.contentType};base64,${fisier.data.toString("base64")}`;
+      mime = fisier.contentType;
+      octeti = fisier.data;
+    }
+
+    // `poza` ajunge în baza de date ca LINK, nu ca imagine.
+    let poza = "";
+    let notaPoza = "";
+    if (octeti && octeti.length) {
+      try {
+        const radacina = process.env.GOOGLE_DRIVE_FOLDER;
+        if (!radacina) throw new Error("GOOGLE_DRIVE_FOLDER nu e setată în Render");
+        const luna = azi().slice(0, 7);
+        const folder = await drive.cale(["Retururi fulfillment", luna], radacina);
+        const ext = /png/i.test(mime) ? "png" : /webp/i.test(mime) ? "webp" : "jpg";
+        const rez = await drive.urca({
+          nume: `retur-${String(r.awb || r.id).replace(/[^A-Za-z0-9_-]/g, "")}-${Date.now()}.${ext}`,
+          mime,
+          continut: octeti,
+          parinte: folder,
+        });
+        poza = rez.link;
+      } catch (e) {
+        // Drive n-a răspuns. NU pierdem dovada: marfa e pe masă acum, iar
+        // peste o oră e la gunoi și poza nu se mai poate face. Rămâne în
+        // bază, dar se spune pe față — altfel ar părea că a plecat în Drive.
+        poza = `data:${mime};base64,${octeti.toString("base64")}`;
+        notaPoza = ` Atenție: Drive n-a răspuns (${String(e.message || e).slice(0, 80)}), deci poza a rămas în baza ERP.`;
+      }
     }
 
     const v = F.validareRetur({
@@ -736,8 +930,8 @@ function register(router) {
     if (v.miscare) {
       const ins = await db
         .prepare(
-          `INSERT INTO ff_miscari (produs_id, cantitate, fel, referinta, awb, data, creat_de, observatii)
-           VALUES (?, ?, 'retur', ?, ?, ?, ?, ?) RETURNING id`
+          `INSERT INTO ff_miscari (produs_id, cantitate, fel, referinta, awb, data, creat_de, observatii, test)
+           VALUES (?, ?, 'retur', ?, ?, ?, ?, ?, ?) RETURNING id`
         )
         .run(
           v.miscare.produs_id,
@@ -746,7 +940,11 @@ function register(router) {
           r.awb,
           azi(),
           ctx.user ? ctx.user.id : null,
-          String(b.motiv || "").slice(0, 200) || null
+          String(b.motiv || "").slice(0, 200) || null,
+          // Decizia mosteneste semnul de la scanare: daca AWB-ul a fost
+          // scanat in proba, si miscarea care iese din el e proba. Altfel
+          // un test ar lasa in urma o intrare adevarata in stoc.
+          nr(r.test) ? 1 : 0
         );
       miscareId = ins.lastInsertRowid || null;
     }
@@ -770,9 +968,37 @@ function register(router) {
 
     return inapoi(
       "ok",
-      v.stare === "in_stoc"
+      (v.stare === "in_stoc"
         ? `${cant(b.cantitate)} s-au întors în stocul de fulfillment.`
-        : `${cant(b.cantitate)} au ieșit din gestiune ca marfă deteriorată, cu poză și motiv.`
+        : `${cant(b.cantitate)} au ieșit din gestiune ca marfă deteriorată, cu poză și motiv.`) + notaPoza
+    );
+  });
+
+  // ---- Anularea probei ---------------------------------------------------
+  //
+  // „Sa fac doar test si roll back apoi." Un buton, nu o curățenie făcută cu
+  // mâna prin tabele: altfel rămân urme, iar peste o lună nimeni nu mai știe
+  // care rând a fost probă.
+  //
+  // Se șterg DOAR rândurile marcate ca probă. Nici nu putea fi altfel —
+  // stocul nici nu le-a numărat vreodată, toate socotelile cer test = 0.
+  // Deci chiar dacă cineva uită să apese butonul ăsta, cifrele firmei rămân
+  // curate; proba doar stă în listă și deranjează la citit.
+  router.post(`${CALE}/proba/sterge`, async (ctx) => {
+    const m = await db.prepare("DELETE FROM ff_miscari WHERE COALESCE(test,0) = 1 RETURNING id").all();
+    const r = await db.prepare("DELETE FROM ff_retururi WHERE COALESCE(test,0) = 1 RETURNING id").all();
+    let s = [];
+    try {
+      s = await db.prepare("DELETE FROM ff_stare WHERE COALESCE(test,0) = 1 RETURNING id").all();
+    } catch (e) {
+      /* tabelul poate fi gol sau fara coloana pe o baza mai veche */
+    }
+    const total = (m || []).length + (r || []).length + (s || []).length;
+    return redirect(
+      ctx.res,
+      `${CALE}/retururi?ok=${encodeURIComponent(
+        total ? `S-au șters ${total} rânduri de probă. Stocul n-a fost atins niciodată de ele.` : "Nu era nimic de probă."
+      )}`
     );
   });
 }

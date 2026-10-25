@@ -22,7 +22,7 @@
 //     800 mm cu tot cu clapă nu se poate produce. Scrisă într-un if din cod,
 //     răspunsul la „de ce nu merge punga asta" ar fi fost „nu știu".
 const db = require("../lib/db");
-const { esc, layout, table } = require("../lib/render");
+const { esc, layout, table, subnavProductie } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const nr = (v) => Number(v || 0);
@@ -106,6 +106,7 @@ function register(router) {
       .join("");
 
     const body = `
+      ${subnavProductie("/fluxuri", ctx.user)}
       ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block">${esc(ctx.query.eroare)}</p>` : ""}
       <p style="max-width:820px;color:var(--text-muted)">
         Prin ce utilaje trece fiecare familie de produse, în ce ordine. Pașii <strong>obligatorii</strong> se fac
@@ -126,7 +127,7 @@ function register(router) {
              </form>`
           : ""
       }`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Fluxuri tehnologice", active: "/fluxuri", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Fluxuri tehnologice", active: "/productie", body }));
   });
 
   router.post("/fluxuri", async (ctx) => {
@@ -192,6 +193,7 @@ function register(router) {
       esc(r.sursa || "—"),
     ]);
     const body = `
+      ${subnavProductie("/fluxuri", ctx.user)}
       <p style="max-width:820px;color:var(--text-muted)">
         Care utilaj poate face ce, și ce nu se poate face deloc. Stau scrise în clar, ca să poată răspunde cineva la
         întrebarea „de ce nu merge punga asta" — îngropate într-un <code>if</code> din cod, răspunsul ar fi fost
@@ -199,7 +201,7 @@ function register(router) {
         utilaj merge, <strong>calculele</strong> spun cum iese dimensiunea foliei din dimensiunea produsului.
       </p>
       ${table(["Cod", "Tip", "Domeniu", "Condiție", "Ce se întâmplă", "Utilaje", "Sursa"], randuri)}`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Reguli de alocare", active: "/fluxuri/reguli", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Reguli de alocare", active: "/productie", body }));
   });
 
   // ---- Formatele de produs si normele de consum ---------------------------
@@ -259,6 +261,7 @@ function register(router) {
 
     const nelegate = fisa.filter((f) => !f.produs_id).length;
     const body = `
+      ${subnavProductie("/fluxuri", ctx.user)}
       <p style="max-width:860px;color:var(--text-muted)">
         Formatele de produs din fișa tehnică: dimensiuni, lățimea foliei desfășurate, masa de folie pe bucată, pe ce
         cilindru se imprimă. Nu sunt nomenclatorul de produse și nu-l înlocuiesc — descriu <strong>cum se face</strong>
@@ -277,7 +280,7 @@ function register(router) {
         de-aia stă separat de <a href="/productie/retete">Rețete</a>, nu peste ele.
       </p>
       ${table(["Produs", "Material", "Fel", "Cantitate", "Per", "Sursa", "Observații"], randuriNorme, { coloane: "fluxuri-norme" })}`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Formate și norme", active: "/fluxuri/produse", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Formate și norme", active: "/productie", body }));
   });
 
   // ---- Formulele si ce nu se stie inca ------------------------------------
@@ -311,6 +314,7 @@ function register(router) {
 
     const nerezolvate = deschise.filter((d) => !Number(d.rezolvata)).length;
     const body = `
+      ${subnavProductie("/fluxuri", ctx.user)}
       <h3 style="margin-top:0">Ce nu se știe încă ${nerezolvate ? `<span class="badge galben">${nerezolvate}</span>` : '<span class="badge verde">nimic</span>'}</h3>
       <p style="max-width:860px;color:var(--text-muted)">
         Lista asta e jumătatea cinstită a fișei tehnice. Un număr care lipsește și e scris ca lipsind e mult mai puțin
@@ -325,7 +329,7 @@ function register(router) {
         formula din spate e un număr pe care nimeni nu-l mai poate verifica.
       </p>
       ${table(["Cod", "Ce calculează", "Formula", "Unde se folosește"], randuriF)}`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Formule și întrebări deschise", active: "/fluxuri/formule", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Formule și întrebări deschise", active: "/productie", body }));
   });
 
   router.post("/fluxuri/deschise/:id/rezolva", async (ctx) => {
@@ -349,13 +353,14 @@ function register(router) {
     ]);
     const total = c.reduce((s, x) => s + nr(x.bucati), 0);
     const body = `
+      ${subnavProductie("/fluxuri", ctx.user)}
       <p style="max-width:820px;color:var(--text-muted)">
         Cilindrii de print pe care îi avem — ${total} bucăți. Contează la ce se poate imprima: lungimea pungii trebuie
         să încapă de un număr întreg de ori în circumferința cilindrului. Un format care nu încape nu se imprimă,
         oricât de liber ar fi utilajul.
       </p>
       ${table(["Circumferință", "Bucăți", "Max. culori", "Observații"], randuri)}`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Cilindri flexo", active: "/fluxuri/cilindri", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Cilindri flexo", active: "/productie", body }));
   });
 }
 
