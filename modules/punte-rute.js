@@ -814,6 +814,29 @@ module.exports = function registerRute(router, deps) {
     }
   });
 
+  // Parserul de etichete AWB Sameday, servit ca text ca sa-l poata lua jobul
+  // de noapte si sa-l ruleze ca atare. Parsarea era scrisa de la zero la
+  // fiecare rulare, din reguli dintr-un prompt, si de noua ori s-a dovedit
+  // prea ingusta — de fiecare data marfa disparea in tacere, niciodata cu
+  // eroare. Un fisier care se corecteaza o data nu poate regresa la o
+  // versiune mai veche a regulilor.
+  router.get("/punte/awb-sameday.py", async (ctx) => {
+    const fs = require("fs");
+    const path = require("path");
+    try {
+      const cod = fs.readFileSync(path.join(__dirname, "..", "punte", "awb-sameday.py"), "utf8");
+      ctx.res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      ctx.res.end(cod);
+    } catch (e) {
+      ctx.res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      ctx.res.end("parserul de AWB-uri nu a fost găsit");
+    }
+  });
+
   router.post("/api/ingest", async (ctx) => {
     const raspunde = (cod, obj) => {
       ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" });
