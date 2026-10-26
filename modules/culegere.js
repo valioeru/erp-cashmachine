@@ -413,39 +413,31 @@ async function faceTask(m, fel, agentId) {
   return r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
 }
 
-// Comanda se naște în CIORNĂ. Nu intră în fluxul depozitului, nu se poate
-// factura, și — cel mai important — nu pleacă niciun email. Agentul o
-// deschide, corectează liniile pe care le-am citit din text, și abia el apasă
-// butonul care o face „nouă" și trimite anunțul.
-async function faceComandaCiorna(m, agentId) {
-  const r = await db
-    .prepare(
-      `INSERT INTO comenzi (partener_id, status, observatii, agent_id, sursa, email_mesaj_id)
-       VALUES (?, 'ciorna', ?, ?, 'email', ?) RETURNING id`
-    )
-    .run(
-      m.partener_id,
-      `Citită automat din emailul „${scurt(m.subiect, 80)}" de la ${m.de_la}, primit ${String(m.data || "").slice(0, 16)}. Verifică liniile înainte de validare.`,
-      agentId,
-      m.id
-    );
-  const comandaId = r && r.lastInsertRowid ? Number(r.lastInsertRowid) : null;
-  if (!comandaId) return null;
-
-  // Liniile intră doar dacă produsul se recunoaște. Un produs ghicit greșit
-  // într-o comandă e mai rău decât o comandă goală: goala se completează în
-  // două minute, greșita pleacă mai departe fără să observe nimeni.
-  for (const l of liniiDinText(m.corp)) {
-    const p = await db
-      .prepare("SELECT id FROM produse WHERE lower(denumire) = lower(?) OR lower(cod) = lower(?) ORDER BY id LIMIT 1")
-      .get(l.denumire, l.denumire);
-    if (!p) continue;
-    await db
-      .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (?, ?, ?, 0)")
-      .run(comandaId, p.id, l.cantitate);
-  }
-  return comandaId;
-}
+// AICI SE NĂȘTEAU COMENZI DIN EMAILURI. NU SE MAI NASC.
+//
+// Un email clasificat drept „comandă" deschidea singur o comandă în ciornă,
+// cu liniile citite din text. Ideea era bună pe hârtie; în registru arăta
+// altfel. Comanda #5: client BRD, observații „Citită automat din emailul «RE:
+// prelungire factoring fara regres WAREHOUSE ALL SRL»", zero linii, zero lei.
+// O discuție despre factoring cu banca, intrată în registrul de vânzări ca
+// o comandă de marfă.
+//
+// Vali, 26.10.2026: „astea nu ar trebui să intre aici, comenzile automate din
+// email. Nu trebuiesc urcate aici, doar ce urcă utilizatorii."
+//
+// Are dreptate, și motivul e mai adânc decât clasificarea greșită: un
+// registru de comenzi în care jumătate din rânduri sunt ipoteze ale unui
+// program nu mai e un registru. Nu mai poți număra comenzile lunii fără să
+// te întrebi de fiecare dată care dintre ele e reală. O clasificare mai bună
+// n-ar fi rezolvat asta, doar ar fi rărit greșelile.
+//
+// CE RĂMÂNE: taskul. Emailul clasificat drept comandă îi face agentului un
+// task urgent, cu expeditorul, cu textul și cu legătura către mesajul întreg,
+// scadent în 24 de ore. Tot ce era util — „uite, cineva cere marfă pe email,
+// ocupă-te" — se vede acolo. Comanda o deschide omul, dacă chiar e una.
+//
+// `liniiDinText` rămâne (e pură și are test), dar nu mai e folosită nicăieri
+// în producție. Dacă o rescrie cineva în flux, de aici a plecat prima oară.
 
 
 // ============================================================================
@@ -753,21 +745,12 @@ async function clasificaMesaje({ zile } = {}) {
 
       const taskId = await faceTask(m, fel, agentId);
       if (taskId) rezumat.taskuri++;
-
-      let comandaId = null;
-      if (fel === "comanda") {
-        comandaId = await faceComandaCiorna(m, agentId);
-        if (comandaId && taskId) {
-          await db.prepare("UPDATE taskuri SET comanda_id = ? WHERE id = ?").run(comandaId, taskId);
-        }
-        rezumat.comenzi++;
-      } else {
-        rezumat.cereri++;
-      }
+      if (fel === "comanda") rezumat.comenzi++;
+      else rezumat.cereri++;
 
       await db
-        .prepare("UPDATE email_mesaje SET fel = ?, task_id = ?, comanda_id = ?, clasificat_la = ? WHERE id = ?")
-        .run(fel, taskId, comandaId, acum(), m.id);
+        .prepare("UPDATE email_mesaje SET fel = ?, task_id = ?, clasificat_la = ? WHERE id = ?")
+        .run(fel, taskId, acum(), m.id);
     } catch (e) {
       rezumat.erori++;
     }

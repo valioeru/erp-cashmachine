@@ -562,7 +562,6 @@ function register(router) {
       )
       .all(...args);
 
-    const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     // Adresa curentă, ca după schimbarea agentului să te întorci exact unde erai
     // — cu filtrul și căutarea puse, nu la începutul listei.
     const inapoi =
@@ -683,15 +682,16 @@ function register(router) {
           `<input type="checkbox" class="sel-cmd" name="ids" value="${c.id}">`,
           `<a href="/productie/${c.id}">${esc(c.numar || c.id)}</a>`,
           c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—"),
-          `<select name="agent_id" form="schimba-agent" class="sel-agent" data-comanda="${c.id}"
-                   onchange="document.getElementById('agent-comanda').value = this.dataset.comanda; this.form.submit()">
-             ${c.agent_id ? "" : `<option value="" selected>${esc(c.reprezentant || "fără agent")}</option>`}
-             ${utilizatori
-               .map((u) => `<option value="${u.id}"${Number(u.id) === Number(c.agent_id) ? " selected" : ""}>${esc(u.nume)}</option>`)
-               .join("")}
-           </select>`,
-          esc(c.tip_produs || "—"),
-          `<span class="cel-lung">${esc(c.caracteristici || "")}</span>`,
+          // Reprezentantul se citeste, nu se schimba de aici. Era o lista
+          // derulanta pe fiecare rand: pe 400 de randuri inseamna 400 de liste
+          // cu toti utilizatorii in ele, coloana cat jumatate de ecran, si un
+          // click gresit la derulare schimba agentul unei comenzi fara ca
+          // nimeni sa observe. Agentul se schimba din fisa comenzii, unde se
+          // si vede ce schimbi. Vali, 26.10.2026: „reprezentant sa nu fie
+          // editabil".
+          esc(c.agent_nume || c.reprezentant || "—"),
+          `<span class="cel-mediu" title="${esc(c.tip_produs || "")}">${esc(c.tip_produs || "—")}</span>`,
+          `<span class="cel-lung" title="${esc(c.caracteristici || "")}">${esc(c.caracteristici || "")}</span>`,
           esc(c.cantitate || ""),
           esc(c.um || ""),
           esc(c.tip_ambalare || ""),
@@ -701,7 +701,17 @@ function register(router) {
               ? `<span class="badge rosu">${esc(c.data_livrare)}</span>`
               : esc(c.data_livrare)
             : "",
-          badge(c.status),
+          // Starea SE schimba de aici. E singurul lucru pe care omul il
+          // schimba des si pe multe comenzi deodata — pana acum trebuia sa
+          // intre in fiecare fisa, sa schimbe, sa se intoarca, si tot asa.
+          // Culoarea ramane, ca sa se vada dintr-o privire ce e unde.
+          `<select name="status" form="schimba-status" class="sel-stare stare-${esc(c.status || "")}" data-comanda="${c.id}"
+                   title="Schimbă starea comenzii"
+                   onchange="document.getElementById('stare-comanda').value = this.dataset.comanda; this.form.submit()">
+             ${STATUSURI.map(
+               ([v, t]) => `<option value="${v}"${c.status === v ? " selected" : ""}>${esc(t)}</option>`
+             ).join("")}
+           </select>`,
           esc(c.doc_emisa_txt || (c.doc_emisa ? "DA" : "")),
           esc(c.fisa_tehnica_txt || (c.fisa_tehnica ? "DA" : "")),
           esc(c.facturat || ""),
@@ -720,9 +730,9 @@ function register(router) {
         <button class="btn secondary" type="submit">Șterge selectatele</button>
       </div>
       </form>
-      <form id="schimba-agent" method="post" action="/productie/agent" hidden>
+      <form id="schimba-status" method="post" action="/productie/stare" hidden>
         <input type="hidden" name="inapoi" value="${esc(inapoi)}">
-        <input type="hidden" name="comanda_id" id="agent-comanda">
+        <input type="hidden" name="comanda_id" id="stare-comanda">
       </form>
       ${sectiuneSpreAlocare(spre)}
       <form method="post" action="/productie/sterge-tot" class="inline-form" onsubmit="return confirm('Ștergi TOATE comenzile de producție? Folosește asta doar înainte de un reimport curat.')">
@@ -1061,6 +1071,18 @@ function register(router) {
   // Schimbarea agentului direct din listă. Mută și clientul la noul agent
   // dacă n-avea deja alocare — altfel comanda ar fi a unuia și clientul a
   // altuia, iar pâlnia ar arăta două povești diferite.
+  // Schimbarea starii direct din lista. Aceeasi validare ca pe fisa comenzii:
+  // o stare care nu e in STATUSURI nu intra, oricine ar trimite formularul.
+  router.post("/productie/stare", async (ctx) => {
+    const inapoi = String((ctx.body && ctx.body.inapoi) || "/productie");
+    const comandaId = parseInt((ctx.body && ctx.body.comanda_id) || 0, 10) || null;
+    const stare = String((ctx.body && ctx.body.status) || "");
+    const bun = STATUSURI.some(([v]) => v === stare);
+    if (!comandaId || !bun) return redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
+    await db.prepare("UPDATE comenzi_productie SET status = ? WHERE id = ?").run(stare, comandaId);
+    redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
+  });
+
   router.post("/productie/agent", async (ctx) => {
     const agentId = parseInt(ctx.body.agent_id, 10) || null;
     const comandaId = parseInt(ctx.body.comanda_id, 10) || null;

@@ -261,8 +261,8 @@ function register(router) {
                  <option value="tert">de la terț</option>
                  <option value="productie">din producție</option>
                </select>
-               <select name="furnizor_id"><option value="">— furnizor —</option>${furnizori
-                 .map((f) => `<option value="${f.id}">${esc(f.nume)}</option>`)
+               <select name="furnizor_id" class="sel-ingust"><option value="">— furnizor —</option>${furnizori
+                 .map((f) => `<option value="${f.id}" title="${esc(f.nume)}">${esc(f.nume)}</option>`)
                  .join("")}</select>
                <button class="btn small" type="submit">Comandă</button>
              </form>`
