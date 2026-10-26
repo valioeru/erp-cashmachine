@@ -1581,11 +1581,88 @@ function register(router) {
       });
     }
 
+    // CINE LUCREAZĂ LA FIECARE POST ------------------------------------------
+    //
+    // Fluxul scrie „UT10|UT11" — două mașini alternative. Pe hârtie, în hală,
+    // asta nu ajută pe nimeni: omul trebuie să știe pe CARE din două merge
+    // lotul lui. Dacă s-a făcut alocarea, fișa ia utilajul ales de acolo.
+    //
+    // Și, lângă el, cine are voie să-l lucreze. Lista vine din competențele
+    // scrise pe oameni (Producție → Resurse), aceleași pe care le filtrează
+    // pagina de alocare. Fără ea, fișa ajunge la un post unde nu e nimeni
+    // calificat, iar asta se descoperă la șase dimineața.
+    const toateUtilajele = await db.prepare("SELECT id, cod, denumire FROM utilaje WHERE activ = 1").all().catch(() => []);
+    const utilajDupaCod = new Map(toateUtilajele.map((u) => [String(u.cod || "").toUpperCase(), u]));
+
+    const competente = await db
+      .prepare(
+        `SELECT rc.utilaj_id, rc.nivel, r.nume
+           FROM resurse_competente rc JOIN resurse r ON r.id = rc.resursa_id
+          WHERE r.activ = 1 ORDER BY rc.nivel DESC, r.nume`
+      )
+      .all()
+      .catch(() => []);
+    const potLucra = new Map();
+    for (const x of competente) {
+      const k = Number(x.utilaj_id);
+      if (!potLucra.has(k)) potLucra.set(k, []);
+      // Cine abia învață se scrie, dar se vede că învață — altfel ajunge singur
+      // pe mașină într-o tură de noapte.
+      potLucra.get(k).push(x.nume + (Number(x.nivel) === 1 ? " (învață)" : ""));
+    }
+
+    // Pe ce utilaje chiar s-a alocat comanda, cu oamenii puși pe fiecare.
+    const alocatPeUtilaj = new Map();
+    for (const a of aloc) {
+      if (!a.utilaj_id) continue;
+      const k = Number(a.utilaj_id);
+      if (!alocatPeUtilaj.has(k)) alocatPeUtilaj.set(k, { utilaj: a, oameni: [] });
+      const r = await db
+        .prepare("SELECT r.nume FROM alocari_resurse ar JOIN resurse r ON r.id = ar.resursa_id WHERE ar.alocare_id = ?")
+        .all(a.id);
+      for (const om of r) {
+        if (!alocatPeUtilaj.get(k).oameni.includes(om.nume)) alocatPeUtilaj.get(k).oameni.push(om.nume);
+      }
+    }
+
+    const MAX_NUME = 6;
+    const pasiCuOameni = f.pasi.map((p) => {
+      // „UT10|UT11" → cele două utilaje candidate; un cod simplu → unul singur.
+      const coduri = String(p.utilaj_cod || "")
+        .split("|")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+      let candidati = coduri.map((cod) => utilajDupaCod.get(cod)).filter(Boolean);
+      if (!candidati.length && p.utilaj_id) {
+        const u = toateUtilajele.find((x) => Number(x.id) === Number(p.utilaj_id));
+        if (u) candidati = [u];
+      }
+
+      // Dintre candidați, cel pe care chiar s-a alocat comanda. Dacă pasul are
+      // oricum un singur utilaj, el e „ales" doar când există o alocare pe el —
+      // altfel am minți spunând că s-a hotărât ceva ce nu s-a hotărât.
+      const peCareSAlocat = candidati.filter((u) => alocatPeUtilaj.has(Number(u.id)));
+      const ales = peCareSAlocat.length === 1 ? peCareSAlocat[0] : null;
+
+      const pentru = ales ? [ales] : candidati;
+      const nume = [];
+      for (const u of pentru) for (const n of potLucra.get(Number(u.id)) || []) if (!nume.includes(n)) nume.push(n);
+      const alocati = ales ? (alocatPeUtilaj.get(Number(ales.id)) || {}).oameni || [] : [];
+      const ramasi = nume.filter((n) => !alocati.includes(n));
+
+      return Object.assign({}, p, {
+        ales: ales ? [ales.cod, ales.denumire].filter(Boolean).join(" · ") : null,
+        alocati,
+        operatori: ramasi.slice(0, MAX_NUME),
+        altiiCalificati: Math.max(0, ramasi.length - MAX_NUME),
+      });
+    });
+
     // Unitatea de la finalul fișei — bucăți la pungi, kilograme la folie
     // debitată. Până la confecționare se lucrează oricum folie, deci kg.
     const umFinal =
       (liniiPdf[0] && unitate(liniiPdf[0].cantitate, liniiPdf[0].um)) || unitate(c.cantitate, c.um) || "buc";
-    const operatii = FL.operatii(f.pasi, { um: umFinal });
+    const operatii = FL.operatii(pasiCuOameni, { um: umFinal });
 
     const html = FL.fisa({
       comanda: c,
