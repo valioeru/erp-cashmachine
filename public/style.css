@@ -618,6 +618,48 @@ button.chip { font-family: inherit; cursor: pointer; }
   text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
   font-size: 12px; color: var(--text-muted);
 }
+/* Coloanele cu text liber (produs, client) se taie la o latime rezonabila cu
+ * trei puncte la capat, nu imping tabelul cu inca jumatate de ecran. Textul
+ * intreg ramane in „title", deci se vede la hover, si latimea se poate trage
+ * oricum de margine. */
+.cel-mediu {
+  display: inline-block; max-width: 320px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+}
+/* LISTA DE FURNIZORI DIN RANDUL DE APROVIZIONARE.
+ *
+ * O lista derulanta se face, implicit, cat cea mai lunga optiune din ea. Cu
+ * doua sute de furnizori cu nume de firma intregi, asta insemna un camp lat
+ * cat ecranul, pe un rand de tabel care avea deja sapte coloane. Vali,
+ * 26.10.2026: „furnizor aici e prea lung, fa celula mai mica, scrisul sa se
+ * vada mai mare cand deschizi celula."
+ *
+ * Deci: inchisa e ingusta si taiata cu trei puncte; deschisa se face larga,
+ * fiindca lista care se deschide ia latimea campului in momentul deschiderii.
+ * Asa se vede intreg numele cand chiar alegi, si nu ocupa nimic cand nu. */
+.sel-ingust {
+  max-width: 170px;
+  text-overflow: ellipsis;
+}
+.sel-ingust:focus {
+  max-width: none;
+  width: 440px;
+  font-size: 15px;
+  position: relative;
+  z-index: 10;
+}
+
+/* Starea, schimbabila direct din lista. Culoarea e aceeasi cu a insignei, ca
+ * sa se citeasca la fel de repede ca inainte. */
+.sel-stare {
+  font-size: 12px; padding: 3px 4px; border: 1px solid var(--border, #e3e6ea);
+  border-radius: 6px; background: var(--bg-card, #fff); max-width: 150px;
+}
+.sel-stare.stare-noua { background: #f1f3f5; }
+.sel-stare.stare-in_productie { background: #fff6da; border-color: #e8d9a5; }
+.sel-stare.stare-finalizata,
+.sel-stare.stare-facturata { background: #e7f6ec; border-color: #b7dfc4; }
+.sel-stare.stare-anulata { background: #fdeceb; border-color: #f0bdb8; }
 .tabel-lat td { padding-top: 7px; padding-bottom: 7px; }
 
 /* Calculatorul AWB: grila de asumptii si marcarea campurilor de scenariu. */
