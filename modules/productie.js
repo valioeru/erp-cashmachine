@@ -508,10 +508,42 @@ function register(router) {
       args.push(filtru);
     }
     if (cauta) {
-      where.push("(c.client_text ILIKE ? OR c.tip_produs ILIKE ? OR c.initiator ILIKE ? OR c.numar ILIKE ?)");
-      args.push(`%${cauta}%`, `%${cauta}%`, `%${cauta}%`, `%${cauta}%`);
+      // Numele clientului e in DOUA locuri: `client_text`, scris pe comanda, si
+      // `parteneri.nume`, cand comanda e legata de un partener. Lista afiseaza
+      // numele partenerului cand exista — deci cautarea doar pe `client_text`
+      // nu gasea exact randurile pe care omul le vedea pe ecran. Se cauta in
+      // amandoua, plus reprezentantul, care si el e ori text ori utilizator.
+      where.push(
+        `(c.client_text ILIKE ? OR p.nume ILIKE ? OR c.tip_produs ILIKE ? OR c.caracteristici ILIKE ?
+          OR c.initiator ILIKE ? OR c.reprezentant ILIKE ? OR u.nume ILIKE ? OR c.numar ILIKE ?)`
+      );
+      for (let i = 0; i < 8; i++) args.push(`%${cauta}%`);
     }
     const clauza = where.length ? "WHERE " + where.join(" AND ") : "";
+
+    // Ordinea listei. Implicit: ultimele comenzi sus, dupa DATA PLASARII.
+    //
+    // Era `id DESC` — ultima adaugata prima. Merge cat timp comenzile se scriu
+    // una cate una, dar un import din Excel le baga in ordinea din fisier, si
+    // atunci id-ul nu mai are nicio legatura cu data: pe ecran ieseau
+    // 19.10-016, -012, -013, -010. Acum se sorteaza dupa data plasarii, iar
+    // id-ul ramane doar departajarea la egalitate, deci o comanda scrisa acum
+    // tot urca prima intre cele de azi.
+    const ORDINI = {
+      plasare: "COALESCE(NULLIF(c.data_initiere, ''), '0000-00-00') DESC, c.id DESC",
+      adaugare: "c.id DESC",
+      livrare: "COALESCE(NULLIF(c.data_livrare, ''), '9999-99-99') ASC, c.id DESC",
+      numar: "c.numar DESC NULLS LAST, c.id DESC",
+      client: "COALESCE(NULLIF(p.nume, ''), c.client_text) ASC NULLS LAST, c.id DESC",
+    };
+    const ORDINI_ETICHETE = [
+      ["plasare", "Ultimele plasate sus"],
+      ["adaugare", "Ultimele adăugate sus"],
+      ["livrare", "Cel mai apropiat termen sus"],
+      ["numar", "După numărul comenzii"],
+      ["client", "După client"],
+    ];
+    const ordine = ORDINI[String(ctx.query.ordine || "")] ? String(ctx.query.ordine) : "plasare";
 
     // Ultima comanda adaugata sta prima. Lista era ordonata dupa data
     // solicitata, iar o comanda scrisa acum, cu termen peste doua luni,
@@ -525,7 +557,7 @@ function register(router) {
          LEFT JOIN parteneri p ON p.id = c.partener_id
          LEFT JOIN utilizatori u ON u.id = c.agent_id
          ${clauza}
-         ORDER BY c.id DESC
+         ORDER BY ${ORDINI[ordine]}
          LIMIT 400`
       )
       .all(...args);
@@ -533,7 +565,10 @@ function register(router) {
     const utilizatori = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     // Adresa curentă, ca după schimbarea agentului să te întorci exact unde erai
     // — cu filtrul și căutarea puse, nu la începutul listei.
-    const inapoi = "/productie?" + new URLSearchParams({ status: filtru, ...(cauta ? { q: cauta } : {}) }).toString();
+    const inapoi =
+      "/productie?" + new URLSearchParams({ status: filtru, ordine, ...(cauta ? { q: cauta } : {}) }).toString();
+    // Bucata de adresa care pastreaza cautarea si ordinea cand se apasa pe un card.
+    const pastreaza = (cauta ? "&q=" + encodeURIComponent(cauta) : "") + "&ordine=" + ordine;
 
     const contoare = await db.prepare("SELECT status, COUNT(*) AS n FROM comenzi_productie GROUP BY status").all();
     const cnt = Object.fromEntries(contoare.map((r) => [r.status, Number(r.n)]));
@@ -594,12 +629,12 @@ function register(router) {
              numarul era deja raspunsul, doar ca nu ducea nicaieri. */ ""}
         ${STATUSURI.map(
           ([v, t]) =>
-            `<a class="card card-filtru${filtru === v ? " activ" : ""}" href="/productie?status=${v}${cauta ? "&q=" + encodeURIComponent(cauta) : ""}"
+            `<a class="card card-filtru${filtru === v ? " activ" : ""}" href="/productie?status=${v}${pastreaza}"
                 title="Arată doar comenzile cu starea asta">
                <div class="label">${esc(t)}</div><div class="value">${cnt[v] || 0}</div>
              </a>`
         ).join("")}
-        <a class="card card-filtru${filtru === "intarziate" ? " activ" : ""}" href="/productie?status=intarziate${cauta ? "&q=" + encodeURIComponent(cauta) : ""}"
+        <a class="card card-filtru${filtru === "intarziate" ? " activ" : ""}" href="/productie?status=intarziate${pastreaza}"
            title="Comenzi deschise cu data de livrare trecută">
           <div class="label">Cu termenul depășit</div>
           <div class="value" style="color:${intarziate.length ? "var(--danger)" : "inherit"}">${intarziate.length}</div>
@@ -612,15 +647,31 @@ function register(router) {
           <div class="mic">din rețete, doar pentru comenzile de mai sus</div></div>
       </div>
       <form class="filtre" method="get" action="/productie">
-        <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după client, produs, inițiator…">
+        <input type="search" name="q" value="${esc(cauta)}" autofocus
+               style="min-width:280px;flex:1 1 320px"
+               placeholder="Caută după client, produs, număr, caracteristici, agent…">
         <select name="status" onchange="this.form.submit()">
           <option value="deschise"${filtru === "deschise" ? " selected" : ""}>Doar deschise</option>
           <option value="toate"${filtru === "toate" ? " selected" : ""}>Toate</option>
           <option value="intarziate"${filtru === "intarziate" ? " selected" : ""}>Cu termenul depășit</option>
           ${STATUSURI.map(([v, t]) => `<option value="${v}"${filtru === v ? " selected" : ""}>${esc(t)}</option>`).join("")}
         </select>
+        <select name="ordine" onchange="this.form.submit()" title="Ordinea în care se văd comenzile">
+          ${ORDINI_ETICHETE.map(
+            ([v, t]) => `<option value="${v}"${ordine === v ? " selected" : ""}>${esc(t)}</option>`
+          ).join("")}
+        </select>
         <button class="btn small" type="submit">Filtrează</button>
+        ${cauta ? `<a class="link-btn" href="/productie?status=${esc(filtru)}&ordine=${esc(ordine)}">Șterge căutarea</a>` : ""}
       </form>
+      ${
+        cauta
+          ? `<p style="margin:-6px 0 10px;font-size:13px;color:var(--text-muted)">
+               ${comenzi.length}${comenzi.length === 400 ? "+" : ""} ${comenzi.length === 1 ? "comandă" : "comenzi"}
+               pentru „${esc(cauta)}". Caută și în numele partenerului legat, nu doar în clientul scris pe comandă.
+             </p>`
+          : ""
+      }
       <form method="post" action="/productie/sterge" onsubmit="return confirm('Ștergi comenzile selectate? Nu se pot recupera.')">
       <div class="tabel-lat tabel-inghetat">
       ${table(
