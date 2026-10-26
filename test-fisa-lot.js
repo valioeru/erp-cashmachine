@@ -50,12 +50,13 @@ const PASI = [
 console.log("Operațiile fișei");
 const ops = FL.operatii(PASI, { um: "buc" });
 bine("fluxul de 4 pași dă 8 operații (recepție + 4 + control + ambalare + eliberare)", ops.length === 8, ops.length);
-bine("prima e recepția materiei prime", /Recepție materie primă/.test(ops[0].titlu), ops[0].titlu);
-bine("ultima e eliberarea lotului", /Eliberare/.test(ops[ops.length - 1].titlu), ops[ops.length - 1].titlu);
+bine("prima e recepția materiei prime, scrisă în engleză", /Raw material receipt/.test(ops[0].titlu), ops[0].titlu);
+bine("românescul rămâne pe al doilea rând, pentru auditul ISO", /Recepție materie primă/.test(ops[0].titluEn), ops[0].titluEn);
+bine("ultima e eliberarea lotului", /Lot release/.test(ops[ops.length - 1].titlu), ops[ops.length - 1].titlu);
 bine("există control final de calitate", ops.some((o) => o.qc === true));
 bine("numerotarea e 010, 020, ... 080",
   ops.map((o) => o.nr).join(",") === "010,020,030,040,050,060,070,080", ops.map((o) => o.nr).join(","));
-bine("pașii fluxului își păstrează ordinea", ops[1].titlu.includes("Extrudare") && ops[4].titlu.includes("Confecționare"),
+bine("pașii fluxului își păstrează ordinea", ops[1].titlu.includes("Film extrusion") && ops[4].titlu.includes("Bag making"),
   ops.map((o) => o.titlu).join(" | "));
 bine("postul arată utilajul", ops[1].post === "UT01 · Extruder", ops[1].post);
 bine("pasul pe două utilaje alternative le arată pe amândouă", ops[4].post === "UT10|UT11", ops[4].post);
@@ -98,13 +99,13 @@ const htmlA = FL.fisa({
   comanda: { id: 9, numar: "CMD-9", data_initiere: "2026-10-26" },
   linii: [], caracteristici: [], operatii: opsA, lot: "CM-261026-9",
 });
-bine("fișa scrie utilajul alocat, nu codul din flux", htmlA.includes("UT01 · Extruder") && htmlA.includes("utilaj alocat"));
-bine("pasul cu două utilaje e marcat ca nealocat", htmlA.includes("UT10|UT11") && htmlA.includes("încă nealocat"));
-bine("scrie cine e alocat", htmlA.includes("<b>Alocat:</b> Bam"));
-bine("scrie cine mai poate lucra", htmlA.includes("Pot lucra: Giri Ankit, Florin Bumbacea"));
+bine("fișa scrie utilajul alocat, nu codul din flux", htmlA.includes("UT01 · Extruder") && htmlA.includes("machine assigned"));
+bine("pasul cu două utilaje e marcat ca nealocat", htmlA.includes("UT10|UT11") && htmlA.includes("not assigned yet"));
+bine("scrie cine e alocat", htmlA.includes("<b>Assigned:</b> Bam"));
+bine("scrie cine mai poate lucra", htmlA.includes("Qualified: Giri Ankit, Florin Bumbacea"));
 bine("spune câți calificați n-au încăput în listă", htmlA.includes("+12"));
 bine("un pas fără niciun om nu lasă rând gol pe hârtie",
-  !FL.fisa({ comanda: { id: 1 }, linii: [], caracteristici: [], operatii: FL.operatii([{ operatie: "X", utilaj_cod: "UT09" }], {}), lot: "CM-1" }).includes("Pot lucra:"));
+  !FL.fisa({ comanda: { id: 1 }, linii: [], caracteristici: [], operatii: FL.operatii([{ operatie: "X", utilaj_cod: "UT09" }], {}), lot: "CM-1" }).includes("Qualified:"));
 
 // ---- 2. Parametrii ---------------------------------------------------------
 console.log("\nParametrii");
@@ -170,18 +171,29 @@ bine("are un cod de bare pentru lot și câte unul pentru fiecare operație",
   (html.match(/<svg class="cod-bare"/g) || []).length);
 bine("fiecare operație are codul ei scris sub cod",
   ops.every((o) => html.includes(">CMP142." + o.nr + "</text>")));
-bine("are banda OPERAȚII", html.includes("OPERAȚII / OPERATIONS"));
-bine("are coloanele Specificat și Realizat", html.includes("Specificat") && html.includes("Realizat"));
+bine("are banda OPERAȚII", html.includes("OPERATIONS / OPERAȚII"));
+bine("are coloanele Specified și Actual", html.includes(">Specified<") && html.includes(">Actual<"));
 bine("valoarea cerută e deja tipărită lângă caseta goală", html.includes('<td class="spec">60 µm</td>'));
 bine("parametrul fără valoare lasă caseta goală, nu scrie zero", html.includes('<td class="spec"></td>'));
-bine("are casete Bune și Rebut în kg la extruder", html.includes("Bune (kg):") && html.includes("Rebut (kg):"));
-bine("are casete în bucăți după confecționare", html.includes("Bune (buc):"));
-bine("spune condiția pasului opțional", html.includes("se aplică doar dacă") && html.includes("R10"));
+bine("are casete Good și Scrap în kg la extruder", html.includes("Good (kg):") && html.includes("Scrap (kg):"));
+bine("după confecționare unitatea devine bucăți, scrise „pcs»", html.includes("Good (pcs):"));
+bine("spune condiția pasului opțional", html.includes("applies only if") && html.includes("R10"));
 bine("are nota de scanare", html.includes("Scanează codul operației la începutul lucrului la post"));
 bine("are nota în engleză", html.includes("Scan the operation barcode"));
-bine("are cele două semnături", html.includes("Responsabil producție") && html.includes("Eliberare lot — Control calitate"));
+bine("are cele două semnături", html.includes("Production manager") && html.includes("Lot release — Quality control"));
 bine("arată clientul și termenul", html.includes("DPD România") && html.includes("2026-11-05"));
-bine("arată produsul, codul și cantitatea scrisă citeț", html.includes("PC-DPD-350450") && html.includes("100.000 buc"));
+
+// Fișa e în engleză: hala e plină de oameni care nu citesc româna, iar hârtia
+// asta se citește la 6 dimineața, nu se studiază. Românescul rămâne pe al
+// doilea rând, acolo unde contează pentru auditul ISO.
+bine("titlul e în engleză, cu românescul dedesubt",
+  html.indexOf("PRODUCTION TRAVELER") < html.indexOf("FIȘĂ ÎNSOȚITOARE LOT"));
+bine("antetul de bloc e în engleză", html.includes("Lot code") && html.includes("Due date") && html.includes("Product code"));
+bine("instrucțiunile sunt în engleză, cu româna sub ele",
+  html.indexOf("Scan the operation barcode when starting work") < html.indexOf("Scanează codul operației la începutul"));
+bine("reprezentantul de vânzări NU mai apare pe fișă",
+  !html.includes("Ionuț Pavel") && !/Reprezentant|>Sales</.test(html));
+bine("arată produsul, codul și cantitatea scrisă citeț", html.includes("PC-DPD-350450") && html.includes("100.000 pcs"));
 bine("cantitatea brută nu mai apare nicăieri", !html.includes(">100000"));
 bine("arată alocarea pe utilaj", html.includes("06:00–14:00") && html.includes("Marius, Ana"));
 bine("arată din ce flux vin operațiile", html.includes("F-PUNGA · Pungă curier (de la produs)"));
@@ -198,7 +210,7 @@ const rau = FL.fisa({
 });
 bine("denumirile cu etichete HTML ies ca text", !rau.includes("<script>alert(1)</script>"));
 bine("observațiile cu etichete HTML ies ca text", !rau.includes("<img src=x"));
-bine("fișa se desenează și fără produse și fără caracteristici", rau.includes("OPERAȚII / OPERATIONS"));
+bine("fișa se desenează și fără produse și fără caracteristici", rau.includes("OPERATIONS / OPERAȚII"));
 
 console.log(esecuri ? `\n${esecuri} verificări căzute.` : "\nToate verificările trec.");
 process.exit(esecuri ? 1 : 0);
