@@ -545,6 +545,32 @@ button.chip { font-family: inherit; cursor: pointer; }
 .tabel-lat table { min-width: 1500px; }
 .tabel-lat td, .tabel-lat th { white-space: nowrap; }
 
+/* PE ECRAN LAT, TABELUL IESE DIN COLOANA DE TEXT.
+ *
+ * Pagina are latimea limitata la 1100px (.content) fiindca un rand de text de
+ * 2000 de pixeli nu se citeste — ochiul pierde randul la intoarcere. Dar
+ * regula asta, buna pentru text, strangea si tabelele: pe un monitor de 1920
+ * sau 2560 se vedeau tot 1100px de tabel si opt coloane din optsprezece, iar
+ * restul ecranului statea gol. Vali, 26.10.2026: „sa poti vedea pe un ecran
+ * lat tot."
+ *
+ * Deci numai tabelul iese din coloana, nu si textul. Marginea negativa il
+ * scoate din .content pana la 20px de marginea ferestrei: coltul din stanga al
+ * continutului e la (100vw - 1100)/2 + 24 de padding, deci deplasarea pana la
+ * 20px e 20 - (50vw - 550) - 24, adica 546px - 50vw. Latimea ramane
+ * calc(100vw - 40px), cu loc de bara de derulare verticala.
+ *
+ * Sub 1200px nu se aplica nimic: acolo .content oricum ocupa tot ecranul, iar
+ * tabelul se deruleaza orizontal ca pana acum. */
+@media (min-width: 1200px) {
+  .tabel-lat,
+  .tabel-lat + .scroll-lipit {
+    width: calc(100vw - 40px);
+    margin-left: calc(546px - 50vw);
+    margin-right: 0;
+  }
+}
+
 /* Capul de tabel ramane sus. „top" e inaltimea barei de sus a aplicatiei. */
 .tabel-lat thead th {
   position: sticky;
