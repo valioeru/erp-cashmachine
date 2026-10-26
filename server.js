@@ -45,6 +45,7 @@ require("./modules/punte").register(router);
 // ordinea inregistrarii, iar "/productie/:id" din productie.js ar inghiti
 // "/productie/utilaje" daca ar veni primul.
 require("./modules/utilaje").register(router);
+require("./modules/program").register(router);
 // Rutele rețetelor se înregistrează ÎNAINTEA producției: acolo există
 // „/productie/:id", care altfel ar înghiți „/productie/retete" ca pe un id.
 require("./modules/retete").register(router);
