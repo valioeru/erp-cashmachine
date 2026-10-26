@@ -164,7 +164,7 @@ function register(router) {
     const cereri = alMeu
       ? await db.prepare(`${SELECT_RFQ} WHERE r.agent_id = ? ORDER BY r.id DESC LIMIT 300`).all(ctx.user.id)
       : toate
-        ? await db.prepare(`${SELECT_RFQ} WHERE r.status IN ('noua','in_lucru') ORDER BY r.termen_ofertare NULLS LAST, r.id DESC LIMIT 300`).all()
+        ? await db.prepare(`${SELECT_RFQ} WHERE r.status IN ('noua','in_lucru') ORDER BY r.id DESC LIMIT 300`).all()
         : await db.prepare(`${SELECT_RFQ} ORDER BY r.id DESC LIMIT 300`).all();
 
     const randuri = cereri.map((x) => deAfisat(ctx.user, x, implicit));

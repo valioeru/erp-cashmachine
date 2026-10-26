@@ -148,7 +148,7 @@ function register(router) {
                 COALESCE((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id), 0) AS total
          FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
          WHERE c.status NOT IN ('facturata', 'livrata', 'anulata')
-         ORDER BY COALESCE(c.data_livrare_ceruta, c.data) ASC, c.id DESC
+         ORDER BY c.id DESC
          LIMIT 300`
       )
       .all();
@@ -536,7 +536,7 @@ function register(router) {
          LEFT JOIN parteneri f ON f.id = a.furnizor_id
          LEFT JOIN comenzi c ON c.id = a.comanda_id
          LEFT JOIN parteneri cl ON cl.id = c.partener_id
-         ORDER BY CASE a.status WHEN 'ceruta' THEN 0 WHEN 'confirmata' THEN 1 ELSE 2 END, a.id DESC
+         ORDER BY a.id DESC
          LIMIT 300`
       )
       .all();
@@ -544,7 +544,7 @@ function register(router) {
       .prepare(
         `SELECT m.*, p.denumire AS produs FROM cereri_materie_prima m
          LEFT JOIN produse p ON p.id = m.produs_id
-         ORDER BY CASE m.status WHEN 'ceruta' THEN 0 WHEN 'confirmata' THEN 1 ELSE 2 END, m.id DESC
+         ORDER BY m.id DESC
          LIMIT 200`
       )
       .all();

@@ -19,26 +19,92 @@ function register(router) {
   });
 
   router.get("/stocuri", async (ctx) => {
+    // Lista de stoc are mii de randuri, cate unul pe produs si depozit. Fara
+    // filtre, singura cale sa afli cat ai dintr-o marfa era Ctrl+F in pagina —
+    // si aia merge doar pe ce a apucat sa se incarce. Vali, 26.10.2026:
+    // „search pe o marfa plus filtre pe depozite etc".
+    const cauta = String(ctx.query.q || "").trim();
+    const depozitId = parseInt(ctx.query.depozit, 10) || 0;
+    const doarAlerta = String(ctx.query.alerta || "") === "1";
+
+    const unde = [];
+    const args = [];
+    if (cauta) {
+      unde.push("(p.denumire ILIKE ? OR p.cod ILIKE ?)");
+      args.push(`%${cauta}%`, `%${cauta}%`);
+    }
+    if (depozitId) {
+      unde.push("d.id = ?");
+      args.push(depozitId);
+    }
+    // „Sub stoc minim" se filtreaza in SQL, nu dupa ce s-au adus randurile:
+    // altfel ar fi aratat doar alertele dintre primele cateva mii de randuri.
+    if (doarAlerta) unde.push("COALESCE(s.stoc, 0) <= COALESCE(p.stoc_minim, 0)");
+    const clauza = unde.length ? "WHERE " + unde.join(" AND ") : "";
+
     const stocCurent = await db
       .prepare(
-        `SELECT p.id AS produs_id, p.denumire, p.unitate_masura, p.stoc_minim, d.denumire AS depozit,
+        `SELECT p.id AS produs_id, p.denumire, p.cod, p.unitate_masura, p.stoc_minim, d.denumire AS depozit,
                 COALESCE(s.stoc, 0) AS stoc
          FROM ${SUB_STOC} s
          JOIN produse p ON p.id = s.produs_id
          JOIN depozite d ON d.id = s.depozit_id
-         ORDER BY p.denumire`
+         ${clauza}
+         ORDER BY p.denumire
+         LIMIT 2000`
       )
-      .all();
+      .all(...args);
 
+    const depozite = await db.prepare("SELECT id, denumire FROM depozite ORDER BY denumire").all();
+
+    // Mișcările urmează aceleași filtre: dacă te uiți la o marfă, vrei să vezi
+    // mișcările ei, nu ultimele 40 din toată firma.
+    const undeM = [];
+    const argsM = [];
+    if (cauta) {
+      undeM.push("(p.denumire ILIKE ? OR p.cod ILIKE ?)");
+      argsM.push(`%${cauta}%`, `%${cauta}%`);
+    }
+    if (depozitId) {
+      undeM.push("d.id = ?");
+      argsM.push(depozitId);
+    }
     const miscari = await db
       .prepare(
         `SELECT m.*, p.denumire AS produs, d.denumire AS depozit
          FROM miscari_stoc m
          JOIN produse p ON p.id = m.produs_id
          JOIN depozite d ON d.id = m.depozit_id
+         ${undeM.length ? "WHERE " + undeM.join(" AND ") : ""}
          ORDER BY m.id DESC LIMIT 40`
       )
-      .all();
+      .all(...argsM);
+
+    const totalStoc = stocCurent.reduce((s, r) => s + Number(r.stoc || 0), 0);
+    const subMinim = stocCurent.filter((r) => Number(r.stoc) <= Number(r.stoc_minim || 0)).length;
+    const filtre = `
+      <form class="filtre" method="get" action="/stocuri">
+        <input type="search" name="q" value="${esc(cauta)}" autofocus
+               style="min-width:260px;flex:1 1 320px" placeholder="Caută o marfă după denumire sau cod…">
+        <select name="depozit" onchange="this.form.submit()">
+          <option value="">Toate depozitele</option>
+          ${depozite
+            .map((d) => `<option value="${d.id}"${depozitId === Number(d.id) ? " selected" : ""}>${esc(d.denumire)}</option>`)
+            .join("")}
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+          <input type="checkbox" name="alerta" value="1"${doarAlerta ? " checked" : ""} onchange="this.form.submit()">
+          doar sub stoc minim
+        </label>
+        <button class="btn small" type="submit">Caută</button>
+        ${cauta || depozitId || doarAlerta ? `<a class="link-btn" href="/stocuri">Șterge filtrele</a>` : ""}
+      </form>
+      <p style="margin:-6px 0 10px;font-size:13px;color:var(--text-muted)">
+        ${stocCurent.length}${stocCurent.length === 2000 ? "+" : ""}
+        ${stocCurent.length === 1 ? "rând" : "rânduri"},
+        ${totalStoc.toLocaleString("ro-RO", { maximumFractionDigits: 3 })} bucăți în total,
+        ${subMinim} sub stoc minim.
+      </p>`;
 
     const body = `
       <div class="toolbar">
@@ -46,6 +112,7 @@ function register(router) {
         <a href="/depozite" class="btn secondary">Gestionează depozite</a>
       </div>
       <h2>Stoc curent pe depozite</h2>
+      ${filtre}
       ${table(
         ["Produs", "Depozit", "Cantitate", "UM", "Alertă"],
         stocCurent.map((r) => [
@@ -58,7 +125,7 @@ function register(router) {
             : '<span class="badge verde">ok</span>',
         ])
       )}
-      <h2>Ultimele mișcări de stoc</h2>
+      <h2>Ultimele mișcări de stoc${cauta || depozitId ? " — pentru ce ai filtrat" : ""}</h2>
       ${table(
         ["Data", "Produs", "Depozit", "Tip", "Cantitate", "Preț unitar", "Document", "Acțiuni"],
         miscari.map((m) => [
