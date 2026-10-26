@@ -11,6 +11,7 @@ const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-
 const T = require("../lib/termene");
 const { comenziSpreAlocare, ore } = require("./utilaje");
 const FL = require("../lib/fisa-lot");
+const { fluxulComenzii } = require("../lib/flux-comanda");
 
 const STATUSURI = [
   ["noua", "Nouă (solicitată)", "gri"],
@@ -29,68 +30,6 @@ function azi() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Pe ce flux tehnologic merge o comandă. Trei surse, în ordinea asta:
-//
-//   1. ce s-a ales pe comandă — o serie de probă poate merge altfel decât
-//      producția curentă, și atunci alegerea omului bate orice regulă;
-//   2. fluxul produsului din catalog;
-//   3. ghicit după denumire, ca ultimă soluție.
-//
-// Al treilea pas există fiindcă fără el fișa unui produs nelegat ar ieși cu
-// zero operații — adică o hârtie care nu ajută pe nimeni. Ghicitul se SPUNE pe
-// fișă („ghicit după denumire"), ca să nu treacă drept o alegere făcută de om.
-const GHICIT = [
-  ["F-STRETCH-PRE", /prestretch|pre-stretch/i],
-  ["F-STRETCH-AUT", /stretch[^.]{0,20}automat|automat[^.]{0,20}stretch/i],
-  ["F-STRETCH-MAN", /stretch/i],
-  ["F-CUTIE-AM", /cutie[^.]{0,20}americ/i],
-  ["F-CUTIE-SIMPLA", /cutie|carton/i],
-  ["F-SAC-MENAJ", /menajer|sac[^.]{0,20}menaj/i],
-  ["F-SAC-SGR", /sgr|fresful|sac/i],
-  ["F-AWB", /awb|plic/i],
-  ["F-PUNGA", /pung/i],
-  ["F-BANDA", /band[ăa] adeziv|scotch/i],
-  ["F-ETICHETE", /etichet/i],
-  ["F-FOLIE-DEBITATA", /folie/i],
-];
-async function fluxulComenzii(c, linii) {
-  const ia = async (id) => (id ? await db.prepare("SELECT * FROM fluxuri WHERE id = ? AND activ = 1").get(id) : null);
-  let flux = await ia(c.flux_id);
-  let cum = flux ? "ales pe comandă" : null;
-
-  if (!flux) {
-    const ids = [];
-    for (const l of linii || []) if (l.produs_id) ids.push(Number(l.produs_id));
-    if (c.produs_id) ids.unshift(Number(c.produs_id));
-    for (const pid of ids) {
-      const p = await db.prepare("SELECT flux_id FROM produse WHERE id = ?").get(pid);
-      if (p && p.flux_id) {
-        flux = await ia(p.flux_id);
-        if (flux) { cum = "de la produs"; break; }
-      }
-    }
-  }
-
-  if (!flux) {
-    const text = [c.tip_produs, c.caracteristici].concat((linii || []).map((l) => l.denumire)).filter(Boolean).join(" ");
-    for (const [cod, rx] of GHICIT) {
-      if (!rx.test(text)) continue;
-      const f = await db.prepare("SELECT * FROM fluxuri WHERE upper(cod) = ? AND activ = 1").get(cod);
-      if (f) { flux = f; cum = "ghicit după denumire"; break; }
-    }
-  }
-
-  const pasi = flux
-    ? await db
-        .prepare(
-          `SELECT p.*, u.denumire AS utilaj_denumire FROM fluxuri_pasi p
-             LEFT JOIN utilaje u ON u.id = p.utilaj_id
-            WHERE p.flux_id = ? ORDER BY p.pas_nr`
-        )
-        .all(flux.id)
-    : [];
-  return { flux, pasi, cum };
-}
 
 // Datele din Excelul de comenzi vin în DOUĂ formate amestecate:
 //   - cu punct = format românesc (19.09.2025 → 19 septembrie)

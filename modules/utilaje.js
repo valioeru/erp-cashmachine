@@ -25,6 +25,7 @@ const { esc, cantitate, unitate, layout, table, subnavProductie } = require("../
 const { send, redirect } = require("../lib/router");
 const SCH = require("../lib/schimburi");
 const PROG = require("./program");
+const { fluxulComenzii, utilajeleFluxului } = require("../lib/flux-comanda");
 
 const nr = (v) => Number(v || 0);
 
@@ -1291,7 +1292,28 @@ function register(router) {
 
     const caps = await capacitati();
     const variante = estimeaza([c], caps).get(Number(c.id)) || [];
-    const utilaje = await db.prepare("SELECT * FROM utilaje WHERE activ = 1 ORDER BY denumire").all();
+
+    // UTILAJELE PE CARE SE POATE ALOCA, NU TOATE CELE DIN HALĂ.
+    //
+    // O comandă de folie n-are ce căuta pe mașina de cartoane, iar lista
+    // completă de 14 utilaje invita exact la greșeala asta — se alege din
+    // derulantă ce sună bine, iar lotul pleacă pe un drum pe care nimeni nu
+    // l-a gândit. Fluxul tehnologic al produsului spune prin ce trece, deci
+    // de acolo vine lista.
+    //
+    // Când comanda n-are flux, lista rămâne întreagă: o derulantă goală ar
+    // bloca producția pentru o scăpare de configurare. Dar se SPUNE pe pagină
+    // că nu există flux, cu linkul unde se pune.
+    const liniiFlux = await db
+      .prepare("SELECT produs_id, denumire FROM comenzi_productie_linii WHERE comanda_id = ?")
+      .all(c.id)
+      .catch(() => []);
+    const fx = await fluxulComenzii(c, liniiFlux);
+    const dinFlux = fx.flux ? await utilajeleFluxului(fx.pasi) : [];
+    const toateUtilajele = await db.prepare("SELECT * FROM utilaje WHERE activ = 1 ORDER BY denumire").all();
+    const utilaje = dinFlux.length
+      ? dinFlux.map((u) => Object.assign({}, toateUtilajele.find((x) => Number(x.id) === u.id) || u, { operatie: u.operatie }))
+      : toateUtilajele;
     const oameni = await db
       .prepare(
         `SELECT r.*, (SELECT string_agg(CAST(rc.utilaj_id AS TEXT), ',') FROM resurse_competente rc WHERE rc.resursa_id = r.id) AS utilaje
@@ -1368,6 +1390,18 @@ function register(router) {
       }
 
       <form class="form" method="post" action="/productie/aloca/${c.id}" style="max-width:900px">
+        ${
+          dinFlux.length
+            ? `<p style="font-size:12.5px;color:var(--text-muted);margin:0 0 10px">
+                 Utilajele de mai jos sunt cele din fluxul <strong>${esc(fx.flux.cod)} · ${esc(fx.flux.denumire || "")}</strong>${fx.cum ? ` (${esc(fx.cum)})` : ""},
+                 în ordinea operațiilor. Restul mașinilor din hală nu apar: n-au ce căuta pe comanda asta.
+                 Fluxul se schimbă <a href="/productie/${c.id}">pe comandă</a>, pașii lui în <a href="/fluxuri">Fluxuri</a>.
+               </p>`
+            : `<p style="font-size:12.5px;border-left:3px solid var(--warn,#e0a14a);padding:6px 10px;margin:0 0 10px">
+                 <strong>Comanda n-are flux tehnologic</strong>, așa că apar toate utilajele — inclusiv unele pe care produsul
+                 ăsta n-are ce căuta. Alege fluxul <a href="/productie/${c.id}">pe comandă</a> și lista se strânge singură.
+               </p>`
+        }
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:14px">
           <label class="field">Utilaj
             <select name="utilaj_id" id="alocUtilaj" required>
@@ -1379,7 +1413,7 @@ function register(router) {
                   // mai multe optiuni inseamna, in HTML, ultima, adica una la
                   // intamplare.
                   const celMaiBun = variante.length && Number(variante[0].utilaj_id) === Number(u.id);
-                  return `<option value="${u.id}" data-ore="${v && v.ore ? Math.round(v.ore * 10) / 10 : ""}"${celMaiBun ? " selected" : ""}>${esc(u.denumire)}${v && v.estimat ? ` — ~${ore(v.ore)} h` : ""}</option>`;
+                  return `<option value="${u.id}" data-ore="${v && v.ore ? Math.round(v.ore * 10) / 10 : ""}"${celMaiBun ? " selected" : ""}>${esc(u.denumire)}${u.operatie ? ` — ${esc(u.operatie)}` : ""}${v && v.estimat ? ` · ~${ore(v.ore)} h` : ""}</option>`;
                 })
                 .join("")}
             </select>
@@ -1515,6 +1549,46 @@ function register(router) {
     const b = ctx.body;
     const utilajId = nr(b.utilaj_id) || null;
     const data = String(b.data || "").slice(0, 10) || azi();
+
+    // Utilajul trebuie să fie din fluxul comenzii. Derulanta îl ascunde deja
+    // pe cel străin, dar ascunderea nu e o regulă: o fereastră lăsată deschisă
+    // de ieri, sau fluxul schimbat între timp, ar trimite lotul pe o mașină
+    // care n-are ce căuta acolo — iar asta se vede abia când nu iese produsul.
+    if (utilajId) {
+      const cmd = await db.prepare("SELECT * FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
+      const liniiCmd = await db
+        .prepare("SELECT produs_id, denumire FROM comenzi_productie_linii WHERE comanda_id = ?")
+        .all(ctx.params.id)
+        .catch(() => []);
+      const fx = cmd ? await fluxulComenzii(cmd, liniiCmd) : { flux: null, pasi: [] };
+      if (fx.flux) {
+        const permise = await utilajeleFluxului(fx.pasi);
+        if (permise.length && !permise.some((u) => Number(u.id) === Number(utilajId))) {
+          const u = await db.prepare("SELECT cod, denumire FROM utilaje WHERE id = ?").get(utilajId);
+          return send(
+            ctx.res,
+            400,
+            layout({
+              user: ctx.user,
+              title: "Alocare refuzată",
+              active: "/productie",
+              body: `<div class="detail-box" style="border-left:4px solid var(--danger)">
+                <h1 style="margin-top:0">Utilajul nu e în fluxul comenzii</h1>
+                <p><strong>${esc(u ? [u.cod, u.denumire].filter(Boolean).join(" · ") : String(utilajId))}</strong>
+                   nu face parte din fluxul <strong>${esc(fx.flux.cod)} · ${esc(fx.flux.denumire || "")}</strong>,
+                   pe care merge comanda asta.</p>
+                <p style="color:var(--text-muted);max-width:640px">Fluxul trece prin:
+                   ${esc(permise.map((x) => [x.cod, x.denumire].filter(Boolean).join(" ")).join(", "))}.
+                   Dacă produsul chiar trebuie făcut pe utilajul ăsta, adaugă pasul în
+                   <a href="/fluxuri">Fluxuri</a> sau schimbă fluxul comenzii.</p>
+                <p><a class="btn" href="/productie/aloca/${esc(String(ctx.params.id))}">Înapoi la alocare</a>
+                   <a class="btn secondary" href="/productie/${esc(String(ctx.params.id))}">Comanda</a></p>
+              </div>`,
+            })
+          );
+        }
+      }
+    }
     const r = await db
       .prepare(
         `INSERT INTO alocari_productie (comanda_productie_id, utilaj_id, data, ora_start, ore, cantitate, status, observatii, creat_de)
