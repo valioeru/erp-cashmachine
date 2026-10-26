@@ -100,14 +100,20 @@ bine("ce nu există rămâne gol, nu inventat", FL.specificat("Tratament corona"
 
 // ---- 3. Codul lotului ------------------------------------------------------
 console.log("\nCodul lotului");
-bine("se construiește din dată și numărul comenzii",
-  FL.codLot({ id: 142, numar: "CMD-1187", data_initiere: "2026-10-26" }) === "CM-261026-CMD1187",
+bine("se construiește din dată și comanda din ERP",
+  FL.codLot({ id: 142, numar: "CMD-1187", data_initiere: "2026-10-26" }) === "CM-261026-142",
   FL.codLot({ id: 142, numar: "CMD-1187", data_initiere: "2026-10-26" }));
+// Un numar comercial ca „20261026-002" facea un cod de bare de 70 mm, rupt pe
+// doua randuri pe hartie, si repeta data pe care fisa o scrie oricum.
+bine("un număr comercial lung nu mai lungește codul lotului",
+  FL.codLot({ id: 1403, numar: "20261026-002", data_initiere: "2026-10-26" }) === "CM-261026-1403",
+  FL.codLot({ id: 1403, numar: "20261026-002", data_initiere: "2026-10-26" }));
+bine("codul lotului și codurile de la posturi arată aceeași comandă",
+  FL.codLot({ id: 1403, data_initiere: "2026-10-26" }).endsWith("1403") && FL.codOperatie(1403, "030") === "CMP1403.030");
 bine("nu se schimbă de la o tipărire la alta",
   FL.codLot({ id: 142, numar: "CMD-1187", data_initiere: "2026-10-26" }) ===
     FL.codLot({ id: 142, numar: "CMD-1187", data_initiere: "2026-10-26" }));
-bine("o comandă fără număr folosește id-ul", FL.codLot({ id: 9, data_initiere: "2026-10-26" }) === "CM-261026-9",
-  FL.codLot({ id: 9, data_initiere: "2026-10-26" }));
+bine("o comandă fără dată tot are cod", FL.codLot({ id: 9 }) === "CM-9", FL.codLot({ id: 9 }));
 bine("codul de operație e scurt, ca să încapă în coloană", FL.codOperatie(142, "030") === "CMP142.030",
   FL.codOperatie(142, "030"));
 
@@ -120,7 +126,7 @@ const html = FL.fisa({
   caracteristici: CARAC,
   operatii: ops,
   alocari: [{ data: "2026-10-28", interval: "06:00–14:00", utilaj: "UT01 · Extruder", cantitate: 420, oameni: "Marius, Ana" }],
-  lot: "CM-261026-CMD1187",
+  lot: "CM-261026-142",
   tiparitLa: "2026-10-26",
   proces: "REALIZARE PUNGĂ CURIER",
   procesEn: "COURIER BAGS",
@@ -129,7 +135,7 @@ const html = FL.fisa({
 bine("e o pagină HTML completă", html.startsWith("<!doctype html>") && html.trim().endsWith("</html>"));
 bine("are antetul ISO 9001", html.includes("SR EN ISO 9001:2015"));
 bine("are titlul bilingv", html.includes("FIȘĂ ÎNSOȚITOARE LOT") && html.includes("PRODUCTION TRAVELER"));
-bine("scrie codul lotului", html.includes("CM-261026-CMD1187"));
+bine("scrie codul lotului", html.includes("CM-261026-142"));
 bine("are un cod de bare pentru lot și câte unul pentru fiecare operație",
   (html.match(/<svg class="cod-bare"/g) || []).length === ops.length + 1,
   (html.match(/<svg class="cod-bare"/g) || []).length);
