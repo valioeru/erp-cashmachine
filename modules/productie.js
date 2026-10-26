@@ -10,6 +10,7 @@ const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
 const T = require("../lib/termene");
 const { comenziSpreAlocare, ore } = require("./utilaje");
+const FL = require("../lib/fisa-lot");
 
 const STATUSURI = [
   ["noua", "Nouă (solicitată)", "gri"],
@@ -26,6 +27,69 @@ function badge(status) {
 }
 function azi() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Pe ce flux tehnologic merge o comandă. Trei surse, în ordinea asta:
+//
+//   1. ce s-a ales pe comandă — o serie de probă poate merge altfel decât
+//      producția curentă, și atunci alegerea omului bate orice regulă;
+//   2. fluxul produsului din catalog;
+//   3. ghicit după denumire, ca ultimă soluție.
+//
+// Al treilea pas există fiindcă fără el fișa unui produs nelegat ar ieși cu
+// zero operații — adică o hârtie care nu ajută pe nimeni. Ghicitul se SPUNE pe
+// fișă („ghicit după denumire"), ca să nu treacă drept o alegere făcută de om.
+const GHICIT = [
+  ["F-STRETCH-PRE", /prestretch|pre-stretch/i],
+  ["F-STRETCH-AUT", /stretch[^.]{0,20}automat|automat[^.]{0,20}stretch/i],
+  ["F-STRETCH-MAN", /stretch/i],
+  ["F-CUTIE-AM", /cutie[^.]{0,20}americ/i],
+  ["F-CUTIE-SIMPLA", /cutie|carton/i],
+  ["F-SAC-MENAJ", /menajer|sac[^.]{0,20}menaj/i],
+  ["F-SAC-SGR", /sgr|fresful|sac/i],
+  ["F-AWB", /awb|plic/i],
+  ["F-PUNGA", /pung/i],
+  ["F-BANDA", /band[ăa] adeziv|scotch/i],
+  ["F-ETICHETE", /etichet/i],
+  ["F-FOLIE-DEBITATA", /folie/i],
+];
+async function fluxulComenzii(c, linii) {
+  const ia = async (id) => (id ? await db.prepare("SELECT * FROM fluxuri WHERE id = ? AND activ = 1").get(id) : null);
+  let flux = await ia(c.flux_id);
+  let cum = flux ? "ales pe comandă" : null;
+
+  if (!flux) {
+    const ids = [];
+    for (const l of linii || []) if (l.produs_id) ids.push(Number(l.produs_id));
+    if (c.produs_id) ids.unshift(Number(c.produs_id));
+    for (const pid of ids) {
+      const p = await db.prepare("SELECT flux_id FROM produse WHERE id = ?").get(pid);
+      if (p && p.flux_id) {
+        flux = await ia(p.flux_id);
+        if (flux) { cum = "de la produs"; break; }
+      }
+    }
+  }
+
+  if (!flux) {
+    const text = [c.tip_produs, c.caracteristici].concat((linii || []).map((l) => l.denumire)).filter(Boolean).join(" ");
+    for (const [cod, rx] of GHICIT) {
+      if (!rx.test(text)) continue;
+      const f = await db.prepare("SELECT * FROM fluxuri WHERE upper(cod) = ? AND activ = 1").get(cod);
+      if (f) { flux = f; cum = "ghicit după denumire"; break; }
+    }
+  }
+
+  const pasi = flux
+    ? await db
+        .prepare(
+          `SELECT p.*, u.denumire AS utilaj_denumire FROM fluxuri_pasi p
+             LEFT JOIN utilaje u ON u.id = p.utilaj_id
+            WHERE p.flux_id = ? ORDER BY p.pas_nr`
+        )
+        .all(flux.id)
+    : [];
+  return { flux, pasi, cum };
 }
 
 // Datele din Excelul de comenzi vin în DOUĂ formate amestecate:
@@ -716,7 +780,7 @@ function register(router) {
           esc(c.facturat || ""),
           `<span class="cel-lung">${esc(c.reteta || "")}</span>`,
           `<span class="cel-lung">${esc(c.observatii || "")}</span>`,
-          `<a class="btn small" href="/productie/${c.id}/pdf" target="_blank" title="Comanda de dat în producție, gata de printat">Comandă PDF</a>`,
+          `<a class="btn small" href="/productie/${c.id}/pdf" target="_blank" title="Fișa însoțitoare a lotului: operațiile, codurile de scanat la post, parametrii de măsurat">Fișă de lot</a>`,
         ]),
         // Optsprezece coloane pe un ecran de laptop inseamna ca denumirea
         // produsului intra pe trei randuri si clientul se taie. De aici se pot
@@ -1454,6 +1518,15 @@ function register(router) {
     redirect(ctx.res, `/productie/${comandaId}`);
   });
 
+  // FIȘA ÎNSOȚITOARE DE LOT ------------------------------------------------
+  //
+  // Ce se tipărește și pleacă cu marfa prin hală: operațiile, cu câte un cod
+  // de bare de scanat la fiecare post, parametrii ceruți lângă casetele goale
+  // pentru cei realizați, și cantitățile bune/rebut pe fiecare operație.
+  //
+  // Aici se adună doar datele — comanda, produsele, caracteristicile, fluxul
+  // tehnologic, alocarea. Desenul fișei stă în lib/fisa-lot.js, ca să poată fi
+  // tipărită o fișă de probă dintr-un test, fără bază de date.
   router.get("/productie/:id/pdf", async (ctx) => {
     const c = await db
       .prepare(
@@ -1466,9 +1539,8 @@ function register(router) {
       .get(ctx.params.id);
     if (!c) return send(ctx.res, 404, "Comanda nu există.");
 
-    // Fișa tipărită e ce citește atelierul. Dacă o comandă are mai multe
-    // produse și fișa ar arăta doar primul, s-ar produce greșit — de-aia aici
-    // intră toate liniile, fiecare cu caracteristicile ei.
+    // O comandă cu mai multe produse are o singură fișă, dar toate produsele pe
+    // ea: dacă fișa ar arăta doar primul, restul s-ar produce din memorie.
     const liniiPdf = await db
       .prepare(
         `SELECT l.*, p.cod AS produs_cod FROM comenzi_productie_linii l
@@ -1479,12 +1551,8 @@ function register(router) {
     const caracPdf = await db
       .prepare("SELECT denumire, valoare, unitate, linie_id FROM comenzi_productie_caracteristici WHERE comanda_id = ? ORDER BY id")
       .all(ctx.params.id);
-    const caracPdfPeLinie = {};
-    for (const x of caracPdf) {
-      const k = x.linie_id === null || x.linie_id === undefined ? "fara" : String(x.linie_id);
-      if (!caracPdfPeLinie[k]) caracPdfPeLinie[k] = [];
-      caracPdfPeLinie[k].push(x);
-    }
+
+    const f = await fluxulComenzii(c, liniiPdf);
 
     const aloc = await db
       .prepare(
@@ -1493,143 +1561,47 @@ function register(router) {
           WHERE a.comanda_productie_id = ? ORDER BY a.data, a.ora_start`
       )
       .all(c.id);
-    const oameni = new Map();
-    for (const a of aloc) {
-      const r = await db
-        .prepare("SELECT r.nume FROM alocari_resurse ar JOIN resurse r ON r.id = ar.resursa_id WHERE ar.alocare_id = ?")
-        .all(a.id);
-      oameni.set(a.id, r.map((x) => x.nume));
-    }
-
     const ora = (v) => {
       const n = Number(v || 0);
       const h = Math.floor(n);
       const m = Math.round((n - h) * 60);
       return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
     };
-    const rand = (et, val) => (val ? `<tr><th>${esc(et)}</th><td>${esc(val)}</td></tr>` : "");
-    const stareText = (STATUSURI.find(([v]) => v === c.status) || [null, c.status])[1];
+    const alocari = [];
+    for (const a of aloc) {
+      const r = await db
+        .prepare("SELECT r.nume FROM alocari_resurse ar JOIN resurse r ON r.id = ar.resursa_id WHERE ar.alocare_id = ?")
+        .all(a.id);
+      alocari.push({
+        data: a.data || "",
+        interval: `${ora(a.ora_start)}–${ora(Number(a.ora_start) + Number(a.ore || 0))}`,
+        utilaj: [a.utilaj_cod, a.utilaj].filter(Boolean).join(" · ") || "—",
+        cantitate: a.cantitate,
+        oameni: r.map((x) => x.nume).join(", "),
+      });
+    }
 
-    const alocHtml = aloc.length
-      ? `<h2>Alocare</h2>
-         <table class="cp-tabel">
-           <tr><th>Data</th><th>Interval</th><th>Utilaj</th><th>Cantitate</th><th>Oameni</th></tr>
-           ${aloc
-             .map(
-               (a) => `<tr>
-                 <td>${esc(a.data || "")}</td>
-                 <td>${esc(ora(a.ora_start))}–${esc(ora(Number(a.ora_start) + Number(a.ore || 0)))}</td>
-                 <td>${esc([a.utilaj_cod, a.utilaj].filter(Boolean).join(" · ") || "—")}</td>
-                 <td>${esc(a.cantitate != null ? String(a.cantitate) : "")}</td>
-                 <td>${esc((oameni.get(a.id) || []).join(", "))}</td>
-               </tr>`
-             )
-             .join("")}
-         </table>`
-      : `<h2>Alocare</h2><p class="cp-gol">Comanda nu e încă alocată pe utilaj. Se alocă din <b>Producție → Planificare</b>, apoi se tipărește din nou.</p>`;
+    // Unitatea de la finalul fișei — bucăți la pungi, kilograme la folie
+    // debitată. Până la confecționare se lucrează oricum folie, deci kg.
+    const umFinal =
+      (liniiPdf[0] && unitate(liniiPdf[0].cantitate, liniiPdf[0].um)) || unitate(c.cantitate, c.um) || "buc";
+    const operatii = FL.operatii(f.pasi, { um: umFinal });
 
-    const corp = `<!doctype html>
-<html lang="ro"><head><meta charset="utf-8">
-<title>Comanda ${esc(c.numar || c.id)} · producție</title>
-<style>
-  @page { size: A4; margin: 14mm; }
-  * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif; color: #14314f; margin: 0; background: #eef2f6; }
-  .bara { padding: 10px 16px; background: #fff; border-bottom: 1px solid #d7dfe8; font-size: 14px; }
-  .bara button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #2f5f92; background: #2f5f92; color: #fff; cursor: pointer; }
-  .bara a { color: #2f5f92; margin-left: 12px; }
-  .foaie { width: 210mm; min-height: 297mm; margin: 16px auto; padding: 16mm; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.12); }
-  .cap { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #14314f; padding-bottom: 8px; margin-bottom: 14px; }
-  .cap .firma { font-size: 13px; letter-spacing: 1px; font-weight: 700; }
-  .cap .tip { font-size: 11px; color: #5b6b7d; letter-spacing: 2px; text-transform: uppercase; }
-  .cap .nr { text-align: right; }
-  .cap .nr b { font-size: 26px; font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 1px; }
-  h1 { font-size: 21px; margin: 0 0 2px; }
-  .sub { color: #5b6b7d; font-size: 13px; margin-bottom: 14px; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; color: #4a6b8c; margin: 18px 0 6px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
-  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #e2e9f0; vertical-align: top; }
-  .cp-date th { width: 42mm; color: #5b6b7d; font-weight: 600; }
-  .cp-tabel th { background: #f2f6fa; font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; color: #4a6b8c; }
-  .mare { font-size: 19px; font-weight: 700; }
-  .cp-gol { color: #7b8794; font-size: 13px; font-style: italic; }
-  .semnaturi { display: flex; gap: 18px; margin-top: 26px; }
-  .semnaturi div { flex: 1; border-top: 1px solid #98a6b5; padding-top: 5px; font-size: 11.5px; color: #5b6b7d; }
-  .obs { border-left: 3px solid #e0a14a; background: #fdf7ee; padding: 8px 12px; font-size: 13px; }
-  @media print { .bara { display: none; } body { background: #fff; } .foaie { margin: 0; box-shadow: none; width: auto; min-height: 0; padding: 0; } }
-</style></head>
-<body>
-<div class="bara">
-  <button onclick="window.print()">Tipărește / salvează ca PDF</button>
-  <a href="/productie">← Înapoi la comenzi</a>
-</div>
-<div class="foaie">
-  <div class="cap">
-    <div>
-      <div class="firma">CASH MACHINE SRL</div>
-      <div class="tip">Comandă de producție</div>
-    </div>
-    <div class="nr"><b>${esc(c.numar || String(c.id))}</b><br><span class="tip">${esc(stareText || "")}</span></div>
-  </div>
-
-  <h1>${esc(c.tip_produs || "Produs")}</h1>
-  <div class="sub">${liniiPdf.length > 1 ? esc(liniiPdf.length + " produse pe comanda asta") : esc(c.caracteristici || "")}</div>
-
-  <h2>Ce se face</h2>
-  ${
-    liniiPdf.length
-      ? `<table class="cp-tabel">
-           <tr><th>Produs</th><th>Cod</th><th>Cantitate</th><th>UM</th><th>Caracteristici</th></tr>
-           ${liniiPdf
-             .map(
-               (l) => `<tr>
-                 <td><strong>${esc(l.denumire || "")}</strong></td>
-                 <td>${esc(l.produs_cod) || "—"}</td>
-                 <td class="mare">${esc(cantitate(l.cantitate, l.um)) || "—"}</td>
-                 <td>${esc(unitate(l.cantitate, l.um))}</td>
-                 <td>${
-                   (caracPdfPeLinie[String(l.id)] || [])
-                     .map((x) => `${esc(x.denumire)}: <strong>${esc(x.valoare)}</strong>${x.unitate ? " " + esc(x.unitate) : ""}`)
-                     .join("<br>") || "—"
-                 }</td>
-               </tr>`
-             )
-             .join("")}
-         </table>
-         <table class="cp-date">
-           ${rand("Tip ambalare", c.tip_ambalare)}
-           ${rand("Rețetă", c.reteta)}
-         </table>`
-      : `<table class="cp-date">
-           <tr><th>Cantitate</th><td class="mare">${esc(cantitate(c.cantitate, c.um)) || "—"}</td></tr>
-           <tr><th>UM</th><td>${esc(unitate(c.cantitate, c.um))}</td></tr>
-           ${rand("Tip ambalare", c.tip_ambalare)}
-           ${rand("Rețetă", c.reteta)}
-         </table>`
-  }
-
-  <h2>Pentru cine și până când</h2>
-  <table class="cp-date">
-    ${rand("Client", c.partener_nume || c.client_text)}
-    ${rand("Reprezentant vânzări", c.agent_nume || c.reprezentant)}
-    ${rand("Data plasării", c.data_initiere)}
-    ${rand("Data livrării", c.data_livrare)}
-    ${rand("DoC emisă", c.doc_emisa_txt || (c.doc_emisa ? "DA" : ""))}
-    ${rand("Fișă tehnică emisă", c.fisa_tehnica_txt || (c.fisa_tehnica ? "DA" : ""))}
-  </table>
-
-  ${alocHtml}
-
-  ${c.observatii ? `<h2>Observații</h2><div class="obs">${esc(c.observatii)}</div>` : ""}
-
-  <div class="semnaturi">
-    <div>Predat de (planificare) — nume, semnătura, data</div>
-    <div>Primit de (producție) — nume, semnătura, data</div>
-    <div>Cantitate realizată / observații la execuție</div>
-  </div>
-</div>
-</body></html>`;
-    send(ctx.res, 200, dateleInText(corp));
+    const html = FL.fisa({
+      comanda: c,
+      linii: liniiPdf,
+      caracteristici: caracPdf,
+      operatii,
+      alocari,
+      lot: FL.codLot(c),
+      tiparitLa: new Date().toISOString().slice(0, 10),
+      proces: f.flux ? "REALIZARE " + String(f.flux.denumire || f.flux.cod).toUpperCase() : "PRODUCȚIE",
+      procesEn: FL.procesEnglez(f.flux),
+      fluxText: f.flux
+        ? `${f.flux.cod} · ${f.flux.denumire || ""}${f.cum ? ` (${f.cum})` : ""}`
+        : "fără flux tehnologic — alege-l pe comandă",
+    });
+    send(ctx.res, 200, dateleInText(html));
   });
 
   router.get("/productie/:id", async (ctx) => {
@@ -1639,6 +1611,7 @@ function register(router) {
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
 
     const utilizatoriComanda = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
+    const fluxuriLista = await db.prepare("SELECT id, cod, denumire FROM fluxuri WHERE activ = 1 ORDER BY cod").all();
 
     // Costul comenzii, din rețeta produsului. Registrul de comenzi n-are
     // prețuri, dar rețeta știe din ce e făcut produsul — deci costul comenzii
@@ -1769,6 +1742,12 @@ function register(router) {
           ${c.doc_emisa ? '<span class="badge verde">DoC emisă</span>' : '<span class="badge gri">fără DoC</span>'}
           ${c.fisa_tehnica ? '<span class="badge verde">Fișă tehnică</span>' : '<span class="badge gri">fără FT</span>'}
         </h1>
+        <p style="margin:-4px 0 12px">
+          <a class="btn small" href="/productie/${c.id}/pdf" target="_blank">Fișă de lot — de printat</a>
+          <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
+            operațiile, codurile de scanat la fiecare post, parametrii de măsurat
+          </span>
+        </p>
         <div class="detail-grid">
           <div><div class="k">Client</div>${c.partener_id ? `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume || c.client_text)}</a>` : esc(c.client_text || "—")}</div>
           ${
@@ -1888,6 +1867,14 @@ function register(router) {
               .join("")}</select>
           </label>
           <label class="field">Valoare estimată (lei)<input name="valoare_estimata" inputmode="decimal" value="${c.valoare_estimata != null ? esc(String(c.valoare_estimata)) : ""}" placeholder="ex. 12500"></label>
+          <label class="field">Flux tehnologic (operațiile de pe fișa de lot)
+            <select name="flux_id">
+              <option value="">— după produs, altfel ghicit după denumire —</option>
+              ${fluxuriLista
+                .map((f) => `<option value="${f.id}"${Number(f.id) === Number(c.flux_id) ? " selected" : ""}>${esc(f.cod)} · ${esc(f.denumire || "")}</option>`)
+                .join("")}
+            </select>
+          </label>
         </div>
         <label class="field">Rețetă / consum<textarea name="reteta" rows="2">${esc(c.reteta || "")}</textarea></label>
         <label class="field">Observații<textarea name="observatii" rows="2">${esc(c.observatii || "")}</textarea></label>
@@ -1937,7 +1924,7 @@ function register(router) {
     await db
       .prepare(
         `UPDATE comenzi_productie SET status = ?, data_livrare = ?, doc_emisa = ?, fisa_tehnica = ?, caracteristici = ?, tip_ambalare = ?, observatii = ?, reteta = ?,
-         agent_id = COALESCE(?, agent_id), valoare_estimata = ?, data_finalizare = COALESCE(data_finalizare, ?) WHERE id = ?`
+         agent_id = COALESCE(?, agent_id), valoare_estimata = ?, flux_id = ?, data_finalizare = COALESCE(data_finalizare, ?) WHERE id = ?`
       )
       .run(
         status,
@@ -1950,6 +1937,10 @@ function register(router) {
         String(b.reteta || "").trim() || null,
         parseInt(b.agent_id, 10) || null,
         Number(String(b.valoare_estimata || "").replace(/\s/g, "").replace(",", ".")) || null,
+        // Gol înseamnă „lasă-l să se ia de la produs" — nu „niciun flux". De-aia
+        // se scrie NULL, nu 0: zero ar fi fost un flux inexistent, și fișa ar fi
+        // ieșit fără operații fără să spună nimănui de ce.
+        parseInt(b.flux_id, 10) || null,
         finalizare,
         ctx.params.id
       );

@@ -78,13 +78,21 @@ function register(router) {
             : String(p.tip_pas || "").toUpperCase() === "OPTIONAL"
               ? '<span class="badge rosu">pas opțional fără condiție scrisă</span>'
               : "—",
+          // Parametrii se scriu si se citesc in acelasi loc. O pagina separata
+          // de editare ar fi insemnat ca nimeni nu-i mai schimba niciodata.
+          poate(ctx.user)
+            ? `<form method="post" action="/fluxuri/pas/${p.id}/parametri" class="inline-form" style="display:flex;gap:6px">
+                 <input name="parametri" value="${esc(p.parametri || "")}" placeholder="Grosime|µm;Lățime folie|mm" style="flex:1;min-width:230px;font-size:12.5px">
+                 <button class="link-btn" type="submit">Salvează</button>
+               </form>`
+            : esc(p.parametri || "—"),
           poate(ctx.user)
             ? `<form method="post" action="/fluxuri/pas/${p.id}/sterge" class="inline-form"><button class="link-btn danger" type="submit">Șterge</button></form>`
             : "",
         ]);
         return `
           <h3 style="margin-top:26px">${esc(f.denumire || f.cod)} <span style="font-weight:400;color:var(--text-muted);font-size:14px">${esc(f.cod)}</span></h3>
-          ${table(["Pas", "Utilaj", "Operație", "Fel", "Când se aplică", ""], randuri)}
+          ${table(["Pas", "Utilaj", "Operație", "Fel", "Când se aplică", "Parametri măsurați la post", ""], randuri)}
           ${
             poate(ctx.user)
               ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Adaugă un pas</summary>
@@ -97,6 +105,8 @@ function register(router) {
                          <select name="tip_pas"><option value="OBLIGATORIU">obligatoriu</option><option value="OPTIONAL">opțional</option></select></label>
                        <label class="field" style="margin:0"><span>Când se aplică</span><input name="conditie" placeholder="obligatoriu dacă pasul e opțional"></label>
                      </div>
+                     <label class="field" style="margin:10px 0 0"><span>Parametri măsurați la post (apar pe fișa de lot, „Specificat / Realizat")</span>
+                       <input name="parametri" placeholder="Grosime|µm;Lățime folie|mm;Tratament corona"></label>
                      <button class="btn small" type="submit">Adaugă pasul</button>
                    </form>
                  </details>`
@@ -168,8 +178,19 @@ function register(router) {
         ? await db.prepare("SELECT id FROM utilaje WHERE upper(cod) = upper(?)").get(codUtilaj)
         : null;
     await db
-      .prepare("INSERT INTO fluxuri_pasi (flux_id, pas_nr, utilaj_cod, utilaj_id, operatie, tip_pas, conditie) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(fid, pas, codUtilaj, unul ? unul.id : null, text(b.operatie, 300), tip, conditie);
+      .prepare("INSERT INTO fluxuri_pasi (flux_id, pas_nr, utilaj_cod, utilaj_id, operatie, tip_pas, conditie, parametri) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(fid, pas, codUtilaj, unul ? unul.id : null, text(b.operatie, 300), tip, conditie, text(b.parametri, 600));
+    redirect(ctx.res, "/fluxuri");
+  });
+
+  // Parametrii masurati la post. Se salveaza singuri, fara sa se atinga
+  // restul pasului — altfel o greseala de tastat intr-o casuta ar sterge
+  // conditia de alaturi.
+  router.post("/fluxuri/pas/:id/parametri", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/fluxuri");
+    await db
+      .prepare("UPDATE fluxuri_pasi SET parametri = ? WHERE id = ?")
+      .run(text((ctx.body || {}).parametri, 600), parseInt(ctx.params.id, 10));
     redirect(ctx.res, "/fluxuri");
   });
 

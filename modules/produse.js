@@ -471,6 +471,8 @@ function register(router) {
       .all(produs.id);
     const stocTotal = stocPeDepozite.reduce((s, r) => s + Number(r.stoc || 0), 0);
 
+    const fluxuriProdus = await db.prepare("SELECT id, cod, denumire FROM fluxuri WHERE activ = 1 ORDER BY cod").all();
+
     const componente = await db
       .prepare(
         `SELECT rc.id, rc.cantitate, c.id AS componenta_id, c.denumire, c.unitate_masura
@@ -515,6 +517,25 @@ function register(router) {
           `<form method="post" action="/produse/${produs.id}/reteta/${c.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi componenta din rețetă?')"><button type="submit" class="link-btn danger">Șterge</button></form>`,
         ])
       )}
+      <h2>Flux tehnologic</h2>
+      <p style="color:var(--text-muted);font-size:13px;max-width:760px">
+        Prin ce utilaje trece produsul, în ce ordine. De aici își iau comenzile operațiile de pe
+        <strong>fișa însoțitoare de lot</strong> — hârtia tipărită care merge cu marfa prin hală. Dacă rămâne
+        neales, fișa ghicește fluxul după denumirea produsului și o spune pe ea, ca să se vadă că n-a ales nimeni.
+      </p>
+      <form method="post" action="/produse/${produs.id}/flux" class="form" style="max-width:520px">
+        <label class="field"><span>Fluxul produsului</span>
+          <select name="flux_id">
+            <option value="">— neales, se ghicește după denumire —</option>
+            ${fluxuriProdus
+              .map((f) => `<option value="${f.id}"${Number(f.id) === Number(produs.flux_id) ? " selected" : ""}>${esc(f.cod)} · ${esc(f.denumire || "")}</option>`)
+              .join("")}
+          </select>
+        </label>
+        <button type="submit" class="btn small">Salvează fluxul</button>
+        <a class="btn small secondary" href="/fluxuri">Vezi pașii fluxurilor</a>
+      </form>
+
       <h2>Caracteristici cerute la comandă</h2>
       <p style="color:var(--text-muted);font-size:13px">Se definesc una câte una. La o comandă nouă în producție, când se alege acest produs, fiecare caracteristică de mai jos devine un câmp <strong>obligatoriu</strong>. Fără ele nu se poate înregistra comanda.</p>
       ${table(
@@ -554,6 +575,16 @@ function register(router) {
       }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Produs: ${produs.denumire}`, active: "/produse", body }));
+  });
+
+  // Fluxul tehnologic al produsului. De aici il mostenesc comenzile, si de la
+  // comenzi ajunge pe fisa de lot. Gol inseamna „ghiceste dupa denumire", nu
+  // „fara operatii" — o fisa fara operatii n-ar ajuta pe nimeni in hala.
+  router.post("/produse/:id/flux", async (ctx) => {
+    await db
+      .prepare("UPDATE produse SET flux_id = ? WHERE id = ?")
+      .run(parseInt((ctx.body || {}).flux_id, 10) || null, ctx.params.id);
+    redirect(ctx.res, `/produse/${ctx.params.id}`);
   });
 
   router.post("/produse/:id/caracteristica", async (ctx) => {
