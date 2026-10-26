@@ -1375,8 +1375,21 @@ function register(router) {
         </div>
 
         <h2 style="margin-bottom:4px">Cine lucrează</h2>
-        <p style="font-size:12px;color:var(--text-muted);margin-top:0">Lista se strânge singură la oamenii care știu utilajul ales.</p>
-        <div id="alocOameni" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+        <p style="font-size:12px;color:var(--text-muted);margin-top:0">Apar doar oamenii trecuți pe utilajul ales, din <a href="/productie/resurse">competențele lor</a>.</p>
+
+        <!-- Cât timp nu s-a ales utilajul, lista nu se arată deloc. Varianta
+             veche arăta toți oamenii din firmă până la prima alegere, iar de
+             acolo se bifa pe nimerite: lista arăta exact la fel și înainte, și
+             după ce filtrul își făcea treaba. -->
+        <p id="alocFaraUtilaj" style="font-size:13px;color:var(--text-muted);border-left:3px solid var(--border);padding:6px 10px;margin:0">
+          Alege întâi utilajul, de sus. Apoi apar aici oamenii care știu să lucreze pe el.
+        </p>
+        <p id="alocNimeni" style="display:none;font-size:13px;border-left:3px solid var(--danger);padding:6px 10px;margin:0">
+          <strong>Niciun om nu e trecut pe utilajul ăsta.</strong>
+          Poți aloca oricum — comanda intră în planificare fără echipă — dar mai bine
+          bifezi întâi cine îl poate lucra, în <a href="/productie/resurse">Producție → Resurse</a>.
+        </p>
+        <div id="alocOameni" style="display:none;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
           ${listaOameni
             .map(
               (o) => `<label class="om-optiune" data-utilaje="${esc(String(o.utilaje || ""))}" style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin:0">
@@ -1395,14 +1408,25 @@ function register(router) {
       (function () {
         var sel = document.getElementById("alocUtilaj");
         var oreInput = document.getElementById("alocOre");
+        var grid = document.getElementById("alocOameni");
+        var faraUtilaj = document.getElementById("alocFaraUtilaj");
+        var nimeni = document.getElementById("alocNimeni");
         function filtreaza() {
           var id = sel.value;
+          var cati = 0;
           document.querySelectorAll(".om-optiune").forEach(function (l) {
             var lista = (l.dataset.utilaje || "").split(",").filter(Boolean);
-            var poate = !id || lista.indexOf(id) !== -1;
+            var poate = !!id && lista.indexOf(id) !== -1;
             l.style.display = poate ? "" : "none";
-            if (!poate) { var cb = l.querySelector("input"); if (cb) cb.checked = false; }
+            if (poate) cati++;
+            // Cine iese din listă iese și din bifare. Altfel, schimbarea
+            // utilajului după ce ai bifat pe cineva l-ar trimite în producție
+            // pe o mașină pe care nu o știe, fără ca nimeni să mai vadă bifa.
+            else { var cb = l.querySelector("input"); if (cb) cb.checked = false; }
           });
+          if (faraUtilaj) faraUtilaj.style.display = id ? "none" : "";
+          if (nimeni) nimeni.style.display = id && cati === 0 ? "" : "none";
+          if (grid) grid.style.display = id && cati ? "grid" : "none";
           var opt = sel.options[sel.selectedIndex];
           if (opt && opt.dataset.ore) oreInput.value = opt.dataset.ore;
         }
@@ -1434,8 +1458,21 @@ function register(router) {
       );
     const alocareId = r.lastInsertRowid;
     if (alocareId) {
-      const oameni = await db.prepare("SELECT id FROM resurse WHERE activ = 1").all();
-      for (const o of oameni) {
+      // Pe mașină intră doar cine o știe. Filtrul din pagină ascunde restul,
+      // dar ascunderea nu e o regulă: un formular trimis cu fereastra lăsată
+      // deschisă de ieri, sau după ce s-a schimbat utilajul fără să se
+      // reîncarce pagina, ar pune pe cineva la un post pe care nu-l poate
+      // lucra — și asta se descoperă abia în tură. De-aia se verifică și aici.
+      const permisi = utilajId
+        ? await db
+            .prepare(
+              `SELECT r.id FROM resurse r
+                 JOIN resurse_competente rc ON rc.resursa_id = r.id AND rc.utilaj_id = ?
+                WHERE r.activ = 1`
+            )
+            .all(utilajId)
+        : [];
+      for (const o of permisi) {
         if (b[`resursa_${o.id}`]) await db.prepare("INSERT INTO alocari_resurse (alocare_id, resursa_id) VALUES (?, ?)").run(alocareId, o.id);
       }
     }
