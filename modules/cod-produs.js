@@ -15,6 +15,10 @@ const nr = (v) => {
   const x = Number(v);
   return isFinite(x) ? x : 0;
 };
+// Dupa o salvare ne intoarcem la familia la care lucra omul, nu la prima din
+// lista. Altfel, cine adauga sase valori la „Pungă curier" ajunge de sase ori
+// inapoi la folia stretch.
+const inapoi = (f) => (Number(f) ? "?familie=" + Number(f) : "");
 
 function subnav(activ) {
   const linkuri = [
@@ -29,10 +33,17 @@ function subnav(activ) {
     .join("")}</div>`;
 }
 
-// Caracteristicile cu valorile lor, gata de dat la lib/cod-produs.
-async function citesteCaracteristici(totul) {
+// Caracteristicile unei familii, cu valorile lor, gata de dat la lib/cod-produs.
+//
+// Familia e obligatorie la citire, nu optionala: fara ea s-ar amesteca
+// „Grosime" de la folie cu „Grosime" de la cartoane si ar iesi un cod din
+// bucati care n-au nicio treaba una cu alta.
+async function citesteCaracteristici(totul, familieId) {
+  const unde = [];
+  if (!totul) unde.push("activ = 1");
+  unde.push(familieId ? "familie_id = " + Number(familieId) : "familie_id IS NULL");
   const car = await db
-    .prepare(`SELECT * FROM cod_caracteristici ${totul ? "" : "WHERE activ = 1"} ORDER BY ordine, id`)
+    .prepare(`SELECT * FROM cod_caracteristici WHERE ${unde.join(" AND ")} ORDER BY ordine, id`)
     .all();
   if (!car.length) return [];
   const val = await db.prepare("SELECT * FROM cod_valori WHERE activ = 1 ORDER BY ordine, id").all();
@@ -44,40 +55,70 @@ async function citesteCaracteristici(totul) {
   return car.map((c) => ({ ...c, valori: peCarac.get(c.id) || [] }));
 }
 
-// Prima deschidere: punem exact caracteristicile cerute de Vali pe 26.10.2026,
-// ca pagina sa nu fie goala si sa se vada din ce se compune un cod. Se pun o
-// singura data; daca el le schimba sau le sterge, nu se mai intorc.
+async function familii() {
+  return await db.prepare("SELECT * FROM cod_familii WHERE activ = 1 ORDER BY ordine, id").all().catch(() => []);
+}
+
+// Familiile de pornire stau in lib/cod-familii.js, ca date pure, ca sa poata
+// fi verificate de un test fara baza de date.
+const { START } = require("../lib/cod-familii");
+
 async function seed() {
-  const are = await db.prepare("SELECT COUNT(*) AS n FROM cod_caracteristici").get().catch(() => null);
-  if (!are || nr(are.n) > 0) return;
-  const start = [
-    { nume: "Tip", fel: "lista", ordine: 1, valori: [["Folie Stretch", "FS"], ["Folie Prestretch", "FP"]] },
-    { nume: "Aplicare", fel: "lista", ordine: 2, valori: [["Manuală", "M"], ["Automată", "A"]] },
-    { nume: "Culoare", fel: "lista", ordine: 3, valori: [["Transparent", "T"], ["Alb", "A"], ["Negru", "N"]] },
-    { nume: "Grosime", fel: "numar", um: "microni", ordine: 4, cifre: 2, min_val: 4, max_val: 23 },
-    { nume: "Lungime", fel: "numar", um: "m", ordine: 5, cifre: 3 },
-  ];
-  for (const c of start) {
-    const r = await db
-      .prepare(
-        `INSERT INTO cod_caracteristici (nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
-         VALUES (?,?,?,1,?,1,?,?,?) RETURNING id`
-      )
-      .run(c.nume, c.fel, c.um || null, c.ordine, c.cifre || 0, c.min_val ?? null, c.max_val ?? null);
-    const id = Number(r.lastInsertRowid);
-    let o = 0;
-    for (const [valoare, cod] of c.valori || []) {
-      await db.prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)").run(id, valoare, cod, ++o);
+  const areFamilii = await db.prepare("SELECT COUNT(*) AS n FROM cod_familii").get().catch(() => null);
+  if (!areFamilii) return; // tabelul nu exista inca
+  if (nr(areFamilii.n) > 0) return;
+
+  // Caracteristicile de stretch facute inainte sa existe familii stau cu
+  // familie_id NULL. Nu le rescriem si nu le dublam: le mutam in familia lor.
+  const orfane = await db
+    .prepare("SELECT COUNT(*) AS n FROM cod_caracteristici WHERE familie_id IS NULL")
+    .get()
+    .catch(() => ({ n: 0 }));
+
+  let o = 0;
+  for (const [nume, exemplu, caracteristici] of START) {
+    const ins = await db
+      .prepare("INSERT INTO cod_familii (nume, exemplu, ordine) VALUES (?,?,?) RETURNING id")
+      .run(nume, exemplu, ++o)
+      .catch(() => null);
+    if (!ins) continue;
+    const famId = Number(ins.lastInsertRowid);
+
+    if (nume === "Folie stretch" && nr(orfane && orfane.n) > 0) {
+      await db.prepare("UPDATE cod_caracteristici SET familie_id = ? WHERE familie_id IS NULL").run(famId);
+      continue;
+    }
+
+    for (const c of caracteristici) {
+      const [cn, fel, um, ordine, cifre, valori, minv, maxv, inCod, oblig] = c;
+      const r = await db
+        .prepare(
+          `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
+           VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`
+        )
+        .run(famId, cn, fel, um || null, inCod === 0 ? 0 : 1, ordine, oblig === 0 ? 0 : 1,
+             cifre || 0, minv == null ? null : minv, maxv == null ? null : maxv)
+        .catch(() => null);
+      if (!r) continue;
+      let k = 0;
+      for (const [valoare, cod] of valori || []) {
+        await db
+          .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)")
+          .run(Number(r.lastInsertRowid), valoare, cod, ++k);
+      }
     }
   }
-  console.log("[cod-produs] caracteristicile de pornire au fost puse");
+  console.log("[cod-produs] " + START.length + " familii de produse au fost puse");
 }
 
 function register(router) {
   // ---- Configurare -------------------------------------------------------
   router.get(CALE, async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
-    const car = await citesteCaracteristici(true);
+    const fam = await familii();
+    const familieId = Number(ctx.query.familie) || (fam[0] ? Number(fam[0].id) : 0);
+    const familia = fam.find((f) => Number(f.id) === familieId) || null;
+    const car = await citesteCaracteristici(true, familieId);
     const sab = C.sablon(car.filter((c) => c.activ));
     const exemplu = sab.map((s) => s.exemplu).join("");
 
@@ -101,10 +142,44 @@ function register(router) {
       ${subnav(CALE)}
       <h1 style="margin:6px 0 2px">Codul produsului</h1>
       <p class="explic">
-        Codul unui produs se scrie singur, din caracteristicile de mai jos. Tu alegi care caracteristici intră
+        Codul unui produs se scrie singur, din caracteristicile familiei lui. Tu alegi care caracteristici intră
         în cod și în ce ordine; restul rămân doar în denumire. La produs nou, sistemul verifică dacă mai
         există deja un produs cu codul ieșit — și te oprește dacă da.
       </p>
+
+      <div class="toolbar" style="flex-wrap:wrap;gap:6px">
+        ${fam
+          .map((f) => `<a class="btn ${Number(f.id) === familieId ? "" : "secondary"}" href="${CALE}?familie=${f.id}">${esc(f.nume)}</a>`)
+          .join("")}
+        ${fam.length ? "" : '<span style="color:var(--text-muted)">Nicio familie încă.</span>'}
+      </div>
+      ${
+        ctx.user.rol === "admin"
+          ? `<details style="margin:6px 0 14px"><summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Familie nouă / șterge familia</summary>
+               <form method="post" action="${CALE}/familie" class="form" style="max-width:720px;margin-top:10px">
+                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+                   <label class="field" style="flex:1 1 220px">Denumirea familiei<input name="nume" required placeholder="Pungă curier"></label>
+                   <label class="field" style="flex:0 1 120px">Ordine<input type="number" name="ordine" value="${fam.length + 1}"></label>
+                   <button class="btn small" type="submit">Adaugă familia</button>
+                 </div>
+                 <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">
+                   O familie e un fel de produs cu atributele lui: punga curier are clapetă, banda adezivă are
+                   zgomot. Fiecare își ține caracteristicile separat, deci „Culoare" poate exista la toate, cu
+                   alte valori.
+                 </p>
+               </form>
+               ${
+                 familia
+                   ? `<form method="post" action="${CALE}/familie/${familia.id}/sterge" class="inline-form" style="margin-top:8px"
+                            onsubmit="return confirm('Ștergi familia „${esc(familia.nume)}” cu tot cu caracteristicile ei? Produsele deja făcute rămân cum sunt.')">
+                        <button class="link-btn danger" type="submit">Șterge familia „${esc(familia.nume)}"</button>
+                      </form>`
+                   : ""
+               }
+             </details>`
+          : ""
+      }
+      ${fam.length ? `<h2 style="margin:4px 0 2px">${esc(familia ? familia.nume : "—")}</h2>` : ""}
       ${
         sab.length
           ? `<div class="card" style="max-width:720px;margin-bottom:16px">
@@ -118,6 +193,7 @@ function register(router) {
 
       <h2>Adaugă o caracteristică</h2>
       <form method="post" action="${CALE}/caracteristica" class="form" style="max-width:720px">
+        <input type="hidden" name="familie_id" value="${familieId}">
         <div style="display:flex;gap:10px;flex-wrap:wrap">
           <label class="field" style="flex:1 1 200px">Denumire<input name="nume" required placeholder="Culoare"></label>
           <label class="field" style="flex:0 1 150px">Fel
@@ -144,6 +220,7 @@ function register(router) {
         car.filter((c) => c.fel === "lista").length
           ? `<h2>Adaugă o valoare</h2>
              <form method="post" action="${CALE}/valoare" class="form" style="max-width:720px">
+               <input type="hidden" name="familie_id" value="${familieId}">
                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
                  <label class="field" style="flex:0 1 200px">Caracteristica
                    <select name="caracteristica_id" required>
@@ -176,6 +253,37 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Codul produsului", active: "/configurari", body }));
   });
 
+  router.post(`${CALE}/familie`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    const b = ctx.body || {};
+    const nume = String(b.nume || "").trim();
+    if (!nume) return redirect(ctx.res, CALE);
+    const r = await db
+      .prepare("INSERT INTO cod_familii (nume, ordine) VALUES (?, ?) RETURNING id")
+      .run(nume, parseInt(b.ordine, 10) || 0)
+      .catch(() => null);
+    redirect(ctx.res, CALE + inapoi(r && r.lastInsertRowid));
+  });
+
+  router.post(`${CALE}/familie/:id/sterge`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    const id = parseInt(ctx.params.id, 10);
+    // Daca din familia asta au iesit deja produse, nu se sterge: se scoate din
+    // uz. Fisa unui produs vechi trebuie sa poata arata in continuare din ce
+    // bucati i s-a facut codul.
+    const folosita = await db
+      .prepare("SELECT COUNT(*) AS n FROM produse WHERE cod_familie_id = ?")
+      .get(id)
+      .catch(() => ({ n: 0 }));
+    if (nr(folosita && folosita.n) > 0) {
+      await db.prepare("UPDATE cod_familii SET activ = 0 WHERE id = ?").run(id);
+    } else {
+      await db.prepare("DELETE FROM cod_caracteristici WHERE familie_id = ?").run(id).catch(() => null);
+      await db.prepare("DELETE FROM cod_familii WHERE id = ?").run(id).catch(() => null);
+    }
+    redirect(ctx.res, CALE);
+  });
+
   router.post(`${CALE}/caracteristica`, async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
     const b = ctx.body || {};
@@ -184,10 +292,11 @@ function register(router) {
     const fel = b.fel === "numar" ? "numar" : "lista";
     await db
       .prepare(
-        `INSERT INTO cod_caracteristici (nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
-         VALUES (?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
+        parseInt(b.familie_id, 10) || null,
         nume,
         fel,
         String(b.um || "").trim() || null,
@@ -199,7 +308,7 @@ function register(router) {
         b.max_val === "" || b.max_val == null ? null : Number(b.max_val)
       )
       .catch(() => null);
-    redirect(ctx.res, CALE);
+    redirect(ctx.res, CALE + inapoi(b.familie_id));
   });
 
   router.post(`${CALE}/:id/sterge`, async (ctx) => {
@@ -215,7 +324,7 @@ function register(router) {
     } else {
       await db.prepare("DELETE FROM cod_caracteristici WHERE id = ?").run(ctx.params.id).catch(() => null);
     }
-    redirect(ctx.res, CALE);
+    redirect(ctx.res, CALE + inapoi(ctx.query.familie));
   });
 
   router.post(`${CALE}/valoare`, async (ctx) => {
@@ -229,7 +338,7 @@ function register(router) {
     await db
       .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)")
       .run(cid, valoare, cod, nr(n && n.n) + 1);
-    redirect(ctx.res, CALE);
+    redirect(ctx.res, CALE + inapoi(b.familie_id));
   });
 
   router.post(`${CALE}/valoare/:id/sterge`, async (ctx) => {
@@ -241,7 +350,9 @@ function register(router) {
   // ---- Produs nou, cu cod generat ---------------------------------------
   router.get("/produse/nou-cu-cod", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
-    const car = await citesteCaracteristici();
+    const fam = await familii();
+    const familieId = Number(ctx.query.familie) || (fam[0] ? Number(fam[0].id) : 0);
+    const car = await citesteCaracteristici(false, familieId);
     const campuri = car
       .map((c) => {
         const et = `${esc(c.nume)}${c.um ? ` <span style="color:var(--text-muted)">(${esc(c.um)})</span>` : ""}${
@@ -269,8 +380,17 @@ function register(router) {
         și nu-l mai fac a doua oară. Caracteristicile se definesc în
         <a href="${CALE}">Configurări · Codul produsului</a>.
       </p>
-      ${car.length ? "" : `<div class="flash">Nu e definită nicio caracteristică. Începe din <a href="${CALE}">Configurări · Codul produsului</a>.</div>`}
+      ${
+        fam.length > 1
+          ? `<div class="toolbar" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">
+               <span style="font-size:13px;color:var(--text-muted);align-self:center">Familia:</span>
+               ${fam.map((f) => `<a class="btn small ${Number(f.id) === familieId ? "" : "secondary"}" href="/produse/nou-cu-cod?familie=${f.id}">${esc(f.nume)}</a>`).join("")}
+             </div>`
+          : ""
+      }
+      ${car.length ? "" : `<div class="flash">Familia asta n-are nicio caracteristică. Începe din <a href="${CALE}">Configurări · Codul produsului</a>.</div>`}
       <form method="post" action="/produse/nou-cu-cod" class="form" style="max-width:860px" id="f-produs">
+        <input type="hidden" name="familie" id="f-familie" value="${familieId}">
         <div style="display:flex;gap:10px;flex-wrap:wrap">${campuri}</div>
         <div class="card" style="margin:12px 0;max-width:620px">
           <div class="label">Codul</div>
@@ -301,6 +421,7 @@ function register(router) {
           f.querySelectorAll("[data-carac]").forEach(function (el) {
             if (el.value !== "") d[el.dataset.carac] = el.value;
           });
+          d.__familie = document.getElementById("f-familie").value;
           fetch("/produse/nou-cu-cod/preview", {
             method: "POST", credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
@@ -332,7 +453,8 @@ function register(router) {
   // Previzualizarea: aceeasi functie ca la salvare, plus cautarea duplicatului.
   router.post("/produse/nou-cu-cod/preview", async (ctx) => {
     if (!ctx.user) return send(ctx.res, 403, "{}");
-    const r = await genereaza(ctx.body || {});
+    const corp = ctx.body || {};
+    const r = await genereaza(corp, Number(corp.__familie) || 0);
     ctx.res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     ctx.res.end(JSON.stringify(r));
   });
@@ -342,7 +464,8 @@ function register(router) {
     const b = ctx.body || {};
     const alegeri = {};
     for (const k of Object.keys(b)) if (k.startsWith("c_")) alegeri[k.slice(2)] = b[k];
-    const r = await genereaza(alegeri);
+    const familieId = Number(b.familie) || 0;
+    const r = await genereaza(alegeri, familieId);
     if (!r.ok || r.exista) {
       const motiv = r.exista
         ? `Produsul există deja: ${r.exista.denumire} (cod ${r.exista.cod_generat || r.exista.cod || "—"}).`
@@ -359,10 +482,10 @@ function register(router) {
     }
     const ins = await db
       .prepare(
-        `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim)
-         VALUES (?,?,?,?,?,?) RETURNING id`
+        `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id)
+         VALUES (?,?,?,?,?,?,?) RETURNING id`
       )
-      .run(r.cod, r.cod, r.denumire, String(b.unitate_masura || "buc"), Number(b.pret_vanzare) || 0, Number(b.stoc_minim) || 0);
+      .run(r.cod, r.cod, r.denumire, String(b.unitate_masura || "buc"), Number(b.pret_vanzare) || 0, Number(b.stoc_minim) || 0, familieId || null);
     const id = Number(ins.lastInsertRowid);
     for (const buc of r.bucati_toate) {
       await db
@@ -376,8 +499,8 @@ function register(router) {
 // Generarea + verificarea duplicatului. Un singur loc, folosit si de
 // previzualizare, si de salvare — altfel ecranul ar putea spune „liber" iar
 // salvarea „exista deja", sau invers.
-async function genereaza(alegeri) {
-  const car = await citesteCaracteristici();
+async function genereaza(alegeri, familieId) {
+  const car = await citesteCaracteristici(false, familieId);
   const r = C.genereazaCod(car, alegeri || {});
   let exista = null;
   if (r.cod) {
