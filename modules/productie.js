@@ -705,9 +705,8 @@ function register(router) {
           // schimba des si pe multe comenzi deodata — pana acum trebuia sa
           // intre in fiecare fisa, sa schimbe, sa se intoarca, si tot asa.
           // Culoarea ramane, ca sa se vada dintr-o privire ce e unde.
-          `<select name="status" form="schimba-status" class="sel-stare stare-${esc(c.status || "")}" data-comanda="${c.id}"
-                   title="Schimbă starea comenzii"
-                   onchange="document.getElementById('stare-comanda').value = this.dataset.comanda; this.form.submit()">
+          `<select class="sel-stare stare-${esc(c.status || "")}" data-stare="${c.id}"
+                   title="Schimbă starea comenzii">
              ${STATUSURI.map(
                ([v, t]) => `<option value="${v}"${c.status === v ? " selected" : ""}>${esc(t)}</option>`
              ).join("")}
@@ -730,10 +729,41 @@ function register(router) {
         <button class="btn secondary" type="submit">Șterge selectatele</button>
       </div>
       </form>
-      <form id="schimba-status" method="post" action="/productie/stare" hidden>
-        <input type="hidden" name="inapoi" value="${esc(inapoi)}">
-        <input type="hidden" name="comanda_id" id="stare-comanda">
-      </form>
+      <script>
+      // DE CE NU UN FORMULAR ASCUNS, CUM ERA LA AGENT.
+      //
+      // Toate cele 400 de liste ar fi fost ale aceluiasi formular, toate cu
+      // name="status". La trimitere plecau 400 de valori cu acelasi nume, iar
+      // serverul citeste ultima — adica starea ultimului rand, scrisa peste
+      // comanda pe care tocmai o schimbasei. Pe ecran arata ca „se schimba dar
+      // nu ramane", exact ce a pait Vali pe 26.10.2026. Nu era o problema de
+      // salvare: ruta scria corect, doar primea alta valoare.
+      //
+      // Aici pleaca doar randul atins, si abia dupa ce serverul confirma se
+      // reincarca pagina. Daca scrierea pica, lista se pune la loc si omul
+      // vede ca n-a mers, in loc sa creada ca s-a salvat.
+      document.addEventListener("change", function (ev) {
+        var s = ev.target.closest ? ev.target.closest("[data-stare]") : null;
+        if (!s) return;
+        var veche = s.dataset.veche || "";
+        s.disabled = true;
+        fetch("/productie/stare", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ comanda_id: s.dataset.stare, status: s.value }),
+        })
+          .then(function (r) {
+            if (!r.ok) throw new Error(r.status);
+            location.reload();
+          })
+          .catch(function () {
+            s.disabled = false;
+            if (veche) s.value = veche;
+            alert("Starea nu s-a putut schimba. Încearcă din nou.");
+          });
+      });
+      document.querySelectorAll("[data-stare]").forEach(function (s) { s.dataset.veche = s.value; });
+      </script>
       ${sectiuneSpreAlocare(spre)}
       <form method="post" action="/productie/sterge-tot" class="inline-form" onsubmit="return confirm('Ștergi TOATE comenzile de producție? Folosește asta doar înainte de un reimport curat.')">
         <button class="link-btn danger" type="submit">Șterge toate comenzile (pentru reimport)</button>
@@ -1078,8 +1108,17 @@ function register(router) {
     const comandaId = parseInt((ctx.body && ctx.body.comanda_id) || 0, 10) || null;
     const stare = String((ctx.body && ctx.body.status) || "");
     const bun = STATUSURI.some(([v]) => v === stare);
-    if (!comandaId || !bun) return redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
+    if (!comandaId || !bun) {
+      if (!ctx.body.inapoi) return send(ctx.res, 400, "stare sau comandă greșită");
+      return redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
+    }
     await db.prepare("UPDATE comenzi_productie SET status = ? WHERE id = ?").run(stare, comandaId);
+    // Chemata din lista, prin fetch, fara „inapoi": raspundem scurt, ca sa nu
+    // trimitem o pagina intreaga pe care browserul o arunca oricum.
+    if (!ctx.body.inapoi) {
+      ctx.res.writeHead(204);
+      return ctx.res.end();
+    }
     redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
   });
 
