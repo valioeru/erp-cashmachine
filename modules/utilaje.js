@@ -23,6 +23,8 @@
 const db = require("../lib/db");
 const { esc, cantitate, unitate, layout, table, subnavProductie } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const SCH = require("../lib/schimburi");
+const PROG = require("./program");
 
 const nr = (v) => Number(v || 0);
 
@@ -1321,6 +1323,20 @@ function register(router) {
     const oreImplicit = variante.length && variante[0].ore ? Math.round(variante[0].ore * 10) / 10 : 8;
     const dataImplicit = c.data_livrare && c.data_livrare > azi() ? ziPlus(c.data_livrare, -1) : azi();
 
+    // Programul de lucru, pentru fereastra în care se poate aloca. Fără el
+    // lista ar arăta și pe cel care în ziua aia e pe tura de noapte, și pe cel
+    // care sâmbăta nu vine deloc — adică o alocare curată pe hârtie și
+    // imposibilă în hală.
+    await PROG.incarcaSchimburi();
+    const programAlocare = await db
+      .prepare("SELECT resursa_id, data, schimb FROM resurse_program WHERE data >= ? AND data <= ?")
+      .all(ziPlus(azi(), -14), ziPlus(azi(), 120))
+      .catch(() => []);
+    const programJson = JSON.stringify(
+      programAlocare.map((p) => ({ r: Number(p.resursa_id), d: String(p.data).slice(0, 10), s: SCH.normalizeaza(p.schimb) })).filter((p) => p.s)
+    );
+    const schimburiJson = JSON.stringify(SCH.toate().map((s) => ({ cod: s.cod, start: s.start, ore: s.ore })));
+
     const body = `
       ${subnavProductie("/productie", ctx.user)}
       <div class="toolbar"><a class="btn secondary" href="/productie/${c.id}">← Comanda ${esc(c.numar || c.id)}</a></div>
@@ -1382,7 +1398,14 @@ function register(router) {
              acolo se bifa pe nimerite: lista arăta exact la fel și înainte, și
              după ce filtrul își făcea treaba. -->
         <p id="alocFaraUtilaj" style="font-size:13px;color:var(--text-muted);border-left:3px solid var(--border);padding:6px 10px;margin:0">
-          Alege întâi utilajul, de sus. Apoi apar aici oamenii care știu să lucreze pe el.
+          Alege întâi utilajul, de sus. Apoi apar aici oamenii care știu să lucreze pe el
+          <strong>și sunt în tură</strong> la data și ora alese.
+        </p>
+        <p id="alocFaraTura" style="display:none;font-size:13px;border-left:3px solid var(--warn,#e0a14a);padding:6px 10px;margin:0">
+          <strong>Nimeni din cei calificați nu e în tură atunci.</strong>
+          <span id="alocFaraTuraCine"></span>
+          Schimbă data sau ora de start, ori completează tura în
+          <a href="/productie/program">Producție → Program</a>.
         </p>
         <p id="alocNimeni" style="display:none;font-size:13px;border-left:3px solid var(--danger);padding:6px 10px;margin:0">
           <strong>Niciun om nu e trecut pe utilajul ăsta.</strong>
@@ -1392,7 +1415,7 @@ function register(router) {
         <div id="alocOameni" style="display:none;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
           ${listaOameni
             .map(
-              (o) => `<label class="om-optiune" data-utilaje="${esc(String(o.utilaje || ""))}" style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin:0">
+              (o) => `<label class="om-optiune" data-resursa="${o.id}" data-utilaje="${esc(String(o.utilaje || ""))}" style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin:0">
                 <input type="checkbox" name="resursa_${o.id}" value="1"> <span>${esc(o.nume)}${o.schimb ? ` <span style="color:var(--text-muted);font-size:12px">· ${esc(o.schimb)}</span>` : ""}</span>
               </label>`
             )
@@ -1406,31 +1429,82 @@ function register(router) {
 
       <script>
       (function () {
+        var PROGRAM = ${programJson};
+        var SCHIMBURI = ${schimburiJson};
         var sel = document.getElementById("alocUtilaj");
         var oreInput = document.getElementById("alocOre");
+        var dataInput = document.querySelector('input[name="data"]');
+        var oraInput = document.querySelector('input[name="ora_start"]');
         var grid = document.getElementById("alocOameni");
         var faraUtilaj = document.getElementById("alocFaraUtilaj");
         var nimeni = document.getElementById("alocNimeni");
+        var faraTura = document.getElementById("alocFaraTura");
+        var faraTuraCine = document.getElementById("alocFaraTuraCine");
+
+        function ziPlus(d, n) {
+          var t = new Date(d + "T00:00:00Z");
+          if (isNaN(t.getTime())) return d;
+          t.setUTCDate(t.getUTCDate() + n);
+          return t.toISOString().slice(0, 10);
+        }
+        // Aceeași socoteală ca în lib/schimburi: schimbul 3 trece peste miezul
+        // nopții, deci cel pornit ieri e în hală azi dimineață.
+        function eInTura(cod, dataProgram, ziua, ora) {
+          var s = null;
+          for (var i = 0; i < SCHIMBURI.length; i++) if (SCHIMBURI[i].cod === cod) s = SCHIMBURI[i];
+          if (!s) return false;
+          var sfarsit = s.start + s.ore;
+          if (sfarsit <= 24) return dataProgram === ziua && ora >= s.start && ora < sfarsit;
+          if (dataProgram === ziua && ora >= s.start) return true;
+          return ziPlus(dataProgram, 1) === ziua && ora < sfarsit - 24;
+        }
+        function inTuraAcum() {
+          var zi = dataInput ? dataInput.value : "";
+          var ora = oraInput ? Number(oraInput.value) : NaN;
+          if (!zi || !isFinite(ora)) return null; // fără dată/oră nu filtrăm pe tură
+          var set = {};
+          for (var i = 0; i < PROGRAM.length; i++) {
+            var p = PROGRAM[i];
+            if (eInTura(p.s, p.d, zi, ora)) set[p.r] = true;
+          }
+          return set;
+        }
+
         function filtreaza() {
           var id = sel.value;
-          var cati = 0;
+          var tura = inTuraAcum();
+          var cati = 0, calificati = 0;
           document.querySelectorAll(".om-optiune").forEach(function (l) {
             var lista = (l.dataset.utilaje || "").split(",").filter(Boolean);
-            var poate = !!id && lista.indexOf(id) !== -1;
+            var stie = !!id && lista.indexOf(id) !== -1;
+            if (stie) calificati++;
+            var vine = !tura || !!tura[l.dataset.resursa];
+            var poate = stie && vine;
             l.style.display = poate ? "" : "none";
             if (poate) cati++;
             // Cine iese din listă iese și din bifare. Altfel, schimbarea
-            // utilajului după ce ai bifat pe cineva l-ar trimite în producție
-            // pe o mașină pe care nu o știe, fără ca nimeni să mai vadă bifa.
+            // utilajului sau a zilei după ce ai bifat pe cineva l-ar trimite
+            // în producție pe o mașină pe care nu o știe sau într-o zi în care
+            // nu vine, fără ca nimeni să mai vadă bifa.
             else { var cb = l.querySelector("input"); if (cb) cb.checked = false; }
           });
           if (faraUtilaj) faraUtilaj.style.display = id ? "none" : "";
-          if (nimeni) nimeni.style.display = id && cati === 0 ? "" : "none";
+          if (nimeni) nimeni.style.display = id && calificati === 0 ? "" : "none";
+          // Calificați există, dar niciunul nu e în tură: altă problemă, alt mesaj.
+          if (faraTura) faraTura.style.display = id && calificati > 0 && cati === 0 ? "" : "none";
+          if (faraTuraCine && id && calificati > 0 && cati === 0) {
+            faraTuraCine.textContent = "Sunt " + calificati + " oameni trecuți pe utilajul ăsta, dar niciunul nu e planificat atunci.";
+          }
           if (grid) grid.style.display = id && cati ? "grid" : "none";
           var opt = sel.options[sel.selectedIndex];
           if (opt && opt.dataset.ore) oreInput.value = opt.dataset.ore;
         }
-        if (sel) { sel.addEventListener("change", filtreaza); filtreaza(); }
+        if (sel) {
+          sel.addEventListener("change", filtreaza);
+          if (dataInput) dataInput.addEventListener("change", filtreaza);
+          if (oraInput) { oraInput.addEventListener("change", filtreaza); oraInput.addEventListener("input", filtreaza); }
+          filtreaza();
+        }
       })();
       </script>
     `;
