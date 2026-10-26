@@ -7,6 +7,7 @@ const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const inbox = require("./inbox");
 const tsk = require("./taskuri");
+const XLS = require("../lib/export-xlsx");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
 const STARE_LABEL = {
@@ -23,6 +24,99 @@ const INTERACTIUNE_LABEL = { nota: "Notă", telefon: "Telefon", vizita: "Vizită
 const INTERACTIUNE_MANUAL = ["nota", "telefon", "vizita", "email", "whatsapp"];
 const INTERACTIUNE_AUTO = { oferta: "Ofertă", contract: "Contract", comanda: "Comandă", notificare: "Notificare", factura: "Factură" };
 
+// Exportul listei de parteneri e DOAR al administratorului.
+//
+// Lista asta e, practic, portofoliul de clienți al firmei: nume, CUI, cât
+// cumpără fiecare și cât datorează. Pe ecran o vede cine are dreptul la
+// pagină, dar un ecran se închide, iar un fișier descărcat pleacă mai departe
+// — la următorul angajator, de pildă. De-aia butonul nu e doar ascuns pentru
+// ceilalți: ruta refuză. Un buton ascuns se ghicește din adresă în zece
+// secunde, și atunci ascunderea devine o minciună spusă nouă înșine.
+function poateExporta(user) {
+  return Boolean(user && user.rol === "admin");
+}
+
+// Lista de parteneri, cu filtrele ei. Stă într-o funcție fiindcă o citesc
+// două rute: pagina și exportul. Dacă ar fi scrisă de două ori, exportul ar
+// ajunge, după a treia modificare de filtru, să scoată alte rânduri decât
+// cele de pe ecran — iar omul ar semna un fișier crezând că e ce-a văzut.
+async function culegeParteneri(q) {
+  const tip = ["client", "furnizor", "ambii"].includes(String(q.tip)) ? String(q.tip) : "ambii";
+  const cauta = String(q.q || "").trim();
+
+  // Cu care firmă din grup a lucrat partenerul. Nu e un câmp scris pe el și
+  // nici nu trebuie să fie: partenerii sunt COMUNI pe tot grupul (vezi
+  // lib/grup.js), iar firma emitentă stă pe factură. Deci se deduce, și e
+  // mereu adevărat — un client care cumpără de la amândouă apare cu
+  // amândouă, fără ca cineva să bifeze ceva.
+  const firmeGrup = await db
+    .prepare("SELECT id, nume, culoare FROM firme WHERE COALESCE(operationala,1) = 1 ORDER BY implicita DESC, id")
+    .all()
+    .catch(() => []);
+  const firmaCeruta = Number(q.firma) || 0;
+
+  const args = [];
+  // Partenerii ignorați nu apar în listă. Sunt firme scoase intenționat din
+  // ERP (date de test rămase în SmartBill), iar locul lor e în
+  // Configurări → Parteneri ignorați, de unde se pun la loc.
+  let unde = "COALESCE(p.ignorat,0) = 0";
+  if (tip === "client") unde = "COALESCE(p.ignorat,0) = 0 AND p.tip IN ('client','ambele')";
+  else if (tip === "furnizor") unde = "COALESCE(p.ignorat,0) = 0 AND p.tip IN ('furnizor','ambele')";
+  if (cauta) {
+    unde += " AND (LOWER(p.nume) LIKE ? OR LOWER(COALESCE(p.cui,'')) LIKE ?)";
+    args.push("%" + cauta.toLowerCase() + "%", "%" + cauta.toLowerCase() + "%");
+  }
+  if (firmaCeruta > 0) {
+    unde += ` AND EXISTS (SELECT 1 FROM facturi fx WHERE fx.activ = 1 AND fx.partener_id = p.id AND fx.firma_id = ${firmaCeruta})`;
+  }
+
+  const T = "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
+  const P = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
+  const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+
+  // Rulajul, soldul si ultima factura se calculeaza o singura data, grupat pe
+  // partener, nu cate trei subinterogari corelate pentru fiecare rand din
+  // lista. Varianta veche recitea tot facturi_linii si toate platile pentru
+  // fiecare partener in parte — pagina statea 25 de secunde la 1.000 de
+  // parteneri. Conditiile raman exact aceleasi, doar ca s-au mutat din WHERE
+  // in CASE-urile de mai jos: „ultima" nu tine cont de intercompany, iar
+  // rulajul si soldul da.
+  const randuri = await db
+    .prepare(
+      `WITH agregat AS (
+         SELECT f.partener_id,
+                COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
+                                  THEN COALESCE(t.total,0) ELSE 0 END), 0) AS rulaj,
+                COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.directie = 'vanzare'
+                                   AND ${deschisa("f")}
+                                   AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5
+                                  THEN COALESCE(t.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS sold,
+                MAX(f.data_emiterii) AS ultima,
+                string_agg(DISTINCT CAST(f.firma_id AS TEXT), ',') AS firme
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN ${T} t ON t.factura_id = f.id
+           LEFT JOIN ${P} pl ON pl.factura_id = f.id
+          WHERE f.status NOT IN ('anulata','ciorna')
+          GROUP BY f.partener_id
+       )
+       SELECT p.id, p.nume, p.tip, p.stare, p.cui, p.email, p.telefon,
+              u.nume AS agent,
+              COALESCE(a.rulaj, 0) AS rulaj,
+              COALESCE(a.sold, 0) AS sold,
+              a.ultima AS ultima,
+              a.firme AS firme
+         FROM parteneri p
+         LEFT JOIN utilizatori u ON u.id = p.agent_id
+         LEFT JOIN agregat a ON a.partener_id = p.id
+        WHERE ${unde}
+        ORDER BY rulaj DESC, sold DESC, p.nume`
+    )
+    .all(acum12, ...args);
+
+  return { tip, cauta, firmaCeruta, firmeGrup, randuri };
+}
+
+
 function register(router) {
   // Lista de parteneri, ordonată după cât cântăresc de fapt: rulajul pe
   // ultimele 12 luni, nu alfabetic. Un client de 13 milioane și unul de 200
@@ -31,77 +125,7 @@ function register(router) {
   // Se înregistrează ÎNAINTEA CRUD-ului generic, ca să câștige ruta /parteneri.
   router.get("/parteneri", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
-    const tip = ["client", "furnizor", "ambii"].includes(String(ctx.query.tip)) ? String(ctx.query.tip) : "ambii";
-    const cauta = String(ctx.query.q || "").trim();
-
-    // Cu care firmă din grup a lucrat partenerul. Nu e un câmp scris pe el și
-    // nici nu trebuie să fie: partenerii sunt COMUNI pe tot grupul (vezi
-    // lib/grup.js), iar firma emitentă stă pe factură. Deci se deduce, și e
-    // mereu adevărat — un client care cumpără de la amândouă apare cu
-    // amândouă, fără ca cineva să bifeze ceva.
-    const firmeGrup = await db
-      .prepare("SELECT id, nume, culoare FROM firme WHERE COALESCE(operationala,1) = 1 ORDER BY implicita DESC, id")
-      .all()
-      .catch(() => []);
-    const firmaCeruta = Number(ctx.query.firma) || 0;
-
-    const args = [];
-    // Partenerii ignorați nu apar în listă. Sunt firme scoase intenționat din
-    // ERP (date de test rămase în SmartBill), iar locul lor e în
-    // Configurări → Parteneri ignorați, de unde se pun la loc.
-    let unde = "COALESCE(p.ignorat,0) = 0";
-    if (tip === "client") unde = "COALESCE(p.ignorat,0) = 0 AND p.tip IN ('client','ambele')";
-    else if (tip === "furnizor") unde = "COALESCE(p.ignorat,0) = 0 AND p.tip IN ('furnizor','ambele')";
-    if (cauta) {
-      unde += " AND (LOWER(p.nume) LIKE ? OR LOWER(COALESCE(p.cui,'')) LIKE ?)";
-      args.push("%" + cauta.toLowerCase() + "%", "%" + cauta.toLowerCase() + "%");
-    }
-    if (firmaCeruta > 0) {
-      unde += ` AND EXISTS (SELECT 1 FROM facturi fx WHERE fx.activ = 1 AND fx.partener_id = p.id AND fx.firma_id = ${firmaCeruta})`;
-    }
-
-    const T = "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0)/100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
-    const P = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id)";
-    const acum12 = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
-
-    // Rulajul, soldul si ultima factura se calculeaza o singura data, grupat pe
-    // partener, nu cate trei subinterogari corelate pentru fiecare rand din
-    // lista. Varianta veche recitea tot facturi_linii si toate platile pentru
-    // fiecare partener in parte — pagina statea 25 de secunde la 1.000 de
-    // parteneri. Conditiile raman exact aceleasi, doar ca s-au mutat din WHERE
-    // in CASE-urile de mai jos: „ultima" nu tine cont de intercompany, iar
-    // rulajul si soldul da.
-    const randuri = await db
-      .prepare(
-        `WITH agregat AS (
-           SELECT f.partener_id,
-                  COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.data_emiterii >= ?
-                                    THEN COALESCE(t.total,0) ELSE 0 END), 0) AS rulaj,
-                  COALESCE(SUM(CASE WHEN COALESCE(f.intercompany,0) = 0 AND f.directie = 'vanzare'
-                                     AND ${deschisa("f")}
-                                     AND COALESCE(t.total,0) - COALESCE(pl.platit,0) > 0.5
-                                    THEN COALESCE(t.total,0) - COALESCE(pl.platit,0) ELSE 0 END), 0) AS sold,
-                  MAX(f.data_emiterii) AS ultima,
-                  string_agg(DISTINCT CAST(f.firma_id AS TEXT), ',') AS firme
-             FROM (SELECT * FROM facturi WHERE activ = 1) f
-             LEFT JOIN ${T} t ON t.factura_id = f.id
-             LEFT JOIN ${P} pl ON pl.factura_id = f.id
-            WHERE f.status NOT IN ('anulata','ciorna')
-            GROUP BY f.partener_id
-         )
-         SELECT p.id, p.nume, p.tip, p.stare, p.cui, p.email, p.telefon,
-                u.nume AS agent,
-                COALESCE(a.rulaj, 0) AS rulaj,
-                COALESCE(a.sold, 0) AS sold,
-                a.ultima AS ultima,
-                a.firme AS firme
-           FROM parteneri p
-           LEFT JOIN utilizatori u ON u.id = p.agent_id
-           LEFT JOIN agregat a ON a.partener_id = p.id
-          WHERE ${unde}
-          ORDER BY rulaj DESC, sold DESC, p.nume`
-      )
-      .all(acum12, ...args);
+    const { tip, cauta, firmaCeruta, firmeGrup, randuri } = await culegeParteneri(ctx.query);
 
     const qs = (cauta ? "&q=" + encodeURIComponent(cauta) : "") + (firmaCeruta ? "&firma=" + firmaCeruta : "");
     const buton = (v, eticheta) =>
@@ -138,6 +162,15 @@ function register(router) {
         ${buton("ambii", "Toți")}
         ${buton("client", "Clienți")}
         ${buton("furnizor", "Furnizori")}
+        ${
+          poateExporta(ctx.user)
+            ? `<a class="btn secondary" style="margin-left:auto"
+                  href="/parteneri/export.xlsx?tip=${encodeURIComponent(tip)}${qs}"
+                  title="Descarcă în Excel toți cei ${randuri.length} parteneri din filtrul curent, nu doar primii 300 de pe ecran. Doar administratorii văd butonul.">
+                 ↓ Export Excel
+               </a>`
+            : ""
+        }
       </div>
       ${
         firmeGrup.length > 1
@@ -174,6 +207,97 @@ function register(router) {
       ${randuri.length > 300 ? `<p style="color:var(--text-muted);font-size:13px">Se afișează primii 300. Folosește căutarea pentru restul.</p>` : ""}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Parteneri", active: "/parteneri", body }));
+  });
+
+  // Exportul listei, în Excel. Se înregistrează AICI, înaintea lui
+  // „/parteneri/:id" și a CRUD-ului generic: rutele se potrivesc în ordinea
+  // înregistrării, iar pusă mai jos adresa ar fi fost înghițită de ruta de
+  // partener și ar fi căutat un partener cu id-ul „export.xlsx".
+  router.get("/parteneri/export.xlsx", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (!poateExporta(ctx.user)) {
+      // Nu redirectăm spre listă: un fișier care „se descarcă" și iese pagina
+      // de parteneri în loc de Excel l-ar face pe om să creadă că s-a stricat
+      // exportul. Spunem pe față că n-are voie.
+      return send(ctx.res, 403, layout({
+        user: ctx.user,
+        title: "Export parteneri",
+        active: "/parteneri",
+        body: `<p>Exportul listei de parteneri e rezervat administratorilor.</p>
+               <p style="color:var(--text-muted);max-width:620px">Lista conține portofoliul de clienți al firmei —
+               nume, CUI, rulaj și sold pe fiecare. Pe ecran o vezi; descărcată, pleacă mai departe.
+               Dacă ai nevoie de ea, cere-i-o unui administrator.</p>
+               <p><a class="btn secondary" href="/parteneri">Înapoi la parteneri</a></p>`,
+      }));
+    }
+
+    const { tip, cauta, firmaCeruta, firmeGrup, randuri } = await culegeParteneri(ctx.query);
+    const numeFirma = new Map(firmeGrup.map((f) => [String(f.id), f.nume]));
+    const firmeText = (lista) =>
+      [...new Set(String(lista || "").split(",").map((s) => s.trim()).filter(Boolean))]
+        .map((id) => numeFirma.get(id) || id)
+        .join(", ");
+
+    // Exportul duce TOATE rândurile filtrului, nu primele 300 ca ecranul:
+    // pe ecran limita e ca să nu stea pagina, într-un fișier ar fi o tăiere
+    // tăcută exact a cozii pe care omul voia s-o vadă.
+    const foaie = {
+      nume: "Parteneri",
+      coloane: [
+        { titlu: "Nume", cheie: "nume", tip: "text", latime: 42 },
+        { titlu: "Tip", cheie: "tip", tip: "text", latime: 16 },
+        { titlu: "Stare", cheie: "stare", tip: "text", latime: 16 },
+        { titlu: "CUI", cheie: "cui", tip: "text", latime: 14 },
+        { titlu: "Email", cheie: "email", tip: "text", latime: 26 },
+        { titlu: "Telefon", cheie: "telefon", tip: "text", latime: 16 },
+        { titlu: "Agent", cheie: "agent", tip: "text", latime: 20 },
+        { titlu: "Firma cu care a lucrat", cheie: "firme", tip: "text", latime: 26 },
+        { titlu: "Rulaj 12 luni (lei, cu TVA)", cheie: "rulaj", tip: "bani", latime: 20 },
+        { titlu: "De încasat (lei, cu TVA)", cheie: "sold", tip: "bani", latime: 20 },
+        { titlu: "Ultima factură", cheie: "ultima", tip: "data", latime: 15 },
+      ],
+      randuri: randuri.map((r) => ({
+        nume: r.nume,
+        tip: TIP_LABEL[r.tip] || r.tip,
+        stare: STARE_LABEL[r.stare] || r.stare || "",
+        cui: r.cui || "",
+        email: r.email || "",
+        telefon: r.telefon || "",
+        agent: r.agent || "",
+        firme: firmeText(r.firme),
+        rulaj: Number(r.rulaj) || 0,
+        sold: Number(r.sold) || 0,
+        ultima: r.ultima ? String(r.ultima).slice(0, 10) : "",
+      })),
+    };
+
+    // A doua foaie spune ce filtru era pus și când. Fără ea, peste o lună
+    // nimeni nu mai știe dacă fișierul de pe disc e „toți partenerii" sau
+    // „furnizorii Warehouse All" — și se trag concluzii din el oricum.
+    const acum = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const filtre = {
+      nume: "Cum a fost scos",
+      coloane: [
+        { titlu: "Ce", cheie: "ce", tip: "text", latime: 30 },
+        { titlu: "Valoare", cheie: "val", tip: "text", latime: 60 },
+      ],
+      randuri: [
+        { ce: "Scos din", val: "ERP Cash Machine, pagina Parteneri" },
+        { ce: "Data și ora", val: acum },
+        { ce: "Scos de", val: ctx.user.nume || ctx.user.email || "administrator" },
+        { ce: "Filtru tip", val: tip === "client" ? "doar clienți" : tip === "furnizor" ? "doar furnizori" : "toți partenerii" },
+        { ce: "Căutare", val: cauta || "(fără)" },
+        { ce: "Firma cu care a lucrat", val: firmaCeruta ? numeFirma.get(String(firmaCeruta)) || String(firmaCeruta) : "oricare" },
+        { ce: "Parteneri în fișier", val: String(randuri.length) },
+        { ce: "Rulaj = ", val: "facturat în ultimele 12 luni, cu TVA, fără facturile dintre firmele grupului" },
+        { ce: "De încasat = ", val: "facturi de vânzare emise și neîncasate, cu TVA, la data exportului" },
+        { ce: "Nu sunt incluși", val: "partenerii marcați ca ignorați (Configurări → Parteneri ignorați)" },
+      ],
+    };
+
+    const buf = XLS.carte([foaie, filtre]);
+    const eticheta = tip === "client" ? "clienti" : tip === "furnizor" ? "furnizori" : "parteneri";
+    send(ctx.res, 200, buf, XLS.antete(`${eticheta}-cash-machine-${acum.slice(0, 10)}`, buf.length));
   });
 
   registerCrud(router, {
