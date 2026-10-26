@@ -1615,7 +1615,7 @@ function register(router) {
       procesEn: FL.procesEnglez(f.flux),
       fluxText: f.flux
         ? `${f.flux.cod} · ${f.flux.denumire || ""}${f.cum ? ` (${f.cum})` : ""}`
-        : "fără flux tehnologic — alege-l pe comandă",
+        : "no routing set — choose it on the order",
     });
     send(ctx.res, 200, dateleInText(html));
   });
