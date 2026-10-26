@@ -77,6 +77,35 @@ const opsKg = FL.operatii(PASI, { um: "kg" });
 bine("la un produs vândut la kilogram, finalul rămâne în kg", opsKg[7].um === "kg", opsKg[7].um);
 bine("fără niciun flux, fișa tot are cele patru operații de bază", FL.operatii([], {}).length === 4);
 
+// ---- 1b. Utilajul ales și cine poate lucra la el ---------------------------
+console.log("\nUtilajul ales și oamenii lui");
+const PASI_ALESE = [
+  { utilaj_cod: "UT01", utilaj_denumire: "Extruder", operatie: "Extrudare folie", tip_pas: "OBLIGATORIU",
+    ales: "UT01 · Extruder", alocati: ["Bam"], operatori: ["Giri Ankit", "Florin Bumbacea"], altiiCalificati: 0 },
+  { utilaj_cod: "UT10|UT11", operatie: "Confecționare pungi", tip_pas: "OBLIGATORIU",
+    ales: null, alocati: [], operatori: ["Karki", "Kosh", "Nirajam", "Magar", "Bam", "Mala"], altiiCalificati: 12 },
+];
+const opsA = FL.operatii(PASI_ALESE, { um: "buc" });
+bine("utilajul ales ajunge pe operație", opsA[1].ales === "UT01 · Extruder", opsA[1].ales);
+bine("pasul nealocat n-are utilaj ales", opsA[2].ales === null, opsA[2].ales);
+bine("oamenii alocați se păstrează", opsA[1].alocati.join() === "Bam", opsA[1].alocati);
+bine("ceilalți calificați se păstrează", opsA[1].operatori.length === 2);
+bine("se ține minte câți n-au încăput", opsA[2].altiiCalificati === 12, opsA[2].altiiCalificati);
+bine("operațiile de capăt n-au nici utilaj, nici oameni",
+  opsA[0].ales === null && opsA[0].operatori.length === 0 && opsA[0].alocati.length === 0);
+
+const htmlA = FL.fisa({
+  comanda: { id: 9, numar: "CMD-9", data_initiere: "2026-10-26" },
+  linii: [], caracteristici: [], operatii: opsA, lot: "CM-261026-9",
+});
+bine("fișa scrie utilajul alocat, nu codul din flux", htmlA.includes("UT01 · Extruder") && htmlA.includes("utilaj alocat"));
+bine("pasul cu două utilaje e marcat ca nealocat", htmlA.includes("UT10|UT11") && htmlA.includes("încă nealocat"));
+bine("scrie cine e alocat", htmlA.includes("<b>Alocat:</b> Bam"));
+bine("scrie cine mai poate lucra", htmlA.includes("Pot lucra: Giri Ankit, Florin Bumbacea"));
+bine("spune câți calificați n-au încăput în listă", htmlA.includes("+12"));
+bine("un pas fără niciun om nu lasă rând gol pe hârtie",
+  !FL.fisa({ comanda: { id: 1 }, linii: [], caracteristici: [], operatii: FL.operatii([{ operatie: "X", utilaj_cod: "UT09" }], {}), lot: "CM-1" }).includes("Pot lucra:"));
+
 // ---- 2. Parametrii ---------------------------------------------------------
 console.log("\nParametrii");
 const p = FL.parametri("Grosime|µm;Lățime folie|mm;Tratament corona");
