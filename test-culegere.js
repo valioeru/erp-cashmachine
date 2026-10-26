@@ -213,6 +213,12 @@ console.log("\nscrierea în Contacte");
 exec1(`DELETE FROM mk_contacte WHERE partener_id IN (SELECT id FROM parteneri WHERE cui LIKE 'RO-CUL-%')`);
 exec1(`DELETE FROM email_mesaje WHERE gmail_id LIKE 'culegere-test-%'`);
 exec1(`DELETE FROM email_conturi WHERE adresa = 'test-culegere@cashmachine.ro'`);
+// Taskurile ies INAINTEA partenerilor: au cheie straina spre ei, iar o rulare
+// cazuta la mijloc lasa taskuri in urma si atunci stergerea partenerilor pica
+// cu „violates foreign key". Testul se repara singur, nu cere curatenie de mana.
+exec1(`DELETE FROM comenzi_linii WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id IN (SELECT id FROM parteneri WHERE cui LIKE 'RO-CUL-%'))`);
+exec1(`DELETE FROM comenzi WHERE partener_id IN (SELECT id FROM parteneri WHERE cui LIKE 'RO-CUL-%')`);
+exec1(`DELETE FROM taskuri WHERE partener_id IN (SELECT id FROM parteneri WHERE cui LIKE 'RO-CUL-%')`);
 exec1(`DELETE FROM parteneri WHERE cui LIKE 'RO-CUL-%'`);
 exec1(`DELETE FROM culegere_istoric WHERE rulat_la >= '2000-01-01'`);
 
@@ -349,15 +355,21 @@ egal("  tipul e email", tCerere.tip, "email");
 egal("  are scadență la 24 de ore", Boolean(tCerere.scadenta_la && tCerere.scadenta), true);
 egal("  titlul spune ce e", tCerere.titlu.startsWith("Cerere pe email:"), true);
 
-const comanda = q(`SELECT * FROM comenzi WHERE email_mesaj_id = ${idComanda}`)[0];
-egal("  comanda s-a născut", Boolean(comanda), true);
-egal("  și e CIORNĂ, nu nouă", comanda.status, "ciorna");
-egal("  cu agentul clientului pe ea", Number(comanda.agent_id), agent);
-egal("  marcată ca venită din email", comanda.sursa, "email");
-if (produs) {
-  egal("  linia recunoscută a intrat",
-    q(`SELECT cantitate FROM comenzi_linii WHERE comanda_id = ${comanda.id}`).map((x) => Number(x.cantitate)), [200]);
-}
+// REGISTRUL DE COMENZI NU SE ATINGE. Un email clasificat drept „comandă"
+// deschidea singur o ciornă în `comenzi`. Arăta bine la demonstrație și prost
+// în registru: o discuție cu banca despre factoring ajunsese comanda #5,
+// client BRD, zero linii, zero lei. Decizia lui Vali, 26.10.2026 — în registru
+// intră doar ce scrie un om. Testul ăsta e singurul care prinde dacă cineva
+// rescrie la loc crearea automată.
+const tComanda = q(`SELECT t.* FROM taskuri t JOIN email_mesaje m ON m.task_id = t.id WHERE m.id = ${idComanda}`)[0];
+egal("  comanda pe email face TASK, nu comandă", Boolean(tComanda), true);
+egal("  taskul e urgent", tComanda.prioritate, "urgenta");
+egal("  și spune în titlu ce e", tComanda.titlu.startsWith("Comandă pe email:"), true);
+egal("  taskul duce la mesajul întreg", tComanda.descriere.includes(`/email/${idComanda}`), true);
+egal("  NU s-a născut nicio comandă în registru",
+  q(`SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ${clientAlocat}`)[0].n, "0");
+egal("  și mesajul nu rămâne legat de vreo comandă",
+  q(`SELECT COUNT(*) AS n FROM email_mesaje WHERE id = ${idComanda} AND comanda_id IS NOT NULL`)[0].n, "0");
 egal("  mesajul care nu e nici una, nici alta e marcat ca văzut",
   q(`SELECT fel, clasificat_la FROM email_mesaje WHERE id = ${idNimic}`)[0].clasificat_la !== null, true);
 
@@ -365,7 +377,6 @@ egal("  mesajul care nu e nici una, nici alta e marcat ca văzut",
 const k2 = await c.clasificaMesaje({ zile: 2 });
 egal("  a doua rulare nu recitește nimic", k2.citite, 0);
 egal("  și nu face al doilea task", q(`SELECT COUNT(*) AS n FROM taskuri WHERE partener_id = ${clientAlocat}`)[0].n, "2");
-egal("  nici a doua comandă", q(`SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ${clientAlocat}`)[0].n, "1");
 
 exec1(`DELETE FROM comenzi_linii WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id = ${clientAlocat})`);
 exec1(`DELETE FROM taskuri WHERE partener_id = ${clientAlocat}`);
