@@ -96,6 +96,7 @@ require("./modules/inbox").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
+require("./modules/cod-produs").register(router);
 require("./modules/forecast").register(router);
 require("./modules/comision").register(router);
 require("./modules/ghid").register(router);
@@ -238,6 +239,10 @@ async function start() {
   // regula, sau regulile adaugate prin migrare).
   await require("./lib/parteneri-ignorati").aplicaTot().catch((e) => console.error("[ignorati]", e.message));
   await require("./modules/calculator").seed();
+  // Caracteristicile din care se naste codul produsului. Se pun o singura
+  // data, la prima pornire in care tabelul e gol, ca pagina de configurare sa
+  // nu fie goala. Daca Vali le schimba sau le sterge, nu se mai intorc.
+  await require("./modules/cod-produs").seed().catch((e) => console.error("[cod-produs]", e.message));
   // Istoricul comenzilor Sameday: se importă o singură dată, la prima
   // pornire în care tabelul e gol. Dacă pică, nu oprește aplicația.
   await require("./modules/comenzi-zi").seed().catch((e) => console.error("[comenzi-zi]", e.message));
