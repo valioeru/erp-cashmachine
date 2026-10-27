@@ -24,8 +24,15 @@ async function adu() {
       signal: AbortSignal.timeout(15000),
     });
     if (!raspuns.ok) return { ok: false, motiv: "BNR a răspuns cu " + raspuns.status };
-    const r = B.parseaza(await raspuns.text());
-    if (!r) return { ok: false, motiv: "fișierul BNR n-a putut fi citit" };
+    const corp = await raspuns.text();
+    const r = B.parseaza(corp);
+    if (!r) {
+      // Ce anume a venit, scurtat. Fără asta, „n-a putut fi citit" nu spune
+      // nimic: nu se știe dacă BNR a schimbat formatul, dacă a răspuns o
+      // pagină de eroare, sau dacă e gol.
+      const inceput = corp.replace(/\s+/g, " ").slice(0, 160);
+      return { ok: false, motiv: `fișierul BNR n-a putut fi citit (${corp.length} octeți: ${inceput})` };
+    }
 
     let scrise = 0;
     for (const [moneda, valoare] of Object.entries(r.cursuri)) {

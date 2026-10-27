@@ -572,6 +572,48 @@ function register(router) {
     // Bucata de adresa care pastreaza cautarea si ordinea cand se apasa pe un card.
     const pastreaza = (cauta ? "&q=" + encodeURIComponent(cauta) : "") + "&ordine=" + ordine;
 
+    // Utilajul pe care s-a alocat fiecare comandă.
+    //
+    // Cererea lui Vali, 27.10.2026: să se vadă în registru pe ce mașină merge
+    // comanda — dar DOAR după ce a fost pusă pe „în producție". Până atunci,
+    // o alocare e o intenție, nu un fapt: utilajul se mai schimbă de două ori
+    // până pornește lotul, iar o coloană care arată mașini care se tot mută
+    // n-ar mai fi crezută de nimeni.
+    //
+    // O comandă poate avea mai multe alocări (schimburi diferite, sau două
+    // utilaje pe același flux): se scriu toate, o dată fiecare.
+    const utilajePeComanda = new Map();
+    if (comenzi.length) {
+      const idsInProductie = comenzi.filter((c) => c.status === "in_productie").map((c) => Number(c.id)).filter(Boolean);
+      if (idsInProductie.length) {
+        const aloc = await db
+          .prepare(
+            `SELECT a.comanda_productie_id AS cid, u.cod, u.denumire
+               FROM alocari_productie a
+               JOIN utilaje u ON u.id = a.utilaj_id
+              WHERE a.comanda_productie_id IN (${idsInProductie.join(",")})
+              ORDER BY a.data, a.id`
+          )
+          .all()
+          .catch(() => []);
+        for (const a of aloc) {
+          const cheie = Number(a.cid);
+          if (!utilajePeComanda.has(cheie)) utilajePeComanda.set(cheie, []);
+          const lista = utilajePeComanda.get(cheie);
+          const text = a.cod ? a.cod + " · " + (a.denumire || "") : a.denumire || "";
+          if (text && !lista.includes(text)) lista.push(text);
+        }
+      }
+    }
+    const utilajulComenzii = (c) => {
+      if (c.status !== "in_productie") return "";
+      const lista = utilajePeComanda.get(Number(c.id));
+      if (!lista || !lista.length) {
+        return '<span class="badge galben" title="Comanda e în producție, dar n-are încă nicio alocare pe utilaj">nealocată</span>';
+      }
+      return lista.map((t) => `<span class="cel-lung">${esc(t)}</span>`).join("<br>");
+    };
+
     const contoare = await db.prepare("SELECT status, COUNT(*) AS n FROM comenzi_productie GROUP BY status").all();
     const cnt = Object.fromEntries(contoare.map((r) => [r.status, Number(r.n)]));
     const aziStr = azi();
@@ -679,7 +721,7 @@ function register(router) {
       ${table(
         ["<input type=\"checkbox\" onclick=\"document.querySelectorAll('.sel-cmd').forEach(c=>c.checked=this.checked)\">",
          "Nr. comandă", "Client", "Reprezentant", "Produs comandat", "Caracteristici produs",
-         "Cantitate", "UM", "Tip ambalare", "Data plasare", "Data livrare", "Stare",
+         "Cantitate", "UM", "Tip ambalare", "Data plasare", "Data livrare", "Stare", "Utilaj",
          "DoC", "Fișă tehnică", "Facturat", "Rețetă", "Observații", ""],
         comenzi.map((c) => [
           `<input type="checkbox" class="sel-cmd" name="ids" value="${c.id}">`,
@@ -714,6 +756,7 @@ function register(router) {
                ([v, t]) => `<option value="${v}"${c.status === v ? " selected" : ""}>${esc(t)}</option>`
              ).join("")}
            </select>`,
+          utilajulComenzii(c),
           esc(c.doc_emisa_txt || (c.doc_emisa ? "DA" : "")),
           esc(c.fisa_tehnica_txt || (c.fisa_tehnica ? "DA" : "")),
           esc(c.facturat || ""),
