@@ -287,6 +287,41 @@ const CA_ACUM = [[1, 20000, 0.42], [2, 100, 7.1]];
     bine("trecerea înapoi pe lei șterge cursul", BAZA.comenzi[0].curs_bnr === null, BAZA.comenzi[0].curs_bnr);
   }
 
+  console.log("\nConfirmarea de după salvare");
+  {
+    // Fara ea, agentul ramane cu intrebarea „a intrat sau nu?" si salveaza a
+    // doua oara. Cererea lui Vali, 27.10.2026.
+    const cuOk = async (q) => {
+      let text = "";
+      const res = { writeHead() {}, end(t) { text = String(t || ""); }, setHeader() {} };
+      await ruta("GET", "/comenzi/:id")({ req: {}, res, params: { id: "5" }, query: q, body: {}, user: ADMIN });
+      return text;
+    };
+    const fara = await cuOk({});
+    bine("fără parametru nu apare nicio confirmare", fara.indexOf('class="flash"') === -1);
+
+    const mod = await cuOk({ ok: "modificat", n: "3" });
+    bine("după o modificare scrie câte schimbări s-au scris",
+      mod.indexOf('class="flash"') !== -1 && mod.indexOf("3 schimbări scrise") !== -1,
+      (mod.match(/class="flash">[^<]*/) || [""])[0]);
+
+    const una = await cuOk({ ok: "modificat", n: "1" });
+    bine("la una singură scrie «schimbare», nu «schimbări»", una.indexOf("1 schimbare scrisă") !== -1);
+
+    const nimic = await cuOk({ ok: "nimic" });
+    bine("când n-a fost nimic de schimbat, o spune", nimic.indexOf("N-a fost nimic de schimbat") !== -1);
+
+    const plasata = await cuOk({ ok: "plasata" });
+    bine("după plasare spune numărul comenzii", plasata.indexOf("CMD-5") !== -1 || plasata.indexOf("a fost salvată") !== -1,
+      (plasata.match(/class="flash">[^<]*/) || [""])[0]);
+    bine("și câte linii are", /\d+ lini/.test((plasata.match(/class="flash">[^<]*/) || [""])[0]),
+      (plasata.match(/class="flash">[^<]*/) || [""])[0]);
+
+    const gunoi = await cuOk({ ok: "<script>alert(1)</script>" });
+    bine("un parametru inventat nu scrie nimic și nu intră în pagină",
+      gunoi.indexOf('class="flash"') === -1 && gunoi.indexOf("alert(1)") === -1);
+  }
+
   console.log("\nIstoricul se vede pe comandă");
   {
     const r = await cheama("GET", "/comenzi/:id", { id: "5" }, {}, ADMIN);
