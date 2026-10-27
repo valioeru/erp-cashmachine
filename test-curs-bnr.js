@@ -74,6 +74,27 @@ console.log("Citirea fișierului BNR");
     !C.parseaza('<Cube date="2026-10-27"><Rate currency="HUF" multiplier="0">1.23</Rate></Cube>'));
 }
 
+console.log("\nȘi dacă BNR scrie fișierul altfel");
+{
+  // Prefix de spatiu de nume si ghilimele simple: forme valide de XML pe care
+  // un parser scris strict le-ar rata, iar ERP-ul ar cadea tacut pe cursul
+  // implicit — adica ar arata cifre vechi fara sa spuna nimanui.
+  const cuPrefix = `<bnr:Cube bnr:date='2026-10-27'>
+      <bnr:Rate currency='EUR'>4.9723</bnr:Rate>
+      <bnr:Rate currency='HUF' multiplier='100'>1.2345</bnr:Rate>
+    </bnr:Cube>`;
+  const r = C.parseaza(cuPrefix);
+  bine("merge și cu prefix de spațiu de nume", Boolean(r) && Math.abs(r.cursuri.EUR - 4.9723) < 1e-9, r);
+  bine("și multiplicatorul tot se respectă", r && Math.abs(r.cursuri.HUF - 0.012345) < 1e-12, r && r.cursuri.HUF);
+  bine("moneda scrisă cu litere mici se ridică la majuscule",
+    Boolean(C.parseaza(`<Cube date="2026-10-27"><Rate currency="eur">4.97</Rate></Cube>`).cursuri.EUR));
+
+  // Dar o pagina de eroare NU are voie sa treaca drept curs.
+  bine("o pagină HTML de blocare nu trece",
+    C.parseaza('<!DOCTYPE html><html><body>Access denied. date="2026-10-27"</body></html>') === null);
+  bine("nici un JSON", C.parseaza('{"EUR":4.97,"date":"2026-10-27"}') === null);
+}
+
 console.log("\nSocoteala în lei");
 {
   bine("leii rămân lei", C.inLei(100, "RON", 4.9723) === 100);
