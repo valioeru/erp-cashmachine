@@ -9,9 +9,42 @@ const livrare = require("../lib/livrare-partiala");
 // caracteristicile obligatorii, iar codul și denumirea se scriu singure.
 // Regula e în lib/cod-produs.js, stratul dintre formular și ea în
 // lib/comanda-config.js, iar scrierea produsului în modules/cod-produs.js —
-// aceeași funcție pe care o folosește și „Produs nou" din nomenclator, ca să
+// aceeași funcție pe care o folosește și „Produs nou” din nomenclator, ca să
 // nu existe două produse cu același cod.
 const K = require("../lib/comanda-config");
+
+// Modificarea unei comenzi și urma pe care o lasă. Regula de comparație și cea
+// de „cine are voie” sunt în lib/comanda-istoric.js, cu testul lor.
+const IST = require("../lib/comanda-istoric");
+
+// Scrie în istoric ce s-a schimbat.
+//
+// Numele omului se copiază în rând, nu se lasă doar legătura: peste doi ani
+// el poate fi plecat din firmă și șters din utilizatori, iar un istoric care
+// spune „modificat de (nimeni)” n-apără pe nimeni.
+//
+// Dacă scrierea istoricului cade, CADE TOATĂ SALVAREA — de-aia nu e prins în
+// try/catch. O comandă schimbată fără urmă e mai rea decât una neschimbată:
+// peste trei luni nimeni nu mai poate spune cine a pus 25.000 în loc de
+// 20.000.
+async function scrieIstoric(comandaId, user, schimbari) {
+  if (!schimbari.length) return 0;
+  const q = db.prepare(
+    `INSERT INTO comenzi_istoric (comanda_id, utilizator_id, utilizator_nume, ce, vechi, nou)
+     VALUES (?,?,?,?,?,?)`
+  );
+  for (const s of schimbari) {
+    await q.run(comandaId, user ? user.id : null, user ? user.nume || user.email || "" : "", s.ce, s.vechi, s.nou);
+  }
+  return schimbari.length;
+}
+
+async function citesteIstoric(comandaId) {
+  return await db
+    .prepare("SELECT * FROM comenzi_istoric WHERE comanda_id = ? ORDER BY id DESC LIMIT 200")
+    .all(comandaId)
+    .catch(() => []);
+}
 
 function trimiteJson(ctx, status, obiect) {
   ctx.res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -58,7 +91,7 @@ const sumaIn = (v, moneda) =>
 // setari_app, deci se schimba din baza fara sa mai umblam prin cod.
 // 09.10.2026: anunțul nu mai pleacă la office@, ci la comercial@ — cererea lui
 // Vali. Restul adreselor rămân cum erau. Cine vrea altceva fără deploy pune
-// cheia „comanda_noua_catre" în setari_app, care bate valoarea de aici.
+// cheia „comanda_noua_catre” în setari_app, care bate valoarea de aici.
 const CATRE_IMPLICIT = "comercial@cashmachine.ro, mihai.mosneanu@cashmachine.ro";
 
 function adreseDinText(text) {
@@ -124,7 +157,7 @@ async function anuntaComandaNoua(comandaId, user) {
     )
     .all(comandaId);
   const total = linii.reduce((s, l) => s + Number(l.cantitate) * Number(l.pret_unitar), 0);
-  // Emailul scrie moneda comenzii, nu „lei" din reflex: o comandă în euro
+  // Emailul scrie moneda comenzii, nu „lei” din reflex: o comandă în euro
   // anunțată în lei e o cifră greșită trimisă la trei oameni deodată.
   const lei = (v) => sumaIn(v, c.moneda);
 
@@ -195,6 +228,79 @@ function asArray(v) {
 // exact când omul scrie mai repede.
 const MAX_REZULTATE = 40;
 
+// Tabelul de linii al unei comenzi: filtrul de categorie, căutarea de produs
+// și câmpurile de pe rând.
+//
+// Stă într-o funcție fiindcă îl desenează DOUĂ ecrane: comanda nouă și
+// modificarea unei comenzi existente. Scris de două ori, al doilea ar fi rămas
+// în urmă la prima schimbare — exact cum s-a întâmplat cu alte formulare din
+// ERP — iar agentul ar fi avut panoul de produs configurat la plasare și nu și
+// la corectură.
+function blocLinii(produse, linii) {
+  const categorii = [...new Set(produse.map((p) => String(p.categorie || "").trim()).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, "ro")
+  );
+  const faraCategorie = produse.some((p) => !String(p.categorie || "").trim());
+  const optiuniCategorie = (aleasa) =>
+    [`<option value="">— toate categoriile —</option>`]
+      .concat(
+        categorii.map(
+          (c) => `<option value="${esc(c)}"${String(aleasa || "") === c ? " selected" : ""}>${esc(c)}</option>`
+        )
+      )
+      .concat(faraCategorie ? [`<option value="\u0000"${String(aleasa || "") === "\u0000" ? " selected" : ""}>(fără categorie)</option>`] : [])
+      .join("");
+
+  const numeProdus = (id) => {
+    const p = produse.find((x) => String(x.id) === String(id));
+    return p ? p.denumire : "";
+  };
+  const categoriaProdusului = (id) => {
+    const p = produse.find((x) => String(x.id) === String(id));
+    return p ? String(p.categorie || "").trim() : "";
+  };
+  const unitateaProdusului = (id) => {
+    const p = produse.find((x) => String(x.id) === String(id));
+    return p ? String(p.unitate_masura || "").trim() : "";
+  };
+
+  // `data-eticheta` pe fiecare celulă: pe telefon rândul se desface în
+  // cartelă, iar atunci capul de tabel nu se mai vede deasupra coloanelor.
+  // Fără eticheta asta, agentul ar avea trei căsuțe de numere una sub alta
+  // și nimic care să spună care e cantitatea și care e prețul. Regula de
+  // desfacere e în blocul de stil din lineRowsScript.
+  const randLinie = (l) => `<tr>
+          <td data-eticheta="Categorie" style="min-width:150px">
+            <select class="cat-produs" onchange="comenziFiltreaza(this)">${optiuniCategorie(categoriaProdusului(l.produs_id))}</select>
+          </td>
+          <td data-eticheta="Produs" style="min-width:260px">
+            <span class="alege-produs" style="position:relative;display:block">
+              <input type="hidden" name="produs_id[]" value="${esc(l.produs_id || "")}">
+              <input type="search" class="cauta-produs" autocomplete="off" style="width:100%"
+                     placeholder="scrie din cod sau denumire" value="${esc(numeProdus(l.produs_id))}"
+                     oninput="comenziCauta(this)" onfocus="comenziCauta(this)">
+              <div class="rezultate-produs" hidden></div>
+            </span>
+            <button type="button" class="link-btn configureaza-linie" onclick="comenziDeschideConfig(this)">
+              sau configurează un produs nou (cod generat)
+            </button>
+          </td>
+          <td data-eticheta="Cantitate"><input type="number" step="0.01" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
+          <td data-eticheta="UM"><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
+                     value="${esc(l.um || unitateaProdusului(l.produs_id))}"></td>
+          <td data-eticheta="Preț unitar"><input type="number" step="0.01" inputmode="decimal" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
+          <td data-eticheta=""><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
+        </tr>`;
+
+  const randuri = (Array.isArray(linii) && linii.length ? linii : [{}]).map(randLinie).join("");
+  return `
+      <table class="table lines-table">
+        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:120px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:130px">Preț unitar</th><th></th></tr></thead>
+        <tbody id="linii-body">${randuri}</tbody>
+      </table>
+      <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>`;
+}
+
 function lineRowsScript(produse, familii, eAdmin) {
   const date = (produse || []).map((p) => [
     p.id,
@@ -220,13 +326,13 @@ function lineRowsScript(produse, familii, eAdmin) {
 
     function comenziRand(el) { return el.closest('tr'); }
 
-    // Lista de rezultate stă pe „fixed", nu pe „absolute".
+    // Lista de rezultate stă pe „fixed”, nu pe „absolute”.
     //
-    // Pe „absolute" se desena corect, dar se vedea doar o dungă de câțiva
+    // Pe „absolute” se desena corect, dar se vedea doar o dungă de câțiva
     // pixeli: rândul e o celulă de tabel, iar undeva deasupra există un
     // overflow pentru derularea pe orizontală. Orice strămoș cu overflow
     // taie un element poziționat absolut, oricât de mare i-ar fi z-index-ul.
-    // „Fixed" îl scoate din tabel cu totul, iar poziția o calculăm noi din
+    // „Fixed” îl scoate din tabel cu totul, iar poziția o calculăm noi din
     // dreptunghiul câmpului. Prețul: trebuie repusă la derulare și la
     // redimensionare, de-aia cele două ascultători de mai jos.
     function comenziAseaza(cutie, input) {
@@ -301,7 +407,7 @@ function lineRowsScript(produse, familii, eAdmin) {
       comenziAseaza(cutie, input);
     }
 
-    // „+ Produs nou — configurează-l"
+    // „+ Produs nou — configurează-l”
     //
     // Butonul apare si cand lista ARE rezultate, nu doar cand e goala: cazul
     // real e tocmai acela in care se vad patru benzi adezive si niciuna nu e
@@ -311,7 +417,7 @@ function lineRowsScript(produse, familii, eAdmin) {
     // 27.10.2026, cererea lui Vali: agentul NU mai poate adauga un produs doar
     // cu o denumire tastata. Alege familia si completeaza caracteristicile
     // obligatorii, iar codul si denumirea se scriu singure. Altfel intrau in
-    // nomenclator „punga curier 35x45" si „Punga Curier 350x450" ca doua
+    // nomenclator „punga curier 35x45” si „Punga Curier 350x450” ca doua
     // produse diferite, si stocul se rupea in doua.
     //
     // Adminul pastreaza si calea veche, pentru ce nu intra in nicio familie
@@ -439,8 +545,8 @@ function lineRowsScript(produse, familii, eAdmin) {
     }
 
     // Previzualizarea cheama ACEEASI functie de pe server ca salvarea. Daca ar
-    // fi calculata in browser, ecranul ar putea spune „gata" iar serverul
-    // „lipseste grosimea" — si nimeni n-ar sti pe cine sa creada.
+    // fi calculata in browser, ecranul ar putea spune „gata” iar serverul
+    // „lipseste grosimea” — si nimeni n-ar sti pe cine sa creada.
     function comenziPreview(panou) {
       var cod = panou.querySelector('.config-cod');
       var den = panou.querySelector('.config-den');
@@ -606,7 +712,7 @@ function lineRowsScript(produse, familii, eAdmin) {
     function comenziRemoveRow(btn) {
       var tbody = document.getElementById('linii-body');
       // Se numara liniile de marfa. Altfel un panou de configurare deschis ar
-      // trece drept „a doua linie" si s-ar putea sterge si ultima.
+      // trece drept „a doua linie” si s-ar putea sterge si ultima.
       if (tbody.querySelectorAll('tr:not(.rand-config)').length <= 1) return;
       var rand = btn.closest('tr');
       var panou = comenziPanou(rand);
@@ -632,6 +738,10 @@ function lineRowsScript(produse, familii, eAdmin) {
     .rezultat-nou:hover { background:var(--accent-slab,#e8f0fe); }
     .rezultat-nou[disabled] { opacity:.6; cursor:default; }
     .rezultat-nou-liber { color:var(--text-muted); font-weight:500; }
+    /* Al doilea drum spre produs, la vedere pe linie — nu doar ascuns in
+       lista de rezultate, unde statea sub patruzeci de produse. */
+    .configureaza-linie { display:block; margin-top:4px; padding:0; font-size:12px;
+      color:var(--primary,#2f5d9c); font-weight:600; text-align:left; }
     .rezultat-eroare { padding:6px 10px; color:var(--danger,#b42318); font-size:12px; }
 
     /* Panoul de configurare: stă sub linia lui, în același tabel, ca agentul
@@ -661,11 +771,11 @@ function lineRowsScript(produse, familii, eAdmin) {
      * atributul data-eticheta), fiindcă dispare capul de tabel.
      *
      * Aceeași pagină, același formular, aceleași rute — doar altfel așezate.
-     * De-aia nu există o a doua „aplicație de comenzi" de ținut în pas.
+     * De-aia nu există o a doua „aplicație de comenzi” de ținut în pas.
      */
     @media (max-width: 760px) {
       /* min-width:0 nu e de prisos: foaia principală dă tabelului
-         „min-width:760px", ca să nu se strivească cele șase coloane pe
+         „min-width:760px”, ca să nu se strivească cele șase coloane pe
          laptop. Fără anularea asta, cartelele s-ar desena cuminți — într-un
          tabel care tot iese 760 px în lățime și tot trebuie împins cu
          degetul. */
@@ -710,7 +820,7 @@ function lineRowsScript(produse, familii, eAdmin) {
       .config-campuri { grid-template-columns:1fr 1fr; }
       .config-ia { align-self:stretch; }
     }
-    /* Telefoanele mici: un singur câmp pe rând, altfel „Lungime fără clapetă"
+    /* Telefoanele mici: un singur câmp pe rând, altfel „Lungime fără clapetă”
        se rupe în trei rânduri și cartela devine un perete de text. */
     @media (max-width: 430px) {
       .config-campuri { grid-template-columns:1fr; }
@@ -792,7 +902,7 @@ function register(router) {
     // Alegerea produsului: întâi categoria, apoi căutarea în ea.
     //
     // Până acum fiecare linie avea o listă derulantă cu TOATE produsele —
-    // peste patru mii de rânduri — iar butonul „+ Adaugă linie" clona rândul
+    // peste patru mii de rânduri — iar butonul „+ Adaugă linie” clona rândul
     // cu tot cu listă. Trei linii pe comandă însemnau douăsprezece mii de
     // elemente în pagină, și oricum nu se putea căuta în ele: lista nativă
     // sare doar la prima literă tastată, deci o folie din mijlocul
@@ -801,57 +911,8 @@ function register(router) {
     // Acum produsele se trimit o singură dată, ca date, iar fiecare linie are
     // un filtru de categorie și o căsuță de căutare. Căutarea merge pe cod și
     // pe denumire, fără diacritice, oriunde în text — nu doar la început.
-    const categorii = [...new Set(produse.map((p) => String(p.categorie || "").trim()).filter(Boolean))].sort((a, b) =>
-      a.localeCompare(b, "ro")
-    );
-    const faraCategorie = produse.some((p) => !String(p.categorie || "").trim());
-    const optiuniCategorie = (aleasa) =>
-      [`<option value="">— toate categoriile —</option>`]
-        .concat(
-          categorii.map(
-            (c) => `<option value="${esc(c)}"${String(aleasa || "") === c ? " selected" : ""}>${esc(c)}</option>`
-          )
-        )
-        .concat(faraCategorie ? [`<option value="\u0000"${String(aleasa || "") === "\u0000" ? " selected" : ""}>(fără categorie)</option>`] : [])
-        .join("");
+    // Tabelul de linii: aceeași funcție ca la modificarea comenzii.
 
-    const numeProdus = (id) => {
-      const p = produse.find((x) => String(x.id) === String(id));
-      return p ? p.denumire : "";
-    };
-    const categoriaProdusului = (id) => {
-      const p = produse.find((x) => String(x.id) === String(id));
-      return p ? String(p.categorie || "").trim() : "";
-    };
-    const unitateaProdusului = (id) => {
-      const p = produse.find((x) => String(x.id) === String(id));
-      return p ? String(p.unitate_masura || "").trim() : "";
-    };
-
-    // `data-eticheta` pe fiecare celulă: pe telefon rândul se desface în
-    // cartelă, iar atunci capul de tabel nu se mai vede deasupra coloanelor.
-    // Fără eticheta asta, agentul ar avea trei căsuțe de numere una sub alta
-    // și nimic care să spună care e cantitatea și care e prețul. Regula de
-    // desfacere e în blocul de stil din lineRowsScript.
-    const randLinie = (l) => `<tr>
-            <td data-eticheta="Categorie" style="min-width:150px">
-              <select class="cat-produs" onchange="comenziFiltreaza(this)">${optiuniCategorie(categoriaProdusului(l.produs_id))}</select>
-            </td>
-            <td data-eticheta="Produs" style="min-width:260px">
-              <span class="alege-produs" style="position:relative;display:block">
-                <input type="hidden" name="produs_id[]" value="${esc(l.produs_id || "")}">
-                <input type="search" class="cauta-produs" autocomplete="off" style="width:100%"
-                       placeholder="scrie din cod sau denumire" value="${esc(numeProdus(l.produs_id))}"
-                       oninput="comenziCauta(this)" onfocus="comenziCauta(this)">
-                <div class="rezultate-produs" hidden></div>
-              </span>
-            </td>
-            <td data-eticheta="Cantitate"><input type="number" step="0.01" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
-            <td data-eticheta="UM"><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
-                       value="${esc(l.um || unitateaProdusului(l.produs_id))}"></td>
-            <td data-eticheta="Preț unitar"><input type="number" step="0.01" inputmode="decimal" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
-            <td data-eticheta=""><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
-          </tr>`;
 
     // Liniile scrise deja, dacă salvarea a fost oprită. Altfel, un rând gol.
     const linii = Array.isArray(v.linii) && v.linii.length ? v.linii : [{}];
@@ -898,13 +959,7 @@ function register(router) {
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
       <h2>Produse comandate</h2>
-      <table class="table lines-table">
-        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:120px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:130px">Preț unitar</th><th></th></tr></thead>
-        <tbody id="linii-body">
-          ${linii.map(randLinie).join("")}
-        </tbody>
-      </table>
-      <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>
+      ${blocLinii(produse, linii)}
 
       <div class="form-actions">
         <button type="submit" class="btn">Salvează comanda</button>
@@ -929,7 +984,7 @@ function register(router) {
   // ar lăsa un produs în nomenclator.
   //
   // Amândouă rutele stau ÎNAINTEA lui /comenzi/:id — rutele se potrivesc în
-  // ordinea în care sunt scrise, iar altfel „produs-configurat" ar fi citit ca
+  // ordinea în care sunt scrise, iar altfel „produs-configurat” ar fi citit ca
   // număr de comandă.
   router.post("/comenzi/produs-configurat", async (ctx) => {
     if (!ctx.user) return trimiteJson(ctx, 403, { eroare: "Nu ești autentificat." });
@@ -958,7 +1013,7 @@ function register(router) {
 
     const alegeri = K.alegeriDin(corp);
     const nimic = Object.keys(alegeri).length === 0;
-    // Aceeași funcție ca la „Produs nou" din nomenclator: găsește produsul
+    // Aceeași funcție ca la „Produs nou” din nomenclator: găsește produsul
     // dacă există, îl scrie dacă nu. Un produs incomplet nu se scrie niciodată
     // — verificarea e înăuntru, nu aici, ca să nu existe o a doua părere.
     const { r, id } = await CP.produsulAlegerilor(alegeri, familieId, { um: corp.um });
@@ -996,7 +1051,7 @@ function register(router) {
     // (formular trimis din altă parte), inserarea crăpa cu 500, fiindcă
     // partener_id e NOT NULL în bază.
     //
-    // Acum lista începe cu „— alege clientul —", iar aici se verifică din nou:
+    // Acum lista începe cu „— alege clientul —”, iar aici se verifică din nou:
     // ce vine prin HTTP nu se crede pe cuvânt, oricât de strict ar fi
     // formularul. Ce a scris omul se întoarce cu el, ca să nu retasteze.
     const valori = {
@@ -1113,7 +1168,7 @@ function register(router) {
     }
 
     // Comanda NU mai pleacă direct în producție. Drumul ei e cel cerut de
-    // Vali: intră în lista depozitului („comenzi deschise"), acolo se face
+    // Vali: intră în lista depozitului („comenzi deschise”), acolo se face
     // potrivirea cu stocul, și abia dacă marfa lipsește depozitul o comandă
     // mai departe — la un terț sau la producție. Vezi modules/warehouse.js.
     redirect(ctx.res, `/comenzi/${comandaId}`);
@@ -1138,7 +1193,7 @@ function register(router) {
     const factura = facturi[0] || null;
 
     // Cum stă comanda față de stoc — aceeași socoteală pe care o vede și
-    // depozitul, ca agentul să nu întrebe pe telefon „a venit marfa?".
+    // depozitul, ca agentul să nu întrebe pe telefon „a venit marfa?”.
     const warehouse = require("./warehouse");
     let stoc = { linii: [], acoperiteTot: false, acoperitePartial: false };
     try {
@@ -1155,20 +1210,28 @@ function register(router) {
       )
       .all(comanda.id);
 
-    // Fiecare mută bucata lui de drum: producția „în producție" și
-    // „finalizat", depozitul stările de stoc și livrarea, financiarul
+    // Fiecare mută bucata lui de drum: producția „în producție” și
+    // „finalizat”, depozitul stările de stoc și livrarea, financiarul
     // facturarea. Agentul nu are stările de livrare — el nu vede când pleacă
     // marfa din depozit, deci n-are de unde să știe; își poate anula doar
     // comanda lui. Lista e în lib/comenzi-stari.js.
     const stariDePus = stari.stariPermise(ctx.user, comanda);
     // Ștergerea e doar a adminului. Nu e un pas din flux — e ștergere
-    // definitivă din bază, cu linii cu tot. Pentru „comanda nu se mai face"
-    // există „anulată", care lasă urma pe client și motivul scris.
+    // definitivă din bază, cu linii cu tot. Pentru „comanda nu se mai face”
+    // există „anulată”, care lasă urma pe client și motivul scris.
     const potiSterge = ctx.user && ctx.user.rol === "admin";
 
     // Răspunsul clientului la livrarea parțială. Îl poate schimba agentul
     // comenzii sau un admin — e o informație luată la telefon, nu o decizie
     // a depozitului, deci depozitul n-o rescrie.
+    // Cine poate umbla la comandă, și ce s-a umblat până acum.
+    const clientFisa = await db
+      .prepare("SELECT id, agent_id FROM parteneri WHERE id = ?")
+      .get(comanda.partener_id)
+      .catch(() => null);
+    const potiModifica = IST.poateEdita(ctx.user, comanda, clientFisa);
+    const istoric = await citesteIstoric(comanda.id);
+
     const acceptaPartial = livrare.acceptaPartial(comanda);
     const potiRaspundeLivrare =
       ctx.user && (ctx.user.rol === "admin" || Number(comanda.agent_id) === Number(ctx.user.id) || ctx.user.rol === "vanzari");
@@ -1201,7 +1264,7 @@ function register(router) {
         !livrare.raspuns(comanda) && comanda.status !== "anulata"
           ? `<p style="max-width:820px;color:var(--text-muted);font-size:13px;margin:0 0 12px">
                Comanda asta e de dinainte să întrebăm despre livrarea parțială. Până primește un răspuns,
-               depozitul o tratează ca „doar comanda completă" — nu pleacă nimic pe jumătate din greșeală.
+               depozitul o tratează ca „doar comanda completă” — nu pleacă nimic pe jumătate din greșeală.
              </p>`
           : ""
       }
@@ -1236,6 +1299,12 @@ function register(router) {
         })
       )}
       <div class="totals"><span class="grand">Total: ${esc(sumaIn(total, comanda.moneda))}</span></div>
+
+      ${
+        potiModifica
+          ? `<p style="margin:10px 0 0"><a class="btn secondary" href="/comenzi/${comanda.id}/editare">Modifică comanda</a></p>`
+          : ""
+      }
 
       ${
         comanda.verificata_depozit_la
@@ -1333,7 +1402,7 @@ function register(router) {
             </form>`
           : `<p style="color:var(--text-muted);font-size:13px;max-width:520px">
                Pe comanda asta n-ai pași de mutat. Depozitul o verifică pe stoc, producția o face, facturarea o închide —
-               iar tu vei putea cere factura când ajunge „în stoc depozit".
+               iar tu vei putea cere factura când ajunge „în stoc depozit”.
              </p>`
       }
 
@@ -1348,7 +1417,7 @@ function register(router) {
                 .join(" ")
             : poateFactura(comanda)
               ? `<form method="post" action="/comenzi/${comanda.id}/factureaza" class="inline-form"><button type="submit" class="btn">Facturează</button></form>`
-              : `<span style="color:var(--text-muted);font-size:13px">Facturarea se deblochează la statusul „în stoc depozit".</span>`
+              : `<span style="color:var(--text-muted);font-size:13px">Facturarea se deblochează la statusul „în stoc depozit”.</span>`
         }
         ${
           potiSterge
@@ -1359,12 +1428,313 @@ function register(router) {
             : ""
         }
       </div>
+      ${
+        istoric.length
+          ? `<h2>Ce s-a modificat pe comandă</h2>
+             <p style="margin:-6px 0 8px;color:var(--text-muted);font-size:13px">
+               Cea mai nouă schimbare sus. Rândurile de aici nu se șterg și nu se corectează — asta e tot rostul lor.
+             </p>
+             ${table(
+               ["Când", "Cine", "Ce", "Era", "A rămas"],
+               istoric.map((h) => [
+                 esc(String(h.la || "").slice(0, 16)),
+                 esc(h.utilizator_nume || "—"),
+                 esc(h.ce),
+                 h.vechi ? esc(h.vechi) : '<span style="color:var(--text-muted)">—</span>',
+                 h.nou ? esc(h.nou) : '<span style="color:var(--text-muted)">—</span>',
+               ])
+             )}`
+          : ""
+      }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body }));
   });
 
   // Validarea unei ciorne născute dintr-un email. O poate apăsa agentul comenzii
   // sau un administrator — nu depozitul, fiindcă nu el a vorbit cu clientul.
+  // ---- modificarea unei comenzi ------------------------------------------
+  //
+  // Cererea lui Vali, 27.10.2026: ownerul clientului poate schimba orice
+  // comandă a lui, dar rămâne scris ce s-a umblat, când și de cine.
+  //
+  // „Orice comandă” chiar înseamnă orice — și cele facturate, și cele
+  // anulate. Nu se blochează nimic; se SPUNE ce urmări are, înainte de
+  // salvare, și se scrie în istoric după. Vezi `avertismente` din
+  // lib/comanda-istoric.js.
+  async function formularEditare(ctx, comanda, { eroare, valori } = {}) {
+    const client = await db.prepare("SELECT id, nume, agent_id FROM parteneri WHERE id = ?").get(comanda.partener_id);
+    const parteneri = await db
+      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
+      .all();
+    const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
+    const produse = await db
+      .prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire")
+      .all();
+    const familiiPagina = await familiiPentruFormular();
+
+    const liniiBaza = await db
+      .prepare(
+        `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um FROM comenzi_linii cl
+         WHERE cl.comanda_id = ? ORDER BY cl.id`
+      )
+      .all(comanda.id);
+    const v = valori || {
+      partener_id: comanda.partener_id,
+      numar: comanda.numar,
+      data_livrare_ceruta: comanda.data_livrare_ceruta,
+      livrare_partiala: livrare.raspuns(comanda),
+      moneda: comanda.moneda,
+      observatii: comanda.observatii,
+      linii: liniiBaza,
+    };
+    const avert = IST.avertismente(comanda);
+
+    const body = `
+      <p style="margin:0 0 10px"><a href="/comenzi/${comanda.id}">← Înapoi la comanda ${esc(
+      comanda.numar || "#" + comanda.id
+    )}</a></p>
+      ${
+        eroare
+          ? `<p class="alerta" style="max-width:820px;color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 12px">${esc(eroare)}</p>`
+          : ""
+      }
+      ${
+        avert.length
+          ? `<div class="detail-box" style="max-width:820px;border-color:var(--warn);background:#fffaf0">
+               <strong>Citește asta înainte să salvezi</strong>
+               <ul style="margin:6px 0 0;padding-left:18px">${avert.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>
+             </div>`
+          : ""
+      }
+      <p style="max-width:820px;color:var(--text-muted);font-size:13px">
+        Tot ce schimbi aici se scrie în istoricul comenzii, cu numele tău și ora — și rămâne acolo.
+      </p>
+      <form method="post" action="/comenzi/${comanda.id}/editare" class="form" style="max-width:820px">
+        <label class="field"><span>Client</span>
+          ${cautaClient({
+            nume: "client_cautat",
+            obligatoriu: true,
+            partenerId: v.partener_id,
+            valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
+          })}
+        </label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 140px;gap:14px">
+          <label class="field"><span>Număr comandă</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
+          <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta" value="${esc(v.data_livrare_ceruta || "")}"></label>
+          <label class="field"><span>Moneda</span>
+            <select name="moneda">
+              ${MONEDE.map((m) => `<option value="${m}"${String(v.moneda || "RON") === m ? " selected" : ""}>${m}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
+          <legend style="font-size:13px;padding:0 4px">Clientul acceptă livrare parțială?</legend>
+          <label style="display:inline-flex;align-items:center;gap:6px;margin-right:18px">
+            <input type="radio" name="livrare_partiala" value="da" required${v.livrare_partiala === "da" ? " checked" : ""}>
+            <span>Da</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:6px">
+            <input type="radio" name="livrare_partiala" value="nu" required${v.livrare_partiala === "nu" ? " checked" : ""}>
+            <span>Nu — doar comanda completă</span>
+          </label>
+        </fieldset>
+        <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
+
+        <h2>Produse comandate</h2>
+        ${blocLinii(produse, v.linii)}
+
+        <label class="field" style="margin-top:12px"><span>De ce modifici? (intră în istoric)</span>
+          <input type="text" name="motiv" maxlength="200" placeholder="ex. clientul a mărit cantitatea la telefon">
+        </label>
+
+        <div class="form-actions">
+          <button type="submit" class="btn">Salvează modificările</button>
+          <a href="/comenzi/${comanda.id}" class="btn secondary">Renunță</a>
+        </div>
+      </form>
+      <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
+      ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
+      ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"))}`;
+    send(
+      ctx.res,
+      200,
+      layout({ user: ctx.user, title: `Modifici comanda ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body })
+    );
+  }
+
+  async function comandaSiDreptul(ctx) {
+    const comanda = await db
+      .prepare(`SELECT c.*, p.nume AS partener_nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`)
+      .get(ctx.params.id);
+    if (!comanda) {
+      send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/comenzi", body: "<p>Comandă inexistentă.</p>" }));
+      return null;
+    }
+    const client = await db.prepare("SELECT id, agent_id FROM parteneri WHERE id = ?").get(comanda.partener_id);
+    if (!IST.poateEdita(ctx.user, comanda, client)) {
+      send(
+        ctx.res,
+        403,
+        layout({
+          user: ctx.user, title: "Fără drept", active: "/comenzi",
+          body: `<h1>Nu poți modifica această comandă</h1>
+            <p style="max-width:640px">O comandă o schimbă administratorul, agentul care a plasat-o, sau agentul pe
+              al cărui nume stă clientul. Dacă firma ar trebui să fie a ta, cere-i unui administrator să ți-o treacă
+              din <a href="/parteneri/${esc(String(comanda.partener_id))}">fișa clientului</a>.</p>
+            <a class="btn secondary" href="/comenzi/${esc(String(comanda.id))}">Înapoi la comandă</a>`,
+        })
+      );
+      return null;
+    }
+    return comanda;
+  }
+
+  router.get("/comenzi/:id/editare", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const comanda = await comandaSiDreptul(ctx);
+    if (!comanda) return;
+    await formularEditare(ctx, comanda);
+  });
+
+  router.post("/comenzi/:id/editare", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const comanda = await comandaSiDreptul(ctx);
+    if (!comanda) return;
+
+    const b = ctx.body || {};
+    const produsIds = asArray(b["produs_id[]"]);
+    const cantitati = asArray(b["cantitate[]"]);
+    const preturi = asArray(b["pret_unitar[]"]);
+    const unitati = asArray(b["um[]"]);
+    const moneda = MONEDE.includes(String(b.moneda || "")) ? String(b.moneda) : "RON";
+
+    const noi = produsIds
+      .map((id, i) => ({
+        produs_id: parseInt(id, 10),
+        cantitate: Number(cantitati[i] || 0),
+        pret_unitar: Number(preturi[i] || 0),
+        um: String(unitati[i] || "").trim() || null,
+      }))
+      .filter((l) => l.produs_id && l.cantitate > 0);
+
+    const valori = {
+      partener_id: b.partener_id,
+      numar: b.numar,
+      data_livrare_ceruta: b.data_livrare_ceruta,
+      livrare_partiala: livrare.valid(b.livrare_partiala),
+      moneda,
+      observatii: b.observatii,
+      linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i], um: unitati[i] })),
+    };
+    const opreste = (mesaj) => formularEditare(ctx, comanda, { eroare: mesaj, valori });
+
+    const idClient = parseInt(b.partener_id, 10);
+    if (!idClient) return await opreste("Alege clientul — o comandă nu poate exista fără el.");
+    if (!(await db.prepare("SELECT id FROM parteneri WHERE id = ?").get(idClient))) {
+      return await opreste("Clientul ales nu mai există în ERP. Alege altul.");
+    }
+    // O comanda golita de linii n-ar mai avea ce cauta nici in depozit, nici
+    // pe factura. Daca omul vrea sa renunte la ea, o anuleaza — nu o goleste.
+    if (!noi.length) {
+      return await opreste(
+        "Comanda ar rămâne fără nicio linie. Dacă vrei să renunți la ea, anuleaz-o din pagina comenzii — nu o goli."
+      );
+    }
+    if (!valori.livrare_partiala) return await opreste("Spune dacă clientul acceptă livrare parțială.");
+
+    // Cum arăta ÎNAINTE. Se citește acum, nu din formular: formularul poate fi
+    // vechi de zece minute, timp în care altcineva a schimbat altceva, iar
+    // istoricul ar scrie o diferență față de o stare care n-a existat.
+    const inainte = {
+      partener_id: comanda.partener_id,
+      numar: comanda.numar,
+      data_livrare_ceruta: comanda.data_livrare_ceruta,
+      livrare_partiala: livrare.raspuns(comanda),
+      moneda: comanda.moneda,
+      observatii: comanda.observatii,
+    };
+    const liniiInainte = await db
+      .prepare(
+        `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um, p.denumire
+         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ? ORDER BY cl.id`
+      )
+      .all(comanda.id);
+    const numeProduselor = new Map(liniiInainte.map((l) => [Number(l.produs_id), l.denumire]));
+    for (const l of noi) {
+      if (numeProduselor.has(l.produs_id)) continue;
+      const p = await db.prepare("SELECT denumire FROM produse WHERE id = ?").get(l.produs_id);
+      numeProduselor.set(l.produs_id, p ? p.denumire : "produs #" + l.produs_id);
+    }
+    const dupa = {
+      partener_id: idClient,
+      numar: b.numar || "",
+      data_livrare_ceruta: String(b.data_livrare_ceruta || "") || null,
+      livrare_partiala: valori.livrare_partiala,
+      moneda,
+      observatii: b.observatii || "",
+    };
+
+    const schimbari = [
+      ...IST.diferente(inainte, dupa, IST.ETICHETE),
+      ...IST.diferenteLinii(
+        liniiInainte,
+        noi.map((l) => ({ ...l, denumire: numeProduselor.get(l.produs_id) }))
+      ),
+    ];
+    // Clientul schimbat se scrie cu numele, nu cu id-ul: „7 → 12” nu spune
+    // nimic peste trei luni.
+    for (const s of schimbari) {
+      if (s.ce !== "Client") continue;
+      const a = await db.prepare("SELECT nume FROM parteneri WHERE id = ?").get(Number(s.vechi)).catch(() => null);
+      const c = await db.prepare("SELECT nume FROM parteneri WHERE id = ?").get(Number(s.nou)).catch(() => null);
+      if (a) s.vechi = a.nume;
+      if (c) s.nou = c.nume;
+    }
+
+    if (!schimbari.length) return redirect(ctx.res, `/comenzi/${comanda.id}?ok=nimic`);
+
+    await db
+      .prepare(
+        `UPDATE comenzi SET partener_id = ?, numar = ?, observatii = ?, data_livrare_ceruta = ?,
+           livrare_partiala = ?, moneda = ? WHERE id = ?`
+      )
+      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, dupa.moneda, comanda.id);
+
+    // Liniile se rescriu, dar `cantitate_livrata` NU se pierde: depozitul a
+    // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să
+    // șteargă asta. De-aia se actualizează rândul existent în loc să se
+    // șteargă tot și să se scrie din nou.
+    const vechiPeProdus = new Map(
+      (await db.prepare("SELECT id, produs_id FROM comenzi_linii WHERE comanda_id = ?").all(comanda.id)).map((l) => [
+        Number(l.produs_id),
+        Number(l.id),
+      ])
+    );
+    const pastrate = new Set();
+    for (const l of noi) {
+      const idVechi = vechiPeProdus.get(l.produs_id);
+      if (idVechi) {
+        pastrate.add(idVechi);
+        await db
+          .prepare("UPDATE comenzi_linii SET cantitate = ?, pret_unitar = ?, um = ? WHERE id = ?")
+          .run(l.cantitate, l.pret_unitar, l.um, idVechi);
+      } else {
+        await db
+          .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?,?,?,?,?)")
+          .run(comanda.id, l.produs_id, l.cantitate, l.pret_unitar, l.um);
+      }
+    }
+    for (const [, idVechi] of vechiPeProdus) {
+      if (!pastrate.has(idVechi)) await db.prepare("DELETE FROM comenzi_linii WHERE id = ?").run(idVechi);
+    }
+
+    const motiv = String(b.motiv || "").slice(0, 200).trim();
+    if (motiv) schimbari.push({ ce: "Motivul modificării", vechi: "", nou: motiv });
+    await scrieIstoric(comanda.id, ctx.user, schimbari);
+
+    redirect(ctx.res, `/comenzi/${comanda.id}?ok=modificat`);
+  });
+
   router.post("/comenzi/:id/valideaza", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/comenzi");
     const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
@@ -1401,7 +1771,7 @@ function register(router) {
     redirect(ctx.res, `/comenzi/${ctx.params.id}`);
   });
 
-  // „Facturează" — agentul poate apăsa DOAR după ce marfa e în stoc la
+  // „Facturează” — agentul poate apăsa DOAR după ce marfa e în stoc la
   // depozit. Nu emite nimic: naște o factură CIORNĂ, pe care o validează
   // apoi cineva cu drepturi pe facturare. Până la validare nu pleacă nimic
   // în SmartBill și nu se mișcă niciun stoc.
@@ -1465,7 +1835,7 @@ function register(router) {
   });
 
   // Decizia agentului după ce depozitul i-a spus ce are: „aștept comanda
-  // completă" nu face nimic în stoc, doar o scrie, ca să nu întrebe nimeni
+  // completă” nu face nimic în stoc, doar o scrie, ca să nu întrebe nimeni
   // peste trei zile de ce stă comanda.
   router.post("/comenzi/:id/decizie", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
@@ -1484,12 +1854,12 @@ function register(router) {
   //
   // Există pentru comenzile de dinainte de coloana asta și pentru cazul real
   // în care clientul se răzgândește la telefon. Nu-l dă depozitul: el vede
-  // răspunsul, nu-l scrie — altfel „clientul acceptă" ar deveni ce-i convine
+  // răspunsul, nu-l scrie — altfel „clientul acceptă” ar deveni ce-i convine
   // depozitului într-o zi aglomerată.
   //
-  // Dacă răspunsul se schimbă în „da" iar comanda stătea pe „așteaptă marfă"
+  // Dacă răspunsul se schimbă în „da” iar comanda stătea pe „așteaptă marfă”
   // cu ceva disponibil, drumul se redeschide singur: trece pe „în stoc
-  // depozit" și agentul poate factura partea acoperită. Invers, un „nu" pe o
+  // depozit” și agentul poate factura partea acoperită. Invers, un „nu” pe o
   // comandă neacoperită integral o trimite înapoi la așteptare.
   router.post("/comenzi/:id/livrare-partiala", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
@@ -1504,7 +1874,7 @@ function register(router) {
     await db.prepare("UPDATE comenzi SET livrare_partiala = ? WHERE id = ?").run(raspuns, comanda.id);
 
     // Recalculăm starea doar dacă depozitul se uitase deja la stoc. Înainte de
-    // verificare n-avem ce muta: comanda e tot „nouă" și așteaptă depozitul.
+    // verificare n-avem ce muta: comanda e tot „nouă” și așteaptă depozitul.
     if (comanda.verificata_depozit_la && ["asteapta_marfa", "in_stoc_depozit", "confirmata"].includes(comanda.status)) {
       try {
         const { acoperiteTot, acoperitePartial } = await require("./warehouse").potrivire(comanda.id);
@@ -1531,7 +1901,7 @@ function register(router) {
   });
 
   // Facturare parțială: intră pe factură doar cât e acoperit din stoc acum.
-  // Restul rămâne pe comandă, cu „cantitate_livrata" mărită, ca a doua oară
+  // Restul rămâne pe comandă, cu „cantitate_livrata” mărită, ca a doua oară
   // să se factureze exact ce a mai rămas.
   router.post("/comenzi/:id/factureaza-partial", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");

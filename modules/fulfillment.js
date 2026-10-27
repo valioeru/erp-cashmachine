@@ -3,12 +3,12 @@
 //
 // ALTĂ GESTIUNE DECÂT CT-PARK, ȘI FIZIC ALT LOC. Vali, când l-am întrebat:
 // „E complet diferit de ct-park, iese din depozit în altă zonă inclusiv
-// fizic." De-aia marfa care pleacă din depozit spre fulfillment nu e o
+// fizic.” De-aia marfa care pleacă din depozit spre fulfillment nu e o
 // mutare de palet: paletul iese din CT-Park, iar aici intră o cantitate pe
 // produs. Două gestiuni, două socoteli, un transfer între ele.
 //
 // CE REFOLOSEȘTE, ȘI DE CE. Comenzile nu se importă din nou aici. AWB-urile
-// Sameday intră deja prin „Comenzi consumabile la zi" (modules/comenzi-zi.js),
+// Sameday intră deja prin „Comenzi consumabile la zi” (modules/comenzi-zi.js),
 // împreună cu toate capcanele lor rezolvate acolo: ultimele trei cifre ale
 // AWB-ului sunt numărul coletului și eticheta fiecărui colet repetă comanda
 // întreagă; ziua de raport e eticheta minus o zi; numele de pe etichetă nu e
@@ -67,7 +67,7 @@ function mesaje(q) {
 
 // Stocul de fulfillment, adunat din mișcări. Nu există o coloană cu
 // cantitatea curentă: o cifră care se scrie peste ea însăși nu se poate
-// explica. Când cineva întreabă „de unde au apărut 300 de topuri aici",
+// explica. Când cineva întreabă „de unde au apărut 300 de topuri aici”,
 // răspunsul trebuie să fie un rând cu data și documentul.
 async function stocCurent() {
   const randuri = await db
@@ -151,7 +151,7 @@ function register(router) {
 
     // Ziua curentă PLUS tot ce a rămas în urmă: comenzile neonorate nu se
     // mută în altă zi, rămân cu ziua lor și urcă în capul listei. Așa se
-    // poate răspunde la „de câte zile stă asta" fără un istoric separat.
+    // poate răspunde la „de câte zile stă asta” fără un istoric separat.
     const ramase = await db
       .prepare("SELECT DISTINCT zi FROM ff_stare WHERE stare IN ('noua','lipsa') AND zi < ? ORDER BY zi")
       .all(ziua);
@@ -169,7 +169,7 @@ function register(router) {
     const randuriTabel = rez.comenzi.map((c) => {
       const s = stari.get(c.awb);
       // Starea scrisă de om (pregătită, livrată) bate socoteala de acoperire:
-      // odată ambalată și scanată, comanda nu mai e „are marfă", e gata.
+      // odată ambalată și scanată, comanda nu mai e „are marfă”, e gata.
       const stare = s && ["pregatita", "livrata", "anulata"].includes(s.stare) ? s.stare : c.stare;
       const lipsaText = c.lipsa
         .map((l) => `${esc(numeProdus.get(l.produs_id) || "produs " + l.produs_id)}: lipsesc <strong>${cant(l.lipsa)}</strong>`)
@@ -292,7 +292,7 @@ function register(router) {
       <h1 style="margin:6px 0 2px">În așteptare</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:900px">
         Comenzile neonorate nu se mută în altă zi și nu se șterg: rămân cu ziua lor, cu AWB-ul lor, și urcă
-        în capul listei pe măsură ce îmbătrânesc. Coloana „Zile" e vechimea față de azi.
+        în capul listei pe măsură ce îmbătrânesc. Coloana „Zile” e vechimea față de azi.
       </p>
       ${randuri.length ? table(["AWB", "Client", "Din ziua", "Zile", "Stare", "Observații"], randuri) : "<p>Nu stă nimic în urmă.</p>"}
     `;
@@ -327,7 +327,7 @@ function register(router) {
       <h1 style="margin:6px 0 2px">Stoc în fulfillment</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:900px">
         Gestiune separată de CT-Park, și fizic alt loc. Cifrele de aici nu se scriu nicăieri ca atare:
-        se adună din mișcări, ca la orice întrebare de felul „de unde au apărut astea" să existe un rând cu
+        se adună din mișcări, ca la orice întrebare de felul „de unde au apărut astea” să existe un rând cu
         data și documentul, nu doar o cantitate.
       </p>
       ${
@@ -363,7 +363,7 @@ function register(router) {
                ${/* Lista intreaga de produse, cu o casuta langa fiecare.
                     A fost intai un formular cu cinci liste derulante, si Vali
                     a taiat-o scurt: „Trebuie sa fie ceva simplu, lista de
-                    produse si stoc initial si aia e." Avea dreptate — la o
+                    produse si stoc initial si aia e.” Avea dreptate — la o
                     numaratoare te plimbi prin depozit cu lista in fata si
                     scrii cifra unde o gasesti, nu alegi produsul din meniu
                     de cinci ori si o iei de la capat. */ ""}
@@ -445,8 +445,8 @@ function register(router) {
     const data = /^\d{4}-\d{2}-\d{2}$/.test(String(b.data || "")) ? String(b.data) : azi();
 
     // Formularul trimite o căsuță pentru FIECARE produs din listă, numită
-    // „q_<id>". Se iau doar cele completate: restul vin goale și nu înseamnă
-    // „zero bucăți", ci „n-am numărat produsul ăsta". Diferența contează —
+    // „q_<id>”. Se iau doar cele completate: restul vin goale și nu înseamnă
+    // „zero bucăți”, ci „n-am numărat produsul ăsta”. Diferența contează —
     // un zero scris ar fi o afirmație, iar un gol e tăcere.
     const peProdus = new Map();
     for (const cheie of Object.keys(b)) {
@@ -603,7 +603,7 @@ function register(router) {
   // ---- Retururi ----------------------------------------------------------
   //
   // „Tot aici sosesc retururi, ar trebui să le scanăm și să te întrebe ce
-  // face cu acea marfă."
+  // face cu acea marfă.”
   //
   // Două momente, nu unul. Scanarea spune DOAR că a sosit ceva — atât știe
   // omul în clipa aia. Decizia vine după ce deschide coletul. Între ele,
@@ -670,7 +670,7 @@ function register(router) {
         </label>
         ${/* Modul de probă: scanezi cu AWB-uri adevărate, pe datele
              adevărate, dar nimic nu ajunge în stoc. „Sa am posibilitatea sa
-             scanez awb si sa fac doar test si roll back apoi."
+             scanez awb si sa fac doar test si roll back apoi.”
              Un test pe altă bază n-ar fi spus nimic — abia pe datele reale
              se vede dacă AWB-ul tău chiar se recunoaște. */ ""}
         <label style="display:flex;align-items:center;gap:7px;font-size:13px;margin:-4px 0 10px">
@@ -679,7 +679,7 @@ function register(router) {
         </label>
         <div class="form-actions"><button class="btn" type="submit">A sosit</button></div>
       </form>
-      ${/* Cititorul „tastează" codul și dă Enter. Formularul are un singur
+      ${/* Cititorul „tastează” codul și dă Enter. Formularul are un singur
            câmp, deci Enter îl trimite singur — nu trebuie apăsat butonul.
            Câmpul se refocalizează după fiecare trimitere, ca omul să poată
            scana colet după colet fără să atingă ecranul. */ ""}
@@ -865,7 +865,7 @@ function register(router) {
     // POZA MERGE ÎN DRIVE, NU ÎN BAZĂ.
     //
     // Prima variantă o ținea ca data-URL într-o coloană. Vali: „Salveaz-o în
-    // drive nu în browser, ca să nu se încarce baza pe Render." Are dreptate:
+    // drive nu în browser, ca să nu se încarce baza pe Render.” Are dreptate:
     // câteva sute de retururi pe an înseamnă sute de megaocteți de poze
     // într-o bază care trebuie să fie rapidă la cu totul altceva, iar un
     // backup de bază se face și se restaurează mult mai des decât se deschid
@@ -977,7 +977,7 @@ function register(router) {
 
   // ---- Anularea probei ---------------------------------------------------
   //
-  // „Sa fac doar test si roll back apoi." Un buton, nu o curățenie făcută cu
+  // „Sa fac doar test si roll back apoi.” Un buton, nu o curățenie făcută cu
   // mâna prin tabele: altfel rămân urme, iar peste o lună nimeni nu mai știe
   // care rând a fost probă.
   //
@@ -1008,10 +1008,10 @@ function register(router) {
   // CE NU POATE FACE ERP-UL, ȘI DE CE PAGINA ARATĂ AȘA. ERP-ul rulează pe
   // Render, în alt oraș decât imprimanta. Un server din cloud nu poate
   // trimite nimic într-o imprimantă din depozit — între ele e tot internetul
-  // și un router care nu lasă pe nimeni înăuntru. Deci „automat" nu poate
-  // însemna „serverul printează"; înseamnă „pagina asta, lăsată deschisă pe
+  // și un router care nu lasă pe nimeni înăuntru. Deci „automat” nu poate
+  // însemna „serverul printează”; înseamnă „pagina asta, lăsată deschisă pe
   // calculatorul de lângă Zebra, se uită singură dacă a apărut ceva nou și
-  // îl scoate la imprimantă". Asta chiar merge, și merge fără dialog dacă
+  // îl scoate la imprimantă”. Asta chiar merge, și merge fără dialog dacă
   // Chrome-ul de pe acel calculator e pornit cu --kiosk-printing și Zebra e
   // imprimanta implicită.
   //
@@ -1189,7 +1189,7 @@ function register(router) {
           btnAlese.textContent = n ? "Printează acum " + (n === 1 ? "teancul ales" : "cele " + n + " teancuri") : "Printează acum ce e selectat";
           if (bifaTot) {
             bifaTot.checked = n > 0 && n === t;
-            // Trei stări, nu două: bifa de sus arată „o parte" când e aleasă
+            // Trei stări, nu două: bifa de sus arată „o parte” când e aleasă
             // doar o parte, altfel ar părea că n-ai ales nimic.
             bifaTot.indeterminate = n > 0 && n < t;
           }
@@ -1314,7 +1314,7 @@ function register(router) {
   });
 
   // Automatul se uita numai la ULTIMELE 36 DE ORE, nu la toata lista.
-  // Altfel, prima data cand cineva bifeaza „printeaza singur", imprimanta ar
+  // Altfel, prima data cand cineva bifeaza „printeaza singur”, imprimanta ar
   // scoate doua saptamani de etichete vechi — adica exact genul de surpriza
   // dupa care nimeni nu mai bifeaza nimic. Restul se scot cu butonul, sau se
   // marcheaza ca facute fara sa se printeze.
