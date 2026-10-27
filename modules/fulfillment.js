@@ -1025,6 +1025,8 @@ function register(router) {
     const neprintate = fisiere.filter((f) => !f.printat_la).length;
 
     const randuri = fisiere.map((f) => [
+      `<input type="checkbox" class="bif-teanc" data-id="${f.id}" data-printat="${f.printat_la ? 1 : 0}"
+              aria-label="Alege teancul din ${dataRo(f.zi)}">`,
       `<strong>${dataRo(f.zi)}</strong> <span style="color:var(--text-muted)">${esc(String(f.ora || ""))}</span>`,
       `<a href="${CALE}/etichete/${f.id}/pdf" target="_blank">${esc(f.nume)}</a>`,
       f.marime ? Math.round(nr(f.marime) / 1024).toLocaleString("ro-RO") + " KB" : "—",
@@ -1073,10 +1075,41 @@ function register(router) {
       }
       ${
         randuri.length
-          ? table(["Ziua emailului", "Fișier", "Mărime", "Stare", ""], randuri)
+          ? `<div class="bara-teancuri" id="bara-teancuri">
+               <span class="bif-grup">
+                 <button class="btn secondary small" type="button" data-alege="tot">Selectează tot</button>
+                 <button class="btn secondary small" type="button" data-alege="neprintate">Doar neprintate</button>
+                 <button class="btn secondary small" type="button" data-alege="nimic">Niciuna</button>
+               </span>
+               <span id="cate-alese" class="cate-alese">niciun teanc ales</span>
+               <button class="btn" type="button" id="printeaza-alese" disabled>Printează acum ce e selectat</button>
+             </div>
+             ${table(
+               [
+                 '<input type="checkbox" id="bif-tot" aria-label="Selectează toate teancurile">',
+                 "Ziua emailului",
+                 "Fișier",
+                 "Mărime",
+                 "Stare",
+                 "",
+               ],
+               randuri
+             )}`
           : "<p>N-a venit niciun teanc de etichete în ultimele două săptămâni.</p>"
       }
       <iframe id="tipar" style="position:fixed;width:0;height:0;border:0;left:-9999px"></iframe>
+      <style>
+        .bara-teancuri { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:0 0 10px; }
+        .bif-grup { display:flex; gap:6px; flex-wrap:wrap; }
+        .cate-alese { font-size:13px; color:var(--text-muted); margin-right:auto; }
+        /* Bifele sunt ținta principală a paginii: la 18px se nimeresc și cu
+           degetul, pe telefonul de lângă imprimantă. */
+        .bif-teanc, #bif-tot { width:18px; height:18px; cursor:pointer; }
+        @media (max-width: 760px) {
+          .cate-alese { margin-right:0; width:100%; }
+          .bara-teancuri > .btn { width:100%; }
+        }
+      </style>
       <script>
       (function () {
         var sus = document.getElementById("stare-auto");
@@ -1129,6 +1162,80 @@ function register(router) {
           if (ok) setTimeout(function () { location.reload(); }, 1200);
           else b.disabled = false;
         });
+
+        // ---- mai multe teancuri deodată ------------------------------------
+        //
+        // Cererea lui Vali, 27.10.2026: dimineața sunt cinci-șase teancuri
+        // venite peste noapte și le apăsa pe rând. Acum se bifează și pleacă
+        // toate la imprimantă dintr-o apăsare.
+        //
+        // Se printează UNUL CÂTE UNUL, nu toate deodată: print() oprește
+        // pagina până se închide dialogul imprimantei, iar șase deodată ar
+        // însemna șase dialoguri peste altul — pe calculatorul cu Zebra, unde
+        // dialogul nici nu apare, tot ar trimite PDF-urile unul peste altul în
+        // același cadru și s-ar pierde teancuri. Fiecare se marchează DUPĂ ce
+        // a ieșit, ca și la butonul de pe rând.
+        var bifaTot = document.getElementById("bif-tot");
+        var cateAlese = document.getElementById("cate-alese");
+        var btnAlese = document.getElementById("printeaza-alese");
+        function toateBifele() { return [].slice.call(document.querySelectorAll(".bif-teanc")); }
+        function alese() { return toateBifele().filter(function (b) { return b.checked; }); }
+        function numara() {
+          if (!cateAlese) return;
+          var n = alese().length;
+          var t = toateBifele().length;
+          cateAlese.textContent = n === 0 ? "niciun teanc ales" : n + " din " + t + (n === 1 ? " teanc ales" : " teancuri alese");
+          btnAlese.disabled = n === 0 || ocupat;
+          btnAlese.textContent = n ? "Printează acum " + (n === 1 ? "teancul ales" : "cele " + n + " teancuri") : "Printează acum ce e selectat";
+          if (bifaTot) {
+            bifaTot.checked = n > 0 && n === t;
+            // Trei stări, nu două: bifa de sus arată „o parte" când e aleasă
+            // doar o parte, altfel ar părea că n-ai ales nimic.
+            bifaTot.indeterminate = n > 0 && n < t;
+          }
+        }
+        if (bifaTot) {
+          bifaTot.addEventListener("change", function () {
+            toateBifele().forEach(function (b) { b.checked = bifaTot.checked; });
+            numara();
+          });
+        }
+        document.addEventListener("change", function (ev) {
+          if (ev.target.classList && ev.target.classList.contains("bif-teanc")) numara();
+        });
+        var bara = document.getElementById("bara-teancuri");
+        if (bara) {
+          bara.addEventListener("click", function (ev) {
+            var b = ev.target.closest("[data-alege]");
+            if (!b) return;
+            var ce = b.getAttribute("data-alege");
+            toateBifele().forEach(function (x) {
+              x.checked = ce === "tot" ? true : ce === "nimic" ? false : x.getAttribute("data-printat") !== "1";
+            });
+            numara();
+          });
+        }
+        if (btnAlese) {
+          btnAlese.addEventListener("click", async function () {
+            var lista = alese();
+            if (!lista.length || ocupat) return;
+            // Cât timp scoatem teancurile alese, automatul stă deoparte:
+            // altfel ar intra peste noi în același cadru ascuns.
+            ocupat = true;
+            btnAlese.disabled = true;
+            var reusite = 0;
+            for (var i = 0; i < lista.length; i++) {
+              btnAlese.textContent = "Se printează " + (i + 1) + " din " + lista.length + "…";
+              if (await unul(lista[i].getAttribute("data-id"), false)) reusite++;
+            }
+            btnAlese.textContent = reusite === lista.length
+              ? "Gata, " + reusite + " scoase"
+              : "Au ieșit " + reusite + " din " + lista.length;
+            ocupat = false;
+            setTimeout(function () { location.reload(); }, reusite === lista.length ? 1500 : 4000);
+          });
+        }
+        numara();
 
         async function verifica() {
           if (!bifa.checked || ocupat) return;

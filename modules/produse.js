@@ -245,6 +245,18 @@ function register(router) {
     const raspunde = (stare, obiect) =>
       send(ctx.res, stare, JSON.stringify(obiect), { "Content-Type": "application/json; charset=utf-8" });
     if (!ctx.user) return raspunde(401, { eroare: "Nu ești autentificat." });
+    // 27.10.2026, cererea lui Vali: agentul nu mai scrie produse doar cu o
+    // denumire tastată. El configurează familia și caracteristicile
+    // obligatorii, iar codul se scrie singur (vezi modules/comenzi.js).
+    //
+    // Butonul e ascuns pentru agenți în formularul de comandă, dar ascunderea
+    // nu e o verificare: ruta se poate chema și direct. De-aia regula stă și
+    // aici, nu doar în pagină.
+    if (ctx.user.rol !== "admin") {
+      return raspunde(403, {
+        eroare: "Produsele noi se configurează, nu se scriu dintr-o denumire. Apasă „Produs nou — configurează-l”.",
+      });
+    }
 
     const v = produsRapid.validare(ctx.body || {});
     if (v.eroare) return raspunde(400, { eroare: v.eroare });

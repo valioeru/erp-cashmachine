@@ -480,20 +480,52 @@ function register(router) {
         })
       );
     }
-    const ins = await db
-      .prepare(
-        `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id)
-         VALUES (?,?,?,?,?,?,?) RETURNING id`
-      )
-      .run(r.cod, r.cod, r.denumire, String(b.unitate_masura || "buc"), Number(b.pret_vanzare) || 0, Number(b.stoc_minim) || 0, familieId || null);
-    const id = Number(ins.lastInsertRowid);
-    for (const buc of r.bucati_toate) {
-      await db
-        .prepare("INSERT INTO produse_cod_valori (produs_id, caracteristica_id, nume, valoare, bucata) VALUES (?,?,?,?,?)")
-        .run(id, buc.id, buc.nume, buc.valoare, buc.cod || null);
-    }
+    const { id } = await scrieProdusul(r, familieId, {
+      um: b.unitate_masura,
+      pret: b.pret_vanzare,
+      stoc_minim: b.stoc_minim,
+    });
     redirect(ctx.res, `/produse/${id}`);
   });
+}
+
+// Scrierea produsului dintr-un rezultat deja generat.
+//
+// Stă separat fiindcă îl cheamă două ecrane: „Produs nou" din nomenclator și
+// comanda agentului. Dacă fiecare ar scrie cu INSERT-ul lui, unul dintre ele
+// ar uita mai devreme sau mai târziu `cod_generat` sau caracteristicile, iar
+// produsul ar intra în sistem fără codul după care îl caută toată lumea.
+async function scrieProdusul(r, familieId, { um, pret, stoc_minim } = {}) {
+  const ins = await db
+    .prepare(
+      `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id)
+       VALUES (?,?,?,?,?,?,?) RETURNING id`
+    )
+    .run(r.cod, r.cod, r.denumire, String(um || "buc"), Number(pret) || 0, Number(stoc_minim) || 0, familieId || null);
+  const id = Number(ins.lastInsertRowid);
+  for (const buc of r.bucati_toate) {
+    await db
+      .prepare("INSERT INTO produse_cod_valori (produs_id, caracteristica_id, nume, valoare, bucata) VALUES (?,?,?,?,?)")
+      .run(id, buc.id, buc.nume, buc.valoare, buc.cod || null);
+  }
+  return { id, cod: r.cod, denumire: r.denumire };
+}
+
+// Produsul pentru un set de caracteristici: îl găsește dacă există, îl scrie
+// dacă nu.
+//
+// Două comenzi cu aceleași caracteristici trebuie să ajungă pe ACELAȘI produs,
+// altfel stocul se rupe în două și nimeni nu mai știe câte pungi de 350×450
+// avem. De-aia căutarea duplicatului (din `genereaza`) și scrierea stau
+// lipite aici, nu lăsate pe seama fiecărui ecran în parte.
+async function produsulAlegerilor(alegeri, familieId, extra = {}) {
+  const r = await genereaza(alegeri, familieId);
+  if (r.exista) return { r, id: Number(r.exista.id), creat: false };
+  // Un produs pe jumătate configurat n-are voie să intre în nomenclator: ar
+  // rămâne acolo cu un cod scurt care se lovește de al altuia.
+  if (!r.ok) return { r, id: null, creat: false };
+  const scris = await scrieProdusul(r, familieId, extra);
+  return { r, id: scris.id, creat: true };
 }
 
 // Generarea + verificarea duplicatului. Un singur loc, folosit si de
@@ -521,4 +553,13 @@ async function genereaza(alegeri, familieId) {
   return { ...r, exista: exista || null, bucati_toate: bucatiToate };
 }
 
-module.exports = { register, seed, citesteCaracteristici, genereaza, CALE };
+module.exports = {
+  register,
+  seed,
+  citesteCaracteristici,
+  familii,
+  genereaza,
+  produsulAlegerilor,
+  scrieProdusul,
+  CALE,
+};
