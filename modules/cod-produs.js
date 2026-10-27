@@ -218,20 +218,72 @@ function register(router) {
 
       ${
         car.filter((c) => c.fel === "lista").length
-          ? `<h2>Adaugă o valoare</h2>
+          ? `<h2>Adaugă valori</h2>
+             <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 8px;max-width:720px">
+               Spui câte valori are lista și le scrii pe toate deodată. Cererea lui Vali, 27.10.2026 —
+               până acum se adăuga una câte una, cu o reîncărcare de pagină între ele.
+             </p>
              <form method="post" action="${CALE}/valoare" class="form" style="max-width:720px">
                <input type="hidden" name="familie_id" value="${familieId}">
                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-                 <label class="field" style="flex:0 1 200px">Caracteristica
+                 <label class="field" style="flex:0 1 220px">Caracteristica
                    <select name="caracteristica_id" required>
                      ${car.filter((c) => c.fel === "lista").map((c) => `<option value="${c.id}">${esc(c.nume)}</option>`).join("")}
                    </select>
                  </label>
-                 <label class="field" style="flex:1 1 200px">Valoarea<input name="valoare" required placeholder="Verde"></label>
-                 <label class="field" style="flex:0 1 140px">Bucata de cod<input name="cod" required placeholder="V"></label>
-                 <button class="btn" type="submit">Adaugă valoarea</button>
+                 <label class="field" style="flex:0 1 150px">Câte valori
+                   <input type="number" id="cate-valori" min="1" max="40" value="3" style="width:100%">
+                 </label>
+                 <button class="btn secondary" type="button" onclick="faRanduriValori()">Fă rândurile</button>
                </div>
+               <div id="randuri-valori" style="margin-top:10px"></div>
+               <button class="btn" type="submit" style="margin-top:10px">Adaugă valorile</button>
              </form>
+             <script>
+             // Randurile se fac in pagina, nu pe server: altfel „cate valori"
+             // ar insemna inca o reincarcare inainte sa poti scrie prima.
+             function randValoare(i) {
+               var d = document.createElement("div");
+               d.className = "rand-valoare";
+               d.innerHTML =
+                 '<span class="nr-valoare">' + i + '.</span>' +
+                 '<input name="valoare[]" placeholder="Verde" autocomplete="off">' +
+                 '<input name="cod[]" placeholder="V" maxlength="8" autocomplete="off" class="cod-valoare">';
+               return d;
+             }
+             function faRanduriValori() {
+               var cate = Math.max(1, Math.min(40, Number(document.getElementById("cate-valori").value) || 1));
+               var gazda = document.getElementById("randuri-valori");
+               // Ce-a scris omul deja nu se pierde cand mareste numarul.
+               var vechi = [].slice.call(gazda.querySelectorAll(".rand-valoare")).map(function (r) {
+                 var i = r.querySelectorAll("input");
+                 return [i[0].value, i[1].value];
+               });
+               gazda.innerHTML = "";
+               for (var i = 0; i < cate; i++) {
+                 var r = randValoare(i + 1);
+                 if (vechi[i]) {
+                   var inp = r.querySelectorAll("input");
+                   inp[0].value = vechi[i][0];
+                   inp[1].value = vechi[i][1];
+                 }
+                 gazda.appendChild(r);
+               }
+               var prim = gazda.querySelector("input");
+               if (prim) prim.focus();
+             }
+             faRanduriValori();
+             </script>
+             <style>
+               .rand-valoare { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+               .rand-valoare .nr-valoare { width:22px; text-align:right; color:var(--text-muted); font-size:12px; }
+               .rand-valoare input { flex:1 1 auto; }
+               .rand-valoare .cod-valoare { flex:0 0 120px; text-transform:uppercase; }
+               @media (max-width: 760px) {
+                 .rand-valoare { flex-wrap:wrap; }
+                 .rand-valoare .cod-valoare { flex:1 1 100px; }
+               }
+             </style>
              ${table(
                ["Caracteristică", "Valoare", "Cod", ""],
                car
@@ -331,13 +383,75 @@ function register(router) {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
     const b = ctx.body || {};
     const cid = parseInt(b.caracteristica_id, 10) || 0;
-    const valoare = String(b.valoare || "").trim();
-    const cod = C.curat(b.cod);
-    if (!cid || !valoare || !cod) return redirect(ctx.res, CALE);
-    const n = await db.prepare("SELECT COUNT(*) AS n FROM cod_valori WHERE caracteristica_id = ?").get(cid);
-    await db
-      .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)")
-      .run(cid, valoare, cod, nr(n && n.n) + 1);
+    if (!cid) return redirect(ctx.res, CALE);
+
+    // Formularul trimite acum mai multe rânduri. Rămâne și forma cu un singur
+    // câmp: o pagină veche lăsată deschisă într-un tab nu trebuie să scrie în
+    // tăcere nimic.
+    const lista = [];
+    const valori = [].concat(b["valoare[]"] === undefined ? (b.valoare === undefined ? [] : [b.valoare]) : b["valoare[]"]);
+    const coduri = [].concat(b["cod[]"] === undefined ? (b.cod === undefined ? [] : [b.cod]) : b["cod[]"]);
+    for (let i = 0; i < valori.length; i++) {
+      const valoare = String(valori[i] || "").trim();
+      const cod = C.curat(coduri[i]);
+      // Rândul gol de tot se sare fără zgomot: omul a cerut zece rânduri și a
+      // completat șapte.
+      if (!valoare && !cod) continue;
+      lista.push({ valoare, cod });
+    }
+    if (!lista.length) return redirect(ctx.res, CALE + inapoi(b.familie_id));
+
+    const existente = await db.prepare("SELECT valoare, cod FROM cod_valori WHERE caracteristica_id = ?").all(cid);
+    const codLuat = new Set(existente.map((v) => C.curat(v.cod)));
+    const numeLuat = new Set(existente.map((v) => C.curat(v.valoare)));
+    const r = await db.prepare("SELECT COUNT(*) AS n FROM cod_valori WHERE caracteristica_id = ?").get(cid);
+    let ordine = nr(r && r.n);
+
+    const sarite = [];
+    let scrise = 0;
+    for (const v of lista) {
+      if (!v.valoare || !v.cod) {
+        sarite.push(`rândul „${v.valoare || "(fără valoare)"}" — lipsește ${v.valoare ? "bucata de cod" : "valoarea"}`);
+        continue;
+      }
+      // DOUĂ VALORI CU ACEEAȘI BUCATĂ DE COD = două produse diferite cu
+      // același cod. Asta sparge exact lucrul pe care codul unic trebuia
+      // să-l apere, și n-ar da nicio eroare mai târziu — doar un stoc rupt
+      // în două. Se refuză aici, cu numele rândului scris.
+      if (codLuat.has(v.cod)) {
+        sarite.push(`„${v.valoare}" — bucata de cod „${v.cod}" e deja folosită la altă valoare`);
+        continue;
+      }
+      if (numeLuat.has(C.curat(v.valoare))) {
+        sarite.push(`„${v.valoare}" — există deja`);
+        continue;
+      }
+      await db
+        .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)")
+        .run(cid, v.valoare, v.cod, ++ordine);
+      codLuat.add(v.cod);
+      numeLuat.add(C.curat(v.valoare));
+      scrise++;
+    }
+
+    if (sarite.length) {
+      return send(
+        ctx.res,
+        200,
+        layout({
+          user: ctx.user, title: "Valori adăugate", active: CALE,
+          body: `<h1>${scrise} ${scrise === 1 ? "valoare scrisă" : "valori scrise"}, ${sarite.length} ${
+            sarite.length === 1 ? "sărită" : "sărite"
+          }</h1>
+            <p style="max-width:640px">Ce n-a intrat, și de ce:</p>
+            <ul style="max-width:640px">${sarite.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+            <p style="max-width:640px;color:var(--text-muted);font-size:13px">
+              Două valori cu aceeași bucată de cod ar însemna două produse diferite cu același cod — exact
+              lucrul pe care codul unic trebuie să-l apere.</p>
+            <a class="btn" href="${CALE}${inapoi(b.familie_id)}">Înapoi la configurare</a>`,
+        })
+      );
+    }
     redirect(ctx.res, CALE + inapoi(b.familie_id));
   });
 

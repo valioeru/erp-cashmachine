@@ -530,6 +530,57 @@ function lineRowsScript(produse, familii, eAdmin) {
         w.innerHTML = '<span>' + eticheta + '</span>' + intrare;
         gazda.appendChild(w);
       });
+      // Greutatea ↔ lungimea, la familiile cu lățime fixă (folia stretch).
+      //
+      // Cererea lui Vali, 27.10.2026: „dacă completează greutatea se
+      // calculează automat lungimea, iar dacă completează lungimea se
+      // calculează automat greutatea". Lățimea e mereu 50 cm, densitatea
+      // foliei 0,918 g/cm³ — de unde iese 0,000459 kg pe metru și micron.
+      //
+      // Greutatea NU intră în cod și nu se trimite nicăieri: e doar felul în
+      // care omul știe marfa. În cod intră tot lungimea.
+      if (f.conversie) {
+        var w = document.createElement('label');
+        w.className = 'config-camp config-greutate';
+        w.innerHTML = '<span>Greutate (kg) <span class="ajutor-greutate">se leagă de lungime</span></span>' +
+                      '<input type="number" step="0.001" min="0" class="camp-greutate" autocomplete="off">';
+        gazda.appendChild(w);
+        var cv = f.conversie;
+        var cmp = function (id) { return gazda.querySelector('.config-val[data-id="' + id + '"]'); };
+        var kgInput = w.querySelector('.camp-greutate');
+        var seScrie = false; // ca sa nu se cheme unul pe altul la nesfarsit
+        var dinLungime = function () {
+          if (seScrie) return;
+          var L = Number(cmp(cv.lungime_id) && cmp(cv.lungime_id).value);
+          var g = Number(cmp(cv.grosime_id) && cmp(cv.grosime_id).value);
+          if (!(L > 0) || !(g > 0)) return;
+          seScrie = true;
+          kgInput.value = Math.round(L * g * cv.kg_pe_metru_micron * 1000) / 1000;
+          seScrie = false;
+        };
+        var dinGreutate = function () {
+          if (seScrie) return;
+          var kg = Number(kgInput.value);
+          var g = Number(cmp(cv.grosime_id) && cmp(cv.grosime_id).value);
+          if (!(kg > 0) || !(g > 0)) return;
+          seScrie = true;
+          var L = cmp(cv.lungime_id);
+          // Lungimea se rotunjeste la metru: nimeni nu taie folie la
+          // centimetru, iar „287,4316" pe o comanda arata a precizie care nu
+          // exista.
+          if (L) { L.value = Math.round(kg / (g * cv.kg_pe_metru_micron)); }
+          seScrie = false;
+          comenziCereIntarziat(panou);
+        };
+        kgInput.addEventListener('input', dinGreutate);
+        var cl = cmp(cv.lungime_id);
+        var cg = cmp(cv.grosime_id);
+        if (cl) cl.addEventListener('input', dinLungime);
+        // Grosimea schimbata rescrie greutatea, nu lungimea: lungimea e ce-a
+        // ales omul, greutatea e ce iese din ea.
+        if (cg) cg.addEventListener('input', dinLungime);
+      }
+
       gazda.querySelectorAll('.config-val').forEach(function (el) {
         el.addEventListener('input', function () { comenziCereIntarziat(panou); });
         el.addEventListener('change', function () { comenziCereIntarziat(panou); });
@@ -769,6 +820,9 @@ function lineRowsScript(produse, familii, eAdmin) {
     /* Produsul care există deja nu e o greșeală — e exact ce vrem. */
     .config-avertisment.e-vechi { color:var(--text-muted); }
     .config-ia { align-self:start; }
+    /* Greutatea nu intra in cod: se vede ca e un ajutor, nu o caracteristica. */
+    .config-greutate > span { font-weight:600; }
+    .ajutor-greutate { font-weight:400; font-size:10px; color:var(--text-muted); display:block; }
 
     /* --- comanda pe telefon ------------------------------------------------
      *

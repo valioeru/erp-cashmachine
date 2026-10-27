@@ -18,12 +18,23 @@ function azi() {
 // BNR ar fi o glumă proastă — comenzile, stocul și facturile n-au nicio
 // treabă cu cursul. Dacă nu merge, rămâne cursul de ieri.
 async function adu() {
+  // Întâi fișierul zilei; dacă nu e publicat încă (BNR îl pune pe la 13:00),
+  // cel cu ultimele zece zile. Din al doilea se ia tot ULTIMUL Cube, adică
+  // ziua cea mai nouă din el.
+  const r1 = await unFisier(B.ADRESA);
+  if (r1.ok) return r1;
+  const r2 = await unFisier(B.ADRESA_REZERVA);
+  if (r2.ok) return r2;
+  return r1;
+}
+
+async function unFisier(adresa) {
   try {
-    const raspuns = await fetch(B.ADRESA, {
-      headers: { "User-Agent": "ERP Cash Machine" },
+    const raspuns = await fetch(adresa, {
+      headers: { "User-Agent": "ERP Cash Machine", Accept: "application/xml, text/xml" },
       signal: AbortSignal.timeout(15000),
     });
-    if (!raspuns.ok) return { ok: false, motiv: "BNR a răspuns cu " + raspuns.status };
+    if (!raspuns.ok) return { ok: false, motiv: "BNR a răspuns cu " + raspuns.status + " la " + adresa };
     const corp = await raspuns.text();
     const r = B.parseaza(corp);
     if (!r) {
@@ -31,7 +42,7 @@ async function adu() {
       // nimic: nu se știe dacă BNR a schimbat formatul, dacă a răspuns o
       // pagină de eroare, sau dacă e gol.
       const inceput = corp.replace(/\s+/g, " ").slice(0, 160);
-      return { ok: false, motiv: `fișierul BNR n-a putut fi citit (${corp.length} octeți: ${inceput})` };
+      return { ok: false, motiv: `${adresa} n-a putut fi citit (${corp.length} octeți: ${inceput})` };
     }
 
     let scrise = 0;
