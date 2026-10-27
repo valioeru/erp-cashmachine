@@ -80,6 +80,14 @@ console.log("\nCui i se pune căsuța de greutate");
   const p = S.potriveste(stretch);
   bine("folia stretch se potrivește", Boolean(p), p);
   bine("și știe care câmp e care", p.grosime_id === 4 && p.lungime_id === 5, p);
+  bine("fără câmp de greutate propriu, panoul își desenează unul", p.greutate_id === null, p.greutate_id);
+
+  // Vali adaugase deja „Greutate (kg)" din Configurari. Fara randul asta,
+  // panoul ar fi aratat DOUA casute de greutate una sub alta.
+  const cuGreutate = stretch.concat([{ id: 57, nume: "Greutate", fel: "numar", um: "kg" }]);
+  const pg = S.potriveste(cuGreutate);
+  bine("dacă familia are deja greutatea, se leagă de ea", pg && pg.greutate_id === 57, pg);
+  bine("și nu se mai pune a doua căsuță", pg.greutate_id !== null);
 
   // Asta e capcana: „mm" incepe cu „m".
   const pungi = [
