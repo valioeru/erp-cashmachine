@@ -1,0 +1,39 @@
+{
+  "name": "ERP Cash Machine",
+  "short_name": "ERP CM",
+  "description": "Comenzi, clienți, stocuri și producție — Cash Machine SRL.",
+  "lang": "ro",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#2f5d9c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Comandă nouă",
+      "short_name": "Comandă",
+      "description": "Plasează o comandă de la client",
+      "url": "/comenzi/nou",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Comenzile mele",
+      "short_name": "Comenzi",
+      "url": "/comenzi",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Scadențele mele",
+      "short_name": "Scadențe",
+      "url": "/scadente",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

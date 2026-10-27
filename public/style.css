@@ -830,3 +830,59 @@ td.cal-azi .cal-nr { background: var(--primary); color: #fff; }
   pointer-events: none;
 }
 .ct-camp.gol .ct-camp-eticheta { visibility: hidden; }
+
+/* --- pe telefon ----------------------------------------------------------
+ *
+ * ERP-ul se poate pune cu iconiță pe ecranul telefonului (vezi capPwa() din
+ * lib/render.js și public/sw.js). Nu e o a doua aplicație — e tot asta, doar
+ * că Android și iPhone o deschid pe tot ecranul. Deci regulile de aici nu
+ * dublează nimic: așază altfel aceleași pagini.
+ *
+ * Două cifre care se repetă mai jos, și de ce tocmai ele:
+ *
+ *   16px pe câmpuri — sub atât, Safari pe iPhone mărește singur pagina când
+ *   intri într-un câmp, ȘI NU O MAI MICȘOREAZĂ la ieșire. Omul rămâne cu
+ *   formularul tăiat pe lat și crede că s-a stricat ceva.
+ *
+ *   44px înălțime — un deget nu e un cursor de mouse. Sub atât, se apasă pe
+ *   câmpul de alături.
+ */
+@media (max-width: 760px) {
+  .topbar { padding: 0 12px; gap: 12px; height: auto; min-height: 52px; flex-wrap: wrap; }
+  .nav { gap: 2px; }
+  .nav a { padding: 8px 10px; }
+  .content { padding: 14px 12px 28px; }
+  h1 { font-size: 19px; }
+
+  /* Grilele scrise în pagină au coloane fixe („1fr 1fr 140px"), bune pe
+     laptop. Pe telefon curg una sub alta. `!important` fiindcă regula din
+     pagină, fiind inline, bate orice foaie de stil. */
+  .form > div[style*="grid"] { grid-template-columns: 1fr !important; gap: 10px !important; }
+
+  .form input, .form select, .form textarea,
+  .field input, .field select, .field textarea {
+    font-size: 16px; min-height: 44px;
+  }
+  .form textarea { min-height: 72px; }
+  .btn { min-height: 44px; padding: 10px 16px; }
+  .btn.small { min-height: 38px; }
+
+  /* Butonul de trimis stă la vedere, lipit de marginea de jos: pe o comandă
+     cu șase linii, altfel ar trebui derulat până la capăt ca să-l găsești.
+     Butoanele rămân unul lângă altul, NU unul sub altul: lipite jos, două
+     rânduri de butoane ar mânca o cincime din ecran tot timpul. */
+  .form-actions {
+    position: sticky; bottom: 0; z-index: 5;
+    display: flex; gap: 8px; align-items: center;
+    background: var(--surface, #fff); border-top: 1px solid var(--border, #e1e4e9);
+    margin: 10px -12px 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+  .form-actions .btn { flex: 1; text-align: center; }
+  /* „Renunță" nu merită jumătate de bară: e ieșirea, nu scopul. */
+  .form-actions .btn.secondary { flex: 0 0 auto; }
+
+  /* Bara acoperă sfârșitul formularului cât timp derulezi. Fără locul ăsta
+     liber sub el, ultima linie de produs ar rămâne ascunsă sub bară și
+     nimeni n-ar putea ajunge la ea. */
+  .form { padding-bottom: 8px; }
+}
