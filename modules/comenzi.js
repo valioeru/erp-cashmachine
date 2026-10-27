@@ -1004,6 +1004,7 @@ function register(router) {
         ${cautaClient({
           nume: "client_cautat",
           obligatoriu: true,
+          clientNou: true,
           partenerId: v.partener_id,
           valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
         })}
@@ -1622,6 +1623,7 @@ function register(router) {
           ${cautaClient({
             nume: "client_cautat",
             obligatoriu: true,
+            clientNou: true,
             partenerId: v.partener_id,
             valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
           })}

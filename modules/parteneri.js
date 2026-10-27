@@ -338,6 +338,69 @@ function register(router) {
     ],
   });
 
+  // ---- clientul scris pe loc, din formularul de comandă -------------------
+  //
+  // Cererea lui Vali, 27.10.2026: agentul e la client, firma nu e în bază, iar
+  // până acum trebuia să plece din comandă, să facă partenerul, să se întoarcă
+  // și s-o ia de la capăt.
+  //
+  // Clientul intră pe numele agentului care îl scrie — tot cererea lui. Fără
+  // asta, firma ar rămâne „a nimănui": n-ar apărea în lista lui, iar
+  // scadențele ei n-ar avea pe cine să blocheze.
+  router.post("/parteneri/rapid", async (ctx) => {
+    const raspunde = (stare, obiect) =>
+      send(ctx.res, stare, JSON.stringify(obiect), { "Content-Type": "application/json; charset=utf-8" });
+    if (!ctx.user) return raspunde(401, { eroare: "Nu ești autentificat." });
+
+    const CN = require("../lib/client-nou");
+    const v = CN.verifica(ctx.body || {});
+    if (!v.ok) return raspunde(400, { gresite: v.gresite });
+
+    // Căutarea dublurii se face pe TOȚI partenerii, nu doar pe clienți: un
+    // furnizor poate deveni și client, iar a doua fișă pe același CUI ar rupe
+    // în două soldul firmei.
+    const existenti = await db.prepare("SELECT id, nume, cui, tip, agent_id FROM parteneri").all().catch(() => []);
+    const gasit = CN.gaseste(existenti, v.date);
+    if (gasit) {
+      const p = gasit.partener;
+      // Un furnizor care începe să cumpere devine „ambele", nu al doilea rând.
+      if (String(p.tip) === "furnizor") {
+        await db.prepare("UPDATE parteneri SET tip = 'ambele' WHERE id = ?").run(p.id).catch(() => null);
+      }
+      // Firma fără stăpân se ia de cine o aduce. Dacă are deja un agent, NU
+      // i-l luăm: clientul colegului nu se mută dintr-o comandă.
+      if (!p.agent_id) {
+        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(ctx.user.id, p.id).catch(() => null);
+      }
+      return raspunde(200, {
+        id: Number(p.id), nume: p.nume, cui: p.cui || "", reutilizat: true, dupa: gasit.dupa,
+        alAltuia: Boolean(p.agent_id) && Number(p.agent_id) !== Number(ctx.user.id),
+      });
+    }
+
+    const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const ins = await db
+      .prepare(
+        `INSERT INTO parteneri (tip, nume, cui, email, telefon, persoana_contact, adresa, stare, sursa, agent_id, creat_la)
+         VALUES ('client', ?, ?, ?, ?, ?, ?, 'client_activ', ?, ?, ?) RETURNING id`
+      )
+      .run(
+        v.date.nume,
+        v.date.cui || null,
+        v.date.email || null,
+        v.date.telefon || null,
+        v.date.persoana_contact || null,
+        v.date.adresa || null,
+        "comandă",
+        ctx.user.id,
+        acum
+      )
+      .catch(() => null);
+    if (!ins) return raspunde(500, { gresite: ["Nu am putut scrie clientul. Încearcă din nou."] });
+    console.log(`[parteneri] client nou din comandă: ${v.date.nume} (${v.date.cui || "fără CUI"}) — ${ctx.user.nume || ctx.user.email}`);
+    return raspunde(200, { id: Number(ins.lastInsertRowid), nume: v.date.nume, cui: v.date.cui || "", reutilizat: false });
+  });
+
   // Schimbarea agentului responsabil — permisă doar administratorului.
   router.post("/parteneri/:id/agent", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, `/parteneri/${ctx.params.id}`);
