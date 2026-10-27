@@ -1255,7 +1255,11 @@ function register(router) {
     // Vali: intră în lista depozitului („comenzi deschise”), acolo se face
     // potrivirea cu stocul, și abia dacă marfa lipsește depozitul o comandă
     // mai departe — la un terț sau la producție. Vezi modules/warehouse.js.
-    redirect(ctx.res, `/comenzi/${comandaId}`);
+    // Până acum salvarea nu spunea nimic: pagina se schimba și atât, iar
+    // agentul rămânea cu întrebarea „a intrat sau nu?" — cererea lui Vali,
+    // 27.10.2026. Mesajul e pe pagina comenzii, nu o alertă: acolo se vede și
+    // comanda, deci confirmarea și dovada stau la un loc.
+    redirect(ctx.res, `/comenzi/${comandaId}?ok=plasata`);
   });
 
   router.get("/comenzi/:id", async (ctx) => {
@@ -1538,7 +1542,20 @@ function register(router) {
           : ""
       }
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body }));
+    // Confirmarea de după salvare. Nu se ține în sesiune și nu se scrie în
+    // bază: e un cuvânt pe un ecran, iar dacă omul dă refresh și-l mai vede o
+    // dată nu strică nimic — pe când o confirmare pierdută îl face să salveze
+    // a doua oară.
+    const n = Number(ctx.query.n) || 0;
+    const MESAJE = {
+      plasata: `Comanda ${comanda.numar || "#" + comanda.id} a fost salvată${
+        comanda.partener_nume ? " pentru " + comanda.partener_nume : ""
+      }. ${linii.length} ${linii.length === 1 ? "linie" : "linii"}, total ${sumaIn(total, comanda.moneda)}.`,
+      modificat: `Salvat. ${n} ${n === 1 ? "schimbare scrisă" : "schimbări scrise"} în istoricul comenzii.`,
+      nimic: "N-a fost nimic de schimbat — comanda a rămas cum era.",
+    };
+    const flash = MESAJE[String(ctx.query.ok || "")] || null;
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body, flash }));
   });
 
   // Validarea unei ciorne născute dintr-un email. O poate apăsa agentul comenzii
@@ -1845,7 +1862,7 @@ function register(router) {
     if (motiv) schimbari.push({ ce: "Motivul modificării", vechi: "", nou: motiv });
     await scrieIstoric(comanda.id, ctx.user, schimbari);
 
-    redirect(ctx.res, `/comenzi/${comanda.id}?ok=modificat`);
+    redirect(ctx.res, `/comenzi/${comanda.id}?ok=modificat&n=${schimbari.length}`);
   });
 
   router.post("/comenzi/:id/valideaza", async (ctx) => {
