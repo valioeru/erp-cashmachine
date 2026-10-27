@@ -479,7 +479,8 @@ function register(router) {
           o.valabil_pana ? esc(String(o.valabil_pana).slice(0, 10)) : "",
           o.email_subiect ? `<span title="${esc(o.email_de_la || "")}">${esc(o.email_subiect.slice(0, 60))}</span>` : esc(o.sursa),
           ctx.user && ctx.user.rol === "admin"
-            ? actionLinks([{ href: `/procurement/oferta/${o.id}/sterge`, label: "Scoate", method: "post", danger: true, confirm: "Scoți oferta asta din istoric?" }])
+            ? `<a class="link-btn" href="/procurement/oferta/${o.id}/editare">Modifică</a> ` +
+              actionLinks([{ href: `/procurement/oferta/${o.id}/sterge`, label: "Scoate", method: "post", danger: true, confirm: "Scoți oferta asta din istoric?" }])
             : "",
         ])
       )}
@@ -630,6 +631,131 @@ function register(router) {
       );
     redirect(ctx.res, `/procurement/articol/${id}`);
   });
+  // ---- modificarea unei oferte deja salvate -------------------------------
+  //
+  // Cererea lui Vali, 27.10.2026. Până acum o ofertă scrisă greșit (preț tastat
+  // pe lângă, furnizorul ales din listă în loc de cel adevărat) se putea doar
+  // SCOATE și rescrie — iar istoricul articolului rămânea cu o gaură și cu o
+  // ofertă „scoasă" pe care nimeni nu mai știa de ce.
+  //
+  // Articolul NU se schimbă de aici. O ofertă mutată pe alt articol ar strica
+  // amândouă istoricele: pe primul dispare un preț care a existat, pe al
+  // doilea apare unul care n-a fost cerut niciodată. Dacă oferta e pe
+  // articolul greșit, se scoate și se scrie din nou — asta e o greșeală de
+  // alt fel decât un preț tastat strâmb.
+  async function formularEditareOferta(ctx, o, eroare) {
+    const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'client' ORDER BY nume LIMIT 3000").all();
+    const a = await db.prepare("SELECT id, nume FROM ach_articole WHERE id = ?").get(o.articol_id);
+    const v = (x) => esc(x == null ? "" : String(x));
+    const body = `
+      <p style="margin:0 0 10px"><a href="/procurement/articol/${o.articol_id}">← Înapoi la ${esc(a ? a.nume : "articol")}</a></p>
+      ${
+        eroare
+          ? `<p style="max-width:720px;color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 12px">${esc(eroare)}</p>`
+          : ""
+      }
+      <p style="max-width:720px;color:var(--text-muted);font-size:13px">
+        Articolul nu se schimbă de aici. Dacă oferta a ajuns pe articolul greșit, scoate-o și scrie-o din nou pe
+        cel bun — altfel ar dispărea un preț dintr-un istoric și ar apărea în altul unul care n-a existat.
+      </p>
+      <form class="form" method="post" action="/procurement/oferta/${o.id}/editare" style="max-width:820px">
+        <div style="display:grid;grid-template-columns:2fr 2fr;gap:12px">
+          <label class="field"><span>Furnizor din listă</span>
+            <select name="furnizor_id">
+              <option value="">— scriu numele mai jos —</option>
+              ${furnizori.map((f) => `<option value="${f.id}"${Number(o.furnizor_id) === Number(f.id) ? " selected" : ""}>${esc(f.nume)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="field"><span>…sau furnizor scris de mână</span><input name="furnizor_text" value="${v(o.furnizor_text)}"></label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+          <label class="field"><span>Preț</span><input name="pret" type="number" step="0.0001" min="0" required value="${v(o.pret)}"></label>
+          <label class="field"><span>Moneda</span>
+            <select name="moneda">${MONEDE.map((m) => `<option value="${m}"${String(o.moneda) === m ? " selected" : ""}>${m}</option>`).join("")}</select>
+          </label>
+          <label class="field"><span>UM</span><input name="um" value="${v(o.um)}"></label>
+          <label class="field"><span>Cantitate minimă</span><input name="cantitate_min" type="number" step="0.001" min="0" value="${v(o.cantitate_min)}"></label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+          <label class="field"><span>Data ofertei</span><input name="data_ofertei" type="date" required value="${v(String(o.data_ofertei || "").slice(0, 10))}"></label>
+          <label class="field"><span>Valabilă până</span><input name="valabil_pana" type="date" value="${v(String(o.valabil_pana || "").slice(0, 10))}"></label>
+          <label class="field"><span>Termen livrare</span><input name="termen_livrare" value="${v(o.termen_livrare)}"></label>
+        </div>
+        <label class="field"><span>Condiții</span><input name="conditii" value="${v(o.conditii)}"></label>
+        <label class="field"><span>Sursa</span><input name="sursa" value="${v(o.sursa)}"></label>
+        <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${v(o.observatii)}</textarea></label>
+        ${
+          o.email_subiect
+            ? `<p style="font-size:13px;color:var(--text-muted)">Oferta a venit pe email: <strong>${esc(o.email_subiect)}</strong>${
+                o.email_de_la ? " — " + esc(o.email_de_la) : ""
+              }. Emailul rămâne legat de ea și după ce o modifici.</p>`
+            : ""
+        }
+        <div class="form-actions">
+          <button class="btn" type="submit">Salvează modificările</button>
+          <a class="btn secondary" href="/procurement/articol/${o.articol_id}">Renunță</a>
+        </div>
+      </form>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Modifici oferta", active: "/procurement", body }));
+  }
+
+  router.get("/procurement/oferta/:id/editare", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/procurement");
+    const o = await db.prepare("SELECT * FROM ach_oferte WHERE id = ?").get(ctx.params.id);
+    if (!o) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/procurement", body: "<p>Oferta nu există.</p>" }));
+    await formularEditareOferta(ctx, o);
+  });
+
+  router.post("/procurement/oferta/:id/editare", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/procurement");
+    const o = await db.prepare("SELECT * FROM ach_oferte WHERE id = ?").get(ctx.params.id);
+    if (!o) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/procurement", body: "<p>Oferta nu există.</p>" }));
+    const b = ctx.body || {};
+
+    const pret = Number(String(b.pret || "").replace(",", "."));
+    // Prețul e singurul lucru fără care oferta n-are rost. Un zero ar face-o
+    // să pară cea mai bună din istoric, și ar rămâne așa în comparație.
+    if (!(pret > 0)) {
+      return await formularEditareOferta(ctx, { ...o, ...b, id: o.id, articol_id: o.articol_id },
+        "Prețul trebuie să fie mai mare ca zero — altfel oferta ar ieși cea mai bună din istoric.");
+    }
+    const furnizorId = parseInt(b.furnizor_id, 10) || null;
+    const furnizorText = String(b.furnizor_text || "").trim() || null;
+    if (!furnizorId && !furnizorText) {
+      return await formularEditareOferta(ctx, { ...o, ...b, id: o.id, articol_id: o.articol_id },
+        "Scrie de la cine e oferta: alege un furnizor din listă sau scrie-i numele.");
+    }
+    const dataOfertei = String(b.data_ofertei || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dataOfertei)) {
+      return await formularEditareOferta(ctx, { ...o, ...b, id: o.id, articol_id: o.articol_id },
+        "Data ofertei lipsește. Fără ea nu se știe cât de veche e prețul.");
+    }
+
+    await db
+      .prepare(
+        `UPDATE ach_oferte SET furnizor_id = ?, furnizor_text = ?, pret = ?, moneda = ?, um = ?,
+            cantitate_min = ?, conditii = ?, termen_livrare = ?, data_ofertei = ?, valabil_pana = ?,
+            sursa = ?, observatii = ?
+          WHERE id = ?`
+      )
+      .run(
+        furnizorId,
+        furnizorText,
+        pret,
+        MONEDE.includes(String(b.moneda)) ? String(b.moneda) : o.moneda || "EUR",
+        String(b.um || "").trim() || null,
+        Number(String(b.cantitate_min || "").replace(",", ".")) || null,
+        String(b.conditii || "").trim() || null,
+        String(b.termen_livrare || "").trim() || null,
+        dataOfertei,
+        String(b.valabil_pana || "").slice(0, 10) || null,
+        String(b.sursa || "").trim() || null,
+        String(b.observatii || "").trim() || null,
+        o.id
+      );
+    redirect(ctx.res, `/procurement/articol/${o.articol_id}`);
+  });
+
   // Scoaterea unei oferte nu șterge rândul: îl dezactivează, ca istoricul să
   // rămână întreg dacă cineva se răzgândește.
   router.post("/procurement/oferta/:id/sterge", async (ctx) => {
