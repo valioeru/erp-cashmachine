@@ -95,6 +95,21 @@ console.log("\nȘi dacă BNR scrie fișierul altfel");
   bine("nici un JSON", C.parseaza('{"EUR":4.97,"date":"2026-10-27"}') === null);
 }
 
+console.log("\nFișierul cu zece zile");
+{
+  // Fisierul de rezerva are zece Cube-uri. Trebuie luat cel mai NOU, nu
+  // primul din fisier: un curs de acum noua zile scris pe o comanda de azi
+  // n-ar da nicio eroare — ar da doar o suma gresita, care arata bine.
+  const zeceZile = `<DataSet><Body>
+    <Cube date="2026-10-20"><Rate currency="EUR">4.9000</Rate></Cube>
+    <Cube date="2026-10-26"><Rate currency="EUR">5.3467</Rate></Cube>
+    <Cube date="2026-10-23"><Rate currency="EUR">5.1000</Rate></Cube>
+  </Body></DataSet>`;
+  const r = C.parseaza(zeceZile);
+  bine("ia ziua cea mai nouă, nu prima din fișier", r.data === "2026-10-26", r.data);
+  bine("și cursul ei", Math.abs(r.cursuri.EUR - 5.3467) < 1e-9, r.cursuri.EUR);
+}
+
 console.log("\nSocoteala în lei");
 {
   bine("leii rămân lei", C.inLei(100, "RON", 4.9723) === 100);
