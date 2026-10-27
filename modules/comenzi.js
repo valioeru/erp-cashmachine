@@ -540,14 +540,28 @@ function lineRowsScript(produse, familii, eAdmin) {
       // Greutatea NU intră în cod și nu se trimite nicăieri: e doar felul în
       // care omul știe marfa. În cod intră tot lungimea.
       if (f.conversie) {
-        var w = document.createElement('label');
-        w.className = 'config-camp config-greutate';
-        w.innerHTML = '<span>Greutate (kg) <span class="ajutor-greutate">se leagă de lungime</span></span>' +
-                      '<input type="number" step="0.001" min="0" class="camp-greutate" autocomplete="off">';
-        gazda.appendChild(w);
         var cv = f.conversie;
         var cmp = function (id) { return gazda.querySelector('.config-val[data-id="' + id + '"]'); };
-        var kgInput = w.querySelector('.camp-greutate');
+        var kgInput;
+        if (cv.greutate_id && cmp(cv.greutate_id)) {
+          // Familia are deja câmpul ei de greutate — pe ăla îl legăm, nu
+          // desenăm al doilea. Două căsuțe de greutate una sub alta ar fi
+          // însemnat că omul o completează pe care nimerește, iar în cod ar
+          // intra alta decât cea calculată.
+          kgInput = cmp(cv.greutate_id);
+          kgInput.classList.add('camp-greutate');
+          var et = kgInput.parentNode.querySelector('span');
+          if (et && et.innerHTML.indexOf('ajutor-greutate') === -1) {
+            et.innerHTML += ' <span class="ajutor-greutate">se leagă de lungime</span>';
+          }
+        } else {
+          var w = document.createElement('label');
+          w.className = 'config-camp config-greutate';
+          w.innerHTML = '<span>Greutate (kg) <span class="ajutor-greutate">se leagă de lungime</span></span>' +
+                        '<input type="number" step="0.001" min="0" class="camp-greutate" autocomplete="off">';
+          gazda.appendChild(w);
+          kgInput = w.querySelector('.camp-greutate');
+        }
         var seScrie = false; // ca sa nu se cheme unul pe altul la nesfarsit
         var dinLungime = function () {
           if (seScrie) return;

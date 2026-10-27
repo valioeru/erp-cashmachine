@@ -478,10 +478,17 @@ function register(router) {
           esc(o.termen_livrare || ""),
           o.valabil_pana ? esc(String(o.valabil_pana).slice(0, 10)) : "",
           o.email_subiect ? `<span title="${esc(o.email_de_la || "")}">${esc(o.email_subiect.slice(0, 60))}</span>` : esc(o.sursa),
-          ctx.user && ctx.user.rol === "admin"
-            ? `<a class="link-btn" href="/procurement/oferta/${o.id}/editare">Modifică</a> ` +
-              actionLinks([{ href: `/procurement/oferta/${o.id}/sterge`, label: "Scoate", method: "post", danger: true, confirm: "Scoți oferta asta din istoric?" }])
-            : "",
+          // „Modifică" îl vede oricine are acces la Procurement — cererea lui
+          // Vali, 27.10.2026. E simetric cu „Adaugă oferta", care n-a cerut
+          // niciodată drept de administrator: cine poate scrie o ofertă poate
+          // și să-i repare prețul tastat strâmb.
+          //
+          // „Scoate" rămâne doar la administrator: aia schimbă ce se vede în
+          // comparația de prețuri, nu doar o cifră.
+          (ctx.user ? `<a class="link-btn" href="/procurement/oferta/${o.id}/editare">Modifică</a> ` : "") +
+          (ctx.user && ctx.user.rol === "admin"
+            ? actionLinks([{ href: `/procurement/oferta/${o.id}/sterge`, label: "Scoate", method: "post", danger: true, confirm: "Scoți oferta asta din istoric?" }])
+            : ""),
         ])
       )}
       ${oferte.some((o) => o.observatii) ? `<h2>Note</h2><ul>${oferte.filter((o) => o.observatii).map((o) => `<li><strong>${esc(String(o.data_ofertei).slice(0, 10))}</strong> ${esc(o.furnizor_nume || o.furnizor_text || "")}: ${esc(o.observatii)}</li>`).join("")}</ul>` : ""}
@@ -700,14 +707,17 @@ function register(router) {
   }
 
   router.get("/procurement/oferta/:id/editare", async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/procurement");
+    // Nu se cere rol de administrator: dreptul pe zona /procurement e verificat
+    // de lib/auth înainte să ajungă cererea aici, iar adăugarea unei oferte
+    // n-a cerut niciodată mai mult.
+    if (!ctx.user) return redirect(ctx.res, "/");
     const o = await db.prepare("SELECT * FROM ach_oferte WHERE id = ?").get(ctx.params.id);
     if (!o) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/procurement", body: "<p>Oferta nu există.</p>" }));
     await formularEditareOferta(ctx, o);
   });
 
   router.post("/procurement/oferta/:id/editare", async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/procurement");
+    if (!ctx.user) return redirect(ctx.res, "/");
     const o = await db.prepare("SELECT * FROM ach_oferte WHERE id = ?").get(ctx.params.id);
     if (!o) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/procurement", body: "<p>Oferta nu există.</p>" }));
     const b = ctx.body || {};

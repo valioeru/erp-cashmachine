@@ -1824,6 +1824,22 @@ function register(router) {
           <div><div class="k">Ambalare</div>${esc(c.tip_ambalare || "—")}</div>
           <div><div class="k">Reprezentant</div>${esc(c.agent_nume || c.reprezentant || c.initiator || "—")}</div>
           <div><div class="k">Plasată la</div>${esc(c.data_initiere || "—")}</div>
+          <div><div class="k">Introdusă de</div>${
+            // Cererea lui Vali, 27.10.2026: „cine a introdus comanda DPD". Pana
+            // acum coloana `initiator` exista in tabel dar nu se vedea nicaieri,
+            // iar raspunsul nu se putea da din ERP.
+            //
+            // `initiator` NU e acelasi lucru cu reprezentantul: reprezentantul e
+            // al cui e clientul, initiatorul e cine a scris randul. La comenzile
+            // venite din importul registrului de Excel initiatorul lipseste —
+            // atunci se scrie de unde a venit, nu „—", ca sa nu para ca s-a
+            // pierdut informatia.
+            c.initiator
+              ? esc(c.initiator)
+              : c.sursa && String(c.sursa) !== "manual"
+                ? `<span style="color:var(--text-muted)">din ${esc(String(c.sursa))}</span>`
+                : '<span style="color:var(--text-muted)">nescris</span>'
+          }</div>
           <div><div class="k">Livrare promisă</div>${esc(c.data_livrare || c.data_solicitata || "—")}</div>
           <div><div class="k">Finalizată la</div>${esc(c.data_finalizare || "—")}</div>
         </div>
