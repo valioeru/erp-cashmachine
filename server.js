@@ -148,14 +148,39 @@ async function creeazaAdminInitialDacaLipseste() {
 }
 
 const PUBLIC_DIR = path.join(__dirname, "public");
-const MIME = { ".css": "text/css", ".js": "text/javascript", ".png": "image/png", ".svg": "image/svg+xml" };
+const MIME = {
+  ".css": "text/css",
+  ".js": "text/javascript",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".json": "application/json",
+  ".webmanifest": "application/manifest+json",
+};
 
 function serveStatic(req, res) {
-  const filePath = path.join(PUBLIC_DIR, decodeURIComponent(req.url));
-  if (!filePath.startsWith(PUBLIC_DIR)) return false;
+  // Doar calea, fără coada de după „?". Altfel „/style.css?v=3" se căuta pe
+  // disc cu tot cu „?v=3", nu se găsea, și cererea pica în router — adică o
+  // simplă spargere de cache ar fi scos foaia de stil din pagină.
+  let cale;
+  try {
+    cale = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+  } catch (e) {
+    return false;
+  }
+  const filePath = path.join(PUBLIC_DIR, cale);
+  // `path.sep` la coadă: fără el, un director frate numit „publicXYZ" ar trece
+  // de verificare, fiindcă „/app/publicXYZ/x" chiar începe cu „/app/public".
+  if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + path.sep)) return false;
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return false;
   const ext = path.extname(filePath);
-  res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+  const antete = { "Content-Type": MIME[ext] || "application/octet-stream" };
+  // Service worker-ul se cere de la server la fiecare pornire a aplicației.
+  // Dacă browserul l-ar ține în buzunar, o versiune nouă (cu alt VERSIUNE
+  // înăuntru) n-ar mai ajunge niciodată pe telefoanele care au deja
+  // aplicația instalată — exact telefoanele care au nevoie de ea.
+  if (cale === "/sw.js") antete["Cache-Control"] = "no-cache";
+  res.writeHead(200, antete);
   fs.createReadStream(filePath).pipe(res);
   return true;
 }
