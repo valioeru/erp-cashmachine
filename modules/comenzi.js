@@ -5,6 +5,32 @@ const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const livrare = require("../lib/livrare-partiala");
 
+// Produsul configurat pe comandă: agentul alege familia și completează
+// caracteristicile obligatorii, iar codul și denumirea se scriu singure.
+// Regula e în lib/cod-produs.js, stratul dintre formular și ea în
+// lib/comanda-config.js, iar scrierea produsului în modules/cod-produs.js —
+// aceeași funcție pe care o folosește și „Produs nou" din nomenclator, ca să
+// nu existe două produse cu același cod.
+const K = require("../lib/comanda-config");
+
+function trimiteJson(ctx, status, obiect) {
+  ctx.res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  ctx.res.end(JSON.stringify(obiect));
+}
+
+// Familiile cu caracteristicile lor, pentru panoul din linia de comandă.
+//
+// Se cheamă `./cod-produs` târziu, nu la încărcarea modulului: ambele module
+// se înregistrează la pornire și o cerință încrucișată la vârf ar putea
+// întoarce un obiect pe jumătate construit.
+async function familiiPentruFormular() {
+  const CP = require("./cod-produs");
+  const fam = await CP.familii();
+  const peFamilie = {};
+  for (const f of fam) peFamilie[f.id] = await CP.citesteCaracteristici(false, f.id);
+  return K.familiiPentruPagina(fam, peFamilie);
+}
+
 // Stările comenzii și bara de pași stau în lib/comenzi-stari.js: le citește
 // și depozitul, iar o a doua copie aici ar fi rămas în urmă la prima
 // modificare. Vezi comentariul de acolo.
@@ -169,7 +195,7 @@ function asArray(v) {
 // exact când omul scrie mai repede.
 const MAX_REZULTATE = 40;
 
-function lineRowsScript(produse) {
+function lineRowsScript(produse, familii, eAdmin) {
   const date = (produse || []).map((p) => [
     p.id,
     String(p.cod || ""),
@@ -182,6 +208,8 @@ function lineRowsScript(produse) {
   return `<script>
     var COMENZI_PRODUSE = ${JSON.stringify(date).replace(/</g, "\\u003c")};
     var COMENZI_MAX = ${MAX_REZULTATE};
+    var COMENZI_FAMILII = ${JSON.stringify(familii || []).replace(/</g, "\\u003c")};
+    var COMENZI_ADMIN = ${eAdmin ? "true" : "false"};
     (function () {
       var fara = function (s) {
         return String(s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
@@ -273,21 +301,206 @@ function lineRowsScript(produse) {
       comenziAseaza(cutie, input);
     }
 
-    // „+ Adaugă ... ca produs nou"
+    // „+ Produs nou — configurează-l"
     //
     // Butonul apare si cand lista ARE rezultate, nu doar cand e goala: cazul
     // real e tocmai acela in care se vad patru benzi adezive si niciuna nu e
     // aia ceruta. Daca ar aparea doar pe lista goala, omul ar trebui sa scrie
     // intentionat o prostie ca sa ajunga la el.
+    //
+    // 27.10.2026, cererea lui Vali: agentul NU mai poate adauga un produs doar
+    // cu o denumire tastata. Alege familia si completeaza caracteristicile
+    // obligatorii, iar codul si denumirea se scriu singure. Altfel intrau in
+    // nomenclator „punga curier 35x45" si „Punga Curier 350x450" ca doua
+    // produse diferite, si stocul se rupea in doua.
+    //
+    // Adminul pastreaza si calea veche, pentru ce nu intra in nicio familie
+    // (consumabile, marfa de revanzare) — dar constient, nu din reflex.
     function comenziEscHtml(s) {
       return String(s == null ? '' : s)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
     function comenziButonNou(q) {
       var t = String(q || '').trim();
-      if (t.length < 3) return '';
-      return '<button type="button" class="rezultat-nou" onclick="comenziProdusNou(this)">' +
-             '+ Adaugă „' + comenziEscHtml(t) + '” ca produs nou</button>';
+      var b = '';
+      if (COMENZI_FAMILII.length) {
+        b += '<button type="button" class="rezultat-nou" onclick="comenziDeschideConfig(this)">' +
+             '+ Produs nou — configurează-l</button>';
+      }
+      if (COMENZI_ADMIN && t.length >= 3) {
+        b += '<button type="button" class="rezultat-nou rezultat-nou-liber" onclick="comenziProdusNou(this)">' +
+             '+ Adaugă „' + comenziEscHtml(t) + '” ca produs liber (doar admin)</button>';
+      }
+      return b;
+    }
+
+    // ---- Produsul configurat ------------------------------------------------
+    //
+    // Panoul sta pe un rand al lui sub linie, nu intr-o fereastra: agentul
+    // trebuie sa vada in acelasi timp cantitatea si pretul pe care le-a scris.
+    //
+    // Campurile NU au atribut name. Produsul se scrie prin fetch, iar comanda
+    // duce mai departe doar id-ul lui. Asa nu exista doua drumuri prin care un
+    // produs poate intra in baza — unul cu verificari, altul fara.
+    function comenziPanou(rand) {
+      var urm = rand.nextElementSibling;
+      return (urm && urm.classList.contains('rand-config')) ? urm : null;
+    }
+
+    function comenziDeschideConfig(btn) {
+      var rand = comenziRand(btn);
+      var cutie = rand.querySelector('.rezultate-produs');
+      if (cutie) cutie.hidden = true;
+      if (comenziPanou(rand)) { comenziPanou(rand).hidden = false; return; }
+
+      var tr = document.createElement('tr');
+      tr.className = 'rand-config';
+      var td = document.createElement('td');
+      td.colSpan = 6;
+      td.innerHTML =
+        '<div class="config-produs">' +
+          '<div class="config-sus">' +
+            '<label>Familia de produse ' +
+              '<select class="config-familie" onchange="comenziCampuri(this)">' +
+                '<option value="">— alege familia —</option>' +
+                COMENZI_FAMILII.map(function (f) {
+                  return '<option value="' + f.id + '">' + comenziEscHtml(f.nume) + '</option>';
+                }).join('') +
+              '</select>' +
+            '</label>' +
+            '<button type="button" class="link-btn" onclick="comenziInchideConfig(this)">Renunță</button>' +
+          '</div>' +
+          '<div class="config-campuri"></div>' +
+          '<div class="config-jos">' +
+            '<div class="config-cod">—</div>' +
+            '<div class="config-den"></div>' +
+            '<div class="config-avertisment"></div>' +
+          '</div>' +
+          '<button type="button" class="btn small config-ia" disabled onclick="comenziIaProdusul(this)">Pune produsul pe comandă</button>' +
+        '</div>';
+      tr.appendChild(td);
+      rand.parentNode.insertBefore(tr, rand.nextSibling);
+      tr.querySelector('.config-familie').focus();
+    }
+
+    function comenziInchideConfig(el) {
+      var tr = el.closest('tr.rand-config');
+      if (tr) tr.remove();
+    }
+
+    // Campurile familiei alese. Obligatoriile sunt marcate si in pagina, nu
+    // doar refuzate la final: agentul trebuie sa vada de la inceput ce i se
+    // cere, nu dupa ce apasa butonul.
+    function comenziCampuri(sel) {
+      var panou = sel.closest('.config-produs');
+      var gazda = panou.querySelector('.config-campuri');
+      var f = COMENZI_FAMILII.find(function (x) { return String(x.id) === String(sel.value); });
+      gazda.innerHTML = '';
+      if (!f) { comenziPreview(panou); return; }
+      f.campuri.forEach(function (c) {
+        var w = document.createElement('label');
+        w.className = 'config-camp' + (c.obligatoriu ? ' obligatoriu' : '');
+        var eticheta = comenziEscHtml(c.nume) + (c.um ? ' (' + comenziEscHtml(c.um) + ')' : '') +
+                       (c.obligatoriu ? ' <span class="steluta">*</span>' : '');
+        var intrare;
+        if (c.fel === 'numar') {
+          intrare = '<input type="number" step="any" class="config-val" data-id="' + c.id + '"' +
+                    (c.min != null ? ' min="' + c.min + '"' : '') +
+                    (c.max != null ? ' max="' + c.max + '"' : '') + '>';
+        } else {
+          intrare = '<select class="config-val" data-id="' + c.id + '"><option value="">—</option>' +
+                    c.valori.map(function (v) {
+                      return '<option value="' + comenziEscHtml(v) + '">' + comenziEscHtml(v) + '</option>';
+                    }).join('') + '</select>';
+        }
+        w.innerHTML = '<span>' + eticheta + '</span>' + intrare;
+        gazda.appendChild(w);
+      });
+      gazda.querySelectorAll('.config-val').forEach(function (el) {
+        el.addEventListener('input', function () { comenziCereIntarziat(panou); });
+        el.addEventListener('change', function () { comenziCereIntarziat(panou); });
+      });
+      comenziPreview(panou);
+    }
+
+    var comenziCeas = null;
+    function comenziCereIntarziat(panou) {
+      clearTimeout(comenziCeas);
+      comenziCeas = setTimeout(function () { comenziPreview(panou); }, 200);
+    }
+
+    function comenziAlegerile(panou) {
+      var sel = panou.querySelector('.config-familie');
+      var corp = { familie: sel ? sel.value : '' };
+      panou.querySelectorAll('.config-val').forEach(function (el) {
+        if (String(el.value).trim() !== '') corp['c_' + el.getAttribute('data-id')] = el.value;
+      });
+      return corp;
+    }
+
+    // Previzualizarea cheama ACEEASI functie de pe server ca salvarea. Daca ar
+    // fi calculata in browser, ecranul ar putea spune „gata" iar serverul
+    // „lipseste grosimea" — si nimeni n-ar sti pe cine sa creada.
+    function comenziPreview(panou) {
+      var cod = panou.querySelector('.config-cod');
+      var den = panou.querySelector('.config-den');
+      var av = panou.querySelector('.config-avertisment');
+      var btn = panou.querySelector('.config-ia');
+      var corp = comenziAlegerile(panou);
+      if (!corp.familie) { cod.textContent = '—'; den.textContent = ''; av.textContent = ''; btn.disabled = true; return; }
+      fetch('/comenzi/produs-configurat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(corp)
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (x) {
+          cod.textContent = x.cod || '—';
+          den.textContent = x.denumire || '';
+          av.textContent = x.rezumat || '';
+          av.className = 'config-avertisment' + (x.exista ? ' e-vechi' : '');
+          btn.disabled = !x.sePoate;
+          btn.textContent = x.exista ? 'Pune produsul existent pe comandă' : 'Pune produsul pe comandă';
+        })
+        .catch(function () { av.textContent = 'Nu am putut verifica codul. Verifică legătura.'; });
+    }
+
+    function comenziIaProdusul(btn) {
+      var panou = btn.closest('.config-produs');
+      var trConfig = btn.closest('tr.rand-config');
+      var rand = trConfig.previousElementSibling;
+      var umInput = rand.querySelector('.um-linie');
+      var corp = comenziAlegerile(panou);
+      corp.um = umInput ? umInput.value.trim() : '';
+      var av = panou.querySelector('.config-avertisment');
+      btn.disabled = true;
+      var textInitial = btn.textContent;
+      btn.textContent = 'Se scrie…';
+      fetch('/comenzi/produs-configurat/creeaza', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(corp)
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.d || !res.d.id) {
+            btn.disabled = false; btn.textContent = textInitial;
+            av.textContent = (res.d && res.d.eroare) || 'Nu am putut pune produsul. Încearcă din nou.';
+            return;
+          }
+          var d = res.d;
+          if (!COMENZI_PRODUSE.some(function (x) { return String(x[0]) === String(d.id); })) {
+            var p = [d.id, d.cod || '', d.denumire, Number(d.pret || 0), d.categorie || '', '', d.um || ''];
+            p[5] = window.comenziFaraDiacritice(p[1] + ' ' + p[2]);
+            COMENZI_PRODUSE.push(p);
+          }
+          rand.querySelector('input[name="produs_id[]"]').value = d.id;
+          rand.querySelector('.cauta-produs').value = (d.cod ? d.cod + ' — ' : '') + d.denumire;
+          if (umInput && !umInput.value && d.um) umInput.value = d.um;
+          trConfig.remove();
+          var cant = rand.querySelector('input[name="cantitate[]"]');
+          if (cant && !cant.value) cant.focus();
+        })
+        .catch(function () {
+          btn.disabled = false; btn.textContent = textInitial;
+          av.textContent = 'Nu am putut pune produsul. Verifică legătura și încearcă din nou.';
+        });
     }
 
     // Ce scrie omul nu se interpoleaza in cod: butonul nu poarta denumirea cu
@@ -378,7 +591,11 @@ function lineRowsScript(produse) {
 
     function comenziAddRow() {
       var tbody = document.getElementById('linii-body');
-      var clone = tbody.querySelector('tr').cloneNode(true);
+      // Prima linie de MARFA, nu primul rand: sub ea poate sta un panou de
+      // configurare deschis, iar clonarea lui ar scoate un al doilea panou
+      // legat de linia gresita.
+      var sursa = tbody.querySelector('tr:not(.rand-config)');
+      var clone = sursa.cloneNode(true);
       clone.querySelectorAll('input').forEach(function (el) { el.value = ''; });
       clone.querySelectorAll('select').forEach(function (el) { el.selectedIndex = 0; });
       var cutie = clone.querySelector('.rezultate-produs');
@@ -388,7 +605,13 @@ function lineRowsScript(produse) {
     }
     function comenziRemoveRow(btn) {
       var tbody = document.getElementById('linii-body');
-      if (tbody.children.length > 1) btn.closest('tr').remove();
+      // Se numara liniile de marfa. Altfel un panou de configurare deschis ar
+      // trece drept „a doua linie" si s-ar putea sterge si ultima.
+      if (tbody.querySelectorAll('tr:not(.rand-config)').length <= 1) return;
+      var rand = btn.closest('tr');
+      var panou = comenziPanou(rand);
+      if (panou) panou.remove();
+      rand.remove();
     }
   </script>
   <style>
@@ -408,7 +631,90 @@ function lineRowsScript(produse) {
       color:var(--accent,#1a56db); font-weight:600; }
     .rezultat-nou:hover { background:var(--accent-slab,#e8f0fe); }
     .rezultat-nou[disabled] { opacity:.6; cursor:default; }
+    .rezultat-nou-liber { color:var(--text-muted); font-weight:500; }
     .rezultat-eroare { padding:6px 10px; color:var(--danger,#b42318); font-size:12px; }
+
+    /* Panoul de configurare: stă sub linia lui, în același tabel, ca agentul
+       să vadă în același timp cantitatea și prețul deja scrise. */
+    .rand-config > td { background:var(--accent-slab,#f4f7fd); padding:10px 12px !important; }
+    .config-produs { display:flex; flex-direction:column; gap:10px; }
+    .config-sus { display:flex; align-items:end; gap:14px; }
+    .config-sus label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--text-muted); }
+    .config-campuri { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:8px 12px; }
+    .config-camp { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--text-muted); }
+    .config-camp.obligatoriu > span { font-weight:600; color:var(--text,#111); }
+    .config-camp .steluta { color:var(--danger,#b42318); }
+    .config-jos { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+    .config-cod { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:17px; font-weight:700; letter-spacing:.5px; }
+    .config-den { font-size:13px; }
+    .config-avertisment { font-size:12px; color:var(--danger,#b42318); }
+    /* Produsul care există deja nu e o greșeală — e exact ce vrem. */
+    .config-avertisment.e-vechi { color:var(--text-muted); }
+    .config-ia { align-self:start; }
+
+    /* --- comanda pe telefon ------------------------------------------------
+     *
+     * Șase coloane nu încap pe un ecran de 360 px, iar o comandă luată de pe
+     * telefon e exact cazul în care agentul e la client și n-are răbdare să
+     * împingă tabelul stânga-dreapta. Deci fiecare linie devine o cartelă:
+     * câmpurile unul sub altul, fiecare cu numele lui scris lângă (vine din
+     * atributul data-eticheta), fiindcă dispare capul de tabel.
+     *
+     * Aceeași pagină, același formular, aceleași rute — doar altfel așezate.
+     * De-aia nu există o a doua „aplicație de comenzi" de ținut în pas.
+     */
+    @media (max-width: 760px) {
+      /* min-width:0 nu e de prisos: foaia principală dă tabelului
+         „min-width:760px", ca să nu se strivească cele șase coloane pe
+         laptop. Fără anularea asta, cartelele s-ar desena cuminți — într-un
+         tabel care tot iese 760 px în lățime și tot trebuie împins cu
+         degetul. */
+      .lines-table, .lines-table tbody, .lines-table tr, .lines-table td {
+        display:block; width:100%; min-width:0;
+      }
+      .lines-table thead { display:none; }
+      .lines-table td { min-width:0 !important; border:0; padding:5px 0 !important; }
+      /* Cartela nu e o simplă coloană de câmpuri: cantitatea, unitatea și
+         prețul sunt scurte și stau pe un singur rând. Altfel o linie ar
+         ocupa cinci ecrane de deget, iar o comandă de trei linii ar
+         însemna derulat până la capătul lumii. */
+      .lines-table tr:not(.rand-config) {
+        display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;
+        background:var(--surface,#fff); border:1px solid var(--border,#e1e4e9); border-radius:10px;
+        padding:10px 12px; margin-bottom:10px;
+      }
+      .lines-table td[data-eticheta="Categorie"],
+      .lines-table td[data-eticheta="Produs"],
+      .lines-table td[data-eticheta=""] { grid-column:1 / -1; }
+      /* Trei câmpuri pe un rând de 340 px nu încap cu min-width-ul de 110
+         pus pentru laptop. */
+      .lines-table td input[type="number"] { min-width:0; }
+      /* Numele câmpului, deasupra lui. Celula fără etichetă (butonul Șterge)
+         n-o scrie — altfel ar rămâne un rând gol deasupra butonului. */
+      .lines-table td[data-eticheta]:not([data-eticheta=""])::before {
+        content:attr(data-eticheta); display:block; font-size:11px; font-weight:600;
+        text-transform:uppercase; letter-spacing:.3px; color:var(--text-muted); margin-bottom:3px;
+      }
+      .lines-table td input, .lines-table td select { width:100% !important; }
+      /* 16px: sub atât, iPhone-ul mărește singur pagina când intri în câmp,
+         și pe urmă rămâne mărită. 44px: degetul, nu cursorul. */
+      .lines-table td input, .lines-table td select,
+      .config-produs input, .config-produs select, .config-produs button {
+        min-height:44px; font-size:16px;
+      }
+      .lines-table td[data-eticheta=""] { padding-top:8px !important; text-align:right; }
+      /* Cartela de configurare se lipește de linia ei, nu plutește separat. */
+      .rand-config { margin-top:-12px; }
+      .rand-config > td { border-radius:0 0 10px 10px; padding:12px !important; }
+      .config-sus { flex-direction:column; align-items:stretch; gap:8px; }
+      .config-campuri { grid-template-columns:1fr 1fr; }
+      .config-ia { align-self:stretch; }
+    }
+    /* Telefoanele mici: un singur câmp pe rând, altfel „Lungime fără clapetă"
+       se rupe în trei rânduri și cartela devine un perete de text. */
+    @media (max-width: 430px) {
+      .config-campuri { grid-template-columns:1fr; }
+    }
   </style>`;
 }
 
@@ -468,6 +774,10 @@ function register(router) {
     const produse = await db
       .prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire")
       .all();
+    // Familiile cu caracteristicile lor, pentru panoul de configurare din
+    // fiecare linie. Se citesc o singură dată și se trimit ca date, nu câte un
+    // tur la server pentru fiecare linie adăugată.
+    const familiiPagina = await familiiPentruFormular();
     if (parteneri.length === 0 || produse.length === 0) {
       return send(
         ctx.res,
@@ -518,11 +828,16 @@ function register(router) {
       return p ? String(p.unitate_masura || "").trim() : "";
     };
 
+    // `data-eticheta` pe fiecare celulă: pe telefon rândul se desface în
+    // cartelă, iar atunci capul de tabel nu se mai vede deasupra coloanelor.
+    // Fără eticheta asta, agentul ar avea trei căsuțe de numere una sub alta
+    // și nimic care să spună care e cantitatea și care e prețul. Regula de
+    // desfacere e în blocul de stil din lineRowsScript.
     const randLinie = (l) => `<tr>
-            <td style="min-width:150px">
+            <td data-eticheta="Categorie" style="min-width:150px">
               <select class="cat-produs" onchange="comenziFiltreaza(this)">${optiuniCategorie(categoriaProdusului(l.produs_id))}</select>
             </td>
-            <td style="min-width:260px">
+            <td data-eticheta="Produs" style="min-width:260px">
               <span class="alege-produs" style="position:relative;display:block">
                 <input type="hidden" name="produs_id[]" value="${esc(l.produs_id || "")}">
                 <input type="search" class="cauta-produs" autocomplete="off" style="width:100%"
@@ -531,11 +846,11 @@ function register(router) {
                 <div class="rezultate-produs" hidden></div>
               </span>
             </td>
-            <td><input type="number" step="0.01" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
-            <td><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
+            <td data-eticheta="Cantitate"><input type="number" step="0.01" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
+            <td data-eticheta="UM"><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
                        value="${esc(l.um || unitateaProdusului(l.produs_id))}"></td>
-            <td><input type="number" step="0.01" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
-            <td><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
+            <td data-eticheta="Preț unitar"><input type="number" step="0.01" inputmode="decimal" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
+            <td data-eticheta=""><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
           </tr>`;
 
     // Liniile scrise deja, dacă salvarea a fost oprită. Altfel, un rând gol.
@@ -598,12 +913,68 @@ function register(router) {
     </form>
     <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
     ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
-    ${lineRowsScript(produse)}`;
+    ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"))}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
 
   router.get("/comenzi/nou", async (ctx) => {
     await formularComandaNoua(ctx);
+  });
+
+  // ---- Produsul configurat din linia de comandă ---------------------------
+  //
+  // Două rute, nu una: una se poate chema la fiecare tastă apăsată fiindcă NU
+  // scrie nimic, cealaltă scrie și se cheamă o singură dată, la apăsarea
+  // butonului. Dacă previzualizarea ar scrie, fiecare cifră tastată la grosime
+  // ar lăsa un produs în nomenclator.
+  //
+  // Amândouă rutele stau ÎNAINTEA lui /comenzi/:id — rutele se potrivesc în
+  // ordinea în care sunt scrise, iar altfel „produs-configurat" ar fi citit ca
+  // număr de comandă.
+  router.post("/comenzi/produs-configurat", async (ctx) => {
+    if (!ctx.user) return trimiteJson(ctx, 403, { eroare: "Nu ești autentificat." });
+    const CP = require("./cod-produs");
+    const corp = ctx.body || {};
+    const familieId = Number(corp.familie) || 0;
+    if (!familieId) return trimiteJson(ctx, 200, { cod: "", denumire: "", rezumat: "", sePoate: false });
+    const alegeri = K.alegeriDin(corp);
+    const r = await CP.genereaza(alegeri, familieId);
+    return trimiteJson(ctx, 200, {
+      cod: r.cod || "",
+      denumire: r.denumire || "",
+      rezumat: K.rezumat(r),
+      exista: Boolean(r.exista),
+      sePoate: K.sePoateComanda(r),
+    });
+  });
+
+  router.post("/comenzi/produs-configurat/creeaza", async (ctx) => {
+    if (!ctx.user) return trimiteJson(ctx, 403, { eroare: "Nu ești autentificat." });
+    const CP = require("./cod-produs");
+    const corp = ctx.body || {};
+    const familieId = Number(corp.familie) || 0;
+    const fam = (await CP.familii()).find((f) => Number(f.id) === familieId);
+    if (!fam) return trimiteJson(ctx, 400, { eroare: "Alege familia de produse." });
+
+    const alegeri = K.alegeriDin(corp);
+    const nimic = Object.keys(alegeri).length === 0;
+    // Aceeași funcție ca la „Produs nou" din nomenclator: găsește produsul
+    // dacă există, îl scrie dacă nu. Un produs incomplet nu se scrie niciodată
+    // — verificarea e înăuntru, nu aici, ca să nu existe o a doua părere.
+    const { r, id } = await CP.produsulAlegerilor(alegeri, familieId, { um: corp.um });
+    if (!id) return trimiteJson(ctx, 400, { eroare: K.motivRefuz(r, fam.nume, nimic) });
+
+    const p = await db
+      .prepare("SELECT id, cod, cod_generat, denumire, unitate_masura, pret_vanzare, categorie FROM produse WHERE id = ?")
+      .get(id);
+    return trimiteJson(ctx, 200, {
+      id: Number(id),
+      cod: p ? p.cod_generat || p.cod || "" : r.cod,
+      denumire: p ? p.denumire : r.denumire,
+      um: p ? p.unitate_masura || "" : "",
+      pret: p ? Number(p.pret_vanzare || 0) : 0,
+      categorie: p ? p.categorie || "" : "",
+    });
   });
 
   router.post("/comenzi", async (ctx) => {
@@ -666,9 +1037,10 @@ function register(router) {
     if (liniiFaraProdus) {
       return await formularComandaNoua(ctx, {
         eroare:
-          liniiFaraProdus === 1
-            ? "O linie are cantitate, dar niciun produs ales. Caută produsul și apasă pe el în listă."
-            : `${liniiFaraProdus} linii au cantitate, dar niciun produs ales. Caută produsul și apasă pe el în listă.`,
+          (liniiFaraProdus === 1
+            ? "O linie are cantitate, dar niciun produs ales."
+            : `${liniiFaraProdus} linii au cantitate, dar niciun produs ales.`) +
+          " Caută produsul și apasă pe el în listă, sau apasă „Produs nou — configurează-l” și completează caracteristicile.",
         valori,
       });
     }
@@ -755,7 +1127,8 @@ function register(router) {
 
     const linii = await db
       .prepare(
-        `SELECT cl.*, p.denumire, p.unitate_masura FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ?`
+        `SELECT cl.*, p.denumire, p.unitate_masura, COALESCE(p.cod_generat, p.cod) AS cod_produs
+         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ?`
       )
       .all(comanda.id);
     const total = linii.reduce((s, l) => s + l.cantitate * l.pret_unitar, 0);
@@ -847,7 +1220,11 @@ function register(router) {
                   ? `<span class="badge galben">parțial ${st.acoperit.toLocaleString("ro-RO", { maximumFractionDigits: 3 })}</span>`
                   : '<span class="badge rosu">lipsă</span>';
           return [
-            esc(l.denumire),
+            // Codul generat stă sub denumire, nu în locul ei: după el se caută
+            // produsul în producție și în depozit, iar denumirea e ce
+            // recunoaște clientul la telefon.
+            esc(l.denumire) +
+              (l.cod_produs ? `<br><span class="mic" style="color:var(--text-muted)">${esc(l.cod_produs)}</span>` : ""),
             l.cantitate,
             // Unitatea scrisă pe linie bate pe cea din nomenclator: acolo e
             // unitatea în care ținem produsul, aici cea în care s-a comandat.

@@ -1,7 +1,7 @@
 "use strict";
 const db = require("../lib/db");
 const auth = require("../lib/auth");
-const { esc, layout, avatar } = require("../lib/render");
+const { esc, layout, avatar, capPwa } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 function paginaLogin(eroare, redirectTo) {
@@ -17,9 +17,15 @@ function paginaLogin(eroare, redirectTo) {
       </form>
     </div>
   `;
+  // Capul de aplicatie e si aici, nu doar pe paginile de dupa autentificare:
+  // pe un telefon pe care ERP-ul nu e inca instalat, PRIMA pagina vazuta e
+  // tocmai asta. Fara el, „Adauga pe ecranul principal" ar salva o scurtatura
+  // de browser, nu aplicatia.
   return `<!doctype html>
-<html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Autentificare · ERP</title><link rel="stylesheet" href="/style.css"></head>
+<html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Autentificare · ERP</title><link rel="stylesheet" href="/style.css">
+${capPwa()}
+</head>
 <body><main class="content">${body}</main></body></html>`;
 }
 
