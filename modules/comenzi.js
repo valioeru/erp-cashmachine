@@ -82,6 +82,14 @@ const sumaIn = (v, moneda) =>
   " " +
   (SIMBOL[moneda] || moneda || "lei");
 
+// Prețul UNITAR se scrie altfel decât un total: ține până la patru zecimale.
+//
+// Cererea lui Vali, 27.10.2026. O pungă la 0,4235 lei nu încape în două
+// zecimale — la 500.000 de bucăți, rotunjirea la 0,42 pierde 1.750 de lei pe
+// o singură linie. Totalurile rămân pe două: sunt bani de încasat, nu prețuri.
+const BNR = require("../lib/curs-bnr");
+const pretIn = (v, moneda) => BNR.scriePret(v) + " " + (SIMBOL[moneda] || moneda || "lei");
+
 // ------------------------------------------------------------------
 // Anuntul de comanda noua
 // ------------------------------------------------------------------
@@ -288,7 +296,7 @@ function blocLinii(produse, linii) {
           <td data-eticheta="Cantitate"><input type="number" step="0.01" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
           <td data-eticheta="UM"><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
                      value="${esc(l.um || unitateaProdusului(l.produs_id))}"></td>
-          <td data-eticheta="Preț unitar"><input type="number" step="0.01" inputmode="decimal" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
+          <td data-eticheta="Preț unitar"><input type="number" step="0.0001" inputmode="decimal" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
           <td data-eticheta=""><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
         </tr>`;
 
@@ -1132,9 +1140,15 @@ function register(router) {
       );
     }
 
+    // Cursul BNR se ÎNGHEAȚĂ pe comandă, nu se recalculează la fiecare
+    // deschidere. Altfel suma în lei s-ar schimba singură în fiecare
+    // dimineață, iar o comandă de luna trecută n-ar mai semăna cu nimic din
+    // contabilitate. La comenzile în lei nu se scrie nimic.
+    const cursAzi = moneda === "RON" ? null : await require("./curs").laZiua(moneda, new Date().toISOString().slice(0, 10));
     const info = await db
       .prepare(
-        "INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, moneda) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id"
+        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, moneda, curs_bnr, curs_bnr_data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         partener_id,
@@ -1143,7 +1157,9 @@ function register(router) {
         ctx.user ? ctx.user.id : null,
         String(ctx.body.data_livrare_ceruta || "") || null,
         valori.livrare_partiala,
-        moneda
+        moneda,
+        cursAzi && cursAzi.valoare > 0 ? cursAzi.valoare : null,
+        cursAzi && cursAzi.data ? cursAzi.data : null
       );
     const comandaId = info.lastInsertRowid;
 
@@ -1292,13 +1308,20 @@ function register(router) {
             // Unitatea scrisă pe linie bate pe cea din nomenclator: acolo e
             // unitatea în care ținem produsul, aici cea în care s-a comandat.
             esc(l.um || l.unitate_masura),
-            sumaIn(l.pret_unitar, comanda.moneda),
+            pretIn(l.pret_unitar, comanda.moneda),
             sumaIn(l.cantitate * l.pret_unitar, comanda.moneda),
             stocTxt,
           ];
         })
       )}
       <div class="totals"><span class="grand">Total: ${esc(sumaIn(total, comanda.moneda))}</span></div>
+      ${
+        String(comanda.moneda || "RON") !== "RON"
+          ? `<p style="margin:2px 0 0;text-align:right;color:var(--text-muted);font-size:13px">${esc(
+              BNR.explica(total, comanda.moneda, comanda.curs_bnr, comanda.curs_bnr_data)
+            )}</p>`
+          : ""
+      }
 
       ${
         potiModifica
@@ -1693,12 +1716,34 @@ function register(router) {
 
     if (!schimbari.length) return redirect(ctx.res, `/comenzi/${comanda.id}?ok=nimic`);
 
+    // Moneda schimbată înseamnă curs nou. Cursul VECHI rămâne însă dacă
+    // moneda n-a fost atinsă: o corectură de cantitate pe o comandă de acum
+    // trei săptămâni n-are voie să-i schimbe cursul sub mână — ar muta suma
+    // în lei fără ca nimeni s-o fi cerut.
+    let curs = comanda.curs_bnr;
+    let cursData = comanda.curs_bnr_data;
+    if (dupa.moneda === "RON") {
+      curs = null;
+      cursData = null;
+    } else if (dupa.moneda !== comanda.moneda || !(Number(curs) > 0)) {
+      const c = await require("./curs").laZiua(dupa.moneda, new Date().toISOString().slice(0, 10));
+      curs = c && c.valoare > 0 ? c.valoare : null;
+      cursData = c && c.data ? c.data : null;
+      if (curs) {
+        schimbari.push({
+          ce: "Curs BNR",
+          vechi: comanda.curs_bnr ? BNR.scrieCurs(comanda.curs_bnr) : "",
+          nou: BNR.scrieCurs(curs) + (cursData ? " din " + cursData : ""),
+        });
+      }
+    }
+
     await db
       .prepare(
         `UPDATE comenzi SET partener_id = ?, numar = ?, observatii = ?, data_livrare_ceruta = ?,
-           livrare_partiala = ?, moneda = ? WHERE id = ?`
+           livrare_partiala = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ? WHERE id = ?`
       )
-      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, dupa.moneda, comanda.id);
+      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, dupa.moneda, curs, cursData, comanda.id);
 
     // Liniile se rescriu, dar `cantitate_livrata` NU se pierde: depozitul a
     // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să
