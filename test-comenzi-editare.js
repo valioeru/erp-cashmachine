@@ -65,6 +65,8 @@ function fals(sql) {
         const p = BAZA.parteneri.find((x) => x.id === c.partener_id);
         return { ...c, partener_nume: p ? p.nume : "" };
       }
+      if (/FROM cursuri_bnr/i.test(s)) return { valoare: 4.9723, data: "2026-10-27" };
+      if (/FROM setari_app/i.test(s)) return undefined;
       if (/FROM parteneri WHERE id/i.test(s)) return BAZA.parteneri.find((x) => x.id === Number(a[0]));
       if (/FROM produse WHERE id/i.test(s)) return BAZA.produse.find((x) => x.id === Number(a[0]));
       if (/COUNT\(\*\)/i.test(s)) return { n: 0 };
@@ -95,8 +97,13 @@ function fals(sql) {
         return { lastInsertRowid: urmId };
       }
       if (/UPDATE comenzi SET partener_id/i.test(s)) {
-        const c = BAZA.comenzi.find((x) => x.id === Number(a[6]));
-        Object.assign(c, { partener_id: a[0], numar: a[1], observatii: a[2], data_livrare_ceruta: a[3], livrare_partiala: a[4], moneda: a[5] });
+        // Ultimul parametru e id-ul comenzii, oricate ar fi inaintea lui.
+        const c = BAZA.comenzi.find((x) => x.id === Number(a[a.length - 1]));
+        if (!c) throw new Error("UPDATE pe o comanda inexistenta: " + JSON.stringify(a));
+        Object.assign(c, {
+          partener_id: a[0], numar: a[1], observatii: a[2], data_livrare_ceruta: a[3],
+          livrare_partiala: a[4], moneda: a[5], curs_bnr: a[6], curs_bnr_data: a[7],
+        });
         return {};
       }
       if (/UPDATE comenzi_linii SET/i.test(s)) {
@@ -252,6 +259,32 @@ const CA_ACUM = [[1, 20000, 0.42], [2, 100, 7.1]];
     bine("schimbarea de client e scrisă", Boolean(h), BAZA.istoric.slice(nAinte).map((x) => x.ce));
     bine("cu numele firmelor, nu cu id-uri",
       h && h.vechi.indexOf("Sameday") !== -1 && h.nou.indexOf("Delivery") !== -1, h);
+  }
+
+  console.log("\nMoneda schimbată aduce curs nou");
+  {
+    const nAinte = BAZA.istoric.length;
+    await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular([[1, 25000, 0.4235]], { partener_id: "4", moneda: "EUR" }), ADMIN);
+    const noi = BAZA.istoric.slice(nAinte).map((h) => h.ce);
+    bine("schimbarea de monedă e scrisă", noi.indexOf("Moneda") !== -1, noi);
+    bine("și cursul BNR înghețat odată cu ea", noi.indexOf("Curs BNR") !== -1, noi);
+    bine("cursul chiar s-a scris pe comandă", Number(BAZA.comenzi[0].curs_bnr) === 4.9723, BAZA.comenzi[0].curs_bnr);
+    bine("cu ziua lui", BAZA.comenzi[0].curs_bnr_data === "2026-10-27", BAZA.comenzi[0].curs_bnr_data);
+    bine("prețul cu patru zecimale a intrat întreg",
+      BAZA.linii.find((l) => l.produs_id === 1).pret_unitar === 0.4235,
+      BAZA.linii.find((l) => l.produs_id === 1).pret_unitar);
+
+    // O corectura pe o comanda veche n-are voie sa-i mute cursul sub mana.
+    const cursVechi = BAZA.comenzi[0].curs_bnr;
+    const n2 = BAZA.istoric.length;
+    await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular([[1, 26000, 0.4235]], { partener_id: "4", moneda: "EUR" }), ADMIN);
+    bine("o corectură de cantitate NU schimbă cursul", BAZA.comenzi[0].curs_bnr === cursVechi, BAZA.comenzi[0].curs_bnr);
+    bine("și nu scrie un «Curs BNR» degeaba în istoric",
+      BAZA.istoric.slice(n2).every((h) => h.ce !== "Curs BNR"), BAZA.istoric.slice(n2).map((h) => h.ce));
+
+    // Inapoi pe lei: cursul trebuie sa dispara.
+    await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular([[1, 26000, 0.4235]], { partener_id: "4", moneda: "RON" }), ADMIN);
+    bine("trecerea înapoi pe lei șterge cursul", BAZA.comenzi[0].curs_bnr === null, BAZA.comenzi[0].curs_bnr);
   }
 
   console.log("\nIstoricul se vede pe comandă");

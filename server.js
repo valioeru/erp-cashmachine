@@ -102,6 +102,7 @@ require("./modules/forecast").register(router);
 require("./modules/comision").register(router);
 require("./modules/ghid").register(router);
 require("./modules/noutati").register(router);
+require("./modules/curs").register(router);
 
 router.get("/healthz", (ctx) => {
   ctx.res.writeHead(200, { "Content-Type": "text/plain" });
@@ -276,6 +277,12 @@ async function start() {
   // Fisa tehnica a utilajelor (Utilaje_CashMachine_ERP.xlsx). Pune doar ce
   // lipseste: o corectura facuta de om in ERP nu se rescrie la repornire.
   await require("./lib/utilaje-seed").seed().catch((e) => console.error("[utilaje-seed]", e.message));
+  // Cursul BNR: o dată la pornire și apoi din șase în șase ore. BNR publică
+  // o dată pe zi, pe la 13:00, dar pornirile sunt la ore întâmplătoare — iar
+  // o comandă în euro scrisă dimineața nu trebuie să aștepte până mâine.
+  // Nu se așteaptă după el: dacă site-ul BNR nu răspunde, ERP-ul pornește la
+  // fel, cu cursul de ieri.
+  require("./modules/curs").seed().catch((e) => console.error("[curs]", e.message));
   // „SC" din fata numelor de parteneri: strica sortarea si cautarea dupa
   // primele litere. Se taie o data; potrivirile pe nume ignora oricum
   // prefixul de acum (lib/nume-firma.js), deci importul nu face duplicate.
@@ -287,6 +294,9 @@ async function start() {
   require("./modules/culegere").porneste();
   await auth.curataSesiuni();
   setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
+  setInterval(() => {
+    require("./modules/curs").seed().catch(() => null);
+  }, 6 * 60 * 60 * 1000).unref();
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, () => {
     console.log(`ERP pornit: http://localhost:${PORT}`);
