@@ -100,8 +100,19 @@ console.log("\n6. Scrierea valorii nu contează, conținutul da");
 {
   const r = C.genereazaCod(CARACTERISTICI, { 1: "folie stretch", 2: "manuala", 3: "ALB", 4: "10", 5: "200" });
   egal("fără diacritice, cu altă literă mare — același cod", r.cod, "FSMA10200");
+  // Virgula se citeste ca punct zecimal, dar bucata tot trebuie sa incapa in
+  // locul ei. „10,5" intr-un loc de doua cifre ar scrie „105" — exact codul
+  // unei grosimi de 105. Se refuza, nu se lateste codul in tacere.
   const z = C.genereazaCod(CARACTERISTICI, { 1: "Folie Stretch", 2: "Manuală", 3: "Alb", 4: "10,5", 5: 200 });
-  egal("virgula zecimală se citește ca punct", z.bucati[3].cod, "105");
+  bine("o zecimală care nu încape în locul ei se refuză", !z.ok && z.gresite.length === 1, JSON.stringify(z.gresite));
+  bine("și spune în câte cifre trebuia să încapă", z.gresite[0].indexOf("2 cifre") !== -1, z.gresite[0]);
+  bine("codul rupt nu iese deloc", z.cod !== "FSMA105200", z.cod);
+
+  // Unde incape, virgula merge mai departe ca punct zecimal.
+  const larg = CARACTERISTICI.map((c) => (c.id === 4 ? { ...c, cifre: 3, max_val: 100 } : c));
+  const w = C.genereazaCod(larg, { 1: "Folie Stretch", 2: "Manuală", 3: "Alb", 4: "10,5", 5: 200 });
+  egal("virgula zecimală se citește ca punct", w.bucati[3].cod, "105");
+  bine("și codul e valid", w.ok, JSON.stringify(w.gresite));
 }
 
 console.log("\n7. Șablonul, pentru ecranul de configurare");
