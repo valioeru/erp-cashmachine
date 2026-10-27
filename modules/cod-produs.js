@@ -132,7 +132,38 @@ function register(router) {
       nr(c.ordine),
       c.fel === "numar" ? (nr(c.cifre) ? nr(c.cifre) + " cifre" : '<span class="badge rosu">lungime liberă</span>') : "—",
       c.obligatoriu ? "da" : "nu",
-      `<form method="post" action="${CALE}/${c.id}/sterge" class="inline-form"
+      // Modificarea unei caracteristici, pe rândul ei.
+      //
+      // Până acum o caracteristică se putea doar adăuga și șterge. Ca să scoți
+      // greutatea din cod trebuia ștearsă și rescrisă — iar dacă apucase să
+      // nască produse, ștergerea doar o dezactiva și nu se mai putea repara
+      // deloc. Cererea lui Vali, 27.10.2026.
+      //
+      // FELUL (listă / număr) NU se schimbă de aici: o listă trecută pe număr
+      // și-ar lăsa valorile orfane, iar un număr trecut pe listă n-ar avea
+      // nicio valoare — în amândouă cazurile codul ar înceta să mai iasă,
+      // fără ca nimeni să înțeleagă de ce.
+      `<details class="editeaza-carac">
+         <summary>Modifică</summary>
+         <form method="post" action="${CALE}/${c.id}/editare" class="form editeaza-form">
+           <input type="hidden" name="familie_id" value="${familieId}">
+           <label>Denumire<input name="nume" value="${esc(c.nume)}" required></label>
+           <label>Ordine<input type="number" name="ordine" value="${nr(c.ordine)}"></label>
+           ${
+             c.fel === "numar"
+               ? `<label>UM<input name="um" value="${esc(c.um || "")}"></label>
+                  <label>Cifre în cod<input type="number" name="cifre" min="0" max="9" value="${nr(c.cifre)}"></label>
+                  <label>Minim<input type="number" step="any" name="min_val" value="${c.min_val == null ? "" : nr(c.min_val)}"></label>
+                  <label>Maxim<input type="number" step="any" name="max_val" value="${c.max_val == null ? "" : nr(c.max_val)}"></label>`
+               : ""
+           }
+           <label class="bif"><input type="checkbox" name="in_cod" value="1"${c.in_cod ? " checked" : ""}> intră în cod</label>
+           <label class="bif"><input type="checkbox" name="obligatoriu" value="1"${c.obligatoriu ? " checked" : ""}> obligatorie</label>
+           <label class="bif"><input type="checkbox" name="activ" value="1"${c.activ ? " checked" : ""}> activă</label>
+           <button class="btn small" type="submit">Salvează</button>
+         </form>
+       </details>
+       <form method="post" action="${CALE}/${c.id}/sterge" class="inline-form"
              onsubmit="return confirm('Ștergi caracteristica „${esc(c.nume)}”? Codurile deja generate rămân cum sunt.')">
          <button class="link-btn danger" type="submit">Șterge</button>
        </form>`,
@@ -189,6 +220,15 @@ function register(router) {
              </div>`
           : ""
       }
+      <style>
+        .editeaza-carac > summary { cursor:pointer; font-size:12px; color:var(--primary,#2f5d9c); font-weight:600; }
+        .editeaza-form { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:6px 10px;
+          margin-top:8px; padding:10px; border:1px solid var(--border,#e1e4e9); border-radius:8px;
+          background:var(--bg,#f5f6f8); max-width:720px; }
+        .editeaza-form label { display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--text-muted); }
+        .editeaza-form label.bif { flex-direction:row; align-items:center; gap:6px; font-size:12px; color:var(--text,#1c2230); }
+        .editeaza-form .btn { grid-column:1 / -1; justify-self:start; }
+      </style>
       ${table(["Caracteristică", "Fel", "Valori / interval", "În cod", "Ordine", "Cifre", "Obligatorie", ""], randuri)}
 
       <h2>Adaugă o caracteristică</h2>
@@ -358,6 +398,40 @@ function register(router) {
         parseInt(b.cifre, 10) || 0,
         b.min_val === "" || b.min_val == null ? null : Number(b.min_val),
         b.max_val === "" || b.max_val == null ? null : Number(b.max_val)
+      )
+      .catch(() => null);
+    redirect(ctx.res, CALE + inapoi(b.familie_id));
+  });
+
+  router.post(`${CALE}/:id/editare`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    const b = ctx.body || {};
+    const c = await db.prepare("SELECT * FROM cod_caracteristici WHERE id = ?").get(ctx.params.id);
+    if (!c) return redirect(ctx.res, CALE + inapoi(b.familie_id));
+    const nume = String(b.nume || "").trim();
+    if (!nume) return redirect(ctx.res, CALE + inapoi(b.familie_id));
+
+    // `fel` și `familie_id` rămân cum sunt: vezi comentariul de la formular.
+    // Numerele își păstrează unitatea și intervalul dacă formularul nu le-a
+    // trimis (la caracteristicile de tip listă nici nu apar pe ecran).
+    const areNum = c.fel === "numar";
+    await db
+      .prepare(
+        `UPDATE cod_caracteristici SET nume = ?, um = ?, in_cod = ?, ordine = ?, obligatoriu = ?,
+            cifre = ?, min_val = ?, max_val = ?, activ = ?
+          WHERE id = ?`
+      )
+      .run(
+        nume,
+        areNum ? String(b.um || "").trim() || null : c.um,
+        b.in_cod ? 1 : 0,
+        parseInt(b.ordine, 10) || 0,
+        b.obligatoriu ? 1 : 0,
+        areNum ? parseInt(b.cifre, 10) || 0 : c.cifre,
+        areNum ? (b.min_val === "" || b.min_val == null ? null : Number(b.min_val)) : c.min_val,
+        areNum ? (b.max_val === "" || b.max_val == null ? null : Number(b.max_val)) : c.max_val,
+        b.activ ? 1 : 0,
+        c.id
       )
       .catch(() => null);
     redirect(ctx.res, CALE + inapoi(b.familie_id));
