@@ -23,6 +23,8 @@
 const db = require("../lib/db");
 const { esc, cantitate, unitate, layout, table, subnavProductie } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const PLAN = require("../lib/plan-lunar");
+const drive = require("../lib/drive");
 const SCH = require("../lib/schimburi");
 const PROG = require("./program");
 const { fluxulComenzii, utilajeleFluxului } = require("../lib/flux-comanda");
@@ -1638,6 +1640,206 @@ function register(router) {
   // =========================================================================
   // PLANIFICARE: calendarul de încărcare
   // =========================================================================
+  // ---- fișierul de planificare lunară -------------------------------------
+  //
+  // Zona asta NU citește nimic din fișier. Ține documentul lunii, cu
+  // versiuni, ca producția să lucreze toată după aceeași foaie. Gridurile de
+  // mai sus rămân cum sunt: ele se fac din alocări, nu din Excel.
+  async function planuriLunare() {
+    return await db
+      .prepare(
+        `SELECT p.*, u.nume AS incarcat_de_nume
+           FROM planuri_lunare p
+           LEFT JOIN utilizatori u ON u.id = p.incarcat_de
+          WHERE p.activ = 1
+          ORDER BY p.luna DESC, p.id DESC
+          LIMIT 300`
+      )
+      .all();
+  }
+
+  function randVersiune(v, eAdmin) {
+    const marime = PLAN.marimeOmeneasca(v.marime);
+    const unde = v.drive_id ? "Drive" : "ERP";
+    return [
+      `<a href="/productie/planificare/fisier/${v.id}">${esc(v.nume_fisier)}</a>`,
+      marime,
+      esc(v.incarcat_de_nume || "—"),
+      esc(String(v.incarcat_la || "").slice(0, 16)),
+      esc(v.observatii || "") +
+        (v.nota ? ` <span class="badge galben" title="${esc(v.nota)}">a rămas în ${esc(unde)}</span>` : ""),
+      eAdmin
+        ? `<form method="post" action="/productie/planificare/fisier/${v.id}/sterge" class="inline-form" onsubmit="return confirm('Scoți versiunea asta din listă?')"><button class="link-btn danger" type="submit">Scoate</button></form>`
+        : "",
+    ];
+  }
+
+  async function zonaPlanLunar(ctx) {
+    const eAdmin = Boolean(ctx.user && ctx.user.rol === "admin");
+    const grupe = PLAN.grupeazaPeLuna(await planuriLunare());
+    const lunaAcum = PLAN.lunaCurenta();
+    const aLunii = grupe.find((g) => g.luna === lunaAcum);
+    const mesaj = String(ctx.query.plan_ok || "");
+    const eroare = String(ctx.query.plan_eroare || "");
+
+    const cardCurent = aLunii
+      ? `<div class="card" style="border-left:4px solid var(--ok,#1a7f42)">
+           <div class="label">Planul lunii ${esc(PLAN.numeLuna(lunaAcum))}</div>
+           <div style="font-size:16px;margin:4px 0">
+             <a href="/productie/planificare/fisier/${aLunii.curent.id}"><strong>${esc(aLunii.curent.nume_fisier)}</strong></a>
+             <span style="color:var(--text-muted);font-size:13px"> ${PLAN.marimeOmeneasca(aLunii.curent.marime)}</span>
+           </div>
+           <div style="font-size:12px;color:var(--text-muted)">
+             urcat de ${esc(aLunii.curent.incarcat_de_nume || "—")}, ${esc(String(aLunii.curent.incarcat_la || "").slice(0, 16))}
+             ${aLunii.vechi.length ? ` · ${aLunii.vechi.length} ${aLunii.vechi.length === 1 ? "versiune anterioară" : "versiuni anterioare"}` : " · prima versiune"}
+           </div>
+           ${aLunii.curent.observatii ? `<div style="font-size:13px;margin-top:6px">${esc(aLunii.curent.observatii)}</div>` : ""}
+           ${aLunii.curent.nota ? `<div style="font-size:12px;color:var(--danger);margin-top:6px">${esc(aLunii.curent.nota)}</div>` : ""}
+         </div>`
+      : `<div class="card" style="border-left:4px solid var(--text-muted,#9ca3af)">
+           <div class="label">Planul lunii ${esc(PLAN.numeLuna(lunaAcum))}</div>
+           <div style="font-size:16px;margin:4px 0">Nu e urcat încă</div>
+           <div style="font-size:12px;color:var(--text-muted)">Urcă-l mai jos — rămâne aici pentru toată lumea din producție.</div>
+         </div>`;
+
+    // Tabelul unei luni. Pe telefon coloanele nu încap: fără derularea pe
+    // orizontală, „Observații" iese din ecran și nu se mai poate ajunge la
+    // ea nicicum.
+    const tabelLunii = (g) => {
+      const randuri = [g.curent, ...g.vechi].map((v, i) => {
+        const r = randVersiune(v, eAdmin);
+        r[0] = (i === 0 ? '<span class="badge verde">curent</span> ' : "") + r[0];
+        return r;
+      });
+      return `<h3 style="margin:18px 0 6px">${esc(g.nume)} <span style="font-weight:400;color:var(--text-muted);font-size:13px">${randuri.length} ${randuri.length === 1 ? "versiune" : "versiuni"}</span></h3>
+              <div style="overflow-x:auto">${table(["Fișier", "Mărime", "Urcat de", "Când", "Observații", ""], randuri)}</div>`;
+    };
+
+    // Luna curentă e deschisă; restul stau strânse. Altfel, după un an, ca
+    // să ajungi la gridul de utilaje ai de derulat pe lângă douăsprezece
+    // tabele de care nu-ți pasă azi.
+    const aLuniiTabel = aLunii ? tabelLunii(aLunii) : "";
+    const vechi = grupe.filter((g) => g.luna !== lunaAcum);
+    const istoricVechi = vechi.length
+      ? `<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--text-muted)">Lunile trecute (${vechi.length})</summary>${vechi
+          .map(tabelLunii)
+          .join("")}</details>`
+      : "";
+    const istoric = aLuniiTabel + istoricVechi;
+
+    return `
+      <h2 id="plan-lunar">Fișierul de planificare lunară</h2>
+      ${mesaj ? `<div class="flash">${esc(mesaj)}</div>` : ""}
+      ${eroare ? `<div class="flash warn">${esc(eroare)}</div>` : ""}
+      <p class="explic" style="max-width:820px">
+        Aici stă foaia după care lucrează producția în luna respectivă. Fiecare urcare e o versiune nouă,
+        nu o înlocuire: cea de sus e cea validă, iar cele de dedesubt rămân, ca să se poată vedea ce scria
+        în plan la începutul lunii. Gridurile de mai sus nu se schimbă — ele se fac din alocări, nu din fișier.
+      </p>
+
+      <div class="cards">${cardCurent}</div>
+
+      <form method="post" action="/productie/planificare/fisier" enctype="multipart/form-data"
+            style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:12px 0 18px">
+        <label class="field" style="margin:0"><span>Luna</span>
+          <input type="month" name="luna" value="${esc(lunaAcum)}" required></label>
+        <label class="field" style="margin:0;flex:1 1 280px"><span>Fișierul (${PLAN.TIPURI.map((t) => "." + t.ext).join(", ")})</span>
+          <input type="file" name="fisier" accept="${PLAN.TIPURI.map((t) => "." + t.ext).join(",")}" required></label>
+        <label class="field" style="margin:0;flex:1 1 320px"><span>Ce s-a schimbat (opțional)</span>
+          <input type="text" name="observatii" maxlength="300" placeholder="ex: mutat Nanoplast pe săptămâna 3"></label>
+        <button class="btn" type="submit">Urcă planul</button>
+      </form>
+
+      ${istoric || '<p class="empty">Niciun plan urcat încă.</p>'}
+    `;
+  }
+
+  router.post("/productie/planificare/fisier", async (ctx) => {
+    const inapoi = (cheie, text) =>
+      redirect(ctx.res, `/productie/planificare?${cheie}=${encodeURIComponent(text)}#plan-lunar`);
+    const b = ctx.body || {};
+    const fisier = ((b.__files || {}).fisier || [])[0];
+    const luna = String(b.luna || "").trim();
+
+    const v = PLAN.verificaFisier(fisier, luna);
+    if (!v.ok) return inapoi("plan_eroare", v.gresite.join(" "));
+
+    // Fișierul pleacă în Drive. Dacă Drive nu răspunde NU pierdem urcarea:
+    // rămâne în baza ERP și se spune pe față în pagină, ca nimeni să nu
+    // creadă că e în Drive când nu e. Același tipar ca la pozele de retur
+    // din fulfillment — acolo l-am învățat.
+    let driveId = null;
+    let link = null;
+    let base64 = null;
+    let nota = null;
+    try {
+      const radacina = process.env.GOOGLE_DRIVE_FOLDER;
+      if (!radacina) throw new Error("GOOGLE_DRIVE_FOLDER nu e setată în Render");
+      const folder = await drive.cale(["Planificare producție", luna], radacina);
+      const rez = await drive.urca({
+        nume: PLAN.numeInDrive(luna, v.nume),
+        mime: v.mime,
+        continut: fisier.data,
+        parinte: folder,
+      });
+      driveId = rez.id;
+      link = rez.link;
+    } catch (e) {
+      base64 = fisier.data.toString("base64");
+      nota = `Drive n-a răspuns (${String((e && e.message) || e).slice(0, 90)}), deci fișierul a rămas în baza ERP.`;
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO planuri_lunare (luna, nume_fisier, mime, marime, drive_id, link, continut_base64, nota, observatii, incarcat_de)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        luna,
+        v.nume.slice(0, 200),
+        v.mime,
+        v.octeti,
+        driveId,
+        link,
+        base64,
+        nota,
+        String(b.observatii || "").trim().slice(0, 300) || null,
+        ctx.user ? ctx.user.id : null
+      );
+
+    return inapoi(
+      "plan_ok",
+      `Planul pentru ${PLAN.numeLuna(luna)} e urcat (${PLAN.marimeOmeneasca(v.octeti)}).${nota ? " " + nota : ""}`
+    );
+  });
+
+  router.get("/productie/planificare/fisier/:id", async (ctx) => {
+    const p = await db.prepare("SELECT * FROM planuri_lunare WHERE id = ? AND activ = 1").get(Number(ctx.params.id));
+    if (!p) return redirect(ctx.res, "/productie/planificare#plan-lunar");
+    // În Drive e deja acolo: îl deschidem acolo, ca omul să-l poată edita și
+    // partaja fără să-l descarce. Ce a rămas în ERP se descarcă de aici.
+    if (p.link) return redirect(ctx.res, p.link);
+    if (!p.continut_base64) return redirect(ctx.res, "/productie/planificare#plan-lunar");
+    const octeti = Buffer.from(p.continut_base64, "base64");
+    ctx.res.writeHead(200, {
+      "Content-Type": p.mime || "application/octet-stream",
+      // Numele se pune între ghilimele și fără caractere de control: un nume
+      // cu virgulă sau cu ghilimele rupe antetul și fișierul se descarcă
+      // botezat „fisier”.
+      "Content-Disposition": `attachment; filename="${String(p.nume_fisier || "plan").replace(/["\r\n]/g, "")}"`,
+      "Content-Length": octeti.length,
+    });
+    ctx.res.end(octeti);
+  });
+
+  router.post("/productie/planificare/fisier/:id/sterge", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/productie/planificare#plan-lunar");
+    // activ = 0, nu DELETE: versiunile sunt istoria planului, iar o apăsare
+    // greșită nu trebuie să șteargă dovada. Fișierul din Drive rămâne acolo.
+    await db.prepare("UPDATE planuri_lunare SET activ = 0 WHERE id = ?").run(Number(ctx.params.id));
+    redirect(ctx.res, "/productie/planificare#plan-lunar");
+  });
+
   router.get("/productie/planificare", async (ctx) => {
     const zile = [7, 14, 30].includes(Number(ctx.query.zile)) ? Number(ctx.query.zile) : 14;
     const deLa = /^\d{4}-\d{2}-\d{2}$/.test(String(ctx.query.de_la || "")) ? String(ctx.query.de_la) : azi();
@@ -1744,6 +1946,8 @@ function register(router) {
         Cifra din celulă e numărul de ore planificate în ziua aia. Verde = are loc, galben = aproape plin,
         roșu = s-a promis mai mult decât încape. Capacitatea unei zile e „ore pe zi" scris pe utilaj, respectiv pe om.
       </p>
+
+      ${await zonaPlanLunar(ctx)}
 
       <h2>Utilaje</h2>
       <div style="overflow-x:auto">${gridUtilaje}</div>

@@ -455,7 +455,13 @@ async function ingestFacturi(randuri) {
   const firme = await db.prepare("SELECT id, nume, cui FROM firme").all();
   const normCui = (v) => String(v || "").replace(/[^0-9]/g, "");
   const firmaDupaCui = new Map(firme.map((f) => [normCui(f.cui), f.id]));
-  const firmaDupaNume = new Map(firme.map((f) => [String(f.nume || "").toLowerCase(), f.id]));
+  // „CASH MACHINE S.R.L." (cum scrie SmartBill) și „Cash Machine SRL" (cum
+  // scrie la noi) sunt aceeași firmă. Compararea pe text brut le vedea
+  // diferite, deci lotul cădea pe firma implicită — nevinovat cât timp firma
+  // implicită chiar e Cash Machine, dar pentru un lot de Warehouse All
+  // înseamnă facturi puse pe firma greșită. Cheia scoate punctuația.
+  const cheieFirma = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const firmaDupaNume = new Map(firme.map((f) => [cheieFirma(f.nume), f.id]));
   const implicita = (await grup.firmaImplicita()) || {};
 
   const parteneri = await db.prepare("SELECT id, nume, cui, tip FROM parteneri").all();
@@ -481,10 +487,29 @@ async function ingestFacturi(randuri) {
   //
   // Deci numărul se normalizează la fel pe amândouă părțile: „0052", „52" și
   // 52 sunt același număr de factură.
+  //
+  // A DOUA PAZĂ: ACEEAȘI SERIE ȘI ACELAȘI NUMĂR, DAR ALTĂ FIRMĂ (27.10.2026)
+  //
+  // Cheia de mai sus are firma în ea, ca două firme cu numerotări proprii să
+  // nu se calce. Firma vine însă din pagina SmartBill, iar acolo s-a greșit:
+  // numele unui client care e tot firmă din grup („WAREHOUSE ALL SRL”) a fost
+  // citit drept firma emitentă, și același raport a intrat a doua oară sub
+  // altă firmă. CSHM3322–3325, 81.757,76 lei de vânzări inexistente.
+  //
+  // Partea din sincronizare e reparată (punte/sincronizare.js citește firma
+  // din antet, nu din tabel), dar nu ne bazăm pe asta: la noi seria E a
+  // firmei — CSHM și CSHMUPA sunt Cash Machine, WHA e Warehouse All. Nu
+  // există „CSHM3322 la altă firmă”. Deci dacă seria și numărul sunt deja în
+  // bază, oricare ar fi firma din lot, factura NU se mai scrie; se numără
+  // separat, ca să se vadă în rezultatul lotului că punțile nu sunt de acord
+  // asupra firmei.
   const existente = new Set();
+  const peSerieNumar = new Set();
   for (const f of await db.prepare("SELECT serie, numar, firma_id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
     existente.add(cheiaFacturii(f.serie, f.numar, f.firma_id));
+    peSerieNumar.add(cheiaFacturii(f.serie, f.numar, ""));
   }
+  let altaFirma = 0;
 
   const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
 
@@ -505,12 +530,14 @@ async function ingestFacturi(randuri) {
 
     const firmaId =
       firmaDupaCui.get(normCui(r.firma_cui)) ||
-      firmaDupaNume.get(String(curat(r.firma)).toLowerCase()) ||
+      firmaDupaNume.get(cheieFirma(curat(r.firma))) ||
       implicita.id ||
       null;
 
     const cheie = cheiaFacturii(serie, numar, firmaId);
     if (existente.has(cheie)) { sarite++; continue; }
+    const cheieFaraFirma = cheiaFacturii(serie, numar, "");
+    if (peSerieNumar.has(cheieFaraFirma)) { sarite++; altaFirma++; continue; }
 
     // partenerul: întâi după CUI, apoi după nume; comun pe tot grupul
     const cui = normCui(r.cui);
@@ -570,6 +597,7 @@ async function ingestFacturi(randuri) {
         cuPlata++;
       }
       existente.add(cheie);
+      peSerieNumar.add(cheieFaraFirma);
       create++;
     } catch (e) {
       // Indexul unic de sub facturile de import a prins un duplicat pe care
@@ -583,6 +611,7 @@ async function ingestFacturi(randuri) {
           : `${serie}${numar}: ${mesaj.slice(0, 120)}`
       );
       existente.add(cheie);
+      peSerieNumar.add(cheieFaraFirma);
     }
   }
 
@@ -590,6 +619,10 @@ async function ingestFacturi(randuri) {
   return {
     facturi: create,
     sarite,
+    // Zero e starea normală. Orice altceva înseamnă că lotul a venit cu altă
+    // firmă emitentă decât are factura în bază — de verificat de unde a citit
+    // puntea firma, nu de ignorat.
+    serie_la_alta_firma: altaFirma,
     parteneri_noi: parteneriNoi,
     cu_plata: cuPlata,
     intercompany_marcate: marcaje.facturiMarcate,
