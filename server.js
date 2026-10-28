@@ -14,6 +14,14 @@ require("./modules/utilizatori").register(router);
 require("./modules/dashboard").register(router);
 require("./modules/alocari").register(router);
 require("./modules/parteneri").register(router);
+// ÎNAINTEA lui „produse", și nu din întâmplare. cod-produs ține
+// „/produse/nou-cu-cod"; produse ține „/produse/:id". Rutele se potrivesc în
+// ordinea înregistrării, deci cu produse înainte, „nou-cu-cod" era citit ca
+// un id de produs și pagina de produs nou cu cod generat nu se deschidea
+// deloc — deși butonul spre ea există în configurarea codului. Celelalte
+// rute ale modulului stau sub „/configurari/cod-produs", deci nu calcă pe
+// nimic de aici.
+require("./modules/cod-produs").register(router);
 require("./modules/produse").register(router);
 require("./modules/stocuri").register(router);
 require("./modules/inventar").register(router);
@@ -97,7 +105,6 @@ require("./modules/inbox").register(router);
 require("./modules/backup").register(router);
 require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
-require("./modules/cod-produs").register(router);
 require("./modules/forecast").register(router);
 require("./modules/comision").register(router);
 require("./modules/ghid").register(router);

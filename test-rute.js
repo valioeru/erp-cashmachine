@@ -121,7 +121,11 @@ const auth = require(path.join(RAD, "lib", "auth.js"));
 const ZONE = new Set(auth.ZONE.map((z) => z.cheie));
 // Rute care nu trec prin gardul de secțiuni: publice (login), punte cu token,
 // sau permise oricui e logat (profil, ghid, marketing).
-const INAFARA = ["/login", "/logout", "/healthz", "/api", "/punte", "/profil", "/ghid", "/dezvoltare", "/marketing", "/concurenta", "/email"];
+// Lista nu se mai scrie aici. Scrisă de două ori, a rămas în urmă: „/noutati"
+// și „/updates" erau de mult în MEREU_PERMISE, iar testul le striga ca fiind
+// pagini la care n-are nimeni acces. Acum citește exact lista pe care o
+// folosește serverul, plus rutele care nici măcar nu trec pe la gard.
+const INAFARA = ["/login", "/healthz", "/api", "/punte"].concat(auth.MEREU_PERMISE);
 const orfane = new Map();
 for (const r of rute) {
   const p = r.cale;

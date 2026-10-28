@@ -153,7 +153,11 @@ async function plaseaza(raspuns, linii) {
   };
   if (raspuns !== undefined) body.livrare_partiala = raspuns;
   const r = await cer("/comenzi", { metoda: "post", body });
-  const m = /^\/comenzi\/(\d+)$/.exec(locatie(r));
+  // Confirmarea de salvare (27.10.2026) a adăugat „?ok=plasata" la redirect.
+  // Testul cerea adresa curată și cădea cu „comanda nu s-a salvat", deși se
+  // salvase — exact genul de test roșu degeaba care ascunde o defecțiune
+  // adevărată data viitoare.
+  const m = /^\/comenzi\/(\d+)(?:\?|$)/.exec(locatie(r));
   if (!m) throw new Error("comanda nu s-a salvat: " + (locatie(r) || r.corp.slice(0, 160)));
   return Number(m[1]);
 }

@@ -208,7 +208,8 @@ const cateComenzi = () => Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE part
   egal("pe clientul ales, nu pe primul din alfabet",
     q("SELECT p.nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.partener_id BETWEEN 96301 AND 96399").map((x) => x.nume),
     ["ZZZ CLIENTUL ADEVARAT SRL"]);
-  if (!/^\/comenzi\/\d+$/.test(locatie(r))) rau("nu duce la comanda salvată", locatie(r));
+  // „?ok=plasata" e confirmarea de salvare adăugată pe 27.10.2026.
+  if (!/^\/comenzi\/\d+(\?|$)/.test(locatie(r))) rau("nu duce la comanda salvată", locatie(r));
   else ok("duce la comanda salvată — " + locatie(r));
   egal("linia cu cantitate a intrat",
     q("SELECT cantitate FROM comenzi_linii WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id = 96302)").map((x) => Number(x.cantitate)),

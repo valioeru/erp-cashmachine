@@ -90,8 +90,13 @@ const res = () => {
   o.end = (b) => { o.corp = b || ""; };
   return o;
 };
-const ADMIN = { id: 96501, nume: "Vali Oeru", rol: "admin", email: "vali@test.ro" };
-const ISABELA = { id: 96502, nume: "Isabela Radu", rol: "vanzari", email: "isabela@test.ro" };
+// Adresele poartă id-ul în ele. „vali@test.ro" se ciocnea de un utilizator
+// care exista deja în baza de probă, iar testul cădea cu „duplicate key" la
+// prima inserare — nu fiindcă s-ar fi stricat ceva, ci fiindcă și-a ales un
+// email pe care îl putea folosi oricine. Cu id-ul în adresă, intervalul
+// 96501–96599 e numai al lui.
+const ADMIN = { id: 96501, nume: "Vali Oeru", rol: "admin", email: "vali.96501@test.ro" };
+const ISABELA = { id: 96502, nume: "Isabela Radu", rol: "vanzari", email: "isabela.96502@test.ro" };
 
 async function cer(cale, { user = ADMIN, params = {}, query = {}, body = null, metoda = "get" } = {}) {
   const h = rute[metoda][cale];
@@ -148,8 +153,8 @@ async function curat() {
   await curat();
   for (const s of [
     `INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol, activ, comision_procent) VALUES
-       (96501,'Vali Oeru','vali@test.ro','x','y','admin',1,2),
-       (96502,'Isabela Radu','isabela@test.ro','x','y','vanzari',1,2)`,
+       (96501,'Vali Oeru','${ADMIN.email}','x','y','admin',1,2),
+       (96502,'Isabela Radu','${ISABELA.email}','x','y','vanzari',1,2)`,
     `INSERT INTO parteneri (id, nume, cui, tip, email, persoana_contact) VALUES
        (96601,'TEST CLIENT CALENDAR SRL','RO-CAL-1','client','client@test.ro','Dl. Popescu')`,
     // O sugestie nelucrată: adminul trebuie s-o poată da Isabelei, nu lui.
