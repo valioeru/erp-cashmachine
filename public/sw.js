@@ -17,7 +17,20 @@
 // Când se schimbă style.css: se ridică VERSIUNEA de mai jos. Altfel telefoanele
 // care au deja aplicația rămân cu foaia de stil veche până curăță cineva
 // datele site-ului — și nimeni nu face asta.
-const VERSIUNE = "erp-v2";
+//
+// S-A ȘI ÎNTÂMPLAT, 28.10.2026. Am adăugat insigna neagră pentru comenzile
+// livrate, am urcat, am dat deploy, iar pagina tot cu foaia veche venea.
+// Două deploy-uri, unul cu build curat, și tot vechea. Nu era nici Render,
+// nici Cloudflare: fișierul nici nu pleca de pe server, fiindcă îl servea
+// service worker-ul ăsta din buzunar, pe pathname — deci nici măcar
+// „/style.css?x=123" nu-l ocolea. Avertismentul era scris chiar aici și am
+// trecut pe lângă el.
+//
+// Ca să nu se mai poată: sub VERSIUNE stă amprenta foii de stil, iar
+// test-sw-versiune.js o recalculează la fiecare rulare. Dacă schimbi
+// style.css și uiți să ridici versiunea, cade testul, nu clientul.
+const VERSIUNE = "erp-v3";
+// amprenta style.css: 4307feef
 
 // Doar lucruri care nu se schimbă de la o oră la alta.
 const STATICE = ["/style.css", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png", "/favicon-32.png"];
