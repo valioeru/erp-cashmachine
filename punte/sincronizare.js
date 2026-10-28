@@ -70,10 +70,47 @@
   // Firma pe care e logată sesiunea. Contează: ERP-ul ține facturile pe firmă,
   // iar dacă cineva comută compania în SmartBill vrem să se vadă în lot, nu să
   // aterizeze marfa pe firma greșită.
-  S.firma = function () {
-    const t = document.body ? document.body.innerText : "";
-    const m = t.match(/CASH MACHINE[^\n]{0,12}|WAREHOUSE ALL[^\n]{0,6}|MARINE BRANDING[^\n]{0,6}|YACHTMAG[^\n]{0,6}|SET ?SAIL[^\n]{0,12}/i);
+  //
+  // CE S-A STRICAT ȘI CUM (descoperit 27.10.2026)
+  //
+  // Funcția căuta numele firmei cu o expresie regulată peste TOT textul
+  // paginii și lua prima potrivire. Pe raportul de facturi, printre clienți
+  // stă și „WAREHOUSE ALL SRL” — o firmă din grup, care e în același timp
+  // client al Cash Machine. Când potrivirea aia venea prima, lotul întreg
+  // pleca spre ERP cu firma emitentă greșită.
+  //
+  // Asta nu rămânea o greșeală de etichetă. În ERP cheia de dedublare e
+  // SERIE|NUMĂR|FIRMĂ (vezi lib/documente.js): cu altă firmă în cheie,
+  // aceleași facturi nu se mai recunoșteau ca fiind deja în bază și intrau a
+  // doua oară. Patru facturi din 20.10 — CSHM3322, 3323, 3324, 3325 — s-au
+  // dublat exact așa: 81.757,76 lei de vânzări care nu existau, și care nu
+  // se vedeau nicăieri ca eroare, fiindcă puntea raporta cinstit „create”.
+  //
+  // Acum se citește din elementul care chiar ține firma sesiunii, din antetul
+  // SmartBill. Expresia regulată a rămas ca plasă de siguranță, dar caută
+  // numai în antet, niciodată în tabel — un nume de client nu mai poate trece
+  // drept firma noastră. Dacă nu se găsește nimic, întoarce gol: ERP-ul pune
+  // atunci firma implicită, ceea ce e tot ce era și înainte de potrivirea
+  // greșită.
+  // Numele firmei, plus forma juridică dacă e scrisă după el. Vechea formă
+  // era „CASH MACHINE[^\n]{0,12}" — adică „numele și încă până la 12
+  // caractere, orice ar fi ele". Pe un antet unde după nume urmează
+  // „Deconectare", ieșea „WAREHOUSE ALL SRL D", care nu se potrivește cu
+  // nimic din tabela de firme a ERP-ului și cade tăcut pe firma implicită.
+  // Acum se cere explicit forma juridică, sau nimic.
+  const NUME_FIRME = /(CASH MACHINE|WAREHOUSE ALL|MARINE BRANDING|YACHTMAG|SET ?SAIL)(\s+S\.?\s*R\.?\s*L\.?|\s+S\.?\s*A\.?)?/i;
+  S.firmaDin = function (doc) {
+    const d = doc || document;
+    const e = d.querySelector(".details-company");
+    const dinAntet = e ? String(e.innerText || e.textContent || "").replace(/\s+/g, " ").trim() : "";
+    if (dinAntet) return dinAntet;
+    const cap = d.querySelector("header, .navbar, .topbar, #header");
+    const t = cap ? cap.innerText || cap.textContent || "" : "";
+    const m = String(t).match(NUME_FIRME);
     return m ? m[0].replace(/\s+/g, " ").trim() : "";
+  };
+  S.firma = function () {
+    return S.firmaDin(document);
   };
 
   function asteapta(conditie, mesajEroare, maxMs) {
