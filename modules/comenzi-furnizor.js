@@ -496,7 +496,7 @@ function register(router) {
               ${furnizori.map((f) => `<option value="${f.id}"${furnizorAles === f.id ? " selected" : ""}>${esc(f.nume)}${f.email ? " · " + esc(f.email) : ""}</option>`).join("")}
             </select>
           </label>
-          <button type="button" class="btn secondary" onclick="document.getElementById('cf-furnizor-nou').style.display='block';this.style.display='none'">+ Furnizor nou</button>
+          <button type="button" class="btn secondary" id="cf-buton-furnizor-nou" onclick="cfDeschideFurnizor()">+ Furnizor nou</button>
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
@@ -528,9 +528,18 @@ function register(router) {
 
       <!-- Furnizorul nou se adaugă din aceeași pagină, dar cu formularul lui:
            altfel un câmp gol de la furnizor ar bloca salvarea comenzii, sau
-           invers. -->
+           invers. Două formulare nu se pot imbrica în HTML, de-aia ăsta stă
+           jos, după comandă, și nu lângă butonul care îl deschide.
+           DE-AIA SE ȘI DERULEAZĂ LA EL CÂND SE DESCHIDE: butonul e sus, lângă
+           lista de furnizori, iar formularul se deschidea la 1020 px, sub
+           marginea de jos a ecranului. Butonul dispărea, pagina stătea pe loc,
+           și arăta exact ca un buton stricat. (Raportat de Vali, 28.10.2026.) -->
       <form class="form" id="cf-furnizor-nou" method="post" action="/procurement/furnizor" style="display:none;max-width:980px;margin-top:28px;border-top:1px solid var(--border);padding-top:18px">
         <h2>Furnizor nou</h2>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:0">
+          Se salvează separat de comandă, deci pagina se reîncarcă și pozițiile scrise sus se pierd.
+          Adaugă întâi furnizorul — după salvare te întorci aici cu el deja ales — și abia apoi scrie ce comanzi.
+        </p>
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px">
           <label class="field"><span>Denumire</span><input name="nume" required placeholder="ex. Teraplast SA"></label>
           <label class="field"><span>CUI</span><input name="cui" placeholder="RO12345678"></label>
@@ -554,9 +563,36 @@ function register(router) {
           .join("")}
         <div class="form-actions">
           <button class="btn" type="submit">Adaugă furnizorul</button>
-          <button type="button" class="btn secondary" onclick="this.closest('form').style.display='none'">Închide</button>
+          <button type="button" class="btn secondary" onclick="cfInchideFurnizor()">Închide</button>
         </div>
       </form>
+
+      <script>
+      function cfDeschideFurnizor() {
+        var panou = document.getElementById("cf-furnizor-nou");
+        var buton = document.getElementById("cf-buton-furnizor-nou");
+        if (!panou) return;
+        panou.style.display = "block";
+        if (buton) buton.style.display = "none";
+        // Derularea e tot ce lipsea. „block" fără ea deschide formularul sub
+        // marginea de jos a ecranului, iar omul vede doar butonul dispărând.
+        panou.scrollIntoView({ behavior: "smooth", block: "start" });
+        var primul = panou.querySelector("input[name=nume]");
+        if (primul) setTimeout(function () { primul.focus(); }, 300);
+      }
+      function cfInchideFurnizor() {
+        var panou = document.getElementById("cf-furnizor-nou");
+        var buton = document.getElementById("cf-buton-furnizor-nou");
+        if (panou) panou.style.display = "none";
+        // Butonul trebuie să se întoarcă. Înainte rămânea ascuns pentru
+        // totdeauna: după „Închide" nu se mai putea adăuga niciun furnizor
+        // fără reîncărcarea paginii.
+        if (buton) {
+          buton.style.display = "";
+          buton.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+      </script>
 
       <datalist id="cf-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${datalistProduse(produse, preturi)}

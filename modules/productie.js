@@ -13,13 +13,20 @@ const { comenziSpreAlocare, ore } = require("./utilaje");
 const FL = require("../lib/fisa-lot");
 const { fluxulComenzii } = require("../lib/flux-comanda");
 
+// Culorile NU mai sunt scrise aici. Stăteau în lista asta, iar comenzile de
+// vânzare își luau culoarea din lib/comenzi-stari.js — două tabele care au
+// și ajuns să nu mai semene: „în producție" era galben în registru și galben
+// la vânzări, dar „nouă" era gri în amândouă iar Vali o voia roșie, și
+// n-ar fi fost de ajuns s-o schimb într-un singur loc. Acum culoarea vine
+// dintr-un singur tabel, deci o comandă arată la fel în orice pagină.
+const STARI = require("../lib/comenzi-stari");
 const STATUSURI = [
-  ["noua", "Nouă (solicitată)", "gri"],
-  ["in_productie", "În producție", "galben"],
-  ["finalizata", "Finalizată", "verde"],
-  ["facturata", "Facturată", "verde"],
-  ["anulata", "Anulată", "rosu"],
-];
+  ["noua", "Nouă (solicitată)"],
+  ["in_productie", "În producție"],
+  ["finalizata", "Finalizată"],
+  ["facturata", "Facturată"],
+  ["anulata", "Anulată"],
+].map(([cheie, text]) => [cheie, text, STARI.culoare(cheie)]);
 const DESCHISE = ["noua", "in_productie", "finalizata"];
 
 function badge(status) {
