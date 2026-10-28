@@ -13,6 +13,7 @@
 const db = require("../lib/db");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const FS = require("../lib/firma-serie");
 
 const SUB_TOTAL =
   "(SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id)";
@@ -20,6 +21,43 @@ const SUB_PLATIT = "(SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM 
 
 const nr = (v) => Number(v || 0);
 const LIMITA = 25;
+
+// Facturile de vânzare care stau pe altă firmă decât stăpânul seriei lor.
+// Regula și motivul ei sunt în lib/firma-serie.js; aici e doar ce se cere de
+// la bază. Aceeași funcție o folosesc și verificarea, și butonul — butonul
+// nu poate muta altceva decât ce arată tabelul de deasupra lui.
+async function facturiPeFirmaGresita() {
+  const numarari = await db
+    .prepare(
+      `SELECT UPPER(TRIM(COALESCE(f.serie,''))) AS serie, f.firma_id, COUNT(*) AS n
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+        WHERE f.directie = 'vanzare' AND COALESCE(f.serie,'') <> ''
+        GROUP BY UPPER(TRIM(COALESCE(f.serie,''))), f.firma_id`
+    )
+    .all();
+  const harta = FS.proprietari(numarari);
+
+  // Doar seriile cu stăpân limpede pot avea facturi rătăcite; restul nici nu
+  // se mai cer de la bază.
+  const serii = [...harta.values()].filter((p) => !p.nedecis && p.total > p.ale_proprietarului).map((p) => p.serie);
+  let lista = [];
+  if (serii.length) {
+    const candidate = await db
+      .prepare(
+        `SELECT f.id, UPPER(TRIM(f.serie)) AS serie, f.numar, f.document_extern, f.data_emiterii, f.firma_id,
+                p.nume AS partener, COALESCE(t.total, 0) AS total
+           FROM (SELECT * FROM facturi WHERE activ = 1) f
+           LEFT JOIN parteneri p ON p.id = f.partener_id
+           LEFT JOIN ${SUB_TOTAL} t ON t.factura_id = f.id
+          WHERE f.directie = 'vanzare' AND UPPER(TRIM(COALESCE(f.serie,''))) IN (${serii.map(() => "?").join(", ")})
+          ORDER BY f.data_emiterii DESC, f.id DESC`
+      )
+      .all(...serii);
+    lista = FS.suspecte(candidate, harta);
+  }
+  const firme = new Map((await db.prepare("SELECT id, nume FROM firme").all()).map((f) => [Number(f.id), f.nume]));
+  return { harta, lista, firme };
+}
 
 // Fiecare verificare întoarce { n, sumar, antet, randuri } — pagina le redă
 // la fel pe toate, deci se adaugă una nouă scriind doar interogarea.
@@ -660,6 +698,50 @@ const VERIFICARI = [
               eticheta: `Scoate cele ${deScos.length} exemplare sigure`,
               confirmare:
                 "Se dezactivează doar exemplarele din grupurile cu ACELAȘI client și ACEEAȘI dată. Din fiecare grup rămâne cel cu detaliul pe produse (cele mai multe linii), la egalitate cel mai vechi. Nu se șterge nimic — se poate anula din istoricul de curățări. Continui?",
+            }
+          : null,
+      };
+    },
+  },
+  {
+    cheie: "serie-alta-firma",
+    titlu: "Facturi de vânzare puse pe altă firmă decât a seriei lor",
+    de_ce:
+      "La noi seria ține de firmă: CSHM și CSHMUPA sunt Cash Machine, WHA e Warehouse All. Sincronizarea din SmartBill a citit o vreme firma din tabelul de clienți — unde stă și „WAREHOUSE ALL SRL”, client al nostru — și a pus facturi Cash Machine pe Warehouse All. Totalurile pe grup rămân corecte; greșesc rapoartele pe firmă, cu exact valoarea facturilor de aici. A cui e o serie nu e scris în cod: se vede din date, ca firma care ține cel puțin 90% din facturile ei. Seriile împărțite mai egal nu se ating — alea sunt o întrebare pentru om, nu o greșeală de import.",
+    gravitate: "rosu",
+    async ruleaza() {
+      const { harta, lista, firme } = await facturiPeFirmaGresita();
+      const numeFirma = (id) => (id == null ? "fără firmă" : firme.get(Number(id)) || `firma #${id}`);
+      const suma = lista.reduce((s, f) => s + nr(f.total), 0);
+
+      // Pe ce se bazează decizia, scris pe pagină: „CSHM: 3.128 pe Cash
+      // Machine, 4 pe Warehouse All". Fără asta, butonul ar cere încredere
+      // oarbă într-o regulă pe care n-o vezi.
+      const dovezi = [...harta.values()]
+        .filter((p) => p.total > p.ale_proprietarului || p.nedecis)
+        .map((p) => {
+          const desc = p.pe_firme.map((x) => `${x.n.toLocaleString("ro-RO")} pe ${numeFirma(x.firma_id)}`).join(", ");
+          return p.nedecis ? `${p.serie}: ${desc} — nu se atinge (${p.motiv})` : `${p.serie}: ${desc}`;
+        });
+
+      return {
+        n: lista.length,
+        sumar: `${lista.length} ${lista.length === 1 ? "factură stă" : "facturi stau"} pe altă firmă decât a seriei, ${money(suma)}`,
+        nota: dovezi.length ? "Pe ce se bazează: " + dovezi.join(" · ") + "." : "",
+        antet: ["Factura", "Client", "Data", "Total", "Stă acum pe", "Se mută pe"],
+        randuri: lista.slice(0, LIMITA).map((f) => [
+          `<a href="/facturi/${f.id}"><strong>${esc(f.document_extern || String(f.serie || "") + String(f.numar || ""))}</strong></a>`,
+          esc(f.partener || "—"),
+          esc(String(f.data_emiterii || "").slice(0, 10)),
+          money(f.total),
+          `<span class="badge galben">${esc(numeFirma(f.firma_acum))}</span>`,
+          `<span class="badge verde">${esc(numeFirma(f.firma_corecta))}</span>`,
+        ]),
+        actiune: lista.length
+          ? {
+              href: "/admin/date/serie-alta-firma/muta",
+              eticheta: `Mută cele ${lista.length} facturi pe firma seriei`,
+              confirmare: `Se mută pe firma seriei lor exact cele ${lista.length} facturi din tabel. Nu se șterge nimic și nu se schimbă nicio sumă — doar firma emitentă. Se poate anula din istoricul de mutări de mai jos. Continui?`,
             }
           : null,
       };
@@ -1534,6 +1616,33 @@ function register(router) {
         )}`
       : "";
 
+    // Mutările de firmă făcute până acum, cu anularea lor.
+    let mutari = [];
+    try {
+      mutari = await db
+        .prepare(
+          `SELECT m.*, u.nume AS autor FROM mutari_firma m
+             LEFT JOIN utilizatori u ON u.id = m.facut_de ORDER BY m.id DESC LIMIT 10`
+        )
+        .all();
+    } catch (e) {
+      mutari = [];
+    }
+    const blocMutari = mutari.length
+      ? `<h2>Facturi mutate pe firma seriei</h2>${table(
+          ["Când", "Cine", "Facturi mutate", "Sumă", ""],
+          mutari.map((m) => [
+            esc(String(m.facut_la || "").slice(0, 16)),
+            esc(m.autor || "—"),
+            String(m.nr_facturi),
+            money(m.suma),
+            m.anulata_la
+              ? `<span class="badge gri">anulată ${esc(String(m.anulata_la).slice(0, 10))}</span>`
+              : `<form method="post" action="/admin/date/mutari-firma/${m.id}/anuleaza" class="inline-form" onsubmit="return confirm('Pun cele ${m.nr_facturi} facturi înapoi pe firma de unde au plecat?')"><button class="link-btn danger" type="submit">Anulează</button></form>`,
+          ])
+        )}`
+      : "";
+
     const curatare = await incasariDeCuratat();
     const curatareSuma = curatare.deScos.reduce((s2, r) => s2 + nr(r.suma), 0);
     const strambe = await cantitatiStrambe();
@@ -1643,6 +1752,18 @@ function register(router) {
 
       ${sectiuni}
       ${blocCuratari}
+      <div id="mutari-firma">
+      ${
+        // Confirmarea stă lângă istoricul mutărilor, nu în capul paginii:
+        // după apăsare, pagina se deschide aici, iar omul vede deodată ce
+        // s-a făcut și butonul cu care se desface. Ancora e pe tot blocul,
+        // nu pe titlu — altfel browserul ar derula exact peste confirmare.
+        String(ctx.query.mutate || "")
+          ? `<div class="flash" style="margin-top:24px">Am mutat ${esc(String(ctx.query.mutate))} facturi pe firma seriei lor. Dacă n-a fost bine, „Anulează” de mai jos le pune la loc.</div>`
+          : ""
+      }
+      ${blocMutari}
+      </div>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Verificări date", active: "/admin/date", body }));
   });
@@ -1710,6 +1831,61 @@ function register(router) {
       .prepare("INSERT INTO curatari_duplicate (facut_de, directie, nr_documente, suma, ids) VALUES (?, 'vanzare', ?, ?, ?)")
       .run(ctx.user.id, deScos.length, nr(sume && sume.suma), JSON.stringify(deScos));
     redirect(ctx.res, "/admin/date?curatate=" + deScos.length + "#numar-refolosit");
+  });
+
+  // ---- facturile puse pe altă firmă decât a seriei -------------------------
+  //
+  // Mută exact ce arată verificarea: se cheamă aceeași funcție, deci butonul
+  // nu poate atinge un rând pe care tabelul nu l-a arătat. Se schimbă DOAR
+  // firma emitentă — nicio sumă, niciun client, nicio dată.
+  router.post("/admin/date/serie-alta-firma/muta", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const { lista } = await facturiPeFirmaGresita();
+    if (!lista.length) return redirect(ctx.res, "/admin/date#serie-alta-firma");
+
+    const plan = FS.planulMutarii(lista);
+    for (const p of plan) {
+      // Condiția pe firma de acum: dacă între citire și scriere cineva a
+      // mutat deja factura, nu o mai mutăm noi peste el.
+      if (p.de_la === null) {
+        await db.prepare("UPDATE facturi SET firma_id = ? WHERE id = ? AND firma_id IS NULL").run(p.la, p.id);
+      } else {
+        await db.prepare("UPDATE facturi SET firma_id = ? WHERE id = ? AND firma_id = ?").run(p.la, p.id, p.de_la);
+      }
+    }
+    const suma = lista.reduce((s, f) => s + nr(f.total), 0);
+    await db
+      .prepare("INSERT INTO mutari_firma (facut_de, nr_facturi, suma, detalii) VALUES (?, ?, ?, ?)")
+      .run(ctx.user.id, plan.length, suma, JSON.stringify(plan));
+    redirect(ctx.res, "/admin/date?mutate=" + plan.length + "#mutari-firma");
+  });
+
+  router.post("/admin/date/mutari-firma/:id/anuleaza", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/admin/date");
+    const m = await db.prepare("SELECT * FROM mutari_firma WHERE id = ?").get(Number(ctx.params.id));
+    if (!m || m.anulata_la) return redirect(ctx.res, "/admin/date#mutari-firma");
+    let plan = [];
+    try {
+      plan = JSON.parse(m.detalii || "[]");
+    } catch (e) {
+      plan = [];
+    }
+    // Se pune la loc doar ce e încă acolo unde l-a pus mutarea. O factură
+    // mutată între timp de altcineva a fost o decizie mai nouă — rămâne.
+    const ids = plan.map((p) => Number(p.id)).filter((x) => x > 0);
+    const acum = new Map();
+    if (ids.length) {
+      for (const r of await db.prepare(`SELECT id, firma_id FROM facturi WHERE id IN (${ids.map(() => "?").join(",")})`).all(...ids)) {
+        acum.set(Number(r.id), r.firma_id == null ? null : Number(r.firma_id));
+      }
+    }
+    for (const p of FS.deAnulat(plan, acum)) {
+      await db.prepare("UPDATE facturi SET firma_id = ? WHERE id = ? AND firma_id = ?").run(p.de_la, p.id, p.la);
+    }
+    await db
+      .prepare("UPDATE mutari_firma SET anulata_la = ?, anulata_de = ? WHERE id = ?")
+      .run(new Date().toISOString().slice(0, 19).replace("T", " "), ctx.user.id, m.id);
+    redirect(ctx.res, "/admin/date#mutari-firma");
   });
 
   // ---- scoaterea unui document de test din bază ---------------------------
