@@ -90,12 +90,16 @@ console.log("\nLinkurile duc undeva");
   bine("majoritatea rândurilor trimit undeva", cuLink.length >= toate.length / 2, cuLink.length);
 
   const moarte = cuLink.filter((r) => {
-    if (rute.has(r.unde)) return false;
+    // Ancora („#serie-alta-firma") ține de pagină, nu de rută: browserul
+    // cere „/admin/date" și apoi derulează singur la secțiune. Fără să o
+    // tăiem, un link care duce exact unde trebuie ar fi părut mort.
+    const unde = String(r.unde).split("#")[0];
+    if (rute.has(unde)) return false;
     // O adresa ca „/comenzi/nou" e buna si daca ruta e inregistrata asa;
     // una ca „/parteneri" e buna daca exista „/parteneri" sau „/parteneri/:id".
     for (const ruta of rute) {
-      if (ruta === r.unde) return false;
-      if (ruta.startsWith(r.unde + "/")) return false;
+      if (ruta === unde) return false;
+      if (ruta.startsWith(unde + "/")) return false;
     }
     return true;
   });
