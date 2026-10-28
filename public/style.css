@@ -181,6 +181,11 @@ h2 { font-size: 17px; margin: 24px 0 10px; }
 .badge.galben { background: #fbf0da; color: var(--warn); }
 .badge.rosu { background: #f8e5e3; color: var(--danger); }
 .badge.albastru { background: #e6edf7; color: var(--primary); }
+/* Comanda livrată. Singura insignă plină, nu palidă: „gri deschis cu text
+   închis" ar fi stat prea aproape de .gri (anulată) și, într-un tabel lung,
+   cele două s-ar fi confundat din priviri. Plină, se vede că e capătul
+   drumului, nu un rând stins. */
+.badge.negru { background: #22262b; color: #ffffff; }
 
 .lines-table input { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; }
 .lines-table select { padding: 6px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; }
@@ -655,11 +660,22 @@ button.chip { font-family: inherit; cursor: pointer; }
   font-size: 12px; padding: 3px 4px; border: 1px solid var(--border, #e3e6ea);
   border-radius: 6px; background: var(--bg-card, #fff); max-width: 150px;
 }
-.sel-stare.stare-noua { background: #f1f3f5; }
-.sel-stare.stare-in_productie { background: #fff6da; border-color: #e8d9a5; }
+/* Aceeasi schema ca insignele, si de data asta chiar aceeasi: rosu = noua si
+ * neatinsa, albastru = in lucru la noi, verde = gata, negru = plecata la
+ * client, gri = iesita din joc. Tabelul care decide sta in
+ * lib/comenzi-stari.js; aici sunt doar culorile lui. Comentariul de deasupra
+ * promitea deja ca sunt la fel — si nu mai erau. */
+.sel-stare.stare-noua { background: #f8e5e3; border-color: #f0bdb8; }
+.sel-stare.stare-confirmata,
+.sel-stare.stare-in_productie { background: #e6edf7; border-color: #b9ccea; }
+.sel-stare.stare-ciorna,
+.sel-stare.stare-asteapta_marfa { background: #fbf0da; border-color: #e8d9a5; }
 .sel-stare.stare-finalizata,
-.sel-stare.stare-facturata { background: #e7f6ec; border-color: #b7dfc4; }
-.sel-stare.stare-anulata { background: #fdeceb; border-color: #f0bdb8; }
+.sel-stare.stare-in_stoc_depozit,
+.sel-stare.stare-facturata { background: #e7f4ec; border-color: #b7dfc4; }
+.sel-stare.stare-livrata,
+.sel-stare.stare-livrata_partial { background: #22262b; border-color: #22262b; color: #ffffff; }
+.sel-stare.stare-anulata { background: #eef0f3; border-color: #dfe3e8; }
 .tabel-lat td { padding-top: 7px; padding-bottom: 7px; }
 
 /* Calculatorul AWB: grila de asumptii si marcarea campurilor de scenariu. */
