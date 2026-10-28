@@ -136,8 +136,12 @@ function curata() {
   console.log("\n2. Cardurile de stare filtrează și ele");
   {
     const p = await cer("/productie", {});
-    bine("„Nouă (solicitată)” e link", /href="\/productie\?status=noua"/.test(p.corp));
-    bine("„În producție” la fel", /href="\/productie\?status=in_productie"/.test(p.corp));
+    // Adresa cardului poartă acum și căutarea și ordinea, ca să nu le piardă
+    // când dai click pe el („&q=...&ordine=..."). Testul cerea adresa curată
+    // și cădea, deși linkul era bun — iar un test roșu degeaba ajunge să fie
+    // ignorat, odată cu problema adevărată de lângă el.
+    bine("„Nouă (solicitată)” e link", /href="\/productie\?status=noua(&|")/.test(p.corp));
+    bine("„În producție” la fel", /href="\/productie\?status=in_productie(&|")/.test(p.corp));
     const f = await cer("/productie", { status: "in_productie" });
     bine("și duc unde trebuie", /LT-2/.test(f.corp) && !/LT-1/.test(f.corp));
   }
