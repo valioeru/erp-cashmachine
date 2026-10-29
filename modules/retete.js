@@ -498,7 +498,7 @@ function register(router) {
         peLot
           ? `<div class="detail-box reteta-pe-lot" style="border-left:4px solid var(--danger)">
                <strong>Nu comanda marfă după lista asta.</strong> Rețeta produsului dă ${bani4(d.total)} pe bucată, de
-               ${Math.round(d.total / reperN.pret).toLocaleString("ro-RO")} ori mai mult decât ${money(reperN.pret)} (${esc(reperN.sursa)}):
+               ${Math.round(d.total / reperN.pret).toLocaleString("ro-RO")} ori mai mult decât ${bani4(reperN.pret)} (${esc(reperN.sursa)}):
                pare scrisă pe lot, nu pe bucată, deci cantitățile de mai jos ies de tot atâtea ori prea mari.
                <a href="/productie/retete/${c.produs_id}">Repară rețeta</a> și necesarul se reface singur.
              </div>`

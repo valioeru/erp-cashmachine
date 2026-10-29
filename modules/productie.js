@@ -21,6 +21,9 @@ const { fluxulComenzii } = require("../lib/flux-comanda");
 // dintr-un singur tabel, deci o comandă arată la fel în orice pagină.
 const STARI = require("../lib/comenzi-stari");
 const COST = require("../lib/cost");
+// Prețuri pe bucată cu până la 4 zecimale: un plic de 0,0125 lei afișat
+// „0,01 lei" ar face raportul „de 2.595 ori" să pară greșit.
+const pret4 = (v) => Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + " lei";
 const STATUSURI = [
   ["noua", "Nouă (solicitată)"],
   ["in_productie", "În producție"],
@@ -717,7 +720,7 @@ function register(router) {
                    .map(
                      (x) => `<li><a href="/productie/${x.id}">${esc(x.numar || "#" + x.id)}</a> —
                        <a href="/productie/retete/${x.produs_id}">${esc(x.produs || "rețeta")}</a>:
-                       ${money(x.costBuc)} pe bucată, față de ${money(x.pretReper)} (${esc(x.sursaReper)}) —
+                       ${pret4(x.costBuc)} pe bucată, față de ${pret4(x.pretReper)} (${esc(x.sursaReper)}) —
                        de ${Math.round(x.ori).toLocaleString("ro-RO")} ori</li>`
                    )
                    .join("")}
@@ -1931,8 +1934,8 @@ function register(router) {
           retetaPeLot
             ? `<div class="detail-box reteta-pe-lot" style="margin-top:12px;border-left:4px solid var(--danger)">
                  <strong>Cost din rețetă: de verificat.</strong>
-                 Rețeta dă ${money(costPeBucata)} pe bucată, de ${Math.round(costPeBucata / reperComanda.pret).toLocaleString("ro-RO")} ori
-                 mai mult decât ${money(reperComanda.pret)} (${esc(reperComanda.sursa)}). Aproape sigur e scrisă pe lot — cât s-a consumat
+                 Rețeta dă ${pret4(costPeBucata)} pe bucată, de ${Math.round(costPeBucata / reperComanda.pret).toLocaleString("ro-RO")} ori
+                 mai mult decât ${pret4(reperComanda.pret)} (${esc(reperComanda.sursa)}). Aproape sigur e scrisă pe lot — cât s-a consumat
                  pentru o șarjă întreagă, de exemplu 1.000 de bucăți — nu pe o bucată. Înmulțită cu ${esc(String(cantComanda.toLocaleString("ro-RO")))}
                  ar da ${money(costComanda)}, care nu e o cifră reală, așa că nu se adună la costul marfă al comenzilor deschise.
                  <a class="link-btn" href="/productie/retete/${produsComanda.id}" style="margin-left:8px">repară rețeta →</a>
