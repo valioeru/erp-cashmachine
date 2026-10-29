@@ -1694,6 +1694,26 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
           p.id
         );
     }
+
+    // Costul scris aici trebuie să ajungă și pe zilele DEJA scrise, altfel
+    // „am completat costul" nu schimbă nimic în raport și omul crede că marja
+    // e stricată. Pățit pe 29.10.2026: cinci costuri completate de mână, iar
+    // „Top produse" a rămas cu „—" pe toate rândurile, pentru că liniile lunii
+    // fuseseră scrise la importul AWB, când produsele n-aveau încă niciun cost.
+    //
+    // Până acum backfill-ul se făcea doar din formularul de legare la
+    // nomenclator (bifa „umple și zilele vechi") și după importul AWB — adică
+    // exact pe drumurile pe care nu treci când completezi un cost de mână.
+    //
+    // umpleCosturiLipsa() atinge DOAR liniile cu cost NULL. O linie care are
+    // deja un cost înghețat rămâne cum e, chiar dacă prețul de pe produs s-a
+    // schimbat între timp: ăla era costul la data ei. Trecutul nu se rescrie.
+    const umplut = await umpleCosturiLipsa().catch(() => ({ linii: 0, linii_awb: 0 }));
+    if (nr(umplut.linii) || nr(umplut.linii_awb)) {
+      console.log(
+        `[comenzi-zi] costuri scrise de mână: ${nr(umplut.linii)} linii umplute + ${nr(umplut.linii_awb)} pe AWB`
+      );
+    }
     return redirect(ctx.res, CALE);
   });
 
