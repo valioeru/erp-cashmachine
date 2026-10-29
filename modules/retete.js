@@ -41,39 +41,11 @@ function um(p) {
   return u;
 }
 
-// Un cost de rețetă e „de verificat" dacă e departe de prețul cu care se vinde
-// produsul. Sub 5% din preț înseamnă că rețeta e incompletă; peste trei ori
-// prețul înseamnă aproape sigur o rețetă scrisă pe lot, nu pe bucată. Nu
-// corectăm nimic singuri — n-avem de unde ști câte bucăți avea lotul — dar
-// spunem că cifra nu se poate folosi ca atare.
-function verdict(costReteta, pretReper) {
-  const c = Number(costReteta) || 0;
-  const p = Number(pretReper) || 0;
-  if (!(c > 0)) return { cheie: "fara", text: "fără cost", clasa: "gri" };
-  if (!(p > 0)) return { cheie: "necunoscut", text: "n-avem cu ce compara", clasa: "gri" };
-  if (c > 3 * p) return { cheie: "prea_mare", text: "de verificat — pare pe lot, nu pe bucată", clasa: "rosu" };
-  if (c < 0.05 * p) return { cheie: "prea_mic", text: "de verificat — pare incompletă", clasa: "galben" };
-  return { cheie: "ok", text: "plauzibil", clasa: "verde" };
-}
-
-// Prețul de referință cu care judecăm costul: întâi cât s-a facturat efectiv
-// pe produsul ăsta (media), fiindcă e ce a plătit clientul; dacă nu s-a vândut
-// niciodată, prețul de vânzare din catalog.
-async function preturiReper() {
-  const randuri = await db
-    .prepare(
-      `SELECT fl.produs_id AS id, AVG(fl.pret_unitar) AS mediu, COUNT(*) AS linii
-         FROM facturi_linii fl
-         JOIN (SELECT * FROM facturi WHERE activ = 1) f ON f.id = fl.factura_id
-        WHERE f.directie = 'vanzare' AND fl.produs_id IS NOT NULL AND fl.pret_unitar > 0
-        GROUP BY fl.produs_id`
-    )
-    .all()
-    .catch(() => []);
-  const m = new Map();
-  for (const r of randuri) m.set(Number(r.id), { mediu: Number(r.mediu) || 0, linii: Number(r.linii) || 0 });
-  return m;
-}
+// Judecata „plauzibil / pare pe lot / pare incompletă" stă în lib/cost.js,
+// fiindcă o folosește și cardul de cost marfă din Producție: o rețetă pe care
+// pagina asta o arată „de verificat" nu are voie să intre acolo în total.
+const verdict = cost.verdictReteta;
+const preturiReper = cost.preturiReper;
 
 function register(router) {
   // ---- Lista rețetelor --------------------------------------------------
@@ -153,6 +125,8 @@ function register(router) {
         Rețeta spune din ce e făcută <strong>o bucată</strong> de produs finit. Din ea iese costul lui, fără să
         aștepte nicio factură și niciun raport de la contabilitate. Costul din rețetă intră direct în marjă:
         e a doua treaptă, după costul real din contabilitate și înaintea prețului de achiziție.
+        E costul <strong>mărfii</strong>: salariile, transportul și energia pe care contabilitatea le repartizează
+        pe lot în rapoartele de producție rămân scrise în rețetă, dar nu se adună la cost.
       </p>
 
       <div class="cards">
@@ -322,9 +296,40 @@ function register(router) {
                 ]),
               { total: ["TOTAL pe bucată", "", "", "", "", d.total > 0 ? bani4(d.total) : "—", ""] }
             )
-          : `<p style="color:var(--text-muted)">Rețeta nu e definită încă. Adaugă prima componentă mai jos.</p>`
+          : d.regie.length
+            ? `<p style="color:var(--text-muted)">Rețeta n-are nicio componentă de marfă — doar costurile firmei de mai jos.</p>`
+            : `<p style="color:var(--text-muted)">Rețeta nu e definită încă. Adaugă prima componentă mai jos.</p>`
       }
       ${d.lipsa ? `<p style="font-size:12px;color:var(--warn)">${d.lipsa} ${d.lipsa === 1 ? "componentă n-are" : "componente n-au"} cost, deci totalul e incomplet.</p>` : ""}
+      ${
+        d.regie.length
+          ? `<h3 style="margin-top:18px">Costuri ale firmei, puse pe lot de contabilitate — nu intră în costul marfă</h3>
+             <p class="explic">
+               Raportul de producție din SmartBill repartizează pe fiecare lot și salariile, transportul, energia.
+               Pentru contabilitate e corect: costul de producție le include. Aici rețeta dă costul
+               <strong>mărfii</strong> dintr-o bucată, așa că liniile astea rămân scrise, dar nu se adună la total
+               și nu se cer din depozit la necesarul de materie primă.
+             </p>
+             ${table(
+               ["Cost al firmei", "Cantitate / bucată", "UM", "Cost unitar", "Pe bucată, lăsat deoparte", ""],
+               d.regie
+                 .slice()
+                 .sort((a, b) => b.cost - a.cost)
+                 .map((l) => [
+                   esc(l.denumire),
+                   Number(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 6 }),
+                   esc(um({ unitate_masura: l.um, denumire: l.denumire })),
+                   l.cost_unitar > 0 ? bani4(l.cost_unitar) : "—",
+                   l.cost > 0 ? `<span style="color:var(--text-muted)">${bani4(l.cost)}</span>` : "—",
+                   `<form method="post" action="/productie/retete/${p.id}/sterge" class="inline-form" onsubmit="return confirm('Scoți linia din rețetă?')">
+                      <input type="hidden" name="componenta_id" value="${l.componenta_id}">
+                      <button class="link-btn danger" type="submit">Scoate</button>
+                    </form>`,
+                 ]),
+               { total: ["Lăsat deoparte, pe bucată", "", "", "", d.totalRegie > 0 ? bani4(d.totalRegie) : "—", ""] }
+             )}`
+          : ""
+      }
 
       <h2>Adaugă o componentă</h2>
       <form class="form" method="post" action="/productie/retete/${p.id}/adauga" style="max-width:640px">
@@ -373,7 +378,8 @@ function register(router) {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const c = await db
       .prepare(
-        `SELECT c.*, pr.denumire AS produs_denumire, pr.unitate_masura AS produs_um, p.nume AS partener_nume
+        `SELECT c.*, pr.denumire AS produs_denumire, pr.unitate_masura AS produs_um, pr.pret_vanzare AS produs_pret_vanzare,
+                p.nume AS partener_nume
            FROM comenzi_productie c
            LEFT JOIN produse pr ON pr.id = c.produs_id
            LEFT JOIN parteneri p ON p.id = c.partener_id
@@ -412,7 +418,21 @@ function register(router) {
     if (!cant) return gol("Comanda n-are o cantitate din care să se poată calcula necesarul.");
 
     const d = await cost.detaliuReteta(c.produs_id);
+    if (!d.linii.length && d.regie.length)
+      return gol(`Rețeta produsului <a href="/productie/retete/${c.produs_id}">${esc(c.produs_denumire || "")}</a> are doar costuri ale firmei (salarii, transport, energie), nicio componentă de marfă — n-ai ce scoate din depozit. Adaugă materialele în rețetă și necesarul apare singur.`);
     if (!d.linii.length) return gol(`Produsul <a href="/productie/retete/${c.produs_id}">${esc(c.produs_denumire || "")}</a> n-are încă rețetă. Scrie-o și necesarul apare singur.`);
+
+    // O rețetă scrisă pe lot dă și un necesar de o mie de ori prea mare: 40 m²
+    // de hârtie „pe plic", înmulțiți cu 700.000 de plicuri. Lista se arată în
+    // continuare — componentele sunt bune, doar cantitățile nu — dar cu
+    // avertismentul deasupra, ca nimeni să nu comande marfă după ea.
+    const reperN = cost.pretReperProdus(
+      await cost.preturiReper(c.produs_id),
+      c.produs_id,
+      c.produs_pret_vanzare,
+      Number(c.valoare_estimata) > 0 && cant > 0 ? Number(c.valoare_estimata) / cant : 0
+    );
+    const peLot = cost.verdictReteta(d.total, reperN.pret).cheie === "prea_mare";
 
     // Ce e în depozit din fiecare componentă, palet cu palet, cele mai vechi
     // întâi — exact ordinea în care ar trebui scoase.
@@ -474,6 +494,16 @@ function register(router) {
 
     const body = `
       ${capTabel}
+      ${
+        peLot
+          ? `<div class="detail-box reteta-pe-lot" style="border-left:4px solid var(--danger)">
+               <strong>Nu comanda marfă după lista asta.</strong> Rețeta produsului dă ${bani4(d.total)} pe bucată, de
+               ${Math.round(d.total / reperN.pret).toLocaleString("ro-RO")} ori mai mult decât ${money(reperN.pret)} (${esc(reperN.sursa)}):
+               pare scrisă pe lot, nu pe bucată, deci cantitățile de mai jos ies de tot atâtea ori prea mari.
+               <a href="/productie/retete/${c.produs_id}">Repară rețeta</a> și necesarul se reface singur.
+             </div>`
+          : ""
+      }
       <div class="cards">
         <div class="card"><div class="label">Componente în rețetă</div><div class="value">${d.linii.length}</div></div>
         <div class="card"><div class="label">Nu se acoperă din depozit</div>
@@ -489,7 +519,15 @@ function register(router) {
         Lista asta <b>nu scoate nimic</b> din depozit — doar spune ce trebuie luat. Scoaterea se face din
         <a href="/stocuri/ct-park/iesire">Depozit → Ieșire marfă</a>, cu destinația <b>producție</b>, bifând paleții de mai sus.
         Paleții se scot întregi, așa că la ultimul palet rămâne de obicei o diferență — e scrisă pe rândul ei.
-      </p>`;
+      </p>
+      ${
+        d.regie.length
+          ? `<p class="explic">
+               Rețeta mai are ${d.regie.length} ${d.regie.length === 1 ? "linie" : "linii"} de costuri ale firmei
+               (${d.regie.map((l) => esc(l.denumire)).join(", ")}) — nu sunt marfă, nu se scot din depozit și nu intră în costul de mai sus.
+             </p>`
+          : ""
+      }`;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Necesar comanda ${c.numar || c.id}`, active: "/productie", body }));
   });
 

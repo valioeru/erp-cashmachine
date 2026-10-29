@@ -20,6 +20,7 @@ const { fluxulComenzii } = require("../lib/flux-comanda");
 // n-ar fi fost de ajuns s-o schimb într-un singur loc. Acum culoarea vine
 // dintr-un singur tabel, deci o comandă arată la fel în orice pagină.
 const STARI = require("../lib/comenzi-stari");
+const COST = require("../lib/cost");
 const STATUSURI = [
   ["noua", "Nouă (solicitată)"],
   ["in_productie", "În producție"],
@@ -650,23 +651,31 @@ function register(router) {
     // Cât din registrul de comenzi deschise își știe costul. E măsura
     // progresului spre „fiecare produs vine cu rețeta lui": câte comenzi sunt
     // legate de un produs care are rețetă, și cât costă marfa de pe ele.
-    const acoperireCost = await db
+    //
+    // Se adună în JS, nu în SQL: fiecare comandă trece întâi prin aceeași
+    // judecată ca pe pagina rețetei, iar o rețetă „de verificat — pare pe lot"
+    // nu intră în total (lib/cost.js, costMarfaComenzi). Costul din rețetă e
+    // deja doar marfa — salariile, transportul și energia puse pe lot de
+    // contabilitate nu mai intră în el.
+    const comenziDeschise = await db
       .prepare(
-        `SELECT COUNT(*) AS deschise,
-                SUM(CASE WHEN COALESCE(pr.cost_reteta, 0) > 0 THEN 1 ELSE 0 END) AS cu_reteta,
-                SUM(CASE WHEN COALESCE(pr.cost_reteta, 0) > 0
-                         THEN COALESCE(pr.cost_reteta, 0) *
-                              COALESCE(CAST(NULLIF(REPLACE(REPLACE(c.cantitate, ' ', ''), ',', '.'), '') AS REAL), 0)
-                         ELSE 0 END) AS cost
+        `SELECT c.id, c.numar, c.cantitate, c.valoare_estimata, c.produs_id,
+                pr.denumire AS produs, pr.cost_reteta, pr.pret_vanzare
            FROM comenzi_productie c
            LEFT JOIN produse pr ON pr.id = c.produs_id
           WHERE c.status IN ('${DESCHISE.join("','")}')`
       )
-      .get()
-      .catch(() => null);
-    const deschiseN = acoperireCost ? Number(acoperireCost.deschise) || 0 : 0;
-    const cuRetetaN = acoperireCost ? Number(acoperireCost.cu_reteta) || 0 : 0;
-    const costDeschise = acoperireCost ? Number(acoperireCost.cost) || 0 : 0;
+      .all()
+      .catch(() => []);
+    const acoperireCost = COST.costMarfaComenzi(
+      comenziDeschise,
+      comenziDeschise.some((c) => Number(c.cost_reteta) > 0) ? await COST.preturiReper() : new Map()
+    );
+    const deschiseN = acoperireCost.deschise;
+    const cuRetetaN = acoperireCost.cuCost;
+    const costDeschise = acoperireCost.cost;
+    const lotN = acoperireCost.deVerificat.length;
+    const lotPrimele = acoperireCost.deVerificat.slice(0, 3);
 
     const body = `
       <div class="toolbar">
@@ -692,11 +701,31 @@ function register(router) {
         </a>
         <div class="card"><div class="label">Comenzi cu cost cunoscut</div>
           <div class="value">${cuRetetaN}<span class="mic"> din ${deschiseN} deschise</span></div>
-          <div class="mic">restul n-au produs legat sau produsul n-are rețetă</div></div>
+          <div class="mic">restul n-au produs legat, produsul n-are rețetă${lotN ? " sau rețeta e de verificat" : ""}</div></div>
         <div class="card"><div class="label">Cost marfă, comenzi deschise</div>
           <div class="value">${money(costDeschise)}</div>
-          <div class="mic">din rețete, doar pentru comenzile de mai sus</div></div>
+          <div class="mic">din rețete, doar materialele${lotN ? `, fără ${lotN} ${lotN === 1 ? "comandă" : "comenzi"} cu rețetă de verificat` : ""}</div></div>
       </div>
+      ${
+        lotN
+          ? `<div class="detail-box retete-lot" style="border-left:4px solid var(--danger);margin:4px 0 14px">
+               <strong>${lotN} ${lotN === 1 ? "comandă deschisă are" : "comenzi deschise au"} o rețetă care pare scrisă pe lot, nu pe bucată</strong>
+               — costul ei pe bucată iese de câteva ori mai mare decât prețul de vânzare, așa că nu e adunat mai sus
+               (ar fi adăugat ${money(acoperireCost.costDeVerificat)}). Repară rețeta și comanda intră singură în total.
+               <ul style="margin:6px 0 0 18px;padding:0">
+                 ${lotPrimele
+                   .map(
+                     (x) => `<li><a href="/productie/${x.id}">${esc(x.numar || "#" + x.id)}</a> —
+                       <a href="/productie/retete/${x.produs_id}">${esc(x.produs || "rețeta")}</a>:
+                       ${money(x.costBuc)} pe bucată, față de ${money(x.pretReper)} (${esc(x.sursaReper)}) —
+                       de ${Math.round(x.ori).toLocaleString("ro-RO")} ori</li>`
+                   )
+                   .join("")}
+                 ${lotN > lotPrimele.length ? `<li><a href="/productie/retete">încă ${lotN - lotPrimele.length} — vezi rețetele de verificat</a></li>` : ""}
+               </ul>
+             </div>`
+          : ""
+      }
       <form class="filtre" method="get" action="/productie">
         <input type="search" name="q" value="${esc(cauta)}" autofocus
                style="min-width:280px;flex:1 1 320px"
@@ -1705,19 +1734,33 @@ function register(router) {
     }
     if (c.produs_id) {
       produsComanda = await db
-        .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa FROM produse WHERE id = ?")
+        .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa, pret_vanzare FROM produse WHERE id = ?")
         .get(c.produs_id)
         .catch(() => null);
     }
     if (!produsComanda && c.tip_produs) {
       produsComanda = await db
-        .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa FROM produse WHERE LOWER(TRIM(denumire)) = LOWER(TRIM(?)) LIMIT 1")
+        .prepare("SELECT id, denumire, unitate_masura, cost_reteta, cost_reteta_lipsa, pret_vanzare FROM produse WHERE LOWER(TRIM(denumire)) = LOWER(TRIM(?)) LIMIT 1")
         .get(String(c.tip_produs))
         .catch(() => null);
     }
     const costPeBucata = produsComanda ? Number(produsComanda.cost_reteta) || 0 : 0;
-    const cantComanda = Number(String(c.cantitate || "").replace(/[^\d.,-]/g, "").replace(",", ".")) || 0;
+    const cantComanda = COST.cantitateComanda(c.cantitate);
     const costComanda = costPeBucata * cantComanda;
+    // Aceeași judecată ca pe pagina rețetei și pe cardul din /productie: o
+    // rețetă care iese de peste trei ori prețul de vânzare e scrisă pe lot, iar
+    // costul ei înmulțit cu cantitatea comenzii nu e o cifră reală.
+    const reperComanda =
+      costPeBucata > 0
+        ? COST.pretReperProdus(
+            await COST.preturiReper(produsComanda.id),
+            produsComanda.id,
+            produsComanda.pret_vanzare,
+            Number(c.valoare_estimata) > 0 && cantComanda > 0 ? Number(c.valoare_estimata) / cantComanda : 0
+          )
+        : { pret: 0, sursa: "" };
+    const verdictComanda = COST.verdictReteta(costPeBucata, reperComanda.pret);
+    const retetaPeLot = verdictComanda.cheie === "prea_mare";
 
     // Legarea comenzii de un produs din catalog. Fără ea, comanda n-are de
     // unde să-și ia rețeta, deci nici costul. Căutăm cu ce scrie omul în
@@ -1885,7 +1928,17 @@ function register(router) {
             : ""
         }
         ${
-          costPeBucata > 0
+          retetaPeLot
+            ? `<div class="detail-box reteta-pe-lot" style="margin-top:12px;border-left:4px solid var(--danger)">
+                 <strong>Cost din rețetă: de verificat.</strong>
+                 Rețeta dă ${money(costPeBucata)} pe bucată, de ${Math.round(costPeBucata / reperComanda.pret).toLocaleString("ro-RO")} ori
+                 mai mult decât ${money(reperComanda.pret)} (${esc(reperComanda.sursa)}). Aproape sigur e scrisă pe lot — cât s-a consumat
+                 pentru o șarjă întreagă, de exemplu 1.000 de bucăți — nu pe o bucată. Înmulțită cu ${esc(String(cantComanda.toLocaleString("ro-RO")))}
+                 ar da ${money(costComanda)}, care nu e o cifră reală, așa că nu se adună la costul marfă al comenzilor deschise.
+                 <a class="link-btn" href="/productie/retete/${produsComanda.id}" style="margin-left:8px">repară rețeta →</a>
+                 <a class="btn small secondary" href="/productie/${c.id}/necesar" style="margin-left:8px">Necesar de materie primă</a>
+               </div>`
+            : costPeBucata > 0
             ? `<p style="margin-top:12px">
                  <strong>Cost din rețetă:</strong>
                  ${money(costPeBucata)} pe bucată${costComanda > 0 ? ` · <strong>${money(costComanda)}</strong> pe toată comanda` : ""}
