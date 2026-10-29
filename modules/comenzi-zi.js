@@ -1013,6 +1013,47 @@ async function awbClient(clientId, limita) {
 
 // ---- bucăți de pagină -------------------------------------------------------
 
+// ---- perioadele de facturare ------------------------------------------------
+// Vali, 29.10.2026: facturăm de două ori pe lună, pe 15 și la sfârșitul lunii;
+// dacă ziua aceea cade sâmbătă sau duminică, factura se face vineri.
+//
+// Sumele zilnice din raport sunt FĂRĂ TVA (confirmat de Vali, 29.10.2026), deci
+// suma de facturat e suma simplă a zilelor — nu se împarte nimic la 1,21. TVA-ul
+// se adaugă pe factură, peste bază.
+//
+// Toată aritmetica e pe șiruri „YYYY-MM-DD", prin ziPlus/ultimaZiDinLuna. Nu se
+// atinge ceasul: singura funcție care știe ce zi e azi rămâne azi(), care e pe
+// ora Bucureștiului. Un Date.now() local aici ar putea cădea cu o zi alături.
+function ziuaSaptamanii(zi) {
+  return new Date(Date.parse(String(zi).slice(0, 10) + "T00:00:00Z")).getUTCDay();
+}
+
+function vineriDacaWeekend(zi) {
+  const z = ziuaSaptamanii(zi);
+  if (z === 6) return ziPlus(zi, -1); // sâmbătă
+  if (z === 0) return ziPlus(zi, -2); // duminică
+  return zi;
+}
+
+// Cele două perioade ale unei luni, fiecare cu data ei de facturare.
+function perioadeFacturare(luna) {
+  const ultima = ultimaZiDinLuna(luna);
+  return [
+    { deLa: `${luna}-01`, panaLa: `${luna}-15`, facturare: vineriDacaWeekend(`${luna}-15`) },
+    { deLa: `${luna}-16`, panaLa: ultima, facturare: vineriDacaWeekend(ultima) },
+  ];
+}
+
+// Perioada de facturare în care cade o zi, și dacă e închisă la data de azi.
+// Închisă = azi a trecut de data de facturare. În ziua facturării perioada e
+// încă deschisă: factura se face din ce există atunci.
+function perioadaFacturarii(zi, aziZi) {
+  const luna = String(zi).slice(0, 7);
+  const p = perioadeFacturare(luna);
+  const sel = Number(String(zi).slice(8, 10)) <= 15 ? p[0] : p[1];
+  return { ...sel, luna, inchisa: String(aziZi) > sel.facturare };
+}
+
 function cardulLunii(titlu, t) {
   const venit = nr(t.venit);
   const cuCost = venit - nr(t.venit_fara_cost);
@@ -1046,9 +1087,42 @@ function tabelProduse(produse, totalMarja) {
       areCost && totalMarja > 0 ? procent(marja, totalMarja).toFixed(1) + "%" : "—",
     ];
   });
+  // Rândul de total, cerut de Vali pe 29.10.2026: „sub acest table fa si total
+  // pe fiecare coloana".
+  //
+  // Două lucruri se calculează altfel decât prin însumarea coloanei:
+  //
+  //   MARJA % se ia DIN TOTALURI, nu ca medie a procentelor de pe rânduri.
+  //   Media tratează un produs de 600 lei la fel ca unul de 6.200 și dă alt
+  //   număr — pe produsele unei zile obișnuite, diferența e de câteva puncte.
+  //
+  //   CANTITATEA nu se adună când unitățile diferă: plicuri la bucată plus
+  //   folie la rolă dau un număr fără sens. Se adună doar dacă toate rândurile
+  //   au aceeași unitate; altfel rândul spune câte produse sunt.
+  const venitTot = produse.reduce((x, p) => x + nr(p.venit), 0);
+  const cuCostTot = produse.reduce((x, p) => x + (nr(p.venit) - nr(p.venit_fara_cost)), 0);
+  const costTot = produse.reduce((x, p) => x + nr(p.cost), 0);
+  const marjaTot = cuCostTot - costTot;
+  const um = new Set(produse.map((p) => String(p.um || "buc")));
+  const cantCelula =
+    um.size === 1
+      ? produse.reduce((x, p) => x + nr(p.cantitate), 0).toLocaleString("ro-RO") + " " + esc([...um][0])
+      : `${produse.length} produse`;
+
   return table(
     ["Produs", "Cantitate", "Venit", "Cost", "Marjă", "Marjă %", "Din marja perioadei"],
-    randuri
+    randuri,
+    {
+      total: [
+        "<strong>Total</strong>",
+        `<strong>${cantCelula}</strong>`,
+        `<strong>${money(venitTot)}</strong>`,
+        cuCostTot > 0 ? `<strong>${money(costTot)}</strong>` : "—",
+        cuCostTot > 0 ? `<strong>${money(marjaTot)}</strong>` : "—",
+        cuCostTot > 0 ? `<strong>${procent(marjaTot, cuCostTot).toFixed(1)}%</strong>` : "—",
+        cuCostTot > 0 ? "<strong>100%</strong>" : "—",
+      ],
+    }
   );
 }
 
@@ -1078,14 +1152,60 @@ function coloaneBani(t) {
   ];
 }
 
-function tabelZile(zile, eticheta) {
+// Rândul de facturare dintre zile: suma perioadei, fără TVA.
+// O perioadă trecută de data facturării e „De facturat"; una încă deschisă e
+// „De facturat la zi", cu ziua până la care s-a numărat scrisă în etichetă —
+// altfel nu se vede dacă suma e de ieri sau de azi.
+function randFacturare(zileleP, p) {
+  const t = sumaZile(zileleP);
+  const panaLaReal = zileleP[0].data; // zilele vin descrescător: prima e cea mai nouă
+  const et = p.inchisa
+    ? `De facturat ${dataRo(p.deLa)} – ${dataRo(p.panaLa)}`
+    : `De facturat la zi ${dataRo(p.deLa)} – ${dataRo(panaLaReal)}`;
+  const badge = p.inchisa
+    ? '<span class="badge">închisă</span>'
+    : `<span class="badge rosu">în curs, se facturează ${dataRo(p.facturare)}</span>`;
+  return [
+    `<strong>${esc(et)}</strong> ${badge}`,
+    ...coloaneBani(t).map((c) => `<strong>${c}</strong>`),
+    `${t.zile} zile`,
+    "",
+  ];
+}
+
+function tabelZile(zile, eticheta, aziZi) {
   if (!zile.length) return '<p style="color:var(--text-muted)">Nicio zi cu comenzi în perioada aleasă.</p>';
   const t = sumaZile(zile);
+  const az = aziZi || azi();
+
+  // Zilele vin descrescător. Subtotalul unei perioade se pune SUB blocul ei,
+  // adică imediat după ultima zi (cea mai veche) din perioada respectivă.
+  const randuri = [];
+  let grup = [];
+  for (let i = 0; i < zile.length; i++) {
+    const z = zile[i];
+    randuri.push([`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || "")]);
+    grup.push(z);
+    const p = perioadaFacturarii(z.data, az);
+    const urm = zile[i + 1];
+    const altaPerioada = !urm || perioadaFacturarii(urm.data, az).deLa !== p.deLa;
+    if (altaPerioada) {
+      randuri.push(randFacturare(grup, p));
+      grup = [];
+    }
+  }
+
   return table(
     ["Ziua", "Venit", "Cost", "Marjă", "Marjă %", "Produse", "Sursa"],
-    zile
-      .map((z) => [`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || "")])
-      .concat([[`<strong>Total${eticheta ? " " + esc(eticheta) : ""}</strong>`, ...coloaneBani(t).map((c) => `<strong>${c}</strong>`), `${t.zile} zile`, ""]])
+    randuri,
+    {
+      total: [
+        `<strong>Total${eticheta ? " " + esc(eticheta) : ""}</strong>`,
+        ...coloaneBani(t).map((c) => `<strong>${c}</strong>`),
+        `${t.zile} zile`,
+        "",
+      ],
+    }
   );
 }
 
@@ -1442,7 +1562,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       ${tabelProduse(pProd, marjaLuna)}
 
       <h2>Pe zi — ${esc(per.eticheta)}</h2>
-      ${tabelZile(zile, per.eticheta)}
+      ${tabelZile(zile, per.eticheta, azi())}
 
       <h2>Pe luni</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Apasă pe o lună ca să-i vezi zilele, cu totalul lunii dedesubt.</p>
