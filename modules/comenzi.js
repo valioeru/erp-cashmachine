@@ -88,6 +88,26 @@ const sumaIn = (v, moneda) =>
 // zecimale — la 500.000 de bucăți, rotunjirea la 0,42 pierde 1.750 de lei pe
 // o singură linie. Totalurile rămân pe două: sunt bani de încasat, nu prețuri.
 const BNR = require("../lib/curs-bnr");
+// Cum se arată și cum se citește prețul din câmp. Povestea — câmpul care
+// primea doar 0.16005859375 și refuza 0,16 — e în lib/pret-camp.js.
+const PC = require("../lib/pret-camp");
+
+// Liniile cu marfă (produs și cantitate) al căror preț nu se poate citi.
+// Câmpul are și „pattern", deci în mod normal browserul le oprește înainte să
+// plece — dar ce vine prin HTTP nu se crede pe cuvânt. Un preț ghicit greșit
+// e mai rău decât unul refuzat: „1.234,56" poate fi 1,23 sau 1.234,56, iar
+// diferența e de o mie de ori.
+function liniiCuPretRau(produsIds, cantitati, preturiCitite) {
+  const rele = [];
+  produsIds.forEach((id, i) => {
+    if (parseInt(id, 10) && Number(cantitati[i] || 0) > 0 && !preturiCitite[i].ok) rele.push(i + 1);
+  });
+  if (!rele.length) return "";
+  return (
+    (rele.length === 1 ? `Prețul de pe linia ${rele[0]} nu e un număr` : `Prețurile de pe liniile ${rele.join(", ")} nu sunt numere`) +
+    " pe care să le pot citi. Scrie zecimalele cu virgulă sau cu punct — de exemplu 0,16 — și fără separator de mii."
+  );
+}
 const pretIn = (v, moneda) => BNR.scriePret(v) + " " + (SIMBOL[moneda] || moneda || "lei");
 
 // ------------------------------------------------------------------
@@ -277,11 +297,37 @@ function blocLinii(produse, linii) {
   // Fără eticheta asta, agentul ar avea trei căsuțe de numere una sub alta
   // și nimic care să spună care e cantitatea și care e prețul. Regula de
   // desfacere e în blocul de stil din lineRowsScript.
+  // Prețul. NU mai e <input type="number" step="0.0001">: acolo pasul se
+  // numără de la valoarea cu care pornește câmpul, deci un preț de
+  // 0.16005859375 făcea ca 0,16 să fie refuzat de browser — „vrea doar acea
+  // valoare", cum a zis Vali. Câmp de text cu tastatura de cifre pe telefon,
+  // virgula sau punctul ca zecimale, verificarea pe server. Detaliile, în
+  // lib/pret-camp.js.
+  //
+  // `pret_exact[]` ține prețul din bază. Se golește când omul tastează în
+  // câmp; dacă rămâne plin, omul n-a atins prețul și se păstrează exact cel
+  // de dinainte — câmpul arată 0,1601, dar nu are voie să schimbe singur
+  // prețul de pe 150.000 de bucăți.
+  //
+  // Cantitatea rămâne „number", dar cu step="any", din același motiv: o
+  // cantitate cu multe zecimale (kilogramele calculate din metri, la stretch)
+  // ar fi făcut ca orice cantitate rotundă să fie refuzată la modificare.
+  const campPret = (l) => {
+    const exact = l.pret_exact === undefined || l.pret_exact === null ? "" : String(l.pret_exact);
+    const nota = PC.areZecimaleInPlus(exact)
+      ? `<div class="pret-exact" title="Câmpul arată prețul rotunjit la 4 zecimale. Dacă nu-l atingi, rămâne exact cel din bază; dacă tastezi altul, se scrie cel tastat.">în bază: ${esc(PC.scrieExact(exact))}</div>`
+      : "";
+    return `<input type="text" class="camp-pret" inputmode="decimal" autocomplete="off" name="pret_unitar[]"
+                     pattern="[0-9]+([.,][0-9]*)?|[.,][0-9]+" title="Prețul, cu virgulă sau punct — de exemplu 0,16"
+                     value="${esc(PC.pretPentruCamp(l.pret_unitar))}" oninput="comenziPretAtins(this)">
+            <input type="hidden" name="pret_exact[]" value="${esc(exact)}">${nota}`;
+  };
+
   const randLinie = (l) => `<tr>
-          <td data-eticheta="Categorie" style="min-width:150px">
+          <td data-eticheta="Categorie" style="min-width:130px">
             <select class="cat-produs" onchange="comenziFiltreaza(this)">${optiuniCategorie(categoriaProdusului(l.produs_id))}</select>
           </td>
-          <td data-eticheta="Produs" style="min-width:260px">
+          <td data-eticheta="Produs" style="min-width:230px">
             <span class="alege-produs" style="position:relative;display:block">
               <input type="hidden" name="produs_id[]" value="${esc(l.produs_id || "")}">
               <input type="search" class="cauta-produs" autocomplete="off" style="width:100%"
@@ -293,17 +339,17 @@ function blocLinii(produse, linii) {
               sau configurează un produs nou (cod generat)
             </button>
           </td>
-          <td data-eticheta="Cantitate"><input type="number" step="0.01" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
+          <td data-eticheta="Cantitate"><input type="number" step="any" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
           <td data-eticheta="UM"><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
                      value="${esc(l.um || unitateaProdusului(l.produs_id))}"></td>
-          <td data-eticheta="Preț unitar"><input type="number" step="0.0001" inputmode="decimal" name="pret_unitar[]" value="${esc(l.pret_unitar || "")}"></td>
+          <td data-eticheta="Preț unitar">${campPret(l)}</td>
           <td data-eticheta=""><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
         </tr>`;
 
   const randuri = (Array.isArray(linii) && linii.length ? linii : [{}]).map(randLinie).join("");
   return `
       <table class="table lines-table">
-        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:120px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:130px">Preț unitar</th><th></th></tr></thead>
+        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:110px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:120px">Preț unitar</th><th></th></tr></thead>
         <tbody id="linii-body">${randuri}</tbody>
       </table>
       <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>`;
@@ -324,6 +370,26 @@ function lineRowsScript(produse, familii, eAdmin) {
     var COMENZI_MAX = ${MAX_REZULTATE};
     var COMENZI_FAMILII = ${JSON.stringify(familii || []).replace(/</g, "\\u003c")};
     var COMENZI_ADMIN = ${eAdmin ? "true" : "false"};
+    // Prețul scris în câmp: aceeași funcție ca pe server (lib/pret-camp.js),
+    // pusă aici ca text, ca prețul completat din nomenclator să arate exact
+    // ca cel desenat de server — cel mult 4 zecimale, cu virgulă.
+    var comenziPretPentruCamp = ${PC.pretPentruCamp.toString()};
+    // Omul a tastat în câmpul de preț: prețul exact din bază nu mai contează,
+    // de acum se scrie ce a tastat el. Nota „în bază: ..." dispare odată cu el.
+    function comenziPretAtins(camp) {
+      var celula = camp.closest('td');
+      if (!celula) return;
+      var exact = celula.querySelector('input[name="pret_exact[]"]');
+      if (exact) exact.value = '';
+      var nota = celula.querySelector('.pret-exact');
+      if (nota) nota.remove();
+    }
+    // Completarea automată din nomenclator e tot o schimbare de preț, chiar
+    // dacă n-a tastat-o omul.
+    function comenziPunePret(camp, valoare) {
+      camp.value = comenziPretPentruCamp(valoare);
+      comenziPretAtins(camp);
+    }
     (function () {
       var fara = function (s) {
         return String(s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '');
@@ -728,7 +794,7 @@ function lineRowsScript(produse, familii, eAdmin) {
           cautare.value = d.denumire;
           if (umInput && !umInput.value && d.um) umInput.value = d.um;
           var pretInput = rand.querySelector('input[name="pret_unitar[]"]');
-          if (pretInput && !pretInput.value && Number(d.pret) > 0) pretInput.value = d.pret;
+          if (pretInput && !pretInput.value && Number(d.pret) > 0) comenziPunePret(pretInput, d.pret);
           cutie.hidden = true;
           var cant = rand.querySelector('input[name="cantitate[]"]');
           if (cant && !cant.value) cant.focus();
@@ -745,7 +811,7 @@ function lineRowsScript(produse, familii, eAdmin) {
       rand.querySelector('.cauta-produs').value = p ? p[2] : '';
       rand.querySelector('.rezultate-produs').hidden = true;
       var pretInput = rand.querySelector('input[name="pret_unitar[]"]');
-      if (pretInput && pret && !pretInput.value) pretInput.value = pret;
+      if (pretInput && pret && !pretInput.value) comenziPunePret(pretInput, pret);
       // Unitatea vine din nomenclator, dar rămâne schimbabilă: se comandă și
       // altfel decât e trecut pe produs (bobina în kg, deși produsul stă în
       // bucăți). Ce a scris omul nu se rescrie.
@@ -779,6 +845,8 @@ function lineRowsScript(produse, familii, eAdmin) {
       clone.querySelectorAll('select').forEach(function (el) { el.selectedIndex = 0; });
       var cutie = clone.querySelector('.rezultate-produs');
       if (cutie) { cutie.innerHTML = ''; cutie.hidden = true; }
+      // Nota „în bază: ..." e a liniei copiate, nu a celei noi.
+      clone.querySelectorAll('.pret-exact').forEach(function (el) { el.remove(); });
       tbody.appendChild(clone);
       clone.querySelector('.cat-produs').focus();
     }
@@ -794,6 +862,15 @@ function lineRowsScript(produse, familii, eAdmin) {
     }
   </script>
   <style>
+    /* Câmpul de preț e acum text, deci nu mai prinde regula din foaia
+       principală pentru câmpurile „number" — de-aia își are lățimea aici.
+       Fără ea, un câmp gol s-ar strânge cel mai tare din tot rândul. */
+    .lines-table .camp-pret { min-width:100px; }
+    .lines-table .pret-exact { font-size:11px; color:var(--text-muted); margin-top:3px; white-space:nowrap; }
+    /* Formularul de comandă (form-comanda) e lat de 980 px, nu de 820. Tabelul
+       de linii are nevoie de vreo 840 — categorie, produs, cantitate, UM, preț,
+       șterge —, iar la 820 ieșea cu 109 px în afara casetei: prețul și
+       „Șterge" stăteau pe fundalul paginii, ca în poza lui Vali din 29.10. */
     /* fixed, nu absolute: vezi comentariul din comenziAseaza. left/top/width
        le pune JS-ul din dreptunghiul câmpului. */
     .rezultate-produs { position:fixed; z-index:400; max-height:300px; overflow-y:auto; min-width:240px;
@@ -848,8 +925,14 @@ function lineRowsScript(produse, familii, eAdmin) {
      *
      * Aceeași pagină, același formular, aceleași rute — doar altfel așezate.
      * De-aia nu există o a doua „aplicație de comenzi” de ținut în pas.
+     *
+     * Pragul e 980 px, nu 760 (29.10.2026). Tabelul cu șase coloane are
+     * nevoie de vreo 873 px; între 760 și 960 nu mai încăpea în casetă și
+     * ieșea pe lângă ea, cu prețul și „Șterge" pe fundalul paginii. Acum,
+     * dacă tabelul nu încape, rândurile devin cartele — pe o fereastră
+     * îngustă de laptop la fel ca pe telefon.
      */
-    @media (max-width: 760px) {
+    @media (max-width: 980px) {
       /* min-width:0 nu e de prisos: foaia principală dă tabelului
          „min-width:760px”, ca să nu se strivească cele șase coloane pe
          laptop. Fără anularea asta, cartelele s-ar desena cuminți — într-un
@@ -874,7 +957,8 @@ function lineRowsScript(produse, familii, eAdmin) {
       .lines-table td[data-eticheta=""] { grid-column:1 / -1; }
       /* Trei câmpuri pe un rând de 340 px nu încap cu min-width-ul de 110
          pus pentru laptop. */
-      .lines-table td input[type="number"] { min-width:0; }
+      .lines-table td input[type="number"], .lines-table .camp-pret { min-width:0; }
+      .lines-table .pret-exact { white-space:normal; }
       /* Numele câmpului, deasupra lui. Celula fără etichetă (butonul Șterge)
          n-o scrie — altfel ar rămâne un rând gol deasupra butonului. */
       .lines-table td[data-eticheta]:not([data-eticheta=""])::before {
@@ -999,7 +1083,7 @@ function register(router) {
         ? `<p class="alerta" style="max-width:820px;color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 12px">${esc(eroare)}</p>`
         : ""
     }
-    <form method="post" action="/comenzi" class="form" style="max-width:820px">
+    <form method="post" action="/comenzi" class="form form-comanda" style="max-width:980px">
       <label class="field"><span>Client</span>
         ${cautaClient({
           nume: "client_cautat",
@@ -1114,6 +1198,10 @@ function register(router) {
     const produsIds = asArray(ctx.body["produs_id[]"]);
     const cantitati = asArray(ctx.body["cantitate[]"]);
     const preturi = asArray(ctx.body["pret_unitar[]"]);
+    // Pe o comandă nouă nu există preț „din bază", deci se citește doar ce a
+    // tastat omul: cu virgulă sau punct, rotunjit la 4 zecimale. „0,16" e
+    // 0,16 lei — nu 16, cum ieșea din câmpul „number" pe un browser în engleză.
+    const preturiCitite = preturi.map((p) => PC.pretDinCamp(p));
     const unitati = asArray(ctx.body["um[]"]);
     // Ce vine prin HTTP nu se crede pe cuvânt: o monedă necunoscută ar ajunge
     // scrisă pe comandă și pe factura de după ea.
@@ -1177,6 +1265,9 @@ function register(router) {
       });
     }
 
+    const preturiRele = liniiCuPretRau(produsIds, cantitati, preturiCitite);
+    if (preturiRele) return await formularComandaNoua(ctx, { eroare: preturiRele, valori });
+
     // Livrarea parțială se întreabă acum, nu după ce depozitul descoperă că
     // lipsește marfă. Radio-urile din formular au `required`, dar ce vine prin
     // HTTP nu se crede pe cuvânt: o comandă trimisă din altă parte ar intra
@@ -1239,7 +1330,13 @@ function register(router) {
       const cant = Number(cantitati[i] || 0);
       const produsId = parseInt(produsIds[i], 10);
       if (cant > 0 && produsId) {
-        await insertLinie.run(comandaId, produsId, cant, Number(preturi[i] || 0), String(unitati[i] || "").trim() || null);
+        await insertLinie.run(
+          comandaId,
+          produsId,
+          cant,
+          preturiCitite[i] && preturiCitite[i].ok ? preturiCitite[i].valoare : 0,
+          String(unitati[i] || "").trim() || null
+        );
       }
     }
 
@@ -1594,7 +1691,9 @@ function register(router) {
       livrare_partiala: livrare.raspuns(comanda),
       moneda: comanda.moneda,
       observatii: comanda.observatii,
-      linii: liniiBaza,
+      // Prețul din bază merge și într-un câmp ascuns, neatins de rotunjire:
+      // dacă omul nu umblă la preț, la salvare se păstrează exact acesta.
+      linii: liniiBaza.map((l) => ({ ...l, pret_exact: l.pret_unitar })),
     };
     const avert = IST.avertismente(comanda);
 
@@ -1618,7 +1717,7 @@ function register(router) {
       <p style="max-width:820px;color:var(--text-muted);font-size:13px">
         Tot ce schimbi aici se scrie în istoricul comenzii, cu numele tău și ora — și rămâne acolo.
       </p>
-      <form method="post" action="/comenzi/${comanda.id}/editare" class="form" style="max-width:820px">
+      <form method="post" action="/comenzi/${comanda.id}/editare" class="form form-comanda" style="max-width:980px">
         <label class="field"><span>Client</span>
           ${cautaClient({
             nume: "client_cautat",
@@ -1715,14 +1814,18 @@ function register(router) {
     const produsIds = asArray(b["produs_id[]"]);
     const cantitati = asArray(b["cantitate[]"]);
     const preturi = asArray(b["pret_unitar[]"]);
+    const exacte = asArray(b["pret_exact[]"]);
     const unitati = asArray(b["um[]"]);
     const moneda = MONEDE.includes(String(b.moneda || "")) ? String(b.moneda) : "RON";
 
+    // Prețul neatins rămâne exact cel din bază; cel tastat se citește cu
+    // virgulă sau punct și se rotunjește la 4 zecimale (lib/pret-camp.js).
+    const preturiCitite = produsIds.map((id, i) => PC.pretDeScris(preturi[i], exacte[i]));
     const noi = produsIds
       .map((id, i) => ({
         produs_id: parseInt(id, 10),
         cantitate: Number(cantitati[i] || 0),
-        pret_unitar: Number(preturi[i] || 0),
+        pret_unitar: preturiCitite[i].ok ? preturiCitite[i].valoare : 0,
         um: String(unitati[i] || "").trim() || null,
       }))
       .filter((l) => l.produs_id && l.cantitate > 0);
@@ -1734,7 +1837,13 @@ function register(router) {
       livrare_partiala: livrare.valid(b.livrare_partiala),
       moneda,
       observatii: b.observatii,
-      linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i], um: unitati[i] })),
+      linii: produsIds.map((id, i) => ({
+        produs_id: id,
+        cantitate: cantitati[i],
+        pret_unitar: preturi[i],
+        pret_exact: exacte[i],
+        um: unitati[i],
+      })),
     };
     const opreste = (mesaj) => formularEditare(ctx, comanda, { eroare: mesaj, valori });
 
@@ -1750,6 +1859,8 @@ function register(router) {
         "Comanda ar rămâne fără nicio linie. Dacă vrei să renunți la ea, anuleaz-o din pagina comenzii — nu o goli."
       );
     }
+    const preturiRele = liniiCuPretRau(produsIds, cantitati, preturiCitite);
+    if (preturiRele) return await opreste(preturiRele);
     if (!valori.livrare_partiala) return await opreste("Spune dacă clientul acceptă livrare parțială.");
 
     // Cum arăta ÎNAINTE. Se citește acum, nu din formular: formularul poate fi
