@@ -6,6 +6,7 @@ const inbox = require("./inbox");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const smartbill = require("../lib/smartbill");
+const ADR = require("../lib/adresa-client");
 
 const STATUS_LABEL = {
   ciorna: '<span class="badge gri">ciornă</span>',
@@ -914,14 +915,39 @@ function register(router) {
     redirect(ctx.res, `/facturi/${factura.id}?mesaj=${encodeURIComponent([mesajSmartbill, avertismentStoc].filter(Boolean).join(" "))}`);
   });
 
-  router.post("/facturi/:id/smartbill", async (ctx) => {
-    const factura = await db
-      .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
-      .get(ctx.params.id);
-    if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
-    const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
+  // ---- trimiterea în SmartBill --------------------------------------------
+  //
+  // SmartBill cere țara clientului (și, pentru România, județul și
+  // localitatea). Prima trimitere reală, FCT-1 din 29.10.2026, a căzut cu
+  // „(400) țara trebuie specificată", fiindcă partenerul avea doar adresa,
+  // ca un singur șir de text. Acum:
+  //   • dacă fișa clientului are datele, sau adresa lui (importată din
+  //     SmartBill) le spune limpede, factura pleacă direct — iar ce s-a citit
+  //     din adresă se scrie și în fișă;
+  //   • altfel apare un formular scurt, cu ce s-a putut deduce completat.
+  //     Omul confirmă, datele rămân în fișa clientului, factura pleacă.
+  // Nicio valoare ghicită nu ajunge pe factură fără să fi văzut-o cineva:
+  // un județ greșit pleacă la ANAF prin e-Factura.
+  async function facturaPentruSmartBill(id) {
+    return await db
+      .prepare(
+        `SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa, p.email,
+                p.tara, p.judet, p.localitate
+           FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`
+      )
+      .get(id);
+  }
+
+  async function trimiteInSmartBill(ctx, factura, adresa) {
+    const linii = await db
+      .prepare(
+        `SELECT fl.*, p.unitate_masura FROM facturi_linii fl
+           LEFT JOIN produse p ON p.id = fl.produs_id
+          WHERE fl.factura_id = ? ORDER BY fl.id`
+      )
+      .all(factura.id);
     try {
-      const rezultat = await smartbill.trimiteFactura(factura, linii);
+      const rezultat = await smartbill.trimiteFactura(factura, linii, adresa);
       await db
         .prepare("UPDATE facturi SET smartbill_sync_la = ?, smartbill_serie = ?, smartbill_numar = ? WHERE id = ?")
         .run(new Date().toISOString(), rezultat.series || "", String(rezultat.number || ""), factura.id);
@@ -934,12 +960,80 @@ function register(router) {
           title: "Eroare integrare SmartBill",
           active: "/facturi",
           body: `<p>Trimiterea către SmartBill a eșuat: ${esc(err.message)}</p>
-                 <p style="color:var(--text-muted);font-size:13px">Verifică datele de conectare (SMARTBILL_*) și structura cerută de API — vezi comentariile din lib/smartbill.js.</p>
+                 <p style="color:var(--text-muted);font-size:13px">Clientul a plecat cu: ${esc(
+                   [adresa.localitate, adresa.judet, adresa.tara].filter(Boolean).join(", ") || "fără localitate, județ și țară"
+                 )}. Dacă eroarea e despre client, corectează-le în <a href="/parteneri/${esc(String(factura.partener_id))}">fișa clientului</a> și trimite din nou.</p>
                  <a href="/facturi/${factura.id}" class="btn secondary">Înapoi la factură</a>`,
         })
       );
     }
-    redirect(ctx.res, `/facturi/${ctx.params.id}`);
+    return redirect(ctx.res, `/facturi/${factura.id}`);
+  }
+
+  function formularAdresa(ctx, factura, a, gresite) {
+    const v = { tara: a.tara || "", judet: a.judet || "", localitate: a.localitate || "" };
+    const ce = [...a.lipsa, ...a.dedus.map((x) => x + " (dedus, de verificat)")];
+    const body = `
+      <h1>Înainte de SmartBill: unde e clientul?</h1>
+      ${gresite && gresite.length ? `<div class="flash warn">${esc(gresite.join(" "))}</div>` : ""}
+      <p style="max-width:720px">
+        SmartBill nu primește factura fără țara clientului, iar pentru o firmă din România cere și județul și
+        localitatea. La <strong>${esc(factura.partener_nume)}</strong> ${ce.length ? `lipsesc: <strong>${esc(ce.join(", "))}</strong>.` : "trebuie confirmate."}
+        Le completezi o singură dată — rămân în fișa clientului și data viitoare factura pleacă direct.
+      </p>
+      ${factura.adresa ? `<p style="font-size:13px;color:var(--text-muted);max-width:720px">Adresa din fișă: ${esc(factura.adresa)}</p>` : ""}
+      <form method="post" action="/facturi/${factura.id}/smartbill/client" class="form" style="max-width:560px">
+        <label class="field"><span>Țară</span><input name="tara" value="${esc(v.tara)}" required placeholder="Romania"></label>
+        <label class="field"><span>Județ (pentru România)</span>
+          <select name="judet">
+            <option value="">— (client din afara României)</option>
+            ${ADR.JUDETE.map((j) => `<option value="${esc(j)}"${v.judet === j ? " selected" : ""}>${esc(j)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="field"><span>Localitate (la București: sectorul, ex. Sector 2)</span>
+          <input name="localitate" value="${esc(v.localitate)}" required></label>
+        <div class="form-actions">
+          <button type="submit" class="btn">Salvează în fișa clientului și trimite în SmartBill</button>
+          <a href="/facturi/${factura.id}" class="btn secondary">Renunță</a>
+        </div>
+      </form>`;
+    return send(ctx.res, 200, layout({ user: ctx.user, title: "Datele clientului pentru SmartBill", active: "/facturi", body }));
+  }
+
+  router.post("/facturi/:id/smartbill", async (ctx) => {
+    const factura = await facturaPentruSmartBill(ctx.params.id);
+    if (!factura) return redirect(ctx.res, "/facturi");
+    if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
+
+    const a = ADR.pentruSmartBill(factura);
+    if (!a.sigur) return formularAdresa(ctx, factura, a);
+
+    // Ce s-a citit limpede din adresa importată se scrie și în fișă: data
+    // viitoare vine de acolo, iar omul vede pe fișa clientului ce a plecat.
+    const deScris = Object.entries(a.deScrisInFisa);
+    if (deScris.length) {
+      for (const [camp, valoare] of deScris) {
+        if (!["tara", "judet", "localitate"].includes(camp)) continue;
+        await db.prepare(`UPDATE parteneri SET ${camp} = ? WHERE id = ? AND COALESCE(${camp}, '') = ''`).run(valoare, factura.partener_id);
+      }
+    }
+    return await trimiteInSmartBill(ctx, factura, a);
+  });
+
+  router.post("/facturi/:id/smartbill/client", async (ctx) => {
+    const factura = await facturaPentruSmartBill(ctx.params.id);
+    if (!factura) return redirect(ctx.res, "/facturi");
+    if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
+
+    const v = ADR.verifica(ctx.body);
+    if (!v.ok) {
+      const a = ADR.pentruSmartBill(factura);
+      return formularAdresa(ctx, factura, { ...a, ...v.date }, v.gresite);
+    }
+    await db
+      .prepare("UPDATE parteneri SET tara = ?, judet = ?, localitate = ? WHERE id = ?")
+      .run(v.date.tara, v.date.judet, v.date.localitate, factura.partener_id);
+    return await trimiteInSmartBill(ctx, factura, v.date);
   });
 }
 

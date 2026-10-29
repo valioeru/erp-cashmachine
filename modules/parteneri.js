@@ -8,6 +8,7 @@ const { send, redirect } = require("../lib/router");
 const inbox = require("./inbox");
 const tsk = require("./taskuri");
 const XLS = require("../lib/export-xlsx");
+const ADR = require("../lib/adresa-client");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
 const STARE_LABEL = {
@@ -327,6 +328,17 @@ function register(router) {
       { name: "sursa", label: "Sursă (de unde a venit)" },
       { name: "data_nastere", label: "Zi de naștere persoană de contact (pentru urări)", type: "date" },
       { name: "adresa", label: "Adresă", type: "textarea" },
+      // Cerute de SmartBill pe factură (vezi lib/adresa-client.js). La
+      // clienții importați din SmartBill se completează singure la prima
+      // factură trimisă, din adresă; aici se pot corecta.
+      { name: "localitate", label: "Localitate (la București: sectorul, ex. Sector 2)" },
+      {
+        name: "judet",
+        label: "Județ",
+        type: "select",
+        options: [{ value: "", label: "— (client din afara României)" }].concat(ADR.JUDETE.map((j) => ({ value: j, label: j }))),
+      },
+      { name: "tara", label: "Țară", ajutor: "Romania pentru firmele din România; altfel țara, de ex. Grecia." },
     ],
     listColumns: [
       { key: "nume", label: "Nume", render: (r) => `<a href="/parteneri/${r.id}">${esc(r.nume)}</a>` },
@@ -544,6 +556,10 @@ function register(router) {
           <div><div class="k">Persoană de contact</div>${esc(partener.persoana_contact) || "—"}</div>
           <div><div class="k">Sursă</div>${esc(partener.sursa) || "—"}</div>
           <div><div class="k">Adresă</div>${esc(partener.adresa) || "—"}</div>
+          <div><div class="k">Localitate · județ · țară</div>${
+            [partener.localitate, partener.judet, partener.tara].filter(Boolean).map((x) => esc(x)).join(" · ") ||
+            '<span style="color:var(--text-muted)">se completează la prima factură trimisă în SmartBill</span>'
+          }</div>
         </div>
         <div class="toolbar" style="margin-top:10px">
           <a href="/parteneri/${partener.id}/editare" class="btn secondary small">Editează datele</a>
