@@ -91,9 +91,85 @@ function badgeVechime(data, aziStr) {
   return `<span class="badge gri">${Math.round(zile / 30)} luni</span>`;
 }
 
-function pretText(o) {
-  return `${Number(o.pret).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${esc(o.moneda)}${o.um ? " / " + esc(o.um) : ""}`;
+// Prețul unei oferte, scris. Cu `pret` dat, scrie acel preț în locul celui
+// din ofertă — pentru catalogul agenților, unde se vede prețul cu adaos.
+function pretText(o, pret) {
+  const p = pret === undefined ? o.pret : pret;
+  return `${Number(p).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${esc(o.moneda)}${o.um ? " / " + esc(o.um) : ""}`;
 }
+
+// ---------------------------------------------------------------------------
+// Catalogul de prețuri al agenților de vânzări.
+//
+// CEREREA LUI VALI, 29.10.2026: pagina de oferte de la furnizori, „duplicată și
+// băgată la agenții de vânzări într-un submeniu Catalog prețuri, unde să arate
+// fix la fel, dar nemodificabil, doar cu buton Copiază în clipboard ca să poată
+// pune în oferte produsul … Prețurile să fie cu 25% mai mari".
+//
+// „Fix la fel" se ține prin construcție: amândouă paginile ies din aceeași
+// funcție (paginaOferte), deci o categorie, un filtru sau o coloană nouă apare
+// în amândouă deodată. Diferențele sunt doar cele cerute: prețul cu adaos,
+// nimic de modificat, butonul Copiază — și, la a doua lui cerere („Ascunde
+// furnizor"), fără furnizor: nici coloana, nici filtrul, nici cardul cu câți
+// furnizori sunt, nici subiectul emailului de la ei.
+//
+// Textul copiat e pentru client: articol, specificație, preț, cantitate minimă,
+// valabilitate.
+const ADAOS_CATALOG = 0.25;
+
+function pretCatalog(pret) {
+  return Math.round(Number(pret || 0) * (1 + ADAOS_CATALOG) * 10000) / 10000;
+}
+
+const zecimale4 = (v) => Number(v).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+
+function dataRoScurta(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || ""));
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : String(d || "");
+}
+
+// Rândul, ca text simplu pentru clipboard (nu HTML: se lipește într-un email,
+// într-un Word sau într-o ofertă, și trebuie să arate la fel peste tot).
+function textDeCopiat(o, pret) {
+  const nume = [o.articol, o.specificatie].map((x) => String(x || "").trim()).filter(Boolean).join(" — ");
+  let t = `${nume}: ${zecimale4(pret)} ${o.moneda || ""}${o.um ? " / " + o.um : ""}`;
+  const extra = [];
+  if (o.cantitate_min) extra.push(`cantitate minimă ${o.cantitate_min}${o.um ? " " + o.um : ""}`);
+  if (o.valabil_pana) extra.push(`valabil până la ${dataRoScurta(o.valabil_pana)}`);
+  if (extra.length) t += ` (${extra.join(", ")})`;
+  return t.replace(/\s+/g, " ").trim();
+}
+
+// Scriptul butonului Copiază. Clipboard-ul modern cere pagină sigură (https,
+// cum e ERP-ul); pe un browser vechi sau unde e blocat, se copiază printr-un
+// câmp ascuns, iar dacă nici asta nu merge, textul apare selectabil.
+const SCRIPT_COPIAZA = `<script>
+function catalogCopiaza(b) {
+  var t = b.getAttribute("data-text") || "";
+  var eticheta = b.getAttribute("data-eticheta") || b.textContent;
+  b.setAttribute("data-eticheta", eticheta);
+  var gata = function () {
+    b.textContent = "Copiat ✓";
+    b.classList.add("copiat");
+    setTimeout(function () { b.textContent = eticheta; b.classList.remove("copiat"); }, 1500);
+  };
+  var rezerva = function () {
+    var a = document.createElement("textarea");
+    a.value = t;
+    a.setAttribute("readonly", "");
+    a.style.position = "fixed";
+    a.style.top = "-1000px";
+    document.body.appendChild(a);
+    a.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(a);
+    if (ok) gata(); else window.prompt("Copiază textul de mai jos:", t);
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(t).then(gata, rezerva);
+  else rezerva();
+}
+</script>`;
 
 // Referința de piață a fiecărui articol: cea mai recentă estimare, într-o
 // singură interogare pentru toate articolele (DISTINCT ON e exact pentru asta).
@@ -154,15 +230,21 @@ function numeFurnizor(o) {
   return o.furnizor_id ? `<a href="/parteneri/${o.furnizor_id}">${esc(nume)}</a>` : esc(nume);
 }
 
-function register(router) {
-  // ---- pagina principală: pe categorii, cu cele mai noi sus ---------------
-  router.get("/procurement", async (ctx) => {
+// ---- pagina principală: pe categorii, cu cele mai noi sus -----------------
+// O singură funcție pentru două uși: /procurement (achizițiile, cu tot ce se
+// poate face) și /crm/catalog-preturi (agenții: aceeași listă, preț cu adaos,
+// nimic de modificat). Vezi comentariul de la ADAOS_CATALOG.
+async function paginaOferte(ctx, catalog) {
+    const cale = catalog ? "/crm/catalog-preturi" : "/procurement";
     await asiguraCategorii();
     const aziStr = azi();
     const c = await curs();
     const cauta = String(ctx.query.q || "").trim();
     const catAleasa = parseInt(ctx.query.categorie, 10) || null;
-    const furnizorCautat = String(ctx.query.furnizor || "").trim();
+    // Furnizorul e ascuns în catalog („Ascunde furnizor", Vali, 29.10.2026):
+    // nici coloană, nici filtru — și filtrul NU se citește nici dacă vine în
+    // adresă, altfel „?furnizor=X" ar spune prin ce rânduri rămân cine e X.
+    const furnizorCautat = catalog ? "" : String(ctx.query.furnizor || "").trim();
     const doarValabile = String(ctx.query.valabile ?? "1") !== "0";
     const luni = Math.min(60, Math.max(1, parseInt(ctx.query.luni || "12", 10) || 12));
     const deLa = new Date(Date.now() - luni * 30.5 * 86400000).toISOString().slice(0, 10);
@@ -177,7 +259,12 @@ function register(router) {
       unde.push("a.categorie_id = ?");
       args.push(catAleasa);
     }
-    if (cauta) {
+    if (cauta && catalog) {
+      // Observațiile ofertei pot pomeni furnizorul; în catalog căutarea merge
+      // doar pe articol și specificație, ca să nu poată fi folosită pe ocolite.
+      unde.push("(a.nume ILIKE ? OR a.specificatie ILIKE ?)");
+      args.push(`%${cauta}%`, `%${cauta}%`);
+    } else if (cauta) {
       unde.push("(a.nume ILIKE ? OR a.specificatie ILIKE ? OR o.observatii ILIKE ?)");
       args.push(`%${cauta}%`, `%${cauta}%`, `%${cauta}%`);
     }
@@ -188,7 +275,7 @@ function register(router) {
 
     const oferte = await db
       .prepare(
-        `SELECT o.*, a.nume AS articol, a.um AS articol_um, a.categorie_id, cat.nume AS categorie,
+        `SELECT o.*, a.nume AS articol, a.um AS articol_um, a.categorie_id, a.specificatie, cat.nume AS categorie,
                 p.nume AS furnizor_nume
            FROM ach_oferte o
            JOIN ach_articole a ON a.id = o.articol_id
@@ -205,10 +292,13 @@ function register(router) {
     // Cât așteaptă în ofertele citite din emailuri. Cifra stă pe butonul din
     // bara de sus: altfel pagina aia rămâne o ușă închisă, pe care nimeni n-are
     // motiv s-o deschidă, iar prețurile culese din mailuri stau acolo degeaba.
-    const dinEmail = await db
-      .prepare("SELECT COUNT(*) AS n FROM email_oferte WHERE stare = 'de_confirmat'")
-      .get()
-      .catch(() => ({ n: 0 }));
+    // În catalog butonul nu există, deci nici numărătoarea.
+    const dinEmail = catalog
+      ? { n: 0 }
+      : await db
+          .prepare("SELECT COUNT(*) AS n FROM email_oferte WHERE stare = 'de_confirmat'")
+          .get()
+          .catch(() => ({ n: 0 }));
     const nDinEmail = Number((dinEmail && dinEmail.n) || 0);
 
     // Gruparea pe categorii. În fiecare, ofertele stau deja în ordinea
@@ -230,42 +320,67 @@ function register(router) {
     const bloc = (numeCat, lista) => {
       // Cel mai bun preț din categorie n-are sens: „folie" și „bandă" nu se
       // compară. Se compară pe articol, în pagina articolului.
-      const randuri = lista.slice(0, 12).map((o) => [
-        `${esc(String(o.data_ofertei).slice(0, 10))} ${badgeVechime(o.data_ofertei, aziStr)}`,
-        `<a href="/procurement/articol/${o.articol_id}"><strong>${esc(o.articol)}</strong></a>${
-          o.specificatie ? `<br><span style="font-size:12px;color:var(--text-muted)">${esc(o.specificatie)}</span>` : ""
-        }`,
-        numeFurnizor(o),
-        `<strong>${pretText(o)}</strong>`,
-        o.cantitate_min ? esc(String(o.cantitate_min)) + (o.um ? " " + esc(o.um) : "") : "",
-        o.valabil_pana ? esc(String(o.valabil_pana).slice(0, 10)) : '<span style="color:var(--text-muted)">fără termen</span>',
-        fataDePiata(inLei(o.pret, o.moneda, c), piata.get(Number(o.articol_id)), c, o.um || o.articol_um),
-        o.email_subiect
-          ? `<span title="${esc(o.email_subiect)}" style="font-size:12px">${esc(o.sursa)}</span>`
-          : `<span style="font-size:12px">${esc(o.sursa)}</span>`,
-      ]);
+      const randuri = lista.slice(0, 12).map((o) => {
+        // În catalog, prețul e cel cu adaos — și tot el se compară cu piața,
+        // ca procentul să vorbească despre cifra de pe rând.
+        const pret = catalog ? pretCatalog(o.pret) : Number(o.pret);
+        const spec = o.specificatie ? `<br><span style="font-size:12px;color:var(--text-muted)">${esc(o.specificatie)}</span>` : "";
+        const rand = [
+          `${esc(String(o.data_ofertei).slice(0, 10))} ${badgeVechime(o.data_ofertei, aziStr)}`,
+          catalog
+            ? `<strong>${esc(o.articol)}</strong>${spec}`
+            : `<a href="/procurement/articol/${o.articol_id}"><strong>${esc(o.articol)}</strong></a>${spec}`,
+          numeFurnizor(o),
+          `<strong>${pretText(o, pret)}</strong>`,
+          o.cantitate_min ? esc(String(o.cantitate_min)) + (o.um ? " " + esc(o.um) : "") : "",
+          o.valabil_pana ? esc(String(o.valabil_pana).slice(0, 10)) : '<span style="color:var(--text-muted)">fără termen</span>',
+          fataDePiata(inLei(pret, o.moneda, c), piata.get(Number(o.articol_id)), c, o.um || o.articol_um),
+          // Subiectul emailului furnizorului rămâne la achiziții.
+          o.email_subiect && !catalog
+            ? `<span title="${esc(o.email_subiect)}" style="font-size:12px">${esc(o.sursa)}</span>`
+            : `<span style="font-size:12px">${esc(o.sursa)}</span>`,
+        ];
+        if (catalog) {
+          // Coloana Furnizor iese de tot din catalog (a treia, index 2).
+          rand.splice(2, 1);
+          rand.push(
+            `<button type="button" class="btn small secondary catalog-copiaza" data-text="${esc(textDeCopiat(o, pret))}" onclick="catalogCopiaza(this)" title="Copiază articolul și prețul, ca să le lipești în ofertă">Copiază</button>`
+          );
+        }
+        return rand;
+      });
+      const capete = catalog
+        ? ["Data", "Articol", "Preț", "Cant. minimă", "Valabilă până", "Față de piață", "Sursa", "<span></span>"]
+        : ["Data", "Articol", "Furnizor", "Preț", "Cant. minimă", "Valabilă până", "Față de piață", "Sursa"];
       return `
         <h2 style="margin-top:26px">${esc(numeCat)} <span style="font-weight:400;font-size:14px;color:var(--text-muted)">· ${lista.length} ${
         lista.length === 1 ? "ofertă" : "oferte"
       }</span></h2>
-        ${table(["Data", "Articol", "Furnizor", "Preț", "Cant. minimă", "Valabilă până", "Față de piață", "Sursa"], randuri)}
+        ${table(capete, randuri)}
         ${lista.length > 12 ? `<p style="font-size:12px;color:var(--text-muted)">Se văd cele mai noi 12. Filtrează pe categorie ca să le vezi pe toate.</p>` : ""}
       `;
     };
 
     const body = `
-      <div class="toolbar">
+      ${
+        catalog
+          ? `<p class="explic" style="margin-top:0">
+               Prețurile de vânzare pentru oferte, pe categorii, cu cele mai noi sus. Pagina doar se citește:
+               <strong>Copiază</strong> pune articolul, prețul, cantitatea minimă și valabilitatea în clipboard, gata de lipit în ofertă.
+             </p>${SCRIPT_COPIAZA}`
+          : `<div class="toolbar">
         <a href="/procurement/nou" class="btn">+ Ofertă nouă</a>
         <a href="/procurement/articole" class="btn secondary">Articole & categorii</a>
         <a href="/procurement/concurenta" class="btn secondary">Prețurile concurenței</a>
         <a href="/procurement/din-email" class="btn secondary">Oferte din emailuri${
           nDinEmail ? ` <span class="badge rosu">${nDinEmail}</span>` : ""
         }</a>
-      </div>
+      </div>`
+      }
 
-      <form class="filtre" method="get" action="/procurement">
+      <form class="filtre" method="get" action="${cale}">
         <input type="search" name="q" value="${esc(cauta)}" placeholder="caută un articol, de exemplu stretch 15" style="min-width:260px">
-        <input type="search" name="furnizor" value="${esc(furnizorCautat)}" placeholder="furnizor">
+        ${catalog ? "" : `<input type="search" name="furnizor" value="${esc(furnizorCautat)}" placeholder="furnizor">`}
         <select name="categorie" onchange="this.form.submit()">
           <option value="">toate categoriile</option>
           ${optCategorii}
@@ -283,22 +398,40 @@ function register(router) {
       <div class="cards">
         <div class="card"><div class="label">Oferte în perioadă</div><div class="value">${oferte.length}</div></div>
         <div class="card"><div class="label">Articole ofertate</div><div class="value">${articoleDistincte.size}</div></div>
-        <div class="card"><div class="label">Furnizori</div><div class="value">${furnizoriDistincti.size}</div></div>
+        ${catalog ? "" : `<div class="card"><div class="label">Furnizori</div><div class="value">${furnizoriDistincti.size}</div></div>`}
       </div>
 
       ${
         oferte.length === 0
-          ? `<p>Nicio ofertă în filtrul ales. <a href="/procurement/nou">Adaugă prima</a>.</p>`
+          ? catalog
+            ? `<p>Nicio ofertă în filtrul ales.</p>`
+            : `<p>Nicio ofertă în filtrul ales. <a href="/procurement/nou">Adaugă prima</a>.</p>`
           : [...peCategorie.entries()].map(([k, v]) => bloc(k, v)).join("")
       }
 
       <p style="font-size:12px;color:var(--text-muted);margin-top:24px">
-        Comparațiile între monede se fac la cursul de ${esc(String(c).replace(".", ","))} lei/euro, setat în
-        <a href="/procurement/articole">Articole &amp; categorii</a>. E doar pentru comparație, nu un curs oficial.
+        Comparațiile între monede se fac la cursul de ${esc(String(c).replace(".", ","))} lei/euro${
+          catalog ? "" : `, setat în <a href="/procurement/articole">Articole &amp; categorii</a>`
+        }. E doar pentru comparație, nu un curs oficial.
       </p>
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Procurement — oferte de la furnizori", active: "/procurement", body }));
-  });
+    send(
+      ctx.res,
+      200,
+      layout({
+        user: ctx.user,
+        title: catalog ? "Catalog prețuri" : "Procurement — oferte de la furnizori",
+        active: cale,
+        body,
+      })
+    );
+}
+
+function register(router) {
+  router.get("/procurement", (ctx) => paginaOferte(ctx, false));
+  // Agenții: aceeași pagină, nemodificabilă, cu prețul de vânzare. Stă sub
+  // /crm, deci o vede oricine are Vânzări — fără drept pe Procurement.
+  router.get("/crm/catalog-preturi", (ctx) => paginaOferte(ctx, true));
 
   // ---- un articol: toți furnizorii, tot istoricul de preț ----------------
   router.get("/procurement/articol/:id", async (ctx) => {
