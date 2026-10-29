@@ -98,8 +98,16 @@ console.log("\n6. Casuta de pret din formularul de comanda");
   bine("tabelul de linii are o latime minima", /\.lines-table \{[^}]*min-width:\s*760px/.test(css));
 
   const comenzi = fs.readFileSync(require("path").join(__dirname, "modules", "comenzi.js"), "utf8");
-  bine("coloana de pret cere latime in antet", /min-width:130px">Preț unitar/.test(comenzi));
-  bine("si cea de cantitate", /min-width:120px">Cantitate/.test(comenzi));
+  // Latimile exacte s-au strans pe 29.10 (130 → 120 la pret, 120 → 110 la
+  // cantitate), cand pretul a devenit camp text fara sageti si tabelul a
+  // trebuit sa incapa in formularul de 980px. Conteaza ca latimea e CERUTA
+  // si ca ajunge pentru un pret cu patru zecimale, nu cifra exacta.
+  const latime = (eticheta) => {
+    const m = comenzi.match(new RegExp('min-width:(\\d+)px">' + eticheta));
+    return m ? Number(m[1]) : 0;
+  };
+  bine("coloana de pret cere latime in antet", latime("Preț unitar") >= 110, latime("Preț unitar"));
+  bine("si cea de cantitate", latime("Cantitate") >= 100, latime("Cantitate"));
   // Capcana evitata: infasurat in .tabel-lat, overflow-x ar fi taiat si pe
   // verticala, iar lista de produse de sub campul de cautare ar fi fost
   // retezata. S-ar fi reparat o casuta si s-ar fi stricat o cautare.
