@@ -500,6 +500,83 @@ async function locuriRand(randId) {
     .all(randId);
 }
 
+// Fișa fiecărui palet de pe harta unui rând, pentru mouseover — cererea lui
+// Vali, 30.10.2026: „când faci mouseover pe ceva în vizualul de la depozit să
+// scrie într-un tooltip toate info despre palet, produs etc."
+//
+// Se întoarce gata de afișat (texte, nu cifre brute): pagina doar le pune în
+// fișă. Trei interogări pentru tot rândul, nu câte una pe palet — un rând plin
+// are zeci de paleți.
+async function infoPaletiPentruHarta(ids) {
+  const lista = [...new Set((ids || []).map(Number).filter(Boolean))];
+  if (!lista.length) return {};
+  const semne = lista.map(() => "?").join(",");
+  const cuFurnizor = await areColoana("ct_paleti", "furnizor_id");
+  const paleti = await db
+    .prepare(
+      `SELECT p.id, p.cod, p.produs_text, p.cantitate, p.um, p.lot, p.categorie, p.data_intrare,
+              p.pret_unitar, p.pret_sursa, p.observatii, p.creat_de,
+              pr.denumire AS produs, pr.cod AS produs_cod
+              ${cuFurnizor ? ", p.furnizor_text, f.nume AS furnizor_nume" : ""}
+         FROM ct_paleti p
+         LEFT JOIN produse pr ON pr.id = p.produs_id
+         ${cuFurnizor ? "LEFT JOIN parteneri f ON f.id = p.furnizor_id" : ""}
+        WHERE p.id IN (${semne})`
+    )
+    .all(...lista)
+    .catch(() => []);
+  const adrese = await db
+    .prepare(
+      `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id
+        WHERE o.palet_id IN (${semne}) ORDER BY l.nivel, l.camp, l.pozitie`
+    )
+    .all(...lista)
+    .catch(() => []);
+  const linii = await db
+    .prepare(
+      `SELECT pl.palet_id, pl.produs_text, pl.cantitate, pl.um, pl.lot, pr.denumire AS produs
+         FROM ct_palet_linii pl LEFT JOIN produse pr ON pr.id = pl.produs_id
+        WHERE pl.palet_id IN (${semne}) AND COALESCE(pl.cantitate, 0) > 0
+        ORDER BY pl.id`
+    )
+    .all(...lista)
+    .catch(() => []);
+
+  const cifra = (v) => Number(v).toLocaleString("ro-RO", { maximumFractionDigits: 3 });
+  const bani = (v) => Number(v).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const azi = Date.parse(aziStr());
+  const out = {};
+  for (const p of paleti) {
+    const id = Number(p.id);
+    const um = String(p.um || "").trim();
+    const cant = nr(p.cantitate);
+    const pret = nr(p.pret_unitar);
+    const intrare = String(p.data_intrare || "").slice(0, 10);
+    const zile = intrare ? Math.round((azi - Date.parse(intrare)) / 86400000) : null;
+    const produs = p.produs || p.produs_text || "";
+    const liniiPalet = linii.filter((x) => Number(x.palet_id) === id);
+    out[id] = {
+      id,
+      cod: p.cod || "",
+      adrese: adrese.filter((a) => Number(a.palet_id) === id).map((a) => a.adresa).join(" + "),
+      produs: produs + (p.produs_cod ? ` (${p.produs_cod})` : ""),
+      cantitate: cant ? `${cifra(cant)} ${um}`.trim() : "nescrisă",
+      lot: p.lot || "",
+      categorie: p.categorie || "",
+      furnizor: (cuFurnizor && (p.furnizor_nume || p.furnizor_text)) || "",
+      intrat: intrare
+        ? `${intrare.slice(8, 10)}.${intrare.slice(5, 7)}.${intrare.slice(0, 4)}${zile !== null && zile >= 0 ? ` · ${zile === 0 ? "azi" : zile === 1 ? "acum o zi" : `acum ${zile} zile`}` : ""}`
+        : "",
+      pret: pret ? `${bani(pret)} lei${um ? " / " + um : ""}${p.pret_sursa ? ` (${p.pret_sursa})` : ""}` : "",
+      valoare: pret && cant ? `${bani(pret * cant)} lei` : "",
+      pus_de: p.creat_de || "",
+      observatii: p.observatii || "",
+      linii: liniiPalet.map((x) => `${x.produs || x.produs_text || "?"} — ${cifra(x.cantitate)} ${x.um || ""}${x.lot ? ` · lot ${x.lot}` : ""}`.trim()),
+    };
+  }
+  return out;
+}
+
 
 // Grosimea grinzii de sub un nivel. Intră în înălțimea totală a rândului, deci
 // stă aici, nu în desen — se vede în cifrele de pe pagina de configurare.
@@ -1331,6 +1408,7 @@ function register(router) {
 
     const ocupate = locuri.filter((l) => l.palet_id).length;
     const latimeCamp = nr(r.latime_loc) * nr(r.locuri_pe_camp);
+    const infoPaleti = await infoPaletiPentruHarta([...paletiRand.keys()]);
 
     // Desenul e la scară pe verticală: un nivel de 2,2 m se vede mai înalt
     // decât unul de 1,2 m. Altfel „designul de stocare" arată la fel oricum
@@ -1381,8 +1459,11 @@ function register(router) {
           // `data-loc` e pentru modul de editare: acolo un click pe loc nu-l
           // mai alege pentru marfă, ci îl scoate din uz sau îl repune.
           if (ocupat) {
+            // Fără `title`: pe un loc ocupat, la mouseover apare fișa paletului
+            // (scriptul de mai jos), iar un title ar fi pus încă o etichetă
+            // galbenă peste ea. Textul scurt rămâne pentru cititoarele de ecran.
             pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${nr(l.blocat) ? " blocat" : ""}"
-                title="${esc(titlu)}" data-adresa="${esc(l.adresa)}" data-loc="${l.id}" data-ocupat="1"
+                aria-label="${esc(titlu)}" data-adresa="${esc(l.adresa)}" data-loc="${l.id}" data-ocupat="1"
                 data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}"
                 data-marfa="${esc(String(l.produs || l.produs_text || "marfă").slice(0, 40))}"
                 style="height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
@@ -1893,7 +1974,91 @@ function register(router) {
            trebuie să arate că sunt de apăsat, nu de citit. */
         body.ct-mut .ct-loc[data-palet] { cursor:grab; }
         body.ct-mut .ct-loc[data-palet]:hover { outline:2px solid #c07018; }
+
+        /* Ce are atributul hidden chiar se ascunde. Bara „Pune marfă pe
+           locurile astea”, bara „Mută aici” și banda de editare pe câmp aveau
+           hidden, dar regulile lor de display:flex băteau stilul implicit al
+           browserului — deci stăteau la vedere tot timpul. Bara de marfă se
+           putea apăsa fără niciun loc ales (și ajungeai la intrare fără loc),
+           iar butoanele − / + ale benzii schimbă raftul pe loc. (30.10.2026) */
+        [hidden] { display:none !important; }
+
+        /* Fișa paletului la mouseover. */
+        .ct-fisa { position:fixed; z-index:50; max-width:340px; pointer-events:none;
+          background:var(--surface,#fff); color:var(--text,#1d2733); border:1px solid var(--border,#d9dee5);
+          border-radius:8px; box-shadow:0 8px 24px rgba(16,24,40,.18); padding:10px 12px; font-size:12.5px; line-height:1.45; }
+        .ct-fisa[hidden] { display:none; }
+        .ct-fisa .f-cod { font-weight:700; font-size:13px; }
+        .ct-fisa .f-adr { color:var(--text-muted); font-size:11.5px; margin-bottom:6px; }
+        .ct-fisa .f-produs { font-weight:600; margin-bottom:4px; }
+        .ct-fisa table { border-collapse:collapse; width:100%; }
+        .ct-fisa td { padding:1px 0; vertical-align:top; }
+        .ct-fisa td.k { color:var(--text-muted); padding-right:10px; white-space:nowrap; }
+        .ct-fisa .f-linii { margin:6px 0 0; padding:6px 0 0; border-top:1px solid var(--border,#e1e4e9); }
       </style>
+      ${/* Datele paletilor din randul asta, o singura data, ca JSON — nu cate
+           un atribut lung pe fiecare casuta. Semnul „<” e scris \\u003c, ca un text
+           de observatii sa nu poata inchide eticheta script. */ ""}
+      <script type="application/json" id="ct-info-paleti">${JSON.stringify(infoPaleti).replace(/</g, "\\u003c")}</script>
+      <div class="ct-fisa" id="ct-fisa" hidden role="tooltip"></div>
+      <script>
+      (function () {
+        var date = {};
+        try { date = JSON.parse(document.getElementById("ct-info-paleti").textContent || "{}"); } catch (e) {}
+        var fisa = document.getElementById("ct-fisa");
+        function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+        function rand(tbl, k, v) {
+          if (v === null || v === undefined || v === "") return;
+          var tr = el("tr"); tr.appendChild(el("td", "k", k)); tr.appendChild(el("td", null, v)); tbl.appendChild(tr);
+        }
+        function arata(p) {
+          fisa.innerHTML = "";
+          fisa.appendChild(el("div", "f-cod", p.cod || ("palet #" + p.id)));
+          if (p.adrese) fisa.appendChild(el("div", "f-adr", p.adrese));
+          fisa.appendChild(el("div", "f-produs", p.produs || "marfă fără denumire"));
+          var t = el("table");
+          rand(t, "Cantitate", p.cantitate);
+          rand(t, "Lot", p.lot);
+          rand(t, "Categorie", p.categorie);
+          rand(t, "Furnizor", p.furnizor);
+          rand(t, "Intrat", p.intrat);
+          rand(t, "Preț intrare", p.pret);
+          rand(t, "Valoare", p.valoare);
+          rand(t, "Pus de", p.pus_de);
+          rand(t, "Observații", p.observatii);
+          fisa.appendChild(t);
+          if (p.linii && p.linii.length > 1) {
+            var l = el("div", "f-linii");
+            l.appendChild(el("div", "k", "Pe palet:"));
+            p.linii.forEach(function (x) { l.appendChild(el("div", null, "• " + x)); });
+            fisa.appendChild(l);
+          }
+          fisa.hidden = false;
+        }
+        function muta(ev) {
+          var x = ev.clientX + 16, y = ev.clientY + 16;
+          var w = fisa.offsetWidth, h = fisa.offsetHeight;
+          if (x + w > window.innerWidth - 8) x = Math.max(8, ev.clientX - w - 16);
+          if (y + h > window.innerHeight - 8) y = Math.max(8, ev.clientY - h - 16);
+          fisa.style.left = x + "px"; fisa.style.top = y + "px";
+        }
+        document.addEventListener("mouseover", function (ev) {
+          var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
+          if (!c) return;
+          var p = date[c.getAttribute("data-palet")];
+          if (!p) return;
+          arata(p); muta(ev);
+        });
+        document.addEventListener("mousemove", function (ev) { if (!fisa.hidden) muta(ev); });
+        document.addEventListener("mouseout", function (ev) {
+          var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
+          if (!c) return;
+          if (ev.relatedTarget && c.contains(ev.relatedTarget)) return;
+          fisa.hidden = true;
+        });
+        window.addEventListener("scroll", function () { fisa.hidden = true; }, { passive: true });
+      })();
+      </script>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `CT-Park · rândul ${r.numar}`, active: "/stocuri/ct-park", body }));
   });
