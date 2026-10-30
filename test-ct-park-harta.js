@@ -101,6 +101,8 @@ function curata() {
     q(`DELETE FROM ct_locuri WHERE rand_id = ${r}`);
     q(`DELETE FROM ct_randuri WHERE id = ${r}`);
   }
+  q("DELETE FROM ct_ocupari WHERE palet_id IN (SELECT id FROM ct_paleti WHERE produs_text = 'TEST-HARTA')");
+  q("DELETE FROM ct_palet_linii WHERE palet_id IN (SELECT id FROM ct_paleti WHERE produs_text = 'TEST-HARTA')");
   q("DELETE FROM ct_paleti WHERE produs_text = 'TEST-HARTA'");
 }
 
@@ -150,7 +152,9 @@ function curata() {
     bine("pagina se deschide", p.cod === 200);
     bine("și spune că locurile vin de pe hartă", /2 locuri alese de pe hartă/.test(p.corp), (p.corp.match(/locuri alese[^<]*/) || [])[0]);
     bine("cu adresele lor", /TH-1-2-1/.test(p.corp) && /TH-1-2-2/.test(p.corp));
-    bine("și le duce mai departe în formular", new RegExp('name="locuri_alese" value="' + a + "," + b2 + '"').test(p.corp));
+    // Lipite, sunt un singur palet lat: un rând în tabelul de paleți, cu
+    // amândouă locurile în el.
+    bine("și le duce mai departe în formular, ca un palet lat", new RegExp('name="loc_ids\\[\\]" value="' + a + "," + b2 + '"').test(p.corp));
     bine("scrie clar că nu mai caută altundeva", /nu mai caută altundeva/.test(p.corp));
 
     // Plasa de siguranta: daca JS-ul n-a rulat, parserul lasa o singura
@@ -160,42 +164,51 @@ function curata() {
 
     // Fara locuri alese, pagina ramane cum era.
     const f = await cer("/stocuri/ct-park/intrare", { query: {} });
-    bine("fără alegere, pagina e cea veche", !/alese de pe hartă/.test(f.corp) && /ERP-ul propune locurile libere/.test(f.corp));
+    bine("fără alegere, rândul de palet e gol, de completat", !/alese de pe hartă/.test(f.corp) && /<select name="loc_rand\[\]"/.test(f.corp) && /ERP-ul îți propune locuri libere/.test(f.corp));
   }
 
-  console.log("\n3. Ce ai ales se folosește EXACT");
+  // Locurile ocupate de un palet, citite din bază.
+  const ocupateDe = (paletId) => q(`SELECT loc_id FROM ct_ocupari WHERE palet_id = ${paletId} ORDER BY loc_id`).map((r) => Number(r.loc_id));
+  const paletiDin = (r) => String(((r.antet && (r.antet.Location || r.antet.location)) || "").split("paleti=")[1] || "").split(",").map(Number).filter(Boolean);
+
+  console.log("\n3. Ce ai ales se folosește EXACT — și se pune direct");
   {
     const a = loc(2, 3, 1), b2 = loc(2, 3, 2);
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
       body: { produs_text: "TEST-HARTA", cantitate: "100", um: "buc", paleti: "1", locuri: "2", locuri_alese: a + "," + b2 },
     });
-    bine("pasul 2 se deschide", p.cod === 200);
-    // Locurile propuse trebuie sa fie fix cele alese, nu altele.
-    bine("apar fix locurile alese", /TH-2-3-1/.test(p.corp) && /TH-2-3-2/.test(p.corp));
-    const alteLocuri = (p.corp.match(/TH-1-\d-\d/g) || []);
-    bine("și niciunul din restul rândului", alteLocuri.length === 0, alteLocuri.slice(0, 5).join(", "));
-    bine("nu se plânge că n-a găsit destule", !/Am găsit doar/.test(p.corp));
+    // „Adaugă marfă" (Vali, 30.10.2026): cu locul ales, nu mai e nimic de
+    // confirmat — se pune și se merge la etichete.
+    bine("se pune direct și se merge la etichete", p.cod === 302 && /\/stocuri\/ct-park\/etichete\?paleti=\d+/.test(String((p.antet || {}).Location || "")), JSON.stringify(p.antet));
+    const ids = paletiDin(p);
+    bine("un singur palet, lat", ids.length === 1, ids.join(","));
+    bine("pus fix pe cele două locuri alese", ids.length === 1 && JSON.stringify(ocupateDe(ids[0])) === JSON.stringify([a, b2].sort((x, y) => x - y)), ids.length && ocupateDe(ids[0]).join(","));
+    bine("cu toată cantitatea pe el", ids.length === 1 && Number(unul(`SELECT cantitate FROM ct_paleti WHERE id = ${ids[0]}`)) === 100);
   }
 
   console.log("\n4. Lipite fac un palet lat, răzlețe fac paleți separați");
   {
-    // Trei locuri lipite, acelasi camp si nivel → un singur palet lat.
-    const t = [loc(1, 1, 1), loc(1, 1, 2), loc(1, 1, 3)].join(",");
+    // Trei locuri lipite, același câmp și nivel → un singur palet lat.
+    const trei = [loc(1, 1, 1), loc(1, 1, 2), loc(1, 1, 3)];
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-HARTA", cantitate: "90", um: "buc", paleti: "1", locuri: "3", locuri_alese: t },
+      body: { produs_text: "TEST-HARTA", cantitate: "90", um: "buc", paleti: "1", locuri: "3", locuri_alese: trei.join(",") },
     });
-    const grupuri = (p.corp.match(/name="locuri\[\]"/g) || []).length;
-    bine("trei lipite ies ca un singur grup", grupuri === 1 || /TH-1-1-1.*TH-1-1-3/s.test(p.corp), grupuri);
+    const ids = paletiDin(p);
+    bine("trei lipite ies ca un singur palet", ids.length === 1, ids.join(","));
+    bine("care ocupă toate trei locurile", ids.length === 1 && ocupateDe(ids[0]).length === 3);
 
-    // Doua locuri din campuri diferite → doi paleti, nu unul lat.
-    const d = [loc(1, 1, 1), loc(1, 3, 1)].join(",");
+    // Două locuri din câmpuri diferite → doi paleți, nu unul lat.
+    const doua = [loc(1, 2, 3), loc(1, 3, 1)];
     const p2 = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-HARTA", cantitate: "60", um: "buc", paleti: "2", locuri: "2", locuri_alese: d },
+      body: { produs_text: "TEST-HARTA", cantitate: "60", um: "buc", paleti: "2", locuri: "2", locuri_alese: doua.join(",") },
     });
-    bine("două din câmpuri diferite apar amândouă", /TH-1-1-1/.test(p2.corp) && /TH-1-3-1/.test(p2.corp));
+    const ids2 = paletiDin(p2);
+    bine("două din câmpuri diferite ies doi paleți", ids2.length === 2, ids2.join(","));
+    bine("fiecare pe locul lui", ids2.length === 2 && ids2.map((i) => ocupateDe(i)[0]).sort((x, y) => x - y).join(",") === doua.slice().sort((x, y) => x - y).join(","));
+    bine("cantitatea împărțită: 30 pe fiecare", ids2.length === 2 && ids2.every((i) => Number(unul(`SELECT cantitate FROM ct_paleti WHERE id = ${i}`)) === 30));
   }
 
   console.log("\n5. Un loc ocupat între timp nu se suprascrie");
@@ -210,7 +223,8 @@ function curata() {
       metoda: "post",
       body: { produs_text: "TEST-HARTA", cantitate: "50", um: "buc", paleti: "2", locuri: "1", locuri_alese: a + "," + b2 },
     });
-    bine("se spune că un loc nu mai e liber", /nu mai e liber|nu mai sunt libere/.test(p.corp), (p.corp.match(/nu mai [^<.]*/) || [])[0]);
+    bine("nu se pune direct: se arată ce nu merge", p.cod === 200);
+    bine("se spune că un loc nu e liber", /nu e liber/.test(p.corp), (p.corp.match(/nu e liber[^<]*/) || [])[0]);
     bine("și că altcineva a pus marfă acolo", /a pus marfă acolo între timp/.test(p.corp));
     // Locul ocupat NU trebuie sa apara ca propunere.
     bine("locul ocupat nu se propune", !new RegExp('value="' + a + '"').test(p.corp), "apare " + a);
