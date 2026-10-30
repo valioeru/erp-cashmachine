@@ -29,8 +29,8 @@
 // Ca să nu se mai poată: sub VERSIUNE stă amprenta foii de stil, iar
 // test-sw-versiune.js o recalculează la fiecare rulare. Dacă schimbi
 // style.css și uiți să ridici versiunea, cade testul, nu clientul.
-const VERSIUNE = "erp-v3";
-// amprenta style.css: 4307feef
+const VERSIUNE = "erp-v4";
+// amprenta style.css: fab98094
 
 // Doar lucruri care nu se schimbă de la o oră la alta.
 const STATICE = ["/style.css", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png", "/favicon-32.png"];
