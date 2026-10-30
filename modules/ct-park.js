@@ -437,6 +437,7 @@ const ARATA_SECTIUNEA_TEHNICA = false;
 function subtabs(activ) {
   const linkuri = [
     ["/stocuri/ct-park", "Harta depozitului"],
+    ["/stocuri/ct-park/tot", "Tot depozitul"],
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
     ["/stocuri/ct-park/muta", "Mută marfă"],
     ["/stocuri/ct-park/iesire", "Ieșire marfă"],
@@ -478,6 +479,78 @@ function culoareMarfa(cheie) {
   const sat = 60 + ((h >>> 9) % 3) * 10; // 60 / 70 / 80 %
   const lum = 76 + ((h >>> 12) % 3) * 5; // 76 / 81 / 86 % — textul negru rămâne citeț
   return { fond: `hsl(${nuanta}, ${sat}%, ${lum}%)`, margine: `hsl(${nuanta}, ${Math.min(sat, 70)}%, 40%)` };
+}
+
+// Paleta de culori cât mai diferite între ele — Vali, 30.10.2026: „folosește
+// culori cât mai diferite între ele la depozit". Aleasă o dată, cu punctul cel
+// mai depărtat în OKLab (spațiul în care distanța e cea văzută de ochi):
+// fiecare culoare e cât se poate de departe de toate de dinaintea ei și de
+// griul locului liber. Primele sunt cele mai diferite, deci cât timp sunt
+// puține mărfuri, culorile sunt foarte diferite. `t` e textul care se citește
+// mai bine pe ea (contrast ≥ 4,6), `m` marginea, aceeași nuanță mai închisă.
+const PALETA_MARFA = [
+  { f: "#e11e4b", t: "#fff", m: "#8c132f" }, { f: "#003ce1", t: "#fff", m: "#00258c" }, { f: "#009600", t: "#111", m: "#005d00" }, { f: "#b478ff", t: "#111", m: "#704a9e" },
+  { f: "#2dff5a", t: "#111", m: "#1c9e38" }, { f: "#e19600", t: "#111", m: "#8c5d00" }, { f: "#00c3d2", t: "#111", m: "#007982" }, { f: "#870f96", t: "#fff", m: "#54095d" },
+  { f: "#784b00", t: "#fff", m: "#4a2f00" }, { f: "#1e7896", t: "#fff", m: "#134a5d" }, { f: "#ff87b4", t: "#111", m: "#9e5470" }, { f: "#f0e13c", t: "#111", m: "#958c25" },
+  { f: "#1e87ff", t: "#111", m: "#13549e" }, { f: "#78c34b", t: "#111", m: "#4a792f" }, { f: "#d20fb4", t: "#fff", m: "#820970" }, { f: "#2dffe1", t: "#111", m: "#1c9e8c" },
+  { f: "#965a78", t: "#fff", m: "#5d384a" }, { f: "#c3b4ff", t: "#111", m: "#79709e" }, { f: "#873cf0", t: "#fff", m: "#542595" }, { f: "#00692d", t: "#fff", m: "#00411c" },
+  { f: "#87874b", t: "#111", m: "#54542f" }, { f: "#a5001e", t: "#fff", m: "#660013" }, { f: "#ff5af0", t: "#111", m: "#9e3895" }, { f: "#4b4b96", t: "#fff", m: "#2f2f5d" },
+  { f: "#ff5a00", t: "#111", m: "#9e3800" }, { f: "#b487b4", t: "#111", m: "#705470" }, { f: "#b45a0f", t: "#fff", m: "#703809" }, { f: "#ffb487", t: "#111", m: "#9e7054" },
+  { f: "#00a587", t: "#111", m: "#006654" }, { f: "#b4d296", t: "#111", m: "#70825d" }, { f: "#ff3c96", t: "#111", m: "#9e255d" }, { f: "#5a96c3", t: "#111", m: "#385d79" },
+  { f: "#6969c3", t: "#fff", m: "#414179" }, { f: "#78e1ff", t: "#111", m: "#4a8c9e" }, { f: "#b40069", t: "#fff", m: "#700041" }, { f: "#d26969", t: "#111", m: "#824141" },
+  { f: "#ff96ff", t: "#111", m: "#9e5d9e" }, { f: "#4b5aff", t: "#fff", m: "#2f389e" }, { f: "#00e1a5", t: "#111", m: "#008c66" }, { f: "#691ec3", t: "#fff", m: "#411379" },
+];
+
+// Culorile mărfurilor din tot depozitul. Fiecare marfă de pe raft are culoarea
+// ei, diferită de a celorlalte cât timp ajung culorile paletei (40); după
+// aceea se refolosește culoarea purtată de cele mai puține mărfuri. Culoarea
+// se ține în ct_culori_marfa, deci o marfă o păstrează de la o zi la alta, pe
+// orice rând; una nouă ia prima culoare liberă — cea mai diferită de cele
+// deja folosite. Fără tabel (bază veche), cade pe culoarea din hash.
+async function culoriDepozit() {
+  const prezente = await db
+    .prepare(
+      `SELECT DISTINCT pr.cod AS produs_cod, pr.denumire AS produs, p.produs_text
+         FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
+        WHERE p.data_iesire IS NULL`
+    )
+    .all()
+    .catch(() => []);
+  const chei = [...new Set(prezente.map(cheieMarfa).filter((k) => k && k !== "MIXT"))];
+  const memorate = await db.prepare("SELECT id, cheie, idx FROM ct_culori_marfa ORDER BY id").all().catch(() => null);
+  if (memorate === null) return new Map(chei.map((k) => [k, culoareMarfa(k)]));
+  const dupaCheie = new Map(memorate.map((r) => [r.cheie, r]));
+  // Cine are culoare de mai demult o păstrează; cei noi vin după, alfabetic.
+  const ordine = chei.slice().sort((a, b) => {
+    const ra = dupaCheie.get(a), rb = dupaCheie.get(b);
+    if (ra && rb) return Number(ra.id) - Number(rb.id);
+    if (ra) return -1;
+    if (rb) return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const N = PALETA_MARFA.length;
+  const folosite = new Map();
+  const rez = new Map();
+  for (const k of ordine) {
+    const r = dupaCheie.get(k);
+    let idx = r ? Number(r.idx) : -1;
+    if (!(idx >= 0 && idx < N) || folosite.get(idx)) {
+      idx = -1;
+      for (let i = 0; i < N; i++) if (!folosite.get(i)) { idx = i; break; }
+      if (idx < 0) {
+        let min = Infinity;
+        for (let i = 0; i < N; i++) if ((folosite.get(i) || 0) < min) { min = folosite.get(i) || 0; idx = i; }
+      }
+      await db
+        .prepare("INSERT INTO ct_culori_marfa (cheie, idx) VALUES (?, ?) ON CONFLICT (cheie) DO UPDATE SET idx = EXCLUDED.idx")
+        .run(k, idx)
+        .catch(() => null);
+    }
+    folosite.set(idx, (folosite.get(idx) || 0) + 1);
+    const c = PALETA_MARFA[idx];
+    rez.set(k, { fond: c.f, margine: c.m, text: c.t });
+  }
+  return rez;
 }
 
 function pastila(categorie) {
@@ -588,6 +661,261 @@ async function produsDupaCodSauNume(text) {
       .get(t.toLowerCase())) ||
     null
   );
+}
+
+// Stilul desenului de rând (grila, căsuțele, fișa de la mouseover). Același pe
+// pagina rândului și pe „Tot depozitul", ca să arate la fel.
+const STIL_HARTA = `
+        .ct-fata { background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; }
+        .ct-grila { display:flex; flex-direction:column; gap:6px; min-width:600px; }
+        .ct-nivel { display:flex; align-items:stretch; gap:8px; }
+        .ct-nivel-eticheta { width:58px; flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-weight:600; font-size:12px; color:var(--text-muted); border-right:2px solid var(--border); }
+        .ct-nivel-mm { font-weight:400; font-size:10px; }
+        /* min-width:0 ține câmpurile unul sub altul pe toate nivelurile. Fără
+           el, un nivel cu un palet care are un cuvânt lung în denumire
+           („780mm*565mm") se lățea după text, câmpurile lui ieșeau mai late,
+           și coloanele o luau razna spre dreapta (poza lui Vali, 30.10.2026).
+           Textul lung se taie în căsuță; fișa de la mouseover îl arată întreg. */
+        .ct-nivel-campuri { display:flex; gap:8px; flex:1; min-width:0; }
+        .ct-camp { flex:1; min-width:96px; }
+        .ct-camp-locuri { display:flex; gap:2px; }
+        .ct-camp-eticheta { font-size:10px; color:var(--text-muted); text-align:center; margin-top:2px; }
+        .ct-loc { flex:1; min-width:26px; border:1px solid var(--border); border-radius:3px; background:#f7f8fa;
+                  display:flex; flex-direction:column; align-items:center; justify-content:center; text-decoration:none; color:inherit; overflow:hidden; }
+        .ct-loc.ocupat { cursor:pointer; }
+        .ct-loc.ocupat:hover { outline:2px solid var(--primary); }
+        .ct-loc.lipsa { background:repeating-linear-gradient(45deg,#f0f0f0,#f0f0f0 4px,#fff 4px,#fff 8px); border-style:dashed; }
+        .ct-loc.blocat { background:#f0e2e2; }
+        .ct-loc-adresa { font-size:10px; color:var(--text-muted); }
+        /* Pe un palet, textul ia culoarea aleasă pentru fondul lui (negru sau alb). */
+        .ct-loc.ocupat .ct-loc-adresa { color:inherit; opacity:.8; }
+        .ct-loc-marfa { font-size:9px; line-height:1.05; text-align:center; padding:0 2px; overflow-wrap:anywhere; }
+        .ct-podea { margin-top:6px; margin-left:66px; border-top:3px solid #8a8f98; font-size:11px; color:var(--text-muted); padding-top:2px; }
+        /* Ce are atributul hidden chiar se ascunde. Bara „Pune marfă pe
+           locurile astea”, bara „Mută aici” și banda de editare pe câmp aveau
+           hidden, dar regulile lor de display:flex băteau stilul implicit al
+           browserului — deci stăteau la vedere tot timpul. Bara de marfă se
+           putea apăsa fără niciun loc ales (și ajungeai la intrare fără loc),
+           iar butoanele − / + ale benzii schimbă raftul pe loc. (30.10.2026) */
+        [hidden] { display:none !important; }
+        /* Fișa paletului la mouseover. */
+        .ct-fisa { position:fixed; z-index:50; max-width:340px; pointer-events:none;
+          background:var(--surface,#fff); color:var(--text,#1d2733); border:1px solid var(--border,#d9dee5);
+          border-radius:8px; box-shadow:0 8px 24px rgba(16,24,40,.18); padding:10px 12px; font-size:12.5px; line-height:1.45; }
+        .ct-fisa[hidden] { display:none; }
+        .ct-fisa .f-cod { font-weight:700; font-size:13px; }
+        .ct-fisa .f-adr { color:var(--text-muted); font-size:11.5px; margin-bottom:6px; }
+        .ct-fisa .f-produs { font-weight:600; margin-bottom:4px; }
+        .ct-fisa table { border-collapse:collapse; width:100%; }
+        .ct-fisa td { padding:1px 0; vertical-align:top; }
+        .ct-fisa td.k { color:var(--text-muted); padding-right:10px; white-space:nowrap; }
+        .ct-fisa .f-linii { margin:6px 0 0; padding:6px 0 0; border-top:1px solid var(--border,#e1e4e9); }
+`;
+
+// Fișa paletului la mouseover: datele paleților (JSON), cardul și scriptul.
+function fisaPaletilor(infoPaleti) {
+  return `
+      ${/* Datele paletilor din randul asta, o singura data, ca JSON — nu cate
+           un atribut lung pe fiecare casuta. Semnul „<” e scris \\u003c, ca un text
+           de observatii sa nu poata inchide eticheta script. */ ""}
+      <script type="application/json" id="ct-info-paleti">${JSON.stringify(infoPaleti).replace(/</g, "\\u003c")}</script>
+      <div class="ct-fisa" id="ct-fisa" hidden role="tooltip"></div>
+      <script>
+      (function () {
+        var date = {};
+        try { date = JSON.parse(document.getElementById("ct-info-paleti").textContent || "{}"); } catch (e) {}
+        var fisa = document.getElementById("ct-fisa");
+        function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+        function rand(tbl, k, v) {
+          if (v === null || v === undefined || v === "") return;
+          var tr = el("tr"); tr.appendChild(el("td", "k", k)); tr.appendChild(el("td", null, v)); tbl.appendChild(tr);
+        }
+        function arata(p) {
+          fisa.innerHTML = "";
+          fisa.appendChild(el("div", "f-cod", p.cod || ("palet #" + p.id)));
+          if (p.adrese) fisa.appendChild(el("div", "f-adr", p.adrese));
+          fisa.appendChild(el("div", "f-produs", p.produs || "marfă fără denumire"));
+          var t = el("table");
+          rand(t, "Cantitate", p.cantitate);
+          rand(t, "Lot", p.lot);
+          rand(t, "Categorie", p.categorie);
+          rand(t, "Furnizor", p.furnizor);
+          rand(t, "Intrat", p.intrat);
+          rand(t, "Preț intrare", p.pret);
+          rand(t, "Valoare", p.valoare);
+          rand(t, "Pus de", p.pus_de);
+          rand(t, "Observații", p.observatii);
+          fisa.appendChild(t);
+          if (p.linii && p.linii.length > 1) {
+            var l = el("div", "f-linii");
+            l.appendChild(el("div", "k", "Pe palet:"));
+            p.linii.forEach(function (x) { l.appendChild(el("div", null, "• " + x)); });
+            fisa.appendChild(l);
+          }
+          fisa.hidden = false;
+        }
+        function muta(ev) {
+          var x = ev.clientX + 16, y = ev.clientY + 16;
+          var w = fisa.offsetWidth, h = fisa.offsetHeight;
+          if (x + w > window.innerWidth - 8) x = Math.max(8, ev.clientX - w - 16);
+          if (y + h > window.innerHeight - 8) y = Math.max(8, ev.clientY - h - 16);
+          fisa.style.left = x + "px"; fisa.style.top = y + "px";
+        }
+        // Doar cu mouse-ul. Pe telefon nu exista mouseover: o atingere ar fi
+        // aratat fisa, iar Safari pe iPhone, cand pagina se schimba la
+        // atingere, nu mai trimite click-ul — paletul s-ar fi deschis abia la a
+        // doua atingere, iar la mutare paletul n-ar fi fost prins din prima.
+        // Cu pointerType "mouse", pe telefon atingerea face ce facea si inainte.
+        function eMouse(ev) { return ev.pointerType === "mouse"; }
+        document.addEventListener("pointerover", function (ev) {
+          if (!eMouse(ev)) return;
+          var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
+          if (!c) return;
+          var p = date[c.getAttribute("data-palet")];
+          if (!p) return;
+          arata(p); muta(ev);
+        });
+        document.addEventListener("pointermove", function (ev) { if (eMouse(ev) && !fisa.hidden) muta(ev); });
+        document.addEventListener("pointerout", function (ev) {
+          var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
+          if (!c) return;
+          if (ev.relatedTarget && c.contains(ev.relatedTarget)) return;
+          fisa.hidden = true;
+        });
+        window.addEventListener("scroll", function () { fisa.hidden = true; }, { passive: true });
+        // Intors cu „Inapoi" de pe pagina paletului: fisa ramasa din cache pleaca.
+        window.addEventListener("pageshow", function () { fisa.hidden = true; });
+      })();
+      </script>`;
+}
+
+// Desenul unui rând: nivelurile, de sus în jos, cu câmpurile și locurile lor.
+// Același pe pagina rândului și pe „Tot depozitul" (toate rândurile unul sub
+// altul — Vali, 30.10.2026), ca să arate la fel: aceleași culori, F/L, căsuțe
+// duble. `alegere`: pe pagina rândului locurile libere sunt căsuțe de bifat;
+// altfel, linkuri spre intrarea de marfă pe locul ăla.
+function desenRand(r, plan, locuri, etCamp, culoriMarfa, { alegere = true } = {}) {
+  const niveluri = plan.niveluri;
+  const peCamp = plan.peCamp;
+  const h = new Map();
+  for (const l of locuri) h.set(`${l.nivel}|${l.camp}|${l.pozitie}`, l);
+  // Câte locuri ține fiecare palet din rândul ăsta. Îl pun pe fiecare căsuță
+  // ocupată, ca modul de mutare să poată spune din prima „mai alege două".
+  const cateLocuriArePalet = new Map();
+  for (const l of locuri) if (l.palet_id) cateLocuriArePalet.set(Number(l.palet_id), (cateLocuriArePalet.get(Number(l.palet_id)) || 0) + 1);
+
+  // Desenul e la scară pe verticală: un nivel de 2,2 m se vede mai înalt
+  // decât unul de 1,2 m. Altfel „designul de stocare" arată la fel oricum
+  // l-ai configura, și nu se vede ce-ai făcut.
+  const PX_PE_MM = 0.024;
+  const inaltimePx = (mm) => Math.max(26, Math.min(120, Math.round(nr(mm) * PX_PE_MM)));
+
+  let grila = "";
+  for (let i = niveluri.length - 1; i >= 0; i--) {
+    const n = niveluri[i];
+    const nivel = n.nivel;
+    const hPx = inaltimePx(n.inaltime);
+    let celule = "";
+    for (let camp = 1; camp <= nr(r.campuri); camp++) {
+      // Câmpul ăsta nu urcă până aici: rândul e mai scund pe porțiunea lui.
+      // Desenăm un gol de aceeași lățime, ca să nu se decaleze grila și ca
+      // să se vadă silueta adevărată a raftului, nu una dreaptă inventată.
+      if (nivel > (peCamp.get(camp) || 0)) {
+        const goluri = new Array(plan.locuriLa(camp, nivel))
+          .fill(`<div class="ct-loc fara-raft" style="height:${hPx}px"></div>`)
+          .join("");
+        celule += `<div class="ct-camp gol" data-nivel="${nivel}" data-camp="${camp}" title="Câmpul ${camp} are ${peCamp.get(camp) || 0} niveluri — aici nu e raft">
+            <div class="ct-camp-locuri">${goluri}</div>
+            <div class="ct-camp-eticheta">&nbsp;</div>
+          </div>`;
+        continue;
+      }
+      let pozitii = "";
+      // Câți paleți intră AICI, nu pe nivel în general: un câmp dintr-un
+      // sector de 2 paleți are două căsuțe, nu trei. Cum .ct-camp e
+      // flex:1 și .ct-loc la fel, cele două ies mai late în aceeași
+      // deschidere — adică exact ce se vede în hală.
+      for (let poz = 1; poz <= plan.locuriLa(camp, nivel); poz++) {
+        const l = h.get(`${nivel}|${camp}|${poz}`);
+        if (!l) {
+          pozitii += `<div class="ct-loc lipsa" style="height:${hPx}px"></div>`;
+          continue;
+        }
+        const ocupat = !!l.palet_id;
+        const culoare = ocupat ? culoriMarfa.get(cheieMarfa(l)) || culoareMarfa(cheieMarfa(l)) : null;
+        const titlu = ocupat
+          ? `${l.adresa} · ${l.produs || l.produs_text || "marfă"} · ${nr(l.cantitate) || "?"} ${l.um || ""} · intrat ${l.data_intrare}`
+          : `${l.adresa} · liber${l.categorie ? " · zonă " + l.categorie : ""}`;
+        // Locul OCUPAT ramane link catre paletul lui. Locul LIBER era un div
+        // mort: se vedea ca e liber si atat. Acum e o casuta bifabila —
+        // arati cu degetul unde vrei marfa, exact ca in hala, in loc sa
+        // speri ca propunerea automata nimereste raftul la care te gandeai.
+        // `data-loc` e pentru modul de editare: acolo un click pe loc nu-l
+        // mai alege pentru marfă, ci îl scoate din uz sau îl repune.
+        if (ocupat) {
+          // Un palet lat (pe 2–3 locuri lipite) se desenează ca O SINGURĂ
+          // căsuță dublă sau triplă, cât locurile pe care le ține — cererea
+          // lui Vali, 30.10.2026. Lățimea iese exact cât k căsuțe plus
+          // golurile dintre ele (flex-grow k, bază (k−1)×2 px — golul e de
+          // 2 px), deci marginile rămân aliniate cu nivelurile de deasupra.
+          let k = 1;
+          while (poz + k <= plan.locuriLa(camp, nivel)) {
+            const urm = h.get(`${nivel}|${camp}|${poz + k}`);
+            if (!urm || Number(urm.palet_id) !== Number(l.palet_id)) break;
+            k++;
+          }
+          const adrese = [];
+          for (let j = 0; j < k; j++) adrese.push(h.get(`${nivel}|${camp}|${poz + j}`).adresa);
+          const eticheta = k > 1 ? `${l.pozitie}–${Number(l.pozitie) + k - 1}` : String(l.pozitie);
+          const titluLat = k > 1 ? titlu.replace(l.adresa, adrese.join(" + ")) : titlu;
+          const latime = k > 1 ? `flex:${k} ${k} ${(k - 1) * 2}px;min-width:${k * 26 + (k - 1) * 2}px;` : "";
+          // Fără `title`: pe un loc ocupat, la mouseover apare fișa paletului
+          // (scriptul de mai jos), iar un title ar fi pus încă o etichetă
+          // galbenă peste ea. Textul scurt rămâne pentru cititoarele de ecran.
+          pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${k > 1 ? " lat" : ""}${nr(l.blocat) ? " blocat" : ""}"
+              aria-label="${esc(titluLat)}" data-adresa="${esc(adrese.join(" + "))}" data-loc="${l.id}" data-ocupat="1"
+              data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}" data-latime="${k}"
+              data-marfa="${esc(String(l.produs || l.produs_text || "marfă").slice(0, 40))}"
+              style="${latime}height:${hPx}px;background:${culoare.fond};border-color:${culoare.margine}${culoare.text ? `;color:${culoare.text}` : ""}">
+              <span class="ct-loc-adresa">${esc(eticheta)}</span>
+              <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, k > 1 ? 22 * k : 22))}</span>
+            </a>`;
+          poz += k - 1;
+        } else if (nr(l.blocat)) {
+          pozitii += `<div class="ct-loc liber blocat" title="${esc(titlu)} · scos din uz" data-adresa="${esc(l.adresa)}"
+              data-loc="${l.id}" data-blocat="1" style="height:${hPx}px">
+              <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span></div>`;
+        } else if (!alegere) {
+          // Pe „Tot depozitul": locul liber duce la intrarea de marfă, cu
+          // locul ăsta deja ales.
+          pozitii += `<a class="ct-loc liber" href="/stocuri/ct-park/intrare?rand=${r.id}&amp;locuri=${l.id}"
+              title="${esc(titlu)} · click ca să pui marfă aici" data-adresa="${esc(l.adresa)}" style="height:${hPx}px">
+              <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span></a>`;
+        } else {
+          pozitii += `<label class="ct-loc liber alegibil" title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
+              data-loc="${l.id}" style="height:${hPx}px">
+              <input type="checkbox" name="loc" value="${l.id}" data-adresa="${esc(l.adresa)}"
+                     data-nivel="${nivel}" data-camp="${camp}" data-pozitie="${l.pozitie}">
+              <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
+            </label>`;
+        }
+      }
+      const zona = h.get(`${nivel}|${camp}|1`);
+      celule += `<div class="ct-camp" data-nivel="${nivel}" data-camp="${camp}">
+          <div class="ct-camp-locuri">${pozitii}</div>
+          <div class="ct-camp-eticheta">${etCamp.get(camp) || camp}${zona && zona.categorie ? ` · ${esc(zona.categorie)}` : ""}</div>
+        </div>`;
+    }
+    grila += `<div class="ct-nivel">
+        <div class="ct-nivel-eticheta" title="${esc(n.eticheta || "")}">
+          <span>N${nivel}</span>
+          <span class="ct-nivel-mm">${(n.inaltime / 1000).toFixed(2)} m</span>
+          <span class="ct-nivel-mm">${n.locuri} pal.</span>
+        </div>
+        <div class="ct-nivel-campuri">${celule}</div>
+      </div>`;
+  }
+  return grila;
 }
 
 async function infoPaletiPentruHarta(ids) {
@@ -1499,6 +1827,7 @@ function register(router) {
     const niveluri = plan.niveluri;
     const peCamp = plan.peCamp;
     const etCamp = eticheteCampuri(peCamp, nr(r.campuri));
+    const culoriMarfa = await culoriDepozit();
     const cuFL = [...etCamp.values()].some((v) => v === "F" || v === "L");
 
     // Cheia „nivel|camp|pozitie" ca să pot desena grila fără să caut în listă.
@@ -1507,121 +1836,12 @@ function register(router) {
 
     const paletiRand = new Map();
     for (const l of locuri) if (l.palet_id) paletiRand.set(Number(l.palet_id), l);
-    // Câte locuri ține fiecare palet din rândul ăsta. Îl pun pe fiecare
-    // căsuță ocupată, ca modul de mutare să poată spune din prima „mai alege
-    // două" în loc să trimită la server și să întoarcă o eroare.
-    const cateLocuriArePalet = new Map();
-    for (const l of locuri) if (l.palet_id) cateLocuriArePalet.set(Number(l.palet_id), (cateLocuriArePalet.get(Number(l.palet_id)) || 0) + 1);
 
     const ocupate = locuri.filter((l) => l.palet_id).length;
     const latimeCamp = nr(r.latime_loc) * nr(r.locuri_pe_camp);
     const infoPaleti = await infoPaletiPentruHarta([...paletiRand.keys()]);
 
-    // Desenul e la scară pe verticală: un nivel de 2,2 m se vede mai înalt
-    // decât unul de 1,2 m. Altfel „designul de stocare" arată la fel oricum
-    // l-ai configura, și nu se vede ce-ai făcut.
-    const PX_PE_MM = 0.024;
-    const inaltimePx = (mm) => Math.max(26, Math.min(120, Math.round(nr(mm) * PX_PE_MM)));
-
-    let grila = "";
-    for (let i = niveluri.length - 1; i >= 0; i--) {
-      const n = niveluri[i];
-      const nivel = n.nivel;
-      const hPx = inaltimePx(n.inaltime);
-      let celule = "";
-      for (let camp = 1; camp <= nr(r.campuri); camp++) {
-        // Câmpul ăsta nu urcă până aici: rândul e mai scund pe porțiunea lui.
-        // Desenăm un gol de aceeași lățime, ca să nu se decaleze grila și ca
-        // să se vadă silueta adevărată a raftului, nu una dreaptă inventată.
-        if (nivel > (peCamp.get(camp) || 0)) {
-          const goluri = new Array(plan.locuriLa(camp, nivel))
-            .fill(`<div class="ct-loc fara-raft" style="height:${hPx}px"></div>`)
-            .join("");
-          celule += `<div class="ct-camp gol" data-nivel="${nivel}" data-camp="${camp}" title="Câmpul ${camp} are ${peCamp.get(camp) || 0} niveluri — aici nu e raft">
-              <div class="ct-camp-locuri">${goluri}</div>
-              <div class="ct-camp-eticheta">&nbsp;</div>
-            </div>`;
-          continue;
-        }
-        let pozitii = "";
-        // Câți paleți intră AICI, nu pe nivel în general: un câmp dintr-un
-        // sector de 2 paleți are două căsuțe, nu trei. Cum .ct-camp e
-        // flex:1 și .ct-loc la fel, cele două ies mai late în aceeași
-        // deschidere — adică exact ce se vede în hală.
-        for (let poz = 1; poz <= plan.locuriLa(camp, nivel); poz++) {
-          const l = h.get(`${nivel}|${camp}|${poz}`);
-          if (!l) {
-            pozitii += `<div class="ct-loc lipsa" style="height:${hPx}px"></div>`;
-            continue;
-          }
-          const ocupat = !!l.palet_id;
-          const culoare = ocupat ? culoareMarfa(cheieMarfa(l)) : null;
-          const titlu = ocupat
-            ? `${l.adresa} · ${l.produs || l.produs_text || "marfă"} · ${nr(l.cantitate) || "?"} ${l.um || ""} · intrat ${l.data_intrare}`
-            : `${l.adresa} · liber${l.categorie ? " · zonă " + l.categorie : ""}`;
-          // Locul OCUPAT ramane link catre paletul lui. Locul LIBER era un div
-          // mort: se vedea ca e liber si atat. Acum e o casuta bifabila —
-          // arati cu degetul unde vrei marfa, exact ca in hala, in loc sa
-          // speri ca propunerea automata nimereste raftul la care te gandeai.
-          // `data-loc` e pentru modul de editare: acolo un click pe loc nu-l
-          // mai alege pentru marfă, ci îl scoate din uz sau îl repune.
-          if (ocupat) {
-            // Un palet lat (pe 2–3 locuri lipite) se desenează ca O SINGURĂ
-            // căsuță dublă sau triplă, cât locurile pe care le ține — cererea
-            // lui Vali, 30.10.2026. Lățimea iese exact cât k căsuțe plus
-            // golurile dintre ele (flex-grow k, bază (k−1)×2 px — golul e de
-            // 2 px), deci marginile rămân aliniate cu nivelurile de deasupra.
-            let k = 1;
-            while (poz + k <= plan.locuriLa(camp, nivel)) {
-              const urm = h.get(`${nivel}|${camp}|${poz + k}`);
-              if (!urm || Number(urm.palet_id) !== Number(l.palet_id)) break;
-              k++;
-            }
-            const adrese = [];
-            for (let j = 0; j < k; j++) adrese.push(h.get(`${nivel}|${camp}|${poz + j}`).adresa);
-            const eticheta = k > 1 ? `${l.pozitie}–${Number(l.pozitie) + k - 1}` : String(l.pozitie);
-            const titluLat = k > 1 ? titlu.replace(l.adresa, adrese.join(" + ")) : titlu;
-            const latime = k > 1 ? `flex:${k} ${k} ${(k - 1) * 2}px;min-width:${k * 26 + (k - 1) * 2}px;` : "";
-            // Fără `title`: pe un loc ocupat, la mouseover apare fișa paletului
-            // (scriptul de mai jos), iar un title ar fi pus încă o etichetă
-            // galbenă peste ea. Textul scurt rămâne pentru cititoarele de ecran.
-            pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${k > 1 ? " lat" : ""}${nr(l.blocat) ? " blocat" : ""}"
-                aria-label="${esc(titluLat)}" data-adresa="${esc(adrese.join(" + "))}" data-loc="${l.id}" data-ocupat="1"
-                data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}" data-latime="${k}"
-                data-marfa="${esc(String(l.produs || l.produs_text || "marfă").slice(0, 40))}"
-                style="${latime}height:${hPx}px;background:${culoare.fond};border-color:${culoare.margine}">
-                <span class="ct-loc-adresa">${esc(eticheta)}</span>
-                <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, k > 1 ? 22 * k : 22))}</span>
-              </a>`;
-            poz += k - 1;
-          } else if (nr(l.blocat)) {
-            pozitii += `<div class="ct-loc liber blocat" title="${esc(titlu)} · scos din uz" data-adresa="${esc(l.adresa)}"
-                data-loc="${l.id}" data-blocat="1" style="height:${hPx}px">
-                <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span></div>`;
-          } else {
-            pozitii += `<label class="ct-loc liber alegibil" title="${esc(titlu)}" data-adresa="${esc(l.adresa)}"
-                data-loc="${l.id}" style="height:${hPx}px">
-                <input type="checkbox" name="loc" value="${l.id}" data-adresa="${esc(l.adresa)}"
-                       data-nivel="${nivel}" data-camp="${camp}" data-pozitie="${l.pozitie}">
-                <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
-              </label>`;
-          }
-        }
-        const zona = h.get(`${nivel}|${camp}|1`);
-        celule += `<div class="ct-camp" data-nivel="${nivel}" data-camp="${camp}">
-            <div class="ct-camp-locuri">${pozitii}</div>
-            <div class="ct-camp-eticheta">${etCamp.get(camp) || camp}${zona && zona.categorie ? ` · ${esc(zona.categorie)}` : ""}</div>
-          </div>`;
-      }
-      grila += `<div class="ct-nivel">
-          <div class="ct-nivel-eticheta" title="${esc(n.eticheta || "")}">
-            <span>N${nivel}</span>
-            <span class="ct-nivel-mm">${(n.inaltime / 1000).toFixed(2)} m</span>
-            <span class="ct-nivel-mm">${n.locuri} pal.</span>
-          </div>
-          <div class="ct-nivel-campuri">${celule}</div>
-        </div>`;
-    }
+    const grila = desenRand(r, plan, locuri, etCamp, culoriMarfa, { alegere: true });
 
     const body = `
       ${subtabs("/stocuri/ct-park")}
@@ -2059,29 +2279,7 @@ function register(router) {
       </form>
 
       <style>
-        .ct-fata { background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; }
-        .ct-grila { display:flex; flex-direction:column; gap:6px; min-width:600px; }
-        .ct-nivel { display:flex; align-items:stretch; gap:8px; }
-        .ct-nivel-eticheta { width:58px; flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-weight:600; font-size:12px; color:var(--text-muted); border-right:2px solid var(--border); }
-        .ct-nivel-mm { font-weight:400; font-size:10px; }
-        /* min-width:0 ține câmpurile unul sub altul pe toate nivelurile. Fără
-           el, un nivel cu un palet care are un cuvânt lung în denumire
-           („780mm*565mm") se lățea după text, câmpurile lui ieșeau mai late,
-           și coloanele o luau razna spre dreapta (poza lui Vali, 30.10.2026).
-           Textul lung se taie în căsuță; fișa de la mouseover îl arată întreg. */
-        .ct-nivel-campuri { display:flex; gap:8px; flex:1; min-width:0; }
-        .ct-camp { flex:1; min-width:96px; }
-        .ct-camp-locuri { display:flex; gap:2px; }
-        .ct-camp-eticheta { font-size:10px; color:var(--text-muted); text-align:center; margin-top:2px; }
-        .ct-loc { flex:1; min-width:26px; border:1px solid var(--border); border-radius:3px; background:#f7f8fa;
-                  display:flex; flex-direction:column; align-items:center; justify-content:center; text-decoration:none; color:inherit; overflow:hidden; }
-        .ct-loc.ocupat { cursor:pointer; }
-        .ct-loc.ocupat:hover { outline:2px solid var(--primary); }
-        .ct-loc.lipsa { background:repeating-linear-gradient(45deg,#f0f0f0,#f0f0f0 4px,#fff 4px,#fff 8px); border-style:dashed; }
-        .ct-loc.blocat { background:#f0e2e2; }
-        .ct-loc-adresa { font-size:10px; color:var(--text-muted); }
-        .ct-loc-marfa { font-size:9px; line-height:1.05; text-align:center; padding:0 2px; overflow-wrap:anywhere; }
-        .ct-podea { margin-top:6px; margin-left:66px; border-top:3px solid #8a8f98; font-size:11px; color:var(--text-muted); padding-top:2px; }
+        ${STIL_HARTA}
         .ct-legenda2 { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12px; margin:10px 0 18px; }
         .ct-legenda2 i { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
 
@@ -2108,101 +2306,65 @@ function register(router) {
         body.ct-mut .ct-loc[data-palet] { cursor:grab; }
         body.ct-mut .ct-loc[data-palet]:hover { outline:2px solid #c07018; }
 
-        /* Ce are atributul hidden chiar se ascunde. Bara „Pune marfă pe
-           locurile astea”, bara „Mută aici” și banda de editare pe câmp aveau
-           hidden, dar regulile lor de display:flex băteau stilul implicit al
-           browserului — deci stăteau la vedere tot timpul. Bara de marfă se
-           putea apăsa fără niciun loc ales (și ajungeai la intrare fără loc),
-           iar butoanele − / + ale benzii schimbă raftul pe loc. (30.10.2026) */
-        [hidden] { display:none !important; }
 
-        /* Fișa paletului la mouseover. */
-        .ct-fisa { position:fixed; z-index:50; max-width:340px; pointer-events:none;
-          background:var(--surface,#fff); color:var(--text,#1d2733); border:1px solid var(--border,#d9dee5);
-          border-radius:8px; box-shadow:0 8px 24px rgba(16,24,40,.18); padding:10px 12px; font-size:12.5px; line-height:1.45; }
-        .ct-fisa[hidden] { display:none; }
-        .ct-fisa .f-cod { font-weight:700; font-size:13px; }
-        .ct-fisa .f-adr { color:var(--text-muted); font-size:11.5px; margin-bottom:6px; }
-        .ct-fisa .f-produs { font-weight:600; margin-bottom:4px; }
-        .ct-fisa table { border-collapse:collapse; width:100%; }
-        .ct-fisa td { padding:1px 0; vertical-align:top; }
-        .ct-fisa td.k { color:var(--text-muted); padding-right:10px; white-space:nowrap; }
-        .ct-fisa .f-linii { margin:6px 0 0; padding:6px 0 0; border-top:1px solid var(--border,#e1e4e9); }
       </style>
-      ${/* Datele paletilor din randul asta, o singura data, ca JSON — nu cate
-           un atribut lung pe fiecare casuta. Semnul „<” e scris \\u003c, ca un text
-           de observatii sa nu poata inchide eticheta script. */ ""}
-      <script type="application/json" id="ct-info-paleti">${JSON.stringify(infoPaleti).replace(/</g, "\\u003c")}</script>
-      <div class="ct-fisa" id="ct-fisa" hidden role="tooltip"></div>
-      <script>
-      (function () {
-        var date = {};
-        try { date = JSON.parse(document.getElementById("ct-info-paleti").textContent || "{}"); } catch (e) {}
-        var fisa = document.getElementById("ct-fisa");
-        function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-        function rand(tbl, k, v) {
-          if (v === null || v === undefined || v === "") return;
-          var tr = el("tr"); tr.appendChild(el("td", "k", k)); tr.appendChild(el("td", null, v)); tbl.appendChild(tr);
-        }
-        function arata(p) {
-          fisa.innerHTML = "";
-          fisa.appendChild(el("div", "f-cod", p.cod || ("palet #" + p.id)));
-          if (p.adrese) fisa.appendChild(el("div", "f-adr", p.adrese));
-          fisa.appendChild(el("div", "f-produs", p.produs || "marfă fără denumire"));
-          var t = el("table");
-          rand(t, "Cantitate", p.cantitate);
-          rand(t, "Lot", p.lot);
-          rand(t, "Categorie", p.categorie);
-          rand(t, "Furnizor", p.furnizor);
-          rand(t, "Intrat", p.intrat);
-          rand(t, "Preț intrare", p.pret);
-          rand(t, "Valoare", p.valoare);
-          rand(t, "Pus de", p.pus_de);
-          rand(t, "Observații", p.observatii);
-          fisa.appendChild(t);
-          if (p.linii && p.linii.length > 1) {
-            var l = el("div", "f-linii");
-            l.appendChild(el("div", "k", "Pe palet:"));
-            p.linii.forEach(function (x) { l.appendChild(el("div", null, "• " + x)); });
-            fisa.appendChild(l);
-          }
-          fisa.hidden = false;
-        }
-        function muta(ev) {
-          var x = ev.clientX + 16, y = ev.clientY + 16;
-          var w = fisa.offsetWidth, h = fisa.offsetHeight;
-          if (x + w > window.innerWidth - 8) x = Math.max(8, ev.clientX - w - 16);
-          if (y + h > window.innerHeight - 8) y = Math.max(8, ev.clientY - h - 16);
-          fisa.style.left = x + "px"; fisa.style.top = y + "px";
-        }
-        // Doar cu mouse-ul. Pe telefon nu exista mouseover: o atingere ar fi
-        // aratat fisa, iar Safari pe iPhone, cand pagina se schimba la
-        // atingere, nu mai trimite click-ul — paletul s-ar fi deschis abia la a
-        // doua atingere, iar la mutare paletul n-ar fi fost prins din prima.
-        // Cu pointerType "mouse", pe telefon atingerea face ce facea si inainte.
-        function eMouse(ev) { return ev.pointerType === "mouse"; }
-        document.addEventListener("pointerover", function (ev) {
-          if (!eMouse(ev)) return;
-          var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
-          if (!c) return;
-          var p = date[c.getAttribute("data-palet")];
-          if (!p) return;
-          arata(p); muta(ev);
-        });
-        document.addEventListener("pointermove", function (ev) { if (eMouse(ev) && !fisa.hidden) muta(ev); });
-        document.addEventListener("pointerout", function (ev) {
-          var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
-          if (!c) return;
-          if (ev.relatedTarget && c.contains(ev.relatedTarget)) return;
-          fisa.hidden = true;
-        });
-        window.addEventListener("scroll", function () { fisa.hidden = true; }, { passive: true });
-        // Intors cu „Inapoi" de pe pagina paletului: fisa ramasa din cache pleaca.
-        window.addEventListener("pageshow", function () { fisa.hidden = true; });
-      })();
-      </script>
+      ${fisaPaletilor(infoPaleti)}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `CT-Park · rândul ${r.numar}`, active: "/stocuri/ct-park", body }));
+  });
+
+  // ---- Tot depozitul: toate rândurile, desenate unul sub altul ---------------
+  // Vali, 30.10.2026: „fă un alt submeniu, tot depozitul cu totul detaliat, așa
+  // cum vezi fiecare rând — fără zone pe categorii sub —, dar toate rândurile
+  // vizuale una sub alta". Același desen ca pe pagina rândului (desenRand),
+  // aceleași culori și aceeași fișă la mouseover. Click pe palet → pagina lui
+  // (adaugi, scoți, extinzi); click pe un loc liber → intrare de marfă acolo.
+  router.get("/stocuri/ct-park/tot", async (ctx) => {
+    const randuri = await db.prepare("SELECT * FROM ct_randuri WHERE activ = 1 ORDER BY numar").all();
+    const culoriMarfa = await culoriDepozit();
+    const paleti = new Set();
+    let totalLocuri = 0;
+    let totalOcupate = 0;
+    const sectiuni = [];
+    for (const r of randuri) {
+      const locuri = await locuriRand(r.id);
+      const plan = await planRand(r);
+      const etCamp = eticheteCampuri(plan.peCamp, nr(r.campuri));
+      const ocupate = locuri.filter((l) => l.palet_id).length;
+      totalLocuri += locuri.length;
+      totalOcupate += ocupate;
+      for (const l of locuri) if (l.palet_id) paleti.add(Number(l.palet_id));
+      sectiuni.push(`<section class="ct-tot-rand" id="rand-${r.id}">
+          <h2><a href="/stocuri/ct-park/rand/${r.id}">Rândul ${esc(String(r.numar))}</a> ${pastila(r.eticheta)}
+            <span class="mic">${locuri.length} locuri · ${ocupate} ocupate</span></h2>
+          <div class="ct-fata">
+            <div class="ct-grila">${desenRand(r, plan, locuri, etCamp, culoriMarfa, { alegere: false })}</div>
+            <div class="ct-podea">pardoseală</div>
+          </div>
+        </section>`);
+    }
+    const infoPaleti = await infoPaletiPentruHarta([...paleti]);
+    const body = `
+      ${subtabs("/stocuri/ct-park/tot")}
+      <h1 style="margin:6px 0 2px">Tot depozitul</h1>
+      <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px">
+        ${randuri.length} ${randuri.length === 1 ? "rând" : "rânduri"} · ${totalLocuri} locuri, din care <strong>${totalOcupate} ocupate</strong> ·
+        ${culoriMarfa.size} mărfuri. Click pe un palet ca să-l vezi, să adaugi sau să scoți marfă; click pe un loc liber ca să pui marfă acolo.
+      </p>
+      ${sectiuni.join("") || '<p style="color:var(--text-muted)">Niciun rând configurat încă.</p>'}
+      <style>
+        ${STIL_HARTA}
+        .ct-tot-rand { margin:0 0 18px; }
+        .ct-tot-rand h2 { font-size:16px; margin:0 0 6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .ct-tot-rand h2 .mic { font-weight:400; color:var(--text-muted); font-size:12px; }
+        .ct-tot-rand h2 a { color:inherit; text-decoration:none; }
+        .ct-tot-rand h2 a:hover { text-decoration:underline; }
+        .ct-loc.liber { text-decoration:none; }
+        a.ct-loc.liber:hover { outline:2px solid var(--primary); }
+      </style>
+      ${fisaPaletilor(infoPaleti)}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "CT-Park · tot depozitul", active: "/stocuri/ct-park", body }));
   });
 
   router.post("/stocuri/ct-park/rand/:id/zone", async (ctx) => {
@@ -4478,6 +4640,8 @@ module.exports = {
   eticheteCampuri,
   cheieMarfa,
   culoareMarfa,
+  culoriDepozit,
+  PALETA_MARFA,
   pozitii,
   ADANCIME,
   SPATE,
