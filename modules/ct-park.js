@@ -1459,17 +1459,34 @@ function register(router) {
           // `data-loc` e pentru modul de editare: acolo un click pe loc nu-l
           // mai alege pentru marfă, ci îl scoate din uz sau îl repune.
           if (ocupat) {
+            // Un palet lat (pe 2–3 locuri lipite) se desenează ca O SINGURĂ
+            // căsuță dublă sau triplă, cât locurile pe care le ține — cererea
+            // lui Vali, 30.10.2026. Lățimea iese exact cât k căsuțe plus
+            // golurile dintre ele (flex-grow k, bază (k−1)×2 px — golul e de
+            // 2 px), deci marginile rămân aliniate cu nivelurile de deasupra.
+            let k = 1;
+            while (poz + k <= plan.locuriLa(camp, nivel)) {
+              const urm = h.get(`${nivel}|${camp}|${poz + k}`);
+              if (!urm || Number(urm.palet_id) !== Number(l.palet_id)) break;
+              k++;
+            }
+            const adrese = [];
+            for (let j = 0; j < k; j++) adrese.push(h.get(`${nivel}|${camp}|${poz + j}`).adresa);
+            const eticheta = k > 1 ? `${l.pozitie}–${Number(l.pozitie) + k - 1}` : String(l.pozitie);
+            const titluLat = k > 1 ? titlu.replace(l.adresa, adrese.join(" + ")) : titlu;
+            const latime = k > 1 ? `flex:${k} ${k} ${(k - 1) * 2}px;min-width:${k * 26 + (k - 1) * 2}px;` : "";
             // Fără `title`: pe un loc ocupat, la mouseover apare fișa paletului
             // (scriptul de mai jos), iar un title ar fi pus încă o etichetă
             // galbenă peste ea. Textul scurt rămâne pentru cititoarele de ecran.
-            pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${nr(l.blocat) ? " blocat" : ""}"
-                aria-label="${esc(titlu)}" data-adresa="${esc(l.adresa)}" data-loc="${l.id}" data-ocupat="1"
-                data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}"
+            pozitii += `<a href="/stocuri/ct-park/palet/${l.palet_id}" class="ct-loc ocupat${k > 1 ? " lat" : ""}${nr(l.blocat) ? " blocat" : ""}"
+                aria-label="${esc(titluLat)}" data-adresa="${esc(adrese.join(" + "))}" data-loc="${l.id}" data-ocupat="1"
+                data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}" data-latime="${k}"
                 data-marfa="${esc(String(l.produs || l.produs_text || "marfă").slice(0, 40))}"
-                style="height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
-                <span class="ct-loc-adresa">${esc(String(l.pozitie))}</span>
-                <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, 22))}</span>
+                style="${latime}height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
+                <span class="ct-loc-adresa">${esc(eticheta)}</span>
+                <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, k > 1 ? 22 * k : 22))}</span>
               </a>`;
+            poz += k - 1;
           } else if (nr(l.blocat)) {
             pozitii += `<div class="ct-loc liber blocat" title="${esc(titlu)} · scos din uz" data-adresa="${esc(l.adresa)}"
                 data-loc="${l.id}" data-blocat="1" style="height:${hPx}px">
@@ -1936,7 +1953,12 @@ function register(router) {
         .ct-nivel { display:flex; align-items:stretch; gap:8px; }
         .ct-nivel-eticheta { width:58px; flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-weight:600; font-size:12px; color:var(--text-muted); border-right:2px solid var(--border); }
         .ct-nivel-mm { font-weight:400; font-size:10px; }
-        .ct-nivel-campuri { display:flex; gap:8px; flex:1; }
+        /* min-width:0 ține câmpurile unul sub altul pe toate nivelurile. Fără
+           el, un nivel cu un palet care are un cuvânt lung în denumire
+           („780mm*565mm") se lățea după text, câmpurile lui ieșeau mai late,
+           și coloanele o luau razna spre dreapta (poza lui Vali, 30.10.2026).
+           Textul lung se taie în căsuță; fișa de la mouseover îl arată întreg. */
+        .ct-nivel-campuri { display:flex; gap:8px; flex:1; min-width:0; }
         .ct-camp { flex:1; min-width:96px; }
         .ct-camp-locuri { display:flex; gap:2px; }
         .ct-camp-eticheta { font-size:10px; color:var(--text-muted); text-align:center; margin-top:2px; }
@@ -1947,7 +1969,7 @@ function register(router) {
         .ct-loc.lipsa { background:repeating-linear-gradient(45deg,#f0f0f0,#f0f0f0 4px,#fff 4px,#fff 8px); border-style:dashed; }
         .ct-loc.blocat { background:#f0e2e2; }
         .ct-loc-adresa { font-size:10px; color:var(--text-muted); }
-        .ct-loc-marfa { font-size:9px; line-height:1.05; text-align:center; padding:0 2px; }
+        .ct-loc-marfa { font-size:9px; line-height:1.05; text-align:center; padding:0 2px; overflow-wrap:anywhere; }
         .ct-podea { margin-top:6px; margin-left:66px; border-top:3px solid #8a8f98; font-size:11px; color:var(--text-muted); padding-top:2px; }
         .ct-legenda2 { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12px; margin:10px 0 18px; }
         .ct-legenda2 i { display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; vertical-align:-1px; }

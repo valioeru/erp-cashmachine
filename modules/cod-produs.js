@@ -656,7 +656,7 @@ function register(router) {
     const r = await genereaza(alegeri, familieId);
     if (!r.ok || r.exista) {
       const motiv = r.exista
-        ? `Produsul există deja: ${r.exista.denumire} (cod ${r.exista.cod_generat || r.exista.cod || "—"}).`
+        ? `Produsul există deja: ${r.exista.denumire} (cod ${r.exista.cod || r.exista.cod_generat || "—"}).`
         : [...(r.lipsa.length ? ["mai lipsește: " + r.lipsa.join(", ")] : []), ...r.gresite].join("; ");
       return send(
         ctx.res,
@@ -716,19 +716,31 @@ async function produsulAlegerilor(alegeri, familieId, extra = {}) {
   return { r, id: scris.id, creat: true };
 }
 
+// Produsul care are deja codul ăsta — generat din caracteristici sau scris de
+// om. Un produs înghițit la Unificarea codurilor își ține codul generat (e unic
+// în bază), dar comanda trebuie să cadă pe produsul PĂSTRAT, nu pe unul
+// dezactivat. Codul scris de om se compară fără spații la capete.
+async function produsulCodului(cod) {
+  const c = String(cod || "").trim().toUpperCase();
+  if (!c) return null;
+  return db
+    .prepare(
+      `SELECT p.id, p.denumire, p.cod, p.cod_generat FROM produse p
+        WHERE p.id = (SELECT COALESCE(x.fuzionat_in, x.id) FROM produse x
+                       WHERE x.cod_generat = ? OR UPPER(TRIM(COALESCE(x.cod, ''))) = ?
+                       ORDER BY (x.fuzionat_in IS NULL) DESC, x.id LIMIT 1)`
+    )
+    .get(c, c)
+    .catch(() => null);
+}
+
 // Generarea + verificarea duplicatului. Un singur loc, folosit si de
 // previzualizare, si de salvare — altfel ecranul ar putea spune „liber" iar
 // salvarea „exista deja", sau invers.
 async function genereaza(alegeri, familieId) {
   const car = await citesteCaracteristici(false, familieId);
   const r = C.genereazaCod(car, alegeri || {});
-  let exista = null;
-  if (r.cod) {
-    exista = await db
-      .prepare("SELECT id, denumire, cod, cod_generat FROM produse WHERE cod_generat = ? OR UPPER(COALESCE(cod,'')) = ? LIMIT 1")
-      .get(r.cod, r.cod)
-      .catch(() => null);
-  }
+  const exista = r.cod ? await produsulCodului(r.cod) : null;
   // Toate caracteristicile completate, nu doar cele din cod: pe fisa
   // produsului vrem sa se vada si cele care nu intra in cod.
   const bucatiToate = [];
@@ -747,6 +759,7 @@ module.exports = {
   citesteCaracteristici,
   familii,
   genereaza,
+  produsulCodului,
   produsulAlegerilor,
   scrieProdusul,
   CALE,

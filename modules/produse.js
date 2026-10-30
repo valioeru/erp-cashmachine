@@ -83,6 +83,48 @@ async function scrieSetare(cheie, valoare) {
 
 const lei = (v) => (v == null ? '<span style="color:var(--text-muted)">—</span>' : money(v));
 
+// ---------------------------------------------------------------------------
+// Codul produsului e cel scris de voi
+//
+// Cererea lui Vali, 30.10.2026: „când introducem noi produs, codul introdus de
+// noi rămâne codul peste tot în aplicație". Ca să fie adevărat, un cod nu poate
+// sta pe două produse: căutarea după cod, importurile din SmartBill și
+// „Produs nou — configurează-l" ar nimeri la întâmplare unul dintre ele.
+//
+// Se compară fără spații la capete și fără să conteze literele mari („ps5" e
+// „PS5"). Contează doar produsele active și neunificate — unul înghițit la
+// Unificarea codurilor își ține codul vechi, dar nu mai e în joc. Și codul
+// generat din caracteristici, fiindcă după el caută comanda agentului.
+//
+// La EDITARE se verifică doar dacă omul a SCHIMBAT codul. Cele câteva coduri
+// care stau deja pe două produse, din importurile vechi, nu trebuie să
+// blocheze o schimbare de preț; ele se rezolvă la Unificarea codurilor.
+const normCod = (c) => String(c == null ? "" : c).trim().toUpperCase();
+
+async function produsulCuCodul(cod, exceptId) {
+  const c = normCod(cod);
+  if (!c) return null;
+  return db
+    .prepare(
+      `SELECT id, cod, denumire FROM produse
+        WHERE id <> ? AND COALESCE(activ, 1) = 1 AND fuzionat_in IS NULL
+          AND (UPPER(TRIM(COALESCE(cod, ''))) = ? OR UPPER(TRIM(COALESCE(cod_generat, ''))) = ?)
+        ORDER BY id LIMIT 1`
+    )
+    .get(Number(exceptId) || 0, c, c);
+}
+
+async function verificaCodul(valori, { vechi } = {}) {
+  const c = normCod(valori && valori.cod);
+  if (!c) return null;
+  if (vechi && normCod(vechi.cod) === c) return null;
+  const alt = await produsulCuCodul(c, vechi ? vechi.id : 0);
+  if (!alt) return null;
+  return `Codul <strong>${esc(String(valori.cod).trim())}</strong> e deja pe produsul
+    <a href="/produse/${Number(alt.id)}">${esc(alt.denumire)}</a>. Un cod e al unui singur produs:
+    alege alt cod, sau, dacă e același produs, lucrează pe acela.`;
+}
+
 function register(router) {
   // Adaosul implicit se citește o dată per cerere și se ține aici, ca să nu
   // facem o interogare pentru fiecare dintre cele peste patru mii de rânduri.
@@ -101,6 +143,7 @@ function register(router) {
     limita: 200,
     ordine: "denumire",
     inainte: async () => { adaosCurent = await adaosImplicit(); },
+    valideaza: verificaCodul,
     banner: async (ctx) => {
       const r = await db.prepare("SELECT COUNT(*) AS n FROM produse WHERE cota_tva = 19").get().catch(() => ({ n: 0 }));
       const n = Number((r && r.n) || 0);
@@ -125,7 +168,11 @@ function register(router) {
       return tva + setare;
     },
     fields: [
-      { name: "cod", label: "Cod produs" },
+      {
+        name: "cod",
+        label: "Cod produs",
+        ajutor: "Codul vostru. Rămâne codul produsului peste tot — comenzi, stoc, CT-Park, etichete, producție. Un cod poate fi pe un singur produs.",
+      },
       { name: "denumire", label: "Denumire", required: true },
       { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },
       { name: "gestiune", label: "Gestiune", datalist: true, ajutor: "Gestiunea din contabilitate în care stă produsul." },
@@ -645,4 +692,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, poateConfirma };
+module.exports = { register, poateConfirma, verificaCodul, produsulCuCodul };

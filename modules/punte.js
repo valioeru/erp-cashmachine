@@ -54,13 +54,23 @@ const curat = (v) => String(v === null || v === undefined ? "" : v).trim();
 // --- produse ---------------------------------------------------------------
 // Cheia de identitate e codul; dacă lipsește, denumirea. Reimportul
 // actualizează prețurile, nu creează duplicate.
+//
+// CODUL NOSTRU NU SE SCHIMBĂ (Vali, 30.10.2026: „codul introdus de noi rămâne
+// codul peste tot"). Până acum, un produs găsit după DENUMIRE primea codul din
+// SmartBill peste cel scris în ERP. Acum SmartBill completează codul doar unde
+// lipsește; unde la ei e altul, al nostru rămâne, iar diferențele se numără în
+// rezultat, ca să se vadă.
 async function ingestProduse(randuri) {
-  let noi = 0, actualizate = 0, sarite = 0;
+  let noi = 0, actualizate = 0, sarite = 0, coduriPastrate = 0;
+  const exemplePastrate = [];
   const dupaCod = new Map();
   const dupaDenumire = new Map();
-  for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all()) {
+  // Codul pe care îl are ACUM produsul (cel păstrat, nu unul înghițit).
+  const codulLui = new Map();
+  for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, fuzionat_in, cod, denumire FROM produse").all()) {
     if (p.cod) dupaCod.set(String(p.cod).trim().toLowerCase(), p.id);
     dupaDenumire.set(String(p.denumire).trim().toLowerCase(), p.id);
+    if (p.fuzionat_in == null) codulLui.set(Number(p.id), curat(p.cod));
   }
   for (const r of randuri) {
     const denumire = curat(r.denumire);
@@ -72,13 +82,21 @@ async function ingestProduse(randuri) {
     const tva = r.cota_tva === undefined || r.cota_tva === "" ? 21 : nr(r.cota_tva);
     const id = (cod && dupaCod.get(cod.toLowerCase())) || dupaDenumire.get(denumire.toLowerCase());
     if (id) {
+      const alNostru = codulLui.get(Number(id)) || "";
+      if (cod && alNostru && alNostru.toLowerCase() !== cod.toLowerCase()) {
+        coduriPastrate++;
+        if (exemplePastrate.length < 5) exemplePastrate.push(`${alNostru} (în SmartBill: ${cod})`);
+      }
+      // Codul lor duce tot la produsul ăsta, pentru restul rândurilor din lot.
+      if (cod && !dupaCod.has(cod.toLowerCase())) dupaCod.set(cod.toLowerCase(), id);
+      if (cod && !alNostru) codulLui.set(Number(id), cod);
       // Nu ștergem un preț existent cu zero — importul poate veni parțial.
       // Parametrii numerici sunt turnați explicit: fără CAST, PostgreSQL
       // deduce tipul din „? > 0" și presupune întreg, apoi crapă pe primul
       // preț cu zecimale (bug real: „invalid input syntax for integer 98.34").
       await db
         .prepare(
-          `UPDATE produse SET cod = COALESCE(NULLIF(?, ''), cod),
+          `UPDATE produse SET cod = CASE WHEN COALESCE(TRIM(cod), '') = '' THEN NULLIF(CAST(? AS TEXT), '') ELSE cod END,
                               unitate_masura = COALESCE(NULLIF(?, ''), unitate_masura),
                               pret_vanzare = CASE WHEN CAST(? AS DOUBLE PRECISION) > 0 THEN CAST(? AS DOUBLE PRECISION) ELSE pret_vanzare END,
                               pret_achizitie = CASE WHEN CAST(? AS DOUBLE PRECISION) > 0 THEN CAST(? AS DOUBLE PRECISION) ELSE pret_achizitie END,
@@ -93,10 +111,13 @@ async function ingestProduse(randuri) {
         .run(cod || null, denumire, um, pv, pa, tva);
       if (cod) dupaCod.set(cod.toLowerCase(), ins.lastInsertRowid);
       dupaDenumire.set(denumire.toLowerCase(), ins.lastInsertRowid);
+      codulLui.set(Number(ins.lastInsertRowid), cod);
       noi++;
     }
   }
-  return { noi, actualizate, sarite };
+  const rez = { noi, actualizate, sarite, coduri_pastrate: coduriPastrate };
+  if (exemplePastrate.length) rez.exemple_coduri_pastrate = exemplePastrate.join(" · ");
+  return rez;
 }
 
 // --- stoc ------------------------------------------------------------------

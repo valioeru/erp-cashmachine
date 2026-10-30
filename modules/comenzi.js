@@ -1249,7 +1249,10 @@ function register(router) {
       .get(id);
     return trimiteJson(ctx, 200, {
       id: Number(id),
-      cod: p ? p.cod_generat || p.cod || "" : r.cod,
+      // Codul din fișa produsului, nu cel generat: dacă cineva l-a schimbat în
+      // nomenclator, ăla e codul produsului peste tot. Cel generat rămâne doar
+      // pentru găsirea produsului după caracteristici.
+      cod: p ? p.cod || p.cod_generat || "" : r.cod,
       denumire: p ? p.denumire : r.denumire,
       um: p ? p.unitate_masura || "" : "",
       pret: p ? Number(p.pret_vanzare || 0) : 0,
@@ -1432,7 +1435,7 @@ function register(router) {
 
     const linii = await db
       .prepare(
-        `SELECT cl.*, p.denumire, p.unitate_masura, COALESCE(p.cod_generat, p.cod) AS cod_produs
+        `SELECT cl.*, p.denumire, p.unitate_masura, COALESCE(NULLIF(TRIM(p.cod), ''), p.cod_generat) AS cod_produs
          FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ?`
       )
       .all(comanda.id);
