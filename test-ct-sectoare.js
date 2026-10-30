@@ -473,8 +473,11 @@ function curata() {
     const optiuniZone = [...p.corp.matchAll(/<option value="([^"]+)"[^>]*>[^<]*<\/option>/g)].map((m) => m[1]);
     for (const c of ["produse finite", "produse intermediare", "consumabile", "materie primă"])
       bine("zonele pot fi „" + c + "”", optiuniZone.includes(c), optiuniZone.slice(0, 8).join(" | "));
-    bine("și categoria nouă are culoarea ei în legendă, nu grina implicită",
-      /background:#1a6e8e"><\/i>produse intermediare/.test(p.corp),
+    // 30.10.2026: pe hartă culoarea e a MĂRFII (același cod, aceeași culoare),
+    // iar legenda de categorii a plecat la cererea lui Vali („fără legendă").
+    // Categoria rămâne pe zone, adică în lista derulantă verificată mai sus.
+    bine("harta nu mai are legendă de culori pe categorii",
+      !/<span><i style="background:[^"]+"><\/i>(produse finite|produse intermediare|consumabile|materie primă)<\/span>/.test(p.corp),
       (p.corp.match(/<span><i style="background:[^"]+"><\/i>[^<]+<\/span>/g) || []).join(" "));
 
     // Filtrul de validare e același lista: dacă ar fi rămas pe trei, zona
