@@ -2042,21 +2042,30 @@ function register(router) {
           if (y + h > window.innerHeight - 8) y = Math.max(8, ev.clientY - h - 16);
           fisa.style.left = x + "px"; fisa.style.top = y + "px";
         }
-        document.addEventListener("mouseover", function (ev) {
+        // Doar cu mouse-ul. Pe telefon nu exista mouseover: o atingere ar fi
+        // aratat fisa, iar Safari pe iPhone, cand pagina se schimba la
+        // atingere, nu mai trimite click-ul — paletul s-ar fi deschis abia la a
+        // doua atingere, iar la mutare paletul n-ar fi fost prins din prima.
+        // Cu pointerType "mouse", pe telefon atingerea face ce facea si inainte.
+        function eMouse(ev) { return ev.pointerType === "mouse"; }
+        document.addEventListener("pointerover", function (ev) {
+          if (!eMouse(ev)) return;
           var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
           if (!c) return;
           var p = date[c.getAttribute("data-palet")];
           if (!p) return;
           arata(p); muta(ev);
         });
-        document.addEventListener("mousemove", function (ev) { if (!fisa.hidden) muta(ev); });
-        document.addEventListener("mouseout", function (ev) {
+        document.addEventListener("pointermove", function (ev) { if (eMouse(ev) && !fisa.hidden) muta(ev); });
+        document.addEventListener("pointerout", function (ev) {
           var c = ev.target.closest && ev.target.closest(".ct-loc[data-palet]");
           if (!c) return;
           if (ev.relatedTarget && c.contains(ev.relatedTarget)) return;
           fisa.hidden = true;
         });
         window.addEventListener("scroll", function () { fisa.hidden = true; }, { passive: true });
+        // Intors cu „Inapoi" de pe pagina paletului: fisa ramasa din cache pleaca.
+        window.addEventListener("pageshow", function () { fisa.hidden = true; });
       })();
       </script>
     `;
