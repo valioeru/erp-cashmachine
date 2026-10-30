@@ -450,6 +450,35 @@ function subtabs(activ) {
     .join("")}</div>`;
 }
 
+// Culoarea mărfii pe hartă: aceeași marfă (același cod) = aceeași culoare, pe
+// orice rând, la orice deschidere. Vali, 30.10.2026: „fă aceeași marfă ca și
+// cod cu aceeași culoare peste tot, fără legendă, doar culori diferite".
+// Culoarea iese dintr-un hash al codului (FNV-1a), nu dintr-o listă: nu se
+// ține nicăieri și nu se schimbă când apare marfă nouă. Fără cod, după
+// denumire; un palet cu mai multe produse e gri dungat — nu e „o marfă".
+function cheieMarfa(l) {
+  const cod = String((l && l.produs_cod) || "").trim();
+  if (cod) return "C:" + cod.toUpperCase();
+  const nume = String((l && (l.produs || l.produs_text)) || "").trim();
+  if (!nume) return "";
+  if (/^\d+ produse:/i.test(nume)) return "MIXT";
+  return "N:" + nume.toLowerCase().replace(/\s+/g, " ");
+}
+
+function culoareMarfa(cheie) {
+  if (!cheie) return { fond: "#eef0f3", margine: "#9aa3ad" };
+  if (cheie === "MIXT") return { fond: "repeating-linear-gradient(135deg,#eceff3 0 6px,#dde1e6 6px 12px)", margine: "#868e96" };
+  let h = 2166136261;
+  for (let i = 0; i < cheie.length; i++) {
+    h ^= cheie.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  const nuanta = h % 360;
+  const sat = 60 + ((h >>> 9) % 3) * 10; // 60 / 70 / 80 %
+  const lum = 76 + ((h >>> 12) % 3) * 5; // 76 / 81 / 86 % — textul negru rămâne citeț
+  return { fond: `hsl(${nuanta}, ${sat}%, ${lum}%)`, margine: `hsl(${nuanta}, ${Math.min(sat, 70)}%, 40%)` };
+}
+
 function pastila(categorie) {
   const c = String(categorie || "").trim();
   if (!c) return "";
@@ -1525,7 +1554,7 @@ function register(router) {
             continue;
           }
           const ocupat = !!l.palet_id;
-          const culoare = ocupat ? CULORI_CATEGORII[l.palet_categorie || l.categorie] || "#5a6472" : null;
+          const culoare = ocupat ? culoareMarfa(cheieMarfa(l)) : null;
           const titlu = ocupat
             ? `${l.adresa} · ${l.produs || l.produs_text || "marfă"} · ${nr(l.cantitate) || "?"} ${l.um || ""} · intrat ${l.data_intrare}`
             : `${l.adresa} · liber${l.categorie ? " · zonă " + l.categorie : ""}`;
@@ -1559,7 +1588,7 @@ function register(router) {
                 aria-label="${esc(titluLat)}" data-adresa="${esc(adrese.join(" + "))}" data-loc="${l.id}" data-ocupat="1"
                 data-palet="${l.palet_id}" data-palet-locuri="${cateLocuriArePalet.get(Number(l.palet_id)) || 1}" data-latime="${k}"
                 data-marfa="${esc(String(l.produs || l.produs_text || "marfă").slice(0, 40))}"
-                style="${latime}height:${hPx}px;background:${culoare}1f;border-color:${culoare}66">
+                style="${latime}height:${hPx}px;background:${culoare.fond};border-color:${culoare.margine}">
                 <span class="ct-loc-adresa">${esc(eticheta)}</span>
                 <span class="ct-loc-marfa">${esc(String(l.produs || l.produs_text || "").slice(0, k > 1 ? 22 * k : 22))}</span>
               </a>`;
@@ -1992,8 +2021,6 @@ function register(router) {
       </script>
 
       <p class="ct-legenda2">
-        ${CATEGORII.map((c) => `<span><i style="background:${CULORI_CATEGORII[c]}"></i>${esc(c)}</span>`).join("")}
-        <span><i style="background:#eceff3;border:1px solid var(--border)"></i>liber</span>
         <span style="color:var(--text-muted)">Click pe un loc <strong>liber</strong> ca să pui marfă acolo (poți alege mai multe) · click pe unul <strong>ocupat</strong> ca să vezi ce e pe el, să adaugi sau să scoți marfă.</span>
         ${
           cuFL
@@ -4382,6 +4409,8 @@ async function regenereazaLocuri(randId) {
 module.exports = {
   register,
   eticheteCampuri,
+  cheieMarfa,
+  culoareMarfa,
   pozitii,
   ADANCIME,
   SPATE,
