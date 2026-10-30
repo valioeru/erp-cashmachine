@@ -95,8 +95,23 @@ function curata() {
     q(`DELETE FROM ct_sectoare WHERE rand_id = ${r}`);
     q(`DELETE FROM ct_randuri WHERE id = ${r}`);
   }
-  q("DELETE FROM produse WHERE cod IN ('TST-CUL-A', 'TST-CUL-B')");
+  q("DELETE FROM produse WHERE cod IN ('TST-CUL-A', 'TST-CUL-B', 'TST-CUL-C')");
+  q("DELETE FROM ct_culori_marfa WHERE cheie IN ('C:TST-CUL-A', 'C:TST-CUL-B', 'C:TST-CUL-C')");
 }
+
+// OKLab și contrastul WCAG, ca să judec paleta ca ochiul, nu după cifre RGB.
+const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+const hex3 = (h) => (h.length === 4 ? "#" + h.slice(1).split("").map((x) => x + x).join("") : h);
+function oklab(h) {
+  const [R, G, B] = rgb(hex3(h)).map(lin);
+  const l = Math.cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B);
+  const m = Math.cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B);
+  const s = Math.cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+}
+const lum = (h) => { const [r, g, b] = rgb(hex3(h)).map(lin); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
 
 (async () => {
   console.log("\n1. Culoarea vine din cod");
@@ -114,6 +129,20 @@ function curata() {
     const nuante = new Set();
     for (let i = 0; i < 40; i++) nuante.add(c({ produs_cod: "COD" + i }).fond);
     bine("40 de coduri dau culori diferite", nuante.size >= 38, nuante.size);
+  }
+
+  console.log("\n1b. Paleta: culori cât mai diferite între ele (Vali, 30.10.2026)");
+  {
+    const P = CT.PALETA_MARFA;
+    bine("40 de culori, toate diferite", P.length === 40 && new Set(P.map((c) => c.f)).size === 40);
+    const slab = P.filter((c) => contrast(c.f, c.t) < 4.5).map((c) => c.f + "/" + c.t);
+    bine("textul se citește pe fiecare (contrast ≥ 4,5)", !slab.length, slab.join(" "));
+    const minDist = (n) => { let m = Infinity; for (let i = 0; i < n; i++) for (let j = 0; j < i; j++) { const a = oklab(P[i].f), b = oklab(P[j].f); m = Math.min(m, Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])); } return m; };
+    bine("primele 10 sunt foarte diferite între ele (OKLab ≥ 0,2)", minDist(10) >= 0.2, minDist(10).toFixed(3));
+    bine("primele 24 rămân clar diferite (OKLab ≥ 0,12)", minDist(24) >= 0.12, minDist(24).toFixed(3));
+    const gri = oklab("#eceff3");
+    const aproape = P.filter((c) => { const a = oklab(c.f); return Math.hypot(a[0] - gri[0], a[1] - gri[1], a[2] - gri[2]) < 0.13; });
+    bine("niciuna nu seamănă cu griul locului liber", !aproape.length, aproape.map((c) => c.f).join(" "));
   }
 
   curata();
@@ -145,6 +174,19 @@ function curata() {
     bine("paletul mixt: gri dungat", /repeating-linear-gradient/.test(fond(mx)), fond(mx));
     const leg = (r.corp.match(/<p class="ct-legenda2">([\s\S]*?)<\/p>/) || [])[1] || "";
     bine("fără legendă de culori", leg && !/<i style="background/.test(leg) && !/produse finite|materie primă/.test(leg), leg.slice(0, 200));
+    const dinPaleta = (f) => CT.PALETA_MARFA.some((c) => c.f === f);
+    bine("culorile vin din paleta de culori depărtate", dinPaleta(fond(a1)) && dinPaleta(fond(b1)), fond(a1) + " " + fond(b1));
+    bine("cu textul potrivit fondului (negru sau alb)", new RegExp('href="/stocuri/ct-park/palet/' + a1 + '"[^>]*style="[^"]*;color:#(111|fff)"').test(r.corp));
+    const memorate = q("SELECT cheie, idx FROM ct_culori_marfa WHERE cheie IN ('C:TST-CUL-A', 'C:TST-CUL-B')");
+    bine("culoarea fiecărei mărfi e ținută minte", memorate.length === 2, JSON.stringify(memorate));
+
+    // Marfă nouă în depozit: ia o culoare liberă, iar celelalte rămân cum erau.
+    const pc = Number(q("INSERT INTO produse (cod, denumire, unitate_masura) VALUES ('TST-CUL-C', 'TEST-CUL Cutie C', 'buc') RETURNING id")[0].id);
+    const c1 = pune(pc, null, [loc(1, 3, 1)]);
+    const r2 = await cer("get", "/stocuri/ct-park/rand/:id", { id: String(rand) });
+    const fond2 = (id) => ((r2.corp.match(new RegExp('href="/stocuri/ct-park/palet/' + id + '"[^>]*style="[^"]*background:([^;"]+)')) || [])[1] || "");
+    bine("după o marfă nouă, A și B își păstrează culorile", fond2(a1) === fond(a1) && fond2(b1) === fond(b1), fond2(a1) + " " + fond2(b1));
+    bine("marfa nouă are altă culoare decât A și B", dinPaleta(fond2(c1)) && fond2(c1) !== fond2(a1) && fond2(c1) !== fond2(b1), fond2(c1));
   }
 
   curata();
