@@ -340,8 +340,10 @@ function bine(descriere, conditie, detaliu) {
     bine("un text cu </script> nu închide fișele (scris \\u003c)", m && !/<\/script><b>/.test(m[1]) && /\\u003c\/script>/.test(m[1]));
     bine("locul ocupat n-are title (n-ar apărea două etichete)", !/class="ct-loc ocupat[^"]*"\s+title=/.test(r.corp));
     bine("dar are text pentru cititoarele de ecran", /class="ct-loc ocupat[^"]*"\s+aria-label="TI-/.test(r.corp));
-    bine("scriptul fișei e în pagină", /id="ct-fisa"/.test(r.corp) && /addEventListener\("mouseover"/.test(r.corp));
-    // Barele „Pune marfă…" / „Mută aici" și banda de editare au hidden, dar
+    bine("scriptul fișei e în pagină", /id="ct-fisa"/.test(r.corp) && /addEventListener\("pointerover"/.test(r.corp));
+    // Pe iPhone, o fișă arătată la atingere înghite click-ul: paletul s-ar
+    // deschide abia la a doua atingere. Fișa e doar pentru mouse.
+    bine("fișa apare doar cu mouse-ul, nu la atingere pe telefon", /ev\.pointerType === "mouse"/.test(r.corp) && !/addEventListener\("mouseover"/.test(r.corp));    // Barele „Pune marfă…" / „Mută aici" și banda de editare au hidden, dar
     // display:flex din foaia de stil îl bătea — stăteau la vedere tot timpul.
     bine("ce are hidden chiar se ascunde pe harta rândului", /\[hidden\] \{ display:none !important; \}/.test(r.corp));
   }
