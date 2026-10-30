@@ -15,6 +15,7 @@ const { send, redirect } = require("../lib/router");
 // Planul intrării de marfă (ce palet pe ce loc) — vezi comentariul de acolo.
 const CI = require("../lib/ct-intrare");
 const CPL = require("../lib/ct-palet-linii");
+const CTM = require("../lib/ct-mutare");
 
 // Planul halei. Erau constante scrise în sursă — acum sunt DATE: se pot
 // schimba din „Planul halei", fără să umble cineva prin cod. Valorile de aici
@@ -2349,6 +2350,32 @@ function register(router) {
         ${!p.data_iesire && locuri.length ? `<a class="btn" href="/stocuri/ct-park/muta?palet=${p.id}">Mut-l în alt loc</a>` : ""}
         <a class="btn secondary" href="/stocuri/ct-park/etichete?paleti=${p.id}" target="_blank">Tipărește eticheta</a>
       </div>
+      ${
+        // Câte locuri ține, schimbat pe loc: extinde la locul de lângă sau
+        // eliberează-l, fără să scoți și să repui paletul (Vali, 30.10.2026).
+        !p.data_iesire && locuri.length
+          ? `<form method="post" action="/stocuri/ct-park/palet/${p.id}/latime" class="ct-pa-latime">
+              <span>Ocupă</span>
+              ${[1, 2, 3]
+                .map(
+                  (k) => `<button type="submit" name="cate" value="${k}" class="btn small${k === locuri.length ? "" : " secondary"}"${
+                    k === locuri.length ? " disabled" : ""
+                  }>${k} ${k === 1 ? "loc" : "locuri"}</button>`
+                )
+                .join("")}
+              <select name="parte" aria-label="În ce parte">
+                <option value="">unde e loc lângă</option>
+                <option value="dreapta">partea din dreapta</option>
+                <option value="stanga">partea din stânga</option>
+              </select>
+              <span class="mic" style="color:var(--text-muted)">acum: ${esc(locuri.map((l) => l.adresa).join(" + "))}</span>
+            </form>
+            <style>
+              .ct-pa-latime { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0 6px; font-size:13px; }
+              .ct-pa-latime select { width:auto; }
+            </style>`
+          : ""
+      }
       ${formulare}
       <div class="detail-box">
         <h1 style="margin-top:0">${esc(p.cod)} ${p.data_iesire ? '<span class="badge gri">scoasă</span>' : '<span class="badge verde">în depozit</span>'}</h1>
@@ -2449,6 +2476,46 @@ function register(router) {
     const r = await rescrieRezumat(id);
     console.log(`[ct-park] adaugat pe ${p.cod}: ${spuse.join("; ")} de ${cine || "?"}`);
     return inapoi("ok", `Adăugat pe palet: ${spuse.join("; ")}. Acum: ${r.cantitate ? r.cantitate.toLocaleString("ro-RO") + " " + (r.um || "") : r.produs_text || ""}. Retipărește eticheta dacă scrie cantitatea pe ea.`);
+  });
+
+  // ---- Câte locuri ține paletul: extinde sau eliberează -------------------
+  // Regula (lipite, în același câmp, unde e loc) e CTM.planLatime; aici doar
+  // se rescriu ocupările. Paletul rămâne același — dată, lot, preț.
+  router.post("/stocuri/ct-park/palet/:id/latime", async (ctx) => {
+    const id = nr(ctx.params.id);
+    const inapoi = (k, mesaj) => redirect(ctx.res, `/stocuri/ct-park/palet/${id}?${k}=${encodeURIComponent(mesaj)}`);
+    const p = await db
+      .prepare("SELECT p.*, COALESCE(pr.denumire, p.produs_text, 'Paletul') AS nume FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id WHERE p.id = ?")
+      .get(id);
+    if (!p) return redirect(ctx.res, "/stocuri/ct-park");
+    if (p.data_iesire) return inapoi("eroare", "Paletul a ieșit din depozit.");
+    const acum = await db
+      .prepare(
+        `SELECT l.* FROM ct_locuri l JOIN ct_ocupari o ON o.loc_id = l.id
+          WHERE o.palet_id = ? ORDER BY l.rand_id, l.nivel, l.camp, l.pozitie`
+      )
+      .all(id);
+    if (!acum.length) return inapoi("eroare", "Paletul nu stă pe niciun loc.");
+    const inCamp = await db
+      .prepare(
+        `SELECT l.*, (SELECT o.palet_id FROM ct_ocupari o JOIN ct_paleti x ON x.id = o.palet_id AND x.data_iesire IS NULL
+                       WHERE o.loc_id = l.id LIMIT 1) AS ocupat_de
+           FROM ct_locuri l WHERE l.rand_id = ? AND l.nivel = ? AND l.camp = ? ORDER BY l.pozitie`
+      )
+      .all(acum[0].rand_id, acum[0].nivel, acum[0].camp);
+    const b = ctx.body || {};
+    const parte = ["dreapta", "stanga"].includes(String(b.parte || "")) ? String(b.parte) : "";
+    const plan = CTM.planLatime({ id, nume: p.nume }, acum, inCamp, b.cate, parte);
+    if (!plan.ok) return inapoi("eroare", plan.motiv);
+
+    await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
+    for (const l of plan.locuri) await db.prepare("INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (?, ?)").run(id, l.id);
+    const adrese = plan.locuri.map((l) => l.adresa).join(" + ");
+    const ce = plan.adaugate.length
+      ? `s-a extins pe ${plan.adaugate.map((l) => l.adresa).join(" + ")}`
+      : `a eliberat ${plan.scoase.map((l) => l.adresa).join(" + ")}`;
+    console.log(`[ct-park] ${p.cod}: ${ce} (acum ${adrese}) de ${ctx.user ? ctx.user.nume : "?"}`);
+    return inapoi("ok", `${p.nume} ${ce}. Acum ține ${plan.locuri.length} ${plan.locuri.length === 1 ? "loc" : "locuri"}: ${adrese}. Retipărește eticheta, adresa s-a schimbat.`);
   });
 
   // ---- Scoate o parte din marfa unui palet ----------------------------------
