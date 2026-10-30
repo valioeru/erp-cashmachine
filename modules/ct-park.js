@@ -12,6 +12,7 @@ const db = require("../lib/db");
 const { SUB_STOC } = require("../lib/stoc");
 const { esc, layout, table, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+const { poateAccesa } = require("../lib/auth");
 // Planul intrării de marfă (ce palet pe ce loc) — vezi comentariul de acolo.
 const CI = require("../lib/ct-intrare");
 const CPL = require("../lib/ct-palet-linii");
@@ -257,7 +258,7 @@ async function paginaSectiune(ctx) {
       .join("");
 
     const body = `
-      ${subtabs("/stocuri/ct-park/sectiune")}
+      ${subtabs("/stocuri/ct-park/sectiune", ctx.user)}
       <div class="ct-antet">
         <div>
           <h2 style="margin:0">Depozit CT-Park — secțiune prin rafturi</h2>
@@ -434,8 +435,11 @@ function codPalet(id, data) {
 // subnavigație exact unde era.
 const ARATA_SECTIUNEA_TEHNICA = false;
 
-function subtabs(activ) {
-  const linkuri = [
+// Fiecare vede doar ce poate deschide: un link spre o pagină care răspunde
+// „Nu ai acces" nu e navigație, e o capcană. Agentul de vânzări rămâne doar cu
+// „Stoc la zi" (vezi PAGINI_AGENT în lib/auth).
+function subtabs(activ, user) {
+  const toate = [
     ["/stocuri/ct-park", "Harta depozitului"],
     ["/stocuri/ct-park/tot", "Tot depozitul"],
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
@@ -446,7 +450,8 @@ function subtabs(activ) {
     ["/stocuri/ct-park/configurare", "Configurare rânduri"],
     ["/stocuri/ct-park/plan", "Planul halei"],
   ];
-  if (ARATA_SECTIUNEA_TEHNICA) linkuri.push(["/stocuri/ct-park/sectiune", "Secțiune tehnică"]);
+  if (ARATA_SECTIUNEA_TEHNICA) toate.push(["/stocuri/ct-park/sectiune", "Secțiune tehnică"]);
+  const linkuri = user ? toate.filter(([h]) => poateAccesa(user, h)) : toate;
   return `<div class="subnav" style="margin-top:-6px">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
     .join("")}</div>`;
@@ -1447,7 +1452,7 @@ function register(router) {
 
     if (!randuri.length) {
       const body = `
-        ${subtabs("/stocuri/ct-park")}
+        ${subtabs("/stocuri/ct-park", ctx.user)}
         <div class="detail-box" style="border-left:4px solid var(--danger);max-width:760px">
           <h2 style="margin-top:0">Depozitul nu e încă împărțit pe locuri de palet</h2>
           <p>Ca să poți pune marfă pe adrese, ERP-ul trebuie să știe câte câmpuri și câte niveluri are fiecare rând.
@@ -1461,7 +1466,7 @@ function register(router) {
     }
 
     const body = `
-      ${subtabs("/stocuri/ct-park")}
+      ${subtabs("/stocuri/ct-park", ctx.user)}
       <div class="toolbar">
         <a class="btn" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>
         <a class="btn secondary" href="/stocuri/ct-park/paleti">Paleți în depozit</a>
@@ -1538,7 +1543,7 @@ function register(router) {
     const inPlus = [...configurate].filter((n) => !inPlan.includes(n)).sort((a, b) => a - b);
 
     const body = `
-      ${subtabs("/stocuri/ct-park/plan")}
+      ${subtabs("/stocuri/ct-park/plan", ctx.user)}
       ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Planul halei</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:880px">
@@ -1637,6 +1642,15 @@ function register(router) {
   router.get("/stocuri/ct-park/stoc", async (ctx) => {
     const cauta = String((ctx.query && ctx.query.q) || "").trim();
 
+    // Cine are din Depozit doar pagina asta — agentul de vânzări — vede marfa,
+    // cantitatea și locul, nu și furnizorul sau prețul de intrare: aceeași
+    // regulă ca la Cereri de preț (modules/rfq.js). Nici căutarea nu merge pe
+    // furnizor, altfel l-ar afla căutând. Cine are tot Depozitul vede tot.
+    const vedeTot = poateAccesa(ctx.user, "/stocuri/ct-park");
+    // Butonul „Intrare marfă" rămâne la vedere, ca să știe că operația există,
+    // dar e inactiv pentru cine nu poate face intrarea.
+    const poateIntra = poateAccesa(ctx.user, "/stocuri/ct-park/intrare");
+
     // Paleții din depozit. Locurile se aduc separat și se lipesc în JS: un
     // palet lat stă pe două-trei locuri, iar un JOIN ar multiplica rândul
     // și ar strica totalurile de cantitate și valoare.
@@ -1678,7 +1692,7 @@ function register(router) {
     // arată cu gri și cu „(dedus)". Ce se scrie la recepție bate deducția.
     const idProduse = [...new Set(paleti.map((p) => nr(p.produs_id)).filter(Boolean))];
     const dedus = new Map();
-    if (idProduse.length) {
+    if (idProduse.length && vedeTot) {
       const semne = idProduse.map(() => "?").join(", ");
       const randuri = await db
         .prepare(
@@ -1697,7 +1711,7 @@ function register(router) {
 
     const randuriStoc = paleti.map((p) => {
       const ls = peP.get(Number(p.id)) || [];
-      const furnizor = p.furnizor_nume || p.furnizor_text || null;
+      const furnizor = vedeTot ? p.furnizor_nume || p.furnizor_text || null : null;
       const furnizorDedus = furnizor ? null : dedus.get(nr(p.produs_id)) || null;
       return {
         ...p,
@@ -1757,6 +1771,9 @@ function register(router) {
            <div style="font-size:11px;color:var(--text-muted)">${nr(r.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 4 })} / ${esc(r.um || "UM")}</div>`
         : '<span style="color:var(--text-muted)">fără preț</span>',
     ];
+    // Coloanele pe care nu le vede cine are doar pagina asta: Furnizor și Valoare.
+    const ascunse = vedeTot ? [] : [4, 7];
+    const fara = (v) => v.filter((_, i) => !ascunse.includes(i));
 
     const sectiuni = ordine
       .filter((c) => grupe.get(c).length)
@@ -1774,21 +1791,26 @@ function register(router) {
           `<strong>${val.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</strong>`,
         ];
         return `<h2 style="margin:22px 0 6px">${esc(c)} <span style="font-size:13px;font-weight:400;color:var(--text-muted)">— ${plural(lista.length, "palet", "paleți")}</span></h2>
-          <div class="tabel-scroll">${table(cap, lista.map(randCatre), { total })}</div>`;
+          <div class="tabel-scroll">${table(fara(cap), lista.map((r) => fara(randCatre(r))), { total: fara(total) })}</div>`;
       })
       .join("");
 
     const body = `
-      ${subtabs("/stocuri/ct-park/stoc")}
+      ${subtabs("/stocuri/ct-park/stoc", ctx.user)}
       <h1 style="margin:6px 0 2px">Stoc la zi</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:900px">
-        Tot ce e acum în depozit, grupat pe categorii. Pentru fiecare palet: de la cine a venit, când a intrat
+        ${
+          vedeTot
+            ? `Tot ce e acum în depozit, grupat pe categorii. Pentru fiecare palet: de la cine a venit, când a intrat
         și pe ce raft stă. Căutarea merge în denumire, cod, lot, furnizor, categorie și adresă — deci poți căuta
-        și „R3-05" ca să vezi ce e pe un anume loc.
+        și „R3-05" ca să vezi ce e pe un anume loc.`
+            : `Tot ce e acum în depozit, grupat pe categorii: ce marfă e, câtă e, când a intrat și pe ce raft stă.
+        Căutarea merge în denumire, cod, lot, categorie și adresă.`
+        }
       </p>
 
       ${
-        cuFurnizor
+        cuFurnizor || !vedeTot
           ? ""
           : `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:880px">
               Baza de date n-a primit încă migrarea pentru furnizorul scris pe palet, deci toți furnizorii de mai jos
@@ -1798,10 +1820,14 @@ function register(router) {
       }
 
       <form method="get" action="/stocuri/ct-park/stoc" class="toolbar">
-        <input type="search" name="q" value="${esc(cauta)}" placeholder="caută marfă, lot, furnizor, adresă…" style="min-width:320px">
+        <input type="search" name="q" value="${esc(cauta)}" placeholder="${vedeTot ? "caută marfă, lot, furnizor, adresă…" : "caută marfă, cod, lot, adresă…"}" style="min-width:320px">
         <button class="btn" type="submit">Caută</button>
         ${cauta ? `<a class="btn secondary" href="/stocuri/ct-park/stoc">Vezi tot</a>` : ""}
-        <a class="btn secondary" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>
+        ${
+          poateIntra
+            ? `<a class="btn secondary" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>`
+            : `<button type="button" class="btn secondary" disabled title="Intrarea de marfă o face depozitul" style="opacity:.45;cursor:not-allowed">+ Intrare marfă</button>`
+        }
       </form>
 
       <div class="cards">
@@ -1809,8 +1835,12 @@ function register(router) {
           <div class="ct-sub">${cauta ? `din ${randuriStoc.length} în total` : "paleți reali, nu locuri"}</div></div>
         <div class="card"><div class="label">Locuri ocupate</div><div class="value">${locuriOcupate}</div>
           <div class="ct-sub">${vizibile.length ? (locuriOcupate / vizibile.length).toFixed(2) : "0"} locuri/palet · un palet lat stă pe 2–3</div></div>
-        <div class="card"><div class="label">Valoare la preț de intrare</div><div class="value">${lei(valoareTotala)}</div>
-          <div class="ct-sub">${faraPret ? `<strong>${plural(faraPret, "palet fără preț", "paleți fără preț")}</strong>, nu intră în sumă` : "toți paleții au preț"}</div></div>
+        ${
+          vedeTot
+            ? `<div class="card"><div class="label">Valoare la preț de intrare</div><div class="value">${lei(valoareTotala)}</div>
+          <div class="ct-sub">${faraPret ? `<strong>${plural(faraPret, "palet fără preț", "paleți fără preț")}</strong>, nu intră în sumă` : "toți paleții au preț"}</div></div>`
+            : ""
+        }
       </div>
 
       ${vizibile.length ? sectiuni : `<p style="margin-top:18px">${cauta ? "Nimic nu se potrivește cu „" + esc(cauta) + "”." : "Depozitul e gol."}</p>`}
@@ -1844,7 +1874,7 @@ function register(router) {
     const grila = desenRand(r, plan, locuri, etCamp, culoriMarfa, { alegere: true });
 
     const body = `
-      ${subtabs("/stocuri/ct-park")}
+      ${subtabs("/stocuri/ct-park", ctx.user)}
       <div class="toolbar">
         <a class="btn secondary" href="/stocuri/ct-park">← Harta depozitului</a>
         <a class="btn" href="/stocuri/ct-park/intrare?rand=${r.id}">+ Intrare marfă în rândul ăsta</a>
@@ -2345,7 +2375,7 @@ function register(router) {
     }
     const infoPaleti = await infoPaletiPentruHarta([...paleti]);
     const body = `
-      ${subtabs("/stocuri/ct-park/tot")}
+      ${subtabs("/stocuri/ct-park/tot", ctx.user)}
       <h1 style="margin:6px 0 2px">Tot depozitul</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px">
         ${randuri.length} ${randuri.length === 1 ? "rând" : "rânduri"} · ${totalLocuri} locuri, din care <strong>${totalOcupate} ocupate</strong> ·
@@ -2504,7 +2534,7 @@ function register(router) {
       </script>`;
 
     const body = `
-      ${subtabs("/stocuri/ct-park")}
+      ${subtabs("/stocuri/ct-park", ctx.user)}
       ${q.ok ? `<div class="flash">${esc(String(q.ok))}</div>` : ""}
       ${q.eroare ? `<div class="flash flash-rosu">${esc(String(q.eroare))}</div>` : ""}
       <div class="toolbar">
@@ -2917,7 +2947,7 @@ function register(router) {
         .join("")}</select>`;
 
     const body = `
-      ${subtabs("/stocuri/ct-park/muta")}
+      ${subtabs("/stocuri/ct-park/muta", ctx.user)}
       ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Mută marfă</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:900px">
@@ -3119,7 +3149,7 @@ function register(router) {
     const comenzi = await comenziDeschise();
 
     const body = `
-      ${subtabs("/stocuri/ct-park/iesire")}
+      ${subtabs("/stocuri/ct-park/iesire", ctx.user)}
       ${ctx.query.eroare ? `<div class="flash flash-rosu">${esc(String(ctx.query.eroare))}</div>` : ""}
       <h1 style="margin:6px 0 2px">Ieșire marfă din CT-Park</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
@@ -3409,7 +3439,7 @@ function register(router) {
     const faraPret = inDepozit.filter((p) => !nr(p.pret_unitar)).length;
 
     const body = `
-      ${subtabs("/stocuri/ct-park/paleti")}
+      ${subtabs("/stocuri/ct-park/paleti", ctx.user)}
       <div class="toolbar"><a class="btn" href="/stocuri/ct-park/intrare">+ Intrare marfă</a></div>
       <div class="cards">
         <div class="card"><div class="label">Paleți în depozit</div><div class="value">${inDepozit.length}</div></div>
@@ -3540,7 +3570,7 @@ function register(router) {
     const randuriTabel = grupuriHarta.length ? grupuriHarta.map(randDinHarta).join("") : randScris(ctx.query.rand);
 
     const body = `
-      ${subtabs("/stocuri/ct-park/intrare")}
+      ${subtabs("/stocuri/ct-park/intrare", ctx.user)}
       <h1 style="margin:6px 0 2px">Intrare marfă în CT-Park</h1>
       ${
         locuriAlese.length
@@ -3752,7 +3782,7 @@ function register(router) {
     const randNr = (i) => (randuriForm.length > 1 ? `Paletul de pe rândul ${i + 1} din formular: ` : "");
 
     const body = `
-      ${subtabs("/stocuri/ct-park/intrare")}
+      ${subtabs("/stocuri/ct-park/intrare", ctx.user)}
       <div class="toolbar"><a class="btn secondary" href="/stocuri/ct-park/intrare">← Schimbă marfa</a></div>
       <h1 style="margin:6px 0 2px">${esc(numeMarfa)}</h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px">
@@ -3963,7 +3993,7 @@ function register(router) {
     const dinPlan = GRUPURI.flat().sort((a, b) => a - b);
 
     const body = `
-      ${subtabs("/stocuri/ct-park/configurare")}
+      ${subtabs("/stocuri/ct-park/configurare", ctx.user)}
       ${mesaje(ctx.query)}
       <h1 style="margin:6px 0 2px">Configurare rânduri</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
@@ -4435,7 +4465,7 @@ function register(router) {
       .join("");
 
     const body = `
-      ${subtabs("/stocuri/ct-park/configurare")}
+      ${subtabs("/stocuri/ct-park/configurare", ctx.user)}
       <div class="toolbar"><a class="btn secondary" href="/stocuri/ct-park/configurare">← Toate rândurile</a>
         <a class="btn secondary" href="/stocuri/ct-park/rand/${r.id}">Vezi fața rândului</a></div>
       ${mesaje(ctx.query)}
