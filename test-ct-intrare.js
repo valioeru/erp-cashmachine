@@ -336,6 +336,12 @@ function bine(descriere, conditie, detaliu) {
       bine("valoarea: 735,00 lei", p.valoare === "735,00 lei", p.valoare);
       bine("când a intrat și de când stă", /^\d{2}\.\d{2}\.\d{4} · azi$/.test(p.intrat), p.intrat);
       bine("cine l-a pus și observațiile", p.pus_de === "Vali" && /fragil/.test(p.observatii));
+      // Vali, 30.10.2026: un produs pe mai multe locuri se vede ca O poziție
+      // dublă sau triplă, nu ca două-trei căsuțe separate.
+      const celule = r.corp.match(new RegExp('<a href="/stocuri/ct-park/palet/' + p.id + '"[^>]*>', "g")) || [];
+      bine("paletul lat e o singură căsuță pe hartă, nu două", celule.length === 1, celule.length);
+      bine("dublă: cât două locuri plus golul dintre ele", celule.length === 1 && /data-latime="2"/.test(celule[0]) && /flex:2 2 2px;/.test(celule[0]), celule[0]);
+      bine("cu eticheta 1–2 și ambele adrese", r.corp.includes('ct-loc-adresa">1–2<') && celule.length === 1 && /data-adresa="TI-1-2-1 \+ TI-1-2-2"/.test(celule[0]));
     }
     bine("un text cu </script> nu închide fișele (scris \\u003c)", m && !/<\/script><b>/.test(m[1]) && /\\u003c\/script>/.test(m[1]));
     bine("locul ocupat n-are title (n-ar apărea două etichete)", !/class="ct-loc ocupat[^"]*"\s+title=/.test(r.corp));
@@ -346,6 +352,11 @@ function bine(descriere, conditie, detaliu) {
     bine("fișa apare doar cu mouse-ul, nu la atingere pe telefon", /ev\.pointerType === "mouse"/.test(r.corp) && !/addEventListener\("mouseover"/.test(r.corp));    // Barele „Pune marfă…" / „Mută aici" și banda de editare au hidden, dar
     // display:flex din foaia de stil îl bătea — stăteau la vedere tot timpul.
     bine("ce are hidden chiar se ascunde pe harta rândului", /\[hidden\] \{ display:none !important; \}/.test(r.corp));
+    // Poza lui Vali, 30.10.2026: un nivel cu un cuvânt lung pe un palet se
+    // lățea după text, iar câmpurile nu mai stăteau unul sub altul. Măsurat în
+    // Chromium: 135 px decalaj pe 12 câmpuri fără regula asta, 0 cu ea.
+    bine("câmpurile stau unul sub altul pe toate nivelurile (min-width:0)", /\.ct-nivel-campuri \{[^}]*min-width:0;/.test(r.corp));
+    bine("textul lung se rupe în căsuță, nu o lățește", /\.ct-loc-marfa \{[^}]*overflow-wrap:anywhere;/.test(r.corp));
   }
 
   curata();

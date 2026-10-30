@@ -66,9 +66,12 @@ function fals(sql) {
     async get(...a) {
       BAZA.scrieri.push(s);
       if (/FROM cod_familii/i.test(s)) return { n: BAZA.familii.length };
-      if (/FROM produse WHERE cod_generat/i.test(s)) {
+      if (/FROM produse x WHERE x\.cod_generat/i.test(s)) {
+        // Ca în bază: produsul găsit după cod, dar dacă a fost unificat, cel păstrat.
         const cod = String(a[0] || "");
-        return BAZA.produse.find((p) => p.cod_generat === cod || String(p.cod || "").toUpperCase() === cod) || undefined;
+        const gasit = BAZA.produse.find((p) => p.cod_generat === cod || String(p.cod || "").trim().toUpperCase() === cod);
+        if (!gasit) return undefined;
+        return (gasit.fuzionat_in && BAZA.produse.find((p) => p.id === gasit.fuzionat_in)) || gasit;
       }
       if (/FROM produse WHERE id/i.test(s)) return BAZA.produse.find((p) => p.id === Number(a[0]));
       return undefined;
