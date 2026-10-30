@@ -230,7 +230,8 @@ function bine(descriere, conditie, detaliu) {
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
       body: {
-        produs_text: "TEST-INTRARE folie", um: "kg", pret_unitar: "7,35", categorie: "materie primă",
+        produs_text: "TEST-INTRARE folie", um: "kg", pret_unitar: "7,35", categorie: "materie primă", lot: "L-2026-10", furnizor_text: "Furnizor Test SRL",
+        observatii: "fragil </script><b>atenție</b>",
         "loc_ids[]": [a + "," + b2, String(c)], "loc_rand[]": [String(rand), String(rand)],
         "loc_nivel[]": ["1", "2"], "loc_camp[]": ["2", "3"], "loc_pozitie[]": ["1", "3"],
         "loc_latime[]": ["2", "1"], "loc_paleti[]": ["1", "1"], "loc_cantitate[]": ["100", "40"],
@@ -313,6 +314,36 @@ function bine(descriere, conditie, detaliu) {
     bine("nu mai cade cu „cuFurnizorLaIntrare is not defined”", o && !o.eroare && o.cod === 302, o && (o.eroare || o.cod));
     const ids = o && !o.eroare ? paletiDin(o) : [];
     bine("paletul e pus, cu 3 bucăți", ids.length === 1 && Number(palet(ids[0]).cantitate) === 3 && JSON.stringify(ocupateDe(ids[0])) === JSON.stringify([l]));
+  }
+
+  console.log("\n9. Pe hartă, la mouseover: fișa paletului");
+  {
+    // Ruta are parametru; o chem direct, cu params.
+    const r = res();
+    await rute.get["/stocuri/ct-park/rand/:id"]({ user: { id: 1, nume: "Vali", rol: "admin" }, params: { id: String(rand) }, query: {}, body: {}, res: r, req: { url: "/stocuri/ct-park/rand/" + rand } });
+    bine("harta rândului se deschide", r.cod === 200);
+    const m = r.corp.match(/<script type="application\/json" id="ct-info-paleti">([\s\S]*?)<\/script>/);
+    let info = {};
+    try { info = JSON.parse(m ? m[1] : "{}"); } catch (e) { info = { eroare: e.message }; }
+    const p = Object.values(info).find((x) => /TEST-INTRARE folie/.test(x.produs || "") && /100/.test(x.cantitate || ""));
+    bine("fișa există pentru paletul pus", !!p, Object.keys(info).length + " paleți în fișe");
+    if (p) {
+      bine("cu codul paletului", /^CT\d{6}-\d{4}$/.test(p.cod), p.cod);
+      bine("adresele lui (palet lat: două)", p.adrese === "TI-1-2-1 + TI-1-2-2", p.adrese);
+      bine("cantitatea cu UM", p.cantitate === "100 kg", p.cantitate);
+      bine("lotul, categoria, furnizorul", p.lot === "L-2026-10" && p.categorie === "materie primă" && p.furnizor === "Furnizor Test SRL", JSON.stringify([p.lot, p.categorie, p.furnizor]));
+      bine("prețul de intrare și de unde vine", /^7,35 lei \/ kg \(scris la intrare\)$/.test(p.pret), p.pret);
+      bine("valoarea: 735,00 lei", p.valoare === "735,00 lei", p.valoare);
+      bine("când a intrat și de când stă", /^\d{2}\.\d{2}\.\d{4} · azi$/.test(p.intrat), p.intrat);
+      bine("cine l-a pus și observațiile", p.pus_de === "Vali" && /fragil/.test(p.observatii));
+    }
+    bine("un text cu </script> nu închide fișele (scris \\u003c)", m && !/<\/script><b>/.test(m[1]) && /\\u003c\/script>/.test(m[1]));
+    bine("locul ocupat n-are title (n-ar apărea două etichete)", !/class="ct-loc ocupat[^"]*"\s+title=/.test(r.corp));
+    bine("dar are text pentru cititoarele de ecran", /class="ct-loc ocupat[^"]*"\s+aria-label="TI-/.test(r.corp));
+    bine("scriptul fișei e în pagină", /id="ct-fisa"/.test(r.corp) && /addEventListener\("mouseover"/.test(r.corp));
+    // Barele „Pune marfă…" / „Mută aici" și banda de editare au hidden, dar
+    // display:flex din foaia de stil îl bătea — stăteau la vedere tot timpul.
+    bine("ce are hidden chiar se ascunde pe harta rândului", /\[hidden\] \{ display:none !important; \}/.test(r.corp));
   }
 
   curata();
