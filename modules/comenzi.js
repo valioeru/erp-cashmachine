@@ -988,13 +988,75 @@ function lineRowsScript(produse, familii, eAdmin) {
   </style>`;
 }
 
+// ---------------------------------------------------------------------------
+// Data cerută de client și data confirmată de producție, în lista de comenzi.
+//
+// CEREREA LUI VALI, 30.10.2026: „În comenzi, la agenții de vânzări, să fie și
+// coloana cu data solicitată, data confirmată din producție."
+//
+// Agentul vorbește cu clientul, iar clientul întreabă „când vine?". Până acum
+// răspunsul era în trei locuri: termenul cerut pe comandă, termenul confirmat
+// pe cererea către producție și data de livrare din registrul producției —
+// ultimele două doar în pagina fiecărei comenzi, sau în Producție, unde
+// agentul nici nu intră.
+//
+// „Confirmată de producție" se ia, în ordinea asta:
+//   1. data de livrare a comenzii de producție legate de comandă (o mută
+//      producția când se reprogramează, deci e cea de azi, nu cea din ziua
+//      confirmării); dacă sunt mai multe, cea mai târzie — comanda e gata
+//      când e gata ultima bucată;
+//   2. termenul confirmat pe cererea către producție, dacă n-a ieșit încă o
+//      comandă de producție din ea.
+// O dată confirmată DUPĂ cea cerută de client iese pe roșu: agentul trebuie
+// să afle asta înaintea clientului, nu de la el.
+const dataScurta = (d) => String(d || "").trim().slice(0, 10);
+const roScurt = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)}` : d);
+
+function celulaDataCeruta(c) {
+  const d = dataScurta(c.data_livrare_ceruta);
+  return d ? esc(d) : '<span style="color:var(--text-muted)">—</span>';
+}
+
+function celulaDataConfirmata(c) {
+  const data = dataScurta(c.prod_data || c.cerere_confirmata);
+  const ceruta = dataScurta(c.data_livrare_ceruta);
+  const asteapta = Number(c.cereri_asteapta) || 0;
+  const refuzate = Number(c.cereri_refuzate) || 0;
+  const nr = Number(c.prod_nr) || 0;
+  const note = [];
+  if (nr > 1) note.push(`cea mai târzie din ${nr} comenzi de producție`);
+  if (data && asteapta) note.push(asteapta === 1 ? "încă o cerere neconfirmată" : `încă ${asteapta} cereri neconfirmate`);
+  const mic = note.length ? `<br><span style="font-size:11px;color:var(--text-muted)">${esc(note.join(" · "))}</span>` : "";
+  if (data) {
+    const tarziu = ceruta && data > ceruta;
+    return (
+      (tarziu
+        ? `<span class="badge rosu confirmata-tarziu" title="Producția a confirmat după data cerută de client (${esc(roScurt(ceruta))})">${esc(data)}</span>`
+        : esc(data)) + mic
+    );
+  }
+  if (asteapta) return '<span class="badge gri">așteaptă producția</span>';
+  if (refuzate) return '<span class="badge rosu">refuzată de producție</span>';
+  if (nr) return '<span style="color:var(--text-muted)">în producție, fără dată</span>';
+  return '<span style="color:var(--text-muted)">—</span>';
+}
+
 function register(router) {
   router.get("/comenzi", async (ctx) => {
     const per = perioadaDin(ctx.query, "tot");
     const comenzi = await db
       .prepare(
         `SELECT c.*, p.nume AS partener_nume,
-                COALESCE((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id), 0) AS total
+                COALESCE((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id), 0) AS total,
+                (SELECT MAX(COALESCE(NULLIF(cp.data_livrare, ''), NULLIF(cp.data_propusa, '')))
+                   FROM comenzi_productie cp WHERE cp.comanda_id = c.id AND cp.status <> 'anulata') AS prod_data,
+                (SELECT COUNT(*) FROM comenzi_productie cp WHERE cp.comanda_id = c.id AND cp.status <> 'anulata') AS prod_nr,
+                (SELECT MAX(NULLIF(a.termen_confirmat, '')) FROM aprovizionari a
+                  WHERE a.comanda_id = c.id AND a.sursa = 'productie' AND a.status IN ('confirmata','gata','primita')) AS cerere_confirmata,
+                (SELECT COUNT(*) FROM aprovizionari a
+                  WHERE a.comanda_id = c.id AND a.sursa = 'productie' AND a.status = 'ceruta') AS cereri_asteapta,
+                (SELECT COUNT(*) FROM aprovizionari a
+                  WHERE a.comanda_id = c.id AND a.sursa = 'productie' AND a.status = 'refuzata') AS cereri_refuzate
          FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
          WHERE c.data >= ? AND c.data <= ?
          ORDER BY c.id DESC`
@@ -1013,11 +1075,13 @@ function register(router) {
         </span>
       </form>
       ${table(
-        ["Nr.", "Client", "Data", "Status", "Total", "Acțiuni"],
+        ["Nr.", "Client", "Data", "Data solicitată", "Confirmată de producție", "Status", "Total", "Acțiuni"],
         comenzi.map((c) => [
           `<a href="/comenzi/${c.id}">${esc(c.numar || "#" + c.id)}</a>`,
           esc(c.partener_nume),
           esc(c.data),
+          celulaDataCeruta(c),
+          celulaDataConfirmata(c),
           STATUS_LABEL[c.status] || esc(c.status),
           money(c.total),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
