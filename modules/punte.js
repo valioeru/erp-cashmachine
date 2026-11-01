@@ -216,13 +216,33 @@ async function ingestProductie(randuri) {
     }
   }
 
+  // Unele produse se produc în SmartBill pe mai multe bucăți odată: plicurile
+  // AWB C5 CM „la mia”, deci 1 pe bon = 1.000 de plicuri. Pentru ele, pe
+  // pagina rețetei se scrie pe câte bucăți e bonul (produse.reteta_baza), iar
+  // aici consumul se împarte la bucățile reale, nu la unitățile de pe bon.
+  // Fără asta, fiecare import aducea înapoi rețeta pe 1.000 citită pe una.
+  const baza = new Map();
+  try {
+    for (const r of await db.prepare("SELECT id, reteta_baza FROM produse WHERE reteta_baza > 1").all()) {
+      baza.set(Number(r.id), Number(r.reteta_baza));
+    }
+  } catch (e) {
+    /* coloana încă nemigrată — toate produsele rămân pe 1 */
+  }
+
   for (const g of perechi.values()) {
     if (!(g.cantF > 0)) continue;
-    const perUnitate = g.cantC / g.cantF;
+    const b = baza.get(Number(g.finit)) || 1;
+    const perUnitate = g.cantC / (g.cantF * b);
     if (!(perUnitate > 0)) continue;
+    // Pe bucată, consumul unui plic e de ordinul miimilor; rotunjit la 6
+    // zecimale, regia (0,000003 buc/plic) s-ar fi pierdut. Precizia crește
+    // doar unde baza e mai mare ca 1, ca restul rețetelor să rămână cum erau.
+    const prec = b > 1 ? 1e9 : 1e6;
+    const cantitate = Math.round(perUnitate * prec) / prec;
     const existent = await db.prepare("SELECT id FROM retete_componente WHERE produs_id = ? AND componenta_id = ?").get(g.finit, g.comp);
-    if (existent) await db.prepare("UPDATE retete_componente SET cantitate = ? WHERE id = ?").run(Math.round(perUnitate * 1e6) / 1e6, existent.id);
-    else await db.prepare("INSERT INTO retete_componente (produs_id, componenta_id, cantitate) VALUES (?, ?, ?)").run(g.finit, g.comp, Math.round(perUnitate * 1e6) / 1e6);
+    if (existent) await db.prepare("UPDATE retete_componente SET cantitate = ? WHERE id = ?").run(cantitate, existent.id);
+    else await db.prepare("INSERT INTO retete_componente (produs_id, componenta_id, cantitate) VALUES (?, ?, ?)").run(g.finit, g.comp, cantitate);
     retete++;
   }
   return { documente, liniiFinite, liniiConsum, retete };

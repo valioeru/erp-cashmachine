@@ -211,9 +211,10 @@ function register(router) {
   router.get("/productie/retete/:id", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const p = await db
-      .prepare("SELECT id, cod, denumire, unitate_masura, pret_vanzare, pret_achizitie, cost_reteta, cost_reteta_lipsa, cost_rata FROM produse WHERE id = ?")
+      .prepare("SELECT id, cod, denumire, unitate_masura, pret_vanzare, pret_achizitie, cost_reteta, cost_reteta_lipsa, cost_rata, reteta_baza FROM produse WHERE id = ?")
       .get(ctx.params.id);
     if (!p) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/productie/retete", body: "<p>Produsul nu există.</p>" }));
+    const baza = Number(p.reteta_baza) > 1 ? Number(p.reteta_baza) : 1;
 
     const d = await cost.detaliuReteta(p.id);
     const reper = await preturiReper();
@@ -232,6 +233,7 @@ function register(router) {
         <a class="btn secondary" href="/produse/${p.id}">Fișa produsului</a>
       </div>
       ${ctx.query.eroare ? `<div class="flash flash-rosu">${esc(String(ctx.query.eroare))}</div>` : ""}
+      ${ctx.query.ok ? `<div class="flash">${esc(String(ctx.query.ok))}</div>` : ""}
 
       <div class="detail-box">
         <div class="detail-grid">
@@ -256,7 +258,8 @@ function register(router) {
                <strong>Costul ăsta nu se poate folosi ca atare.</strong> Iese de ${(d.total / pretReper).toFixed(0)} ori mai mare
                decât prețul la care se vinde produsul. Aproape sigur rețeta a venit dintr-un raport de producție scris
                <em>pe lot</em>: cantitățile sunt cât s-a consumat pentru toată șarja, nu pentru o bucată. Împarte-le la
-               câte bucăți au ieșit din lotul ăla și cifra devine reală.
+               câte bucăți au ieșit din lotul ăla și cifra devine reală. Dacă în SmartBill producția se scrie mereu pe
+               mai multe bucăți (de exemplu la mia), scrie mai jos, la „Producția din SmartBill”, pe câte bucăți e un bon.
              </div>`
           : ""
       }
@@ -331,6 +334,23 @@ function register(router) {
           : ""
       }
 
+      <h2>Producția din SmartBill</h2>
+      <p class="explic">
+        Rețeta se reface din bonurile de producție din SmartBill. Dacă acolo produsul se scrie pe mai multe bucăți
+        odată (plicurile, de exemplu, la mia: 1 pe bon = 1.000 de plicuri), scrie aici pe câte bucăți e un bon.
+        Importul împarte atunci consumul la bucățile reale. Acum: <strong>1 pe bon = ${baza.toLocaleString("ro-RO")} ${baza === 1 ? "bucată" : "bucăți"}</strong>.
+      </p>
+      <form class="form" method="post" action="/productie/retete/${p.id}/baza" style="max-width:640px">
+        <label class="field"><span>Un bon de producție din SmartBill înseamnă (bucăți)</span>
+          <input type="number" name="baza" min="1" max="1000000" step="1" value="${baza}" required>
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" name="imparte" value="1" checked style="width:auto;min-height:0">
+          <span>Împarte și cantitățile de acum din rețetă (au venit din SmartBill pe bonul vechi)</span>
+        </label>
+        <div class="form-actions"><button class="btn" type="submit">Salvează</button></div>
+      </form>
+
       <h2>Adaugă o componentă</h2>
       <form class="form" method="post" action="/productie/retete/${p.id}/adauga" style="max-width:640px">
         <label class="field"><span>Componenta</span>
@@ -348,6 +368,34 @@ function register(router) {
       </form>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Rețeta: ${p.denumire}`, active: "/productie/retete", body }));
+  });
+
+  // Pe câte bucăți e un bon de producție din SmartBill pentru produsul ăsta.
+  // Cu „împarte”, cantitățile de acum se trec pe noua bază: ele au venit din
+  // aceleași bonuri, deci sunt pe baza veche. Fără bifă, se schimbă doar baza,
+  // iar următorul import din SmartBill reface rețeta pe bucată.
+  router.post("/productie/retete/:id/baza", async (ctx) => {
+    const produsId = Number(ctx.params.id);
+    const inapoi = (camp, m) => redirect(ctx.res, `/productie/retete/${produsId}?${camp}=${encodeURIComponent(m)}`);
+    const nou = Math.round(nr(ctx.body.baza));
+    if (!(nou >= 1) || nou > 1000000) return inapoi("eroare", "Scrie pe câte bucăți e un bon: un număr întreg între 1 și 1.000.000.");
+    const p = await db.prepare("SELECT id, reteta_baza FROM produse WHERE id = ?").get(produsId);
+    if (!p) return redirect(ctx.res, "/productie/retete");
+    const vechi = Number(p.reteta_baza) > 1 ? Number(p.reteta_baza) : 1;
+    const factor = nou / vechi;
+    const imparte = String(ctx.body.imparte || "") === "1" && factor !== 1;
+    if (imparte) {
+      await db.prepare("UPDATE retete_componente SET cantitate = cantitate / ? WHERE produs_id = ?").run(factor, produsId);
+    }
+    await db.prepare("UPDATE produse SET reteta_baza = ? WHERE id = ?").run(nou > 1 ? nou : null, produsId);
+    await cost.recalculeazaRetete();
+    const cum = nou.toLocaleString("ro-RO");
+    return inapoi(
+      "ok",
+      imparte
+        ? `Gata: 1 pe bon = ${cum} buc. Cantitățile din rețetă au fost ${factor > 1 ? "împărțite" : "înmulțite"} la ${(factor > 1 ? factor : 1 / factor).toLocaleString("ro-RO")}, iar costul s-a recalculat.`
+        : `Gata: 1 pe bon = ${cum} buc. Cantitățile au rămas cum erau; următorul import din SmartBill le reface pe bucată.`
+    );
   });
 
   router.post("/productie/retete/:id/adauga", async (ctx) => {
