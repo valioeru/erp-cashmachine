@@ -2729,7 +2729,7 @@ function register(router) {
       const cid = nr(b.comanda_id);
       if (!cid) return inapoi("eroare", "La destinația „Comandă” trebuie aleasă exact comanda.");
       comanda = await db
-        .prepare("SELECT c.id, c.numar, c.data, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+        .prepare("SELECT c.id, c.numar, c.data, c.partener_id, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
         .get(cid);
       if (!comanda) return inapoi("eroare", "Comanda aleasă nu mai există.");
     }
@@ -2794,20 +2794,52 @@ function register(router) {
     }
     const plecat = v.miscate.map((m) => `${m.pleaca.toLocaleString("ro-RO")} ${m.um || ""} ${m.produs_text || ""}`.replace(/\s+/g, " ").trim()).join("; ");
     const unde = comanda ? `comanda ${comanda.numar || "#" + comanda.id}` : etichetaDestinatie(destinatie).toLowerCase();
+    let mesaj;
     if (v.paletGol) {
       // Nu mai rămâne nimic: paletul iese și locul se eliberează, ca la ieșirea
       // întreagă. Rezumatul de pe palet rămâne cel de dinainte — istoricul lui.
       await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
       await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
       console.log(`[ct-park] golit ${p.cod} spre ${unde} de ${cine || "?"}`);
-      return inapoi("ok", `A plecat tot (${plecat}) spre ${unde}. Paletul a ieșit din depozit, iar ${adrese.join(" + ") || "locul"} e liber.`);
+      mesaj = `A plecat tot (${plecat}) spre ${unde}. Paletul a ieșit din depozit, iar ${adrese.join(" + ") || "locul"} e liber.`;
+    } else {
+      const r = await rescrieRezumat(id);
+      console.log(`[ct-park] scos din ${p.cod}: ${plecat} spre ${unde} de ${cine || "?"}`);
+      mesaj = `A plecat ${plecat} spre ${unde}. Pe palet rămân ${r.cantitate ? r.cantitate.toLocaleString("ro-RO") + " " + (r.um || "") : r.produs_text || "—"}; paletul stă pe loc.`;
     }
-    const r = await rescrieRezumat(id);
-    console.log(`[ct-park] scos din ${p.cod}: ${plecat} spre ${unde} de ${cine || "?"}`);
-    return inapoi(
-      "ok",
-      `A plecat ${plecat} spre ${unde}. Pe palet rămân ${r.cantitate ? r.cantitate.toLocaleString("ro-RO") + " " + (r.um || "") : r.produs_text || "—"}; paletul stă pe loc.`
-    );
+
+    // Pe o comandă de client, ce a plecat acum primește avizul de însoțire
+    // (Vali, 03.11.2026) — doar ce a plecat, nu ce rămâne pe palet.
+    if (comanda) {
+      try {
+        const ids = [...new Set(v.miscate.map((m) => Number(m.produs_id)).filter(Boolean))];
+        const din = ids.length
+          ? await db
+              .prepare(`SELECT id, denumire, COALESCE(NULLIF(TRIM(cod), ''), cod_generat) AS cod FROM produse WHERE id IN (${ids.map(() => "?").join(",")})`)
+              .all(...ids)
+          : [];
+        const catalog = new Map((din || []).map((x) => [Number(x.id), x]));
+        const aviz = await require("./avize").emite({
+          partenerId: comanda.partener_id,
+          comandaId: comanda.id,
+          comandaNumar: comanda.numar || null,
+          linii: v.miscate.map((m) => {
+            const c = catalog.get(Number(m.produs_id));
+            return { produs_id: m.produs_id, denumire: c ? c.denumire : m.produs_text, cod: c ? c.cod : null, um: m.um, cantitate: m.pleaca, palet: p.cod };
+          }),
+          creatDe: cine,
+          creatDeId: ctx.user ? ctx.user.id : null,
+          sursa: "depozit",
+          observatii: obs,
+        });
+        await db.prepare("UPDATE ct_iesiri SET aviz_id = ? WHERE id = ?").run(aviz.id, iesireId);
+        return redirect(ctx.res, `/stocuri/ct-park/aviz/${aviz.id}?palet=${id}&mesaj=${encodeURIComponent(mesaj)}`);
+      } catch (e) {
+        console.error("[ct-park] aviz la ieșirea parțială:", e.message);
+        return inapoi("eroare", `${mesaj} Avizul nu s-a putut emite: ${e.message}`);
+      }
+    }
+    return inapoi("ok", mesaj);
   });
 
   // Ruta veche de scoatere, fără destinație. Nu mai scoate nimic: trimite la
@@ -3155,7 +3187,8 @@ function register(router) {
       <h1 style="margin:6px 0 2px">Ieșire marfă din CT-Park</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
         Bifezi paleții care pleacă și spui <strong>unde se duc</strong> — fără destinație nu iese nimic din depozit.
-        Locurile se eliberează pe loc, iar la final primești etichetele de ieșire, tot 100 × 150 mm.
+        Locurile se eliberează pe loc. La final primești etichetele de ieșire, pe A4 — iar la ieșirea pe o comandă de client,
+        avizul de însoțire a mărfii (fără prețuri), în locul etichetelor.
       </p>
       <p class="explic" style="max-width:820px">
         Lista e pusă în ordinea <strong>FIFO — primul intrat, primul ieșit</strong>: pe fiecare marfă, cea mai veche
@@ -3323,7 +3356,7 @@ function register(router) {
       if (!cid) return inapoi("La destinația „Comandă” trebuie aleasă exact comanda.");
       comanda = await db
         .prepare(
-          `SELECT c.id, c.numar, c.data, p.nume AS client FROM comenzi c
+          `SELECT c.id, c.numar, c.data, c.partener_id, p.nume AS client FROM comenzi c
              JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`
         )
         .get(cid);
@@ -3349,6 +3382,7 @@ function register(router) {
     const cine = ctx.user ? ctx.user.nume : null;
     const motivPeste = String(b.peste_rand || "").trim() || null;
     const scoase = [];
+    const iesiriNoi = [];
     for (const id of ids) {
       const p = await db
         .prepare(
@@ -3381,10 +3415,10 @@ function register(router) {
 
       await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
       await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
-      await db
+      const ies = await db
         .prepare(
           `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
         )
         .run(
           id,
@@ -3402,11 +3436,73 @@ function register(router) {
           sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
         );
       scoase.push(id);
+      if (ies && ies.lastInsertRowid) iesiriNoi.push(Number(ies.lastInsertRowid));
     }
 
     if (!scoase.length) return inapoi("Paleții bifați ieșiseră deja din depozit.");
+
+    // Livrarea pe o comandă de client: în loc de etichete, AVIZUL de însoțire
+    // a mărfii (Vali, 03.11.2026), fără prețuri, cu tot ce a plecat acum.
+    // Ieșirea s-a făcut deja; dacă avizul nu se poate emite, omul primește
+    // etichetele și motivul — nu o ieșire pe jumătate.
+    if (comanda) {
+      try {
+        const linii = await liniiPentruAviz(scoase);
+        const aviz = await require("./avize").emite({
+          partenerId: comanda.partener_id,
+          comandaId: comanda.id,
+          comandaNumar: comanda.numar || null,
+          linii,
+          creatDe: cine,
+          creatDeId: ctx.user ? ctx.user.id : null,
+          sursa: "depozit",
+          observatii: String(b.observatii || "").trim() || null,
+        });
+        if (iesiriNoi.length)
+          await db.prepare(`UPDATE ct_iesiri SET aviz_id = ? WHERE id IN (${iesiriNoi.map(() => "?").join(",")})`).run(aviz.id, ...iesiriNoi);
+        return redirect(ctx.res, `/stocuri/ct-park/aviz/${aviz.id}?paleti=${scoase.join(",")}`);
+      } catch (e) {
+        console.error("[ct-park] aviz la ieșire:", e.message);
+        return redirect(
+          ctx.res,
+          "/stocuri/ct-park/etichete?paleti=" + scoase.join(",") + "&eroare=" + encodeURIComponent("Paleții au ieșit, dar avizul nu s-a putut emite: " + e.message)
+        );
+      }
+    }
     redirect(ctx.res, "/stocuri/ct-park/etichete?paleti=" + scoase.join(","));
   });
+
+  // Ce a plecat pe paleții scoși întregi, pentru aviz: liniile fiecărui palet
+  // (ieșirea întreagă nu le atinge), cu denumirea din nomenclator; paletul vechi,
+  // fără linii, intră cu rezumatul lui. Codul paletului rămâne lângă linie.
+  async function liniiPentruAviz(ids) {
+    if (!ids.length) return [];
+    const semne = ids.map(() => "?").join(",");
+    const paleti = await db
+      .prepare(
+        `SELECT p.id, p.cod, p.produs_id, p.cantitate, p.um, COALESCE(pr.denumire, NULLIF(p.produs_text, '')) AS produs,
+                COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
+           FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id WHERE p.id IN (${semne}) ORDER BY p.id`
+      )
+      .all(...ids);
+    const linii = await db
+      .prepare(
+        `SELECT pl.palet_id, pl.produs_id, pl.cantitate, pl.um, COALESCE(pr.denumire, NULLIF(pl.produs_text, '')) AS produs,
+                COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
+           FROM ct_palet_linii pl LEFT JOIN produse pr ON pr.id = pl.produs_id
+          WHERE pl.palet_id IN (${semne}) AND pl.cantitate > 0 ORDER BY pl.palet_id, pl.id`
+      )
+      .all(...ids)
+      .catch(() => []);
+    const out = [];
+    for (const p of paleti) {
+      const ale = (linii || []).filter((l) => Number(l.palet_id) === Number(p.id));
+      const surse = ale.length ? ale : [{ produs_id: p.produs_id, cantitate: p.cantitate, um: p.um, produs: p.produs, produs_cod: p.produs_cod }];
+      for (const l of surse)
+        out.push({ produs_id: l.produs_id, denumire: l.produs, cod: l.produs_cod, um: l.um, cantitate: l.cantitate, palet: p.cod });
+    }
+    return out;
+  }
 
   // ---- Paleții din depozit -----------------------------------------------
   router.get("/stocuri/ct-park/paleti", async (ctx) => {
@@ -4086,6 +4182,7 @@ function register(router) {
         @media print { .bara { display:none; } .et { border:0; margin:0; } body { background:#fff; } }
       </style></head><body>
       <div class="bara">
+        ${ctx.query.eroare ? `<div style="color:#b3261e;font-weight:600;margin-bottom:6px">${esc(String(ctx.query.eroare))}</div>` : ""}
         <strong>${esc(descriere)}</strong> —
         <button onclick="window.print()">Tipărește</button>
         <a href="/stocuri/ct-park">înapoi la depozit</a>
