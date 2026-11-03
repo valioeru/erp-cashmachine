@@ -16,6 +16,7 @@ const cost = require("../lib/cost");
 const { ALOC, ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
+const XLS = require("../lib/export-xlsx");
 const { chipuriPerioada, azi: perAzi, ieri: perIeri } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const taskuri = require("./taskuri");
@@ -1445,9 +1446,15 @@ function register(router) {
   });
 
   // ================= LEAD-URI =========================================
-  router.get("/crm/leaduri", async (ctx) => {
-    const stadiu = String(ctx.query.stadiu || "");
-    const cauta = String(ctx.query.q || "").trim();
+  //
+  // Lista de lead-uri, cu filtrele ei. O citesc două rute — pagina și
+  // exportul în Excel — ca fișierul să aibă exact rândurile filtrului de pe
+  // ecran. Scrisă de două ori, după a treia schimbare de filtru exportul ar
+  // scoate altceva decât ce a văzut omul (aceeași regulă ca la Parteneri).
+  // `limita` 0 = toate; pagina pune 300, ca să nu stea.
+  async function culegeLeaduri(query, limita) {
+    const stadiu = String(query.stadiu || "");
+    const cauta = String(query.q || "").trim();
     const where = [];
     const args = [];
     if (stadiu) {
@@ -1459,19 +1466,50 @@ function register(router) {
       args.push(`%${cauta}%`, `%${cauta}%`, `%${cauta}%`);
     }
     const clauza = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
+    const lim = Number(limita) > 0 ? ` LIMIT ${Math.floor(Number(limita))}` : "";
     const leaduri = await db
       .prepare(
-        `SELECT l.*, u.nume AS agent_nume FROM leaduri l LEFT JOIN utilizatori u ON u.id = l.atribuit_lui
-         ${clauza} ORDER BY l.id DESC LIMIT 300`
+        `SELECT l.*, u.nume AS agent_nume, p.nume AS partener_nume FROM leaduri l
+           LEFT JOIN utilizatori u ON u.id = l.atribuit_lui
+           LEFT JOIN parteneri p ON p.id = l.partener_id
+         ${clauza} ORDER BY l.id DESC${lim}`
       )
       .all(...args);
+    const total = lim
+      ? Number(((await db.prepare(`SELECT COUNT(*) AS n FROM leaduri l ${clauza}`).get(...args)) || {}).n) || 0
+      : leaduri.length;
+    return { stadiu, cauta, leaduri, total };
+  }
+
+  // Exportul lead-urilor e DOAR al administratorului (Vali, 03.11.2026:
+  // „Adminii să poată exporta în xls lista”). Lista are nume, emailuri și
+  // telefoane de oameni: pe ecran o vede cine are acces la CRM, dar un fișier
+  // descărcat pleacă mai departe. Ca la Parteneri, ruta refuză, nu doar
+  // butonul e ascuns — un buton ascuns se ghicește din adresă.
+  const poateExportaLeaduri = (user) => Boolean(user && user.rol === "admin");
+
+  router.get("/crm/leaduri", async (ctx) => {
+    const { stadiu, cauta, leaduri, total } = await culegeLeaduri(ctx.query, 300);
     const peStadiu = await db.prepare("SELECT stadiu, COUNT(*) AS n FROM leaduri GROUP BY stadiu").all();
     const contor = Object.fromEntries(peStadiu.map((r) => [r.stadiu, r.n]));
+    const exporta = poateExportaLeaduri(ctx.user);
+    const qsExport = [cauta ? "q=" + encodeURIComponent(cauta) : "", stadiu ? "stadiu=" + encodeURIComponent(stadiu) : ""]
+      .filter(Boolean)
+      .join("&");
 
     const body = `
       ${subnavCrm("/crm/leaduri", ctx.user)}
-      <div class="toolbar"><a href="/crm/leaduri/nou" class="btn">+ Lead nou</a></div>
+      <div class="toolbar">
+        <a href="/crm/leaduri/nou" class="btn">+ Lead nou</a>
+        ${
+          exporta
+            ? `<a class="btn secondary" style="margin-left:auto" href="/crm/leaduri/export.xlsx${qsExport ? "?" + qsExport : ""}"
+                  title="Descarcă în Excel toate cele ${total} lead-uri din filtrul curent, nu doar cele de pe ecran. Doar administratorii văd butonul.">
+                 ↓ Export Excel
+               </a>`
+            : ""
+        }
+      </div>
       <div class="cards">
         ${STADII_LEAD.map(([v, t]) => `<div class="card"><div class="label">${esc(t)}</div><div class="value">${contor[v] || 0}</div></div>`).join("")}
       </div>
@@ -1498,8 +1536,100 @@ function register(router) {
             )
           : '<p style="color:var(--text-muted)">Niciun lead încă. <a href="/crm/leaduri/nou">Adaugă primul</a>.</p>'
       }
+      ${
+        total > leaduri.length
+          ? `<p class="mic" style="color:var(--text-muted);margin-top:8px">Pe ecran sunt cele mai noi ${leaduri.length} din ${total}.${
+              exporta ? " Exportul în Excel le are pe toate." : ""
+            }</p>`
+          : ""
+      }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Lead-uri", active: "/crm", body }));
+  });
+
+  // Exportul în Excel. Se înregistrează AICI, înaintea lui „/crm/leaduri/:id":
+  // rutele se potrivesc în ordinea înregistrării, iar mai jos adresa ar fi
+  // fost luată drept lead-ul cu id-ul „export.xlsx”.
+  router.get("/crm/leaduri/export.xlsx", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (!poateExportaLeaduri(ctx.user)) {
+      // Nu redirectăm spre listă: un „export” care se termină cu pagina de
+      // lead-uri în loc de fișier pare stricat. Spunem pe față că n-are voie.
+      return send(
+        ctx.res,
+        403,
+        layout({
+          user: ctx.user,
+          title: "Export lead-uri",
+          active: "/crm",
+          body: `<p>Exportul listei de lead-uri e rezervat administratorilor.</p>
+                 <p style="color:var(--text-muted);max-width:620px">Lista are nume, emailuri și telefoane de oameni.
+                 Pe ecran o vezi; descărcată, pleacă mai departe. Dacă ai nevoie de ea, cere-i-o unui administrator.</p>
+                 <p><a class="btn secondary" href="/crm/leaduri">Înapoi la lead-uri</a></p>`,
+        })
+      );
+    }
+
+    // Toate rândurile filtrului, nu primele 300 ca pe ecran: în fișier, o
+    // limită ar tăia tăcut exact coada pe care omul voia s-o vadă.
+    const { stadiu, cauta, leaduri } = await culegeLeaduri(ctx.query, 0);
+    const numeStadiu = (v) => (STADII_LEAD.find((s) => s[0] === v) || [v, v || ""])[1];
+    const foaie = {
+      nume: "Lead-uri",
+      coloane: [
+        { titlu: "Nume", cheie: "nume", tip: "text", latime: 26 },
+        { titlu: "Companie", cheie: "companie", tip: "text", latime: 32 },
+        { titlu: "Persoană de contact", cheie: "persoana", tip: "text", latime: 22 },
+        { titlu: "Email", cheie: "email", tip: "text", latime: 30 },
+        { titlu: "Telefon", cheie: "telefon", tip: "text", latime: 16 },
+        { titlu: "Sursă", cheie: "sursa", tip: "text", latime: 16 },
+        { titlu: "Stadiu", cheie: "stadiu", tip: "text", latime: 20 },
+        { titlu: "Agent", cheie: "agent", tip: "text", latime: 22 },
+        { titlu: "Scor", cheie: "scor", tip: "numar", latime: 8 },
+        { titlu: "Client în ERP", cheie: "client", tip: "text", latime: 30 },
+        { titlu: "Creat la", cheie: "creat", tip: "data", latime: 12 },
+        { titlu: "Ultima activitate", cheie: "activitate", tip: "data", latime: 15 },
+        { titlu: "Observații", cheie: "observatii", tip: "text", latime: 50 },
+      ],
+      randuri: leaduri.map((l) => ({
+        nume: l.nume || "",
+        companie: l.companie || "",
+        persoana: l.persoana_contact || "",
+        email: l.email || "",
+        // Telefonul rămâne text: ca număr, Excel ar mânca zeroul din față.
+        telefon: l.telefon || "",
+        sursa: l.sursa || "",
+        stadiu: numeStadiu(l.stadiu),
+        agent: l.agent_nume || "neatribuit",
+        scor: l.scor === null || l.scor === undefined || l.scor === "" ? "" : Number(l.scor),
+        client: l.partener_nume || "",
+        creat: l.creat_la ? String(l.creat_la).slice(0, 10) : "",
+        activitate: l.ultima_activitate ? String(l.ultima_activitate).slice(0, 10) : "",
+        observatii: l.observatii || "",
+      })),
+    };
+
+    // A doua foaie spune ce filtru era pus și când — altfel, peste o lună,
+    // nimeni nu mai știe dacă fișierul e „toate lead-urile” sau doar o parte.
+    const acum = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const filtre = {
+      nume: "Cum a fost scos",
+      coloane: [
+        { titlu: "Ce", cheie: "ce", tip: "text", latime: 26 },
+        { titlu: "Valoare", cheie: "val", tip: "text", latime: 60 },
+      ],
+      randuri: [
+        { ce: "Scos din", val: "ERP Cash Machine, CRM → Lead-uri" },
+        { ce: "Data și ora (UTC)", val: acum },
+        { ce: "Scos de", val: ctx.user.nume || ctx.user.email || "administrator" },
+        { ce: "Stadiu", val: stadiu ? numeStadiu(stadiu) : "toate stadiile" },
+        { ce: "Căutare", val: cauta || "(fără)" },
+        { ce: "Lead-uri în fișier", val: String(leaduri.length) },
+      ],
+    };
+
+    const buf = XLS.carte([foaie, filtre]);
+    send(ctx.res, 200, buf, XLS.antete(`lead-uri-cash-machine-${acum.slice(0, 10)}`, buf.length));
   });
 
   router.get("/crm/leaduri/nou", async (ctx) => {
