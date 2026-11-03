@@ -111,6 +111,10 @@ console.log("\nCe se poate pune pe comandă");
   // Ăsta e miezul: un produs care există deja TREBUIE lăsat pe comandă.
   const existent = { ...r, exista: { id: 77, denumire: "Pungă curier imprimată", cod_generat: "PCIA35045045" } };
   bine("produsul care există deja se poate comanda", K.sePoateComanda(existent));
+  // Dar nu pe jumătate: banda fără „Personalizare" dă exact codul benzii
+  // simple și ar fi căzut pe ea, deși clientul ceruse FRAGIL.
+  bine("un produs găsit cu o configurare pe jumătate NU se poate comanda",
+    !K.sePoateComanda({ ...pePjumatate, exista: { id: 77, denumire: "Pungă curier", cod_generat: pePjumatate.cod } }));
   bine("și se vede că e cel vechi, cu codul lui",
     K.rezumat(existent).indexOf("PCIA35045045") !== -1 && K.rezumat(existent).indexOf("există deja") !== -1,
     K.rezumat(existent));
