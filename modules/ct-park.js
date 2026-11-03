@@ -16,6 +16,7 @@ const { poateAccesa } = require("../lib/auth");
 // Planul intrării de marfă (ce palet pe ce loc) — vezi comentariul de acolo.
 const CI = require("../lib/ct-intrare");
 const CPL = require("../lib/ct-palet-linii");
+const codbare = require("../lib/codbare");
 const CTM = require("../lib/ct-mutare");
 
 // Planul halei. Erau constante scrise în sursă — acum sunt DATE: se pot
@@ -3895,12 +3896,64 @@ function register(router) {
     const hi = new Map();
     for (const i of iesiri || []) if (!hi.has(Number(i.palet_id))) hi.set(Number(i.palet_id), i);
 
+    // Eticheta de IEȘIRE e A4, cu cod de bare și cu denumirea întreagă a
+    // fiecărui produs care a plecat (Vali, 03.11.2026: „Eticheta de aici să
+    // fie A4 și să conțină și cod de bare … și denumire produs completă”).
+    // Cea de depozit rămâne de 100 × 150 mm, pentru Zebra.
+    //
+    // Se dă DOAR pentru paletul care chiar a ieșit. Dintr-un palet poate pleca
+    // doar o parte (ieșirea parțială); el stă mai departe pe raft și are nevoie
+    // de eticheta lui de depozit, cu adresa — nu de una care zice „IEȘIRE”.
+    const iesit = (p) => Boolean(p.data_iesire) && hi.has(Number(p.id));
+    const iesitiIds = paleti.filter(iesit).map((p) => Number(p.id));
+
+    // Ce a plecat, linie cu linie. Ieșirea parțială care a golit paletul și-a
+    // scris liniile în ct_iesiri_linii; ieșirea întreagă nu atinge liniile
+    // paletului, deci acolo marfa plecată e chiar ce era pe palet. Denumirea
+    // e cea din nomenclator, întreagă; textul scris de mână doar unde produsul
+    // nu e în nomenclator.
+    const liniiIesire = new Map();
+    if (iesitiIds.length) {
+      const semne = iesitiIds.map(() => "?").join(",");
+      const idsIes = iesitiIds.map((id) => Number(hi.get(id).id));
+      const dinIesiri = await db
+        .prepare(
+          `SELECT il.iesire_id, COALESCE(pr.denumire, NULLIF(il.produs_text, '')) AS produs, pr.cod AS produs_cod, il.cantitate, il.um
+             FROM ct_iesiri_linii il LEFT JOIN produse pr ON pr.id = il.produs_id
+            WHERE il.iesire_id IN (${idsIes.map(() => "?").join(",")}) AND il.cantitate > 0 ORDER BY il.id`
+        )
+        .all(...idsIes)
+        .catch(() => []);
+      const dinPaleti = await db
+        .prepare(
+          `SELECT pl.palet_id, COALESCE(pr.denumire, NULLIF(pl.produs_text, '')) AS produs, pr.cod AS produs_cod, pl.cantitate, pl.um, pl.lot
+             FROM ct_palet_linii pl LEFT JOIN produse pr ON pr.id = pl.produs_id
+            WHERE pl.palet_id IN (${semne}) AND pl.cantitate > 0 ORDER BY pl.id`
+        )
+        .all(...iesitiIds)
+        .catch(() => []);
+      for (const id of iesitiIds) {
+        const iesId = Number(hi.get(id).id);
+        const a = (dinIesiri || []).filter((x) => Number(x.iesire_id) === iesId);
+        const b = (dinPaleti || []).filter((x) => Number(x.palet_id) === id);
+        liniiIesire.set(id, a.length ? a : b);
+      }
+    }
+    const cantText = (cant, um) => (nr(cant) ? nr(cant).toLocaleString("ro-RO") + " " + (um || "") : "—");
+
     const etichete = paleti
       .map((p) => {
         const adr = ha.get(Number(p.id)) || [];
-        const ies = hi.get(Number(p.id));
+        const ies = iesit(p) ? hi.get(Number(p.id)) : null;
         if (ies) {
           const peComanda = String(ies.destinatie) === "comanda";
+          const gasite = liniiIesire.get(Number(p.id)) || [];
+          const linii = gasite.length
+            ? gasite
+            : [{ produs: p.produs || p.produs_text, produs_cod: p.produs_cod, cantitate: p.cantitate, um: p.um }];
+          // Cu multe produse pe un palet, literele se micșorează ca totul să
+          // încapă pe foaie — dar denumirea nu se taie niciodată.
+          const marime = linii.length <= 1 ? "" : linii.length <= 3 ? " et-marfa-cateva" : " et-marfa-multe";
           return `<div class="et et-iesire">
             <div class="et-sus">
               <div class="et-firma">CASH MACHINE · IEȘIRE</div>
@@ -3913,16 +3966,35 @@ function register(router) {
                 ? `<div class="et-comanda">Comanda ${esc(ies.comanda_numar || "—")}${ies.comanda_data ? ` · ${esc(ies.comanda_data)}` : ""}</div>`
                 : ""
             }
-            <div class="et-produs">${esc(p.produs || p.produs_text || "—")}</div>
-            <div class="et-cod">${esc(p.produs_cod || "")}</div>
+            <div class="et-marfa${marime}">
+              ${linii
+                .map(
+                  (l) => `<div class="et-linie">
+                    <div class="et-produs">${esc(l.produs || "—")}</div>
+                    <div class="et-linie-jos">
+                      <div class="et-cant">${esc(cantText(l.cantitate, l.um))}</div>
+                      ${
+                        l.produs_cod
+                          ? `<div class="et-cod-produs"><div class="et-cod-titlu">Cod produs</div>${codbare.svg(l.produs_cod, { inalt: 13, modul: 0.33 })}</div>`
+                          : ""
+                      }
+                    </div>
+                  </div>`
+                )
+                .join("")}
+            </div>
             <table class="et-tab">
-              <tr><td>Cantitate</td><td><strong>${nr(p.cantitate) ? nr(p.cantitate).toLocaleString("ro-RO") + " " + esc(p.um || "") : "—"}</strong></td></tr>
+              ${linii.length > 1 ? `<tr><td>Produse pe palet</td><td><strong>${linii.length}</strong></td></tr>` : ""}
               <tr><td>Lot</td><td>${esc(p.lot || "—")}</td></tr>
               <tr><td>A plecat din</td><td>${esc(ies.adresa || "—")}</td></tr>
               <tr><td>Scoasă de</td><td>${esc(ies.creat_de || "—")}</td></tr>
             </table>
             ${ies.observatii ? `<div class="et-obs">${esc(ies.observatii)}</div>` : ""}
-            <div class="et-jos">${esc(p.cod)}</div>
+            <div class="et-jos et-jos-cod">
+              <div class="et-cod-titlu">Cod palet</div>
+              ${codbare.svg(p.cod, { inalt: 22, modul: 0.5, subtitlu: false })}
+              <div class="et-cod-palet">${esc(p.cod)}</div>
+            </div>
           </div>`;
         }
         return `<div class="et">
@@ -3945,10 +4017,25 @@ function register(router) {
       })
       .join("");
 
+    // Formatul foii. Pagina de după o ieșire are numai etichete A4, deci foaia
+    // întreagă e A4. Dacă se amestecă (rar: linkuri scrise de mână), fiecare
+    // etichetă își cere singură foaia prin „page:” — eticheta de depozit
+    // rămâne 100 × 150 pentru Zebra, cea de ieșire A4.
+    const nrIesite = paleti.filter(iesit).length;
+    const nrDepozit = paleti.length - nrIesite;
+    const doarIesiri = nrIesite > 0 && nrDepozit === 0;
+    const descriere = [
+      nrDepozit ? `${nrDepozit} etichet${nrDepozit === 1 ? "ă" : "e"} de 100 × 150 mm` : "",
+      nrIesite ? `${nrIesite} etichet${nrIesite === 1 ? "ă" : "e"} A4 de ieșire` : "",
+    ]
+      .filter(Boolean)
+      .join(" + ");
+
     const html = `<!doctype html><html lang="ro"><head><meta charset="utf-8">
       <title>Etichete CT-Park (${paleti.length})</title>
       <style>
-        @page { size: 100mm 150mm; margin: 0; }
+        @page { size: ${doarIesiri ? "A4" : "100mm 150mm"}; margin: 0; }
+        @page eticheta-a4 { size: A4; margin: 0; }
         * { box-sizing: border-box; }
         body { margin:0; font-family: system-ui, "Segoe UI", Arial, sans-serif; background:#eceff3; }
         .et { width:100mm; height:150mm; padding:6mm; background:#fff; page-break-after:always; break-after:page;
@@ -3969,13 +4056,37 @@ function register(router) {
         .et-obs { font-size:10pt; color:#444; margin-top:3mm; }
         .et-jos { margin-top:auto; text-align:center; font-size:13pt; font-weight:700; letter-spacing:.08em;
                   font-family:"Consolas","DejaVu Sans Mono",monospace; border-top:1.5pt solid #000; padding-top:2mm; }
+        /* Eticheta de ieșire: o foaie A4, citită de la distanță, lipită pe palet. */
+        .et.et-iesire { page:eticheta-a4; width:210mm; height:auto; min-height:297mm; padding:14mm 16mm 12mm; }
+        .et-iesire .et-sus { font-size:13pt; border-bottom:2.5pt solid #b3261e; padding-bottom:3mm; }
+        .et-iesire .et-destinatie { font-size:60pt; margin:10mm 0 0; line-height:1.05; }
+        .et-iesire .et-client { font-size:28pt; margin-top:5mm; }
+        .et-iesire .et-comanda { font-size:17pt; margin-top:2mm; }
+        .et-marfa { margin-top:10mm; border-top:1.2pt solid #000; }
+        .et-linie { padding:5mm 0; border-bottom:.8pt solid #999; }
+        .et-iesire .et-produs { font-size:28pt; font-weight:700; line-height:1.15; margin:0; overflow-wrap:anywhere; }
+        .et-linie-jos { display:flex; justify-content:space-between; align-items:flex-end; gap:8mm; margin-top:4mm; }
+        .et-cant { font-size:30pt; font-weight:800; white-space:nowrap; }
+        .et-cod-produs { text-align:right; }
+        /* inline-block, NU block: pe o foaie cu nume („page:”), Chrome rupe pagina
+           înaintea fiecărui SVG de tip block — o etichetă ieșea pe trei foi A4. */
+        .et-cod-produs .cod-bare, .et-jos-cod .cod-bare { display:inline-block; vertical-align:bottom; }
+        .et-cod-titlu { font-size:9pt; color:#555; letter-spacing:.08em; text-transform:uppercase; font-family:system-ui,"Segoe UI",Arial,sans-serif; font-weight:600; margin-bottom:1mm; }
+        .et-marfa-cateva .et-produs { font-size:20pt; }
+        .et-marfa-cateva .et-cant { font-size:22pt; }
+        .et-marfa-multe .et-linie { padding:2.5mm 0; }
+        .et-marfa-multe .et-produs { font-size:14pt; }
+        .et-marfa-multe .et-cant { font-size:15pt; }
+        .et-iesire .et-tab { font-size:15pt; margin-top:7mm; }
+        .et-iesire .et-tab td { padding:2.5mm 0; }
+        .et-iesire .et-obs { font-size:14pt; margin-top:5mm; }
+        .et-jos-cod { border-top:2pt solid #000; padding-top:4mm; margin-top:auto; letter-spacing:0; }
+        .et-cod-palet { font-size:24pt; font-weight:800; letter-spacing:.12em; margin-top:2mm; }
         .bara { text-align:center; padding:10px; background:#fff; border-bottom:1px solid #ccc; font-family:system-ui,sans-serif; }
         @media print { .bara { display:none; } .et { border:0; margin:0; } body { background:#fff; } }
       </style></head><body>
       <div class="bara">
-        <strong>${paleti.length} etichet${paleti.length === 1 ? "ă" : "e"}</strong> de 100 × 150 mm${
-          [...hi.keys()].length ? " · ieșire" : ""
-        } —
+        <strong>${esc(descriere)}</strong> —
         <button onclick="window.print()">Tipărește</button>
         <a href="/stocuri/ct-park">înapoi la depozit</a>
       </div>
