@@ -20,6 +20,15 @@ const nr = (v) => {
 // inapoi la folia stretch.
 const inapoi = (f) => (Number(f) ? "?familie=" + Number(f) : "");
 
+// Bucata de cod a unei valori, cum se vede în Configurări. Goală e voie doar
+// la „Nepersonalizată" (vezi lib/cod-familii.js) — și trebuie să se vadă că e
+// goală cu intenție, nu un <code></code> gol pe care nu-l observă nimeni.
+const bucataAfisata = (v) =>
+  C.curat(v.cod) ? `<code>${esc(v.cod)}</code>` : '<span class="badge">nimic în cod</span>';
+// Unitatea de măsură pe care o dă valoarea produsului (hârtia: cutie / top).
+const umAfisata = (v) =>
+  v.um != null && String(v.um).trim() ? ` <span class="badge">UM ${esc(String(v.um).trim())}</span>` : "";
+
 function subnav(activ) {
   const linkuri = [
     ["/configurari/date", "Date importate"],
@@ -101,10 +110,10 @@ async function seed() {
         .catch(() => null);
       if (!r) continue;
       let k = 0;
-      for (const [valoare, cod] of valori || []) {
+      for (const [valoare, cod, umValoare] of valori || []) {
         await db
-          .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)")
-          .run(Number(r.lastInsertRowid), valoare, cod, ++k);
+          .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine, um) VALUES (?,?,?,?,?)")
+          .run(Number(r.lastInsertRowid), valoare, cod, ++k, umValoare || null);
       }
     }
   }
@@ -127,7 +136,7 @@ function register(router) {
       c.fel === "numar" ? `număr${c.um ? " (" + esc(c.um) + ")" : ""}` : "listă",
       c.fel === "numar"
         ? `${c.min_val != null ? nr(c.min_val) : "—"} … ${c.max_val != null ? nr(c.max_val) : "—"}`
-        : (c.valori || []).map((v) => `<code>${esc(v.cod)}</code> ${esc(v.valoare)}`).join("<br>") || "—",
+        : (c.valori || []).map((v) => `${bucataAfisata(v)} ${esc(v.valoare)}${umAfisata(v)}`).join("<br>") || "—",
       c.in_cod ? '<span class="badge verde">în cod</span>' : '<span class="badge">doar în denumire</span>',
       nr(c.ordine),
       c.fel === "numar" ? (nr(c.cifre) ? nr(c.cifre) + " cifre" : '<span class="badge rosu">lungime liberă</span>') : "—",
@@ -288,7 +297,9 @@ function register(router) {
                d.innerHTML =
                  '<span class="nr-valoare">' + i + '.</span>' +
                  '<input name="valoare[]" placeholder="Verde" autocomplete="off">' +
-                 '<input name="cod[]" placeholder="V" maxlength="8" autocomplete="off" class="cod-valoare">';
+                 '<input name="cod[]" placeholder="V" maxlength="8" autocomplete="off" class="cod-valoare">' +
+                 '<input name="um[]" placeholder="UM (opțional)" maxlength="12" autocomplete="off" class="um-valoare"' +
+                 ' title="Unitatea de măsură pe care o primește produsul făcut din valoarea asta — ex. cutie, top. Gol = ce scrie omul la produs.">';
                return d;
              }
              function faRanduriValori() {
@@ -297,7 +308,7 @@ function register(router) {
                // Ce-a scris omul deja nu se pierde cand mareste numarul.
                var vechi = [].slice.call(gazda.querySelectorAll(".rand-valoare")).map(function (r) {
                  var i = r.querySelectorAll("input");
-                 return [i[0].value, i[1].value];
+                 return [i[0].value, i[1].value, i[2] ? i[2].value : ""];
                });
                gazda.innerHTML = "";
                for (var i = 0; i < cate; i++) {
@@ -306,6 +317,7 @@ function register(router) {
                    var inp = r.querySelectorAll("input");
                    inp[0].value = vechi[i][0];
                    inp[1].value = vechi[i][1];
+                   inp[2].value = vechi[i][2];
                  }
                  gazda.appendChild(r);
                }
@@ -319,20 +331,22 @@ function register(router) {
                .rand-valoare .nr-valoare { width:22px; text-align:right; color:var(--text-muted); font-size:12px; }
                .rand-valoare input { flex:1 1 auto; }
                .rand-valoare .cod-valoare { flex:0 0 120px; text-transform:uppercase; }
+               .rand-valoare .um-valoare { flex:0 0 120px; }
                @media (max-width: 760px) {
                  .rand-valoare { flex-wrap:wrap; }
-                 .rand-valoare .cod-valoare { flex:1 1 100px; }
+                 .rand-valoare .cod-valoare, .rand-valoare .um-valoare { flex:1 1 100px; }
                }
              </style>
              ${table(
-               ["Caracteristică", "Valoare", "Cod", ""],
+               ["Caracteristică", "Valoare", "Cod", "UM produs", ""],
                car
                  .filter((c) => c.fel === "lista")
                  .flatMap((c) =>
                    (c.valori || []).map((v) => [
                      esc(c.nume),
                      esc(v.valoare),
-                     `<code>${esc(v.cod)}</code>`,
+                     bucataAfisata(v),
+                     v.um != null && String(v.um).trim() ? esc(String(v.um).trim()) : "—",
                      `<form method="post" action="${CALE}/valoare/${v.id}/sterge" class="inline-form">
                         <button class="link-btn danger" type="submit">Șterge</button></form>`,
                    ])
@@ -465,13 +479,18 @@ function register(router) {
     const lista = [];
     const valori = [].concat(b["valoare[]"] === undefined ? (b.valoare === undefined ? [] : [b.valoare]) : b["valoare[]"]);
     const coduri = [].concat(b["cod[]"] === undefined ? (b.cod === undefined ? [] : [b.cod]) : b["cod[]"]);
+    // UM-ul e opțional și vine abia de la 03.11.2026 (hârtia: cutie / top).
+    // O pagină veche, deschisă de dinainte, nu-l trimite deloc — atunci rămâne
+    // gol, nu se mută UM-ul unui rând pe altul.
+    const umuri = [].concat(b["um[]"] === undefined ? [] : b["um[]"]);
     for (let i = 0; i < valori.length; i++) {
       const valoare = String(valori[i] || "").trim();
       const cod = C.curat(coduri[i]);
+      const um = String(umuri.length === valori.length ? umuri[i] || "" : "").trim().slice(0, 12) || null;
       // Rândul gol de tot se sare fără zgomot: omul a cerut zece rânduri și a
       // completat șapte.
       if (!valoare && !cod) continue;
-      lista.push({ valoare, cod });
+      lista.push({ valoare, cod, um });
     }
     if (!lista.length) return redirect(ctx.res, CALE + inapoi(b.familie_id));
 
@@ -501,8 +520,8 @@ function register(router) {
         continue;
       }
       await db
-        .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine) VALUES (?,?,?,?)")
-        .run(cid, v.valoare, v.cod, ++ordine);
+        .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine, um) VALUES (?,?,?,?,?)")
+        .run(cid, v.valoare, v.cod, ++ordine, v.um);
       codLuat.add(v.cod);
       numeLuat.add(C.curat(v.valoare));
       scrise++;
@@ -625,6 +644,13 @@ function register(router) {
               if (x.exista) m.push("EXISTĂ DEJA: " + x.exista.denumire + " (id " + x.exista.id + ")");
               if (x.ambiguu) m.push("numerele n-au lungime fixă — codul se poate lovi de altul");
               av.textContent = m.join(" · ");
+              // Unitatea dată de caracteristici (hârtia: cutie / top) se vede
+              // în căsuță și nu se poate schimba — oricum la salvare câștigă ea.
+              var umIn = f.querySelector('input[name="unitate_masura"]');
+              if (umIn) {
+                if (x.um) { umIn.value = x.um; umIn.readOnly = true; umIn.title = "Vine din caracteristicile alese"; }
+                else if (umIn.readOnly) { umIn.readOnly = false; umIn.value = "buc"; umIn.title = ""; }
+              }
               document.getElementById("btn-salveaza").disabled = !x.ok || !!x.exista;
             })
             .catch(function () {});
@@ -684,12 +710,17 @@ function register(router) {
 // ar uita mai devreme sau mai târziu `cod_generat` sau caracteristicile, iar
 // produsul ar intra în sistem fără codul după care îl caută toată lumea.
 async function scrieProdusul(r, familieId, { um, pret, stoc_minim } = {}) {
+  // Unitatea dată de o valoare aleasă bate ce scrie în căsuță. La hârtie,
+  // căsuța pornește cu „buc", iar o cutie scrisă „buc" ar arăta pe factură ca
+  // o bucată, nu ca cinci topuri. Unde nicio valoare nu dă unitate (toate
+  // celelalte familii), rămâne ce a scris omul.
+  const unitate = String((r && r.um) || um || "buc").trim() || "buc";
   const ins = await db
     .prepare(
       `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id)
        VALUES (?,?,?,?,?,?,?) RETURNING id`
     )
-    .run(r.cod, r.cod, r.denumire, String(um || "buc"), Number(pret) || 0, Number(stoc_minim) || 0, familieId || null);
+    .run(r.cod, r.cod, r.denumire, unitate, Number(pret) || 0, Number(stoc_minim) || 0, familieId || null);
   const id = Number(ins.lastInsertRowid);
   for (const buc of r.bucati_toate) {
     await db
@@ -708,10 +739,14 @@ async function scrieProdusul(r, familieId, { um, pret, stoc_minim } = {}) {
 // lipite aici, nu lăsate pe seama fiecărui ecran în parte.
 async function produsulAlegerilor(alegeri, familieId, extra = {}) {
   const r = await genereaza(alegeri, familieId);
-  if (r.exista) return { r, id: Number(r.exista.id), creat: false };
   // Un produs pe jumătate configurat n-are voie să intre în nomenclator: ar
   // rămâne acolo cu un cod scurt care se lovește de al altuia.
+  //
+  // Și nici să cadă pe unul existent: banda fără „Personalizare" aleasă dă
+  // codul benzii simple (vezi sePoateComanda din lib/comanda-config.js), deci
+  // verificarea de complet vine ÎNAINTEA căutării, nu după.
   if (!r.ok) return { r, id: null, creat: false };
+  if (r.exista) return { r, id: Number(r.exista.id), creat: false };
   const scris = await scrieProdusul(r, familieId, extra);
   return { r, id: scris.id, creat: true };
 }

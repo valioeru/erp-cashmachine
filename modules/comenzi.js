@@ -737,7 +737,7 @@ function lineRowsScript(produse, familii, eAdmin) {
           }
           rand.querySelector('input[name="produs_id[]"]').value = d.id;
           rand.querySelector('.cauta-produs').value = (d.cod ? d.cod + ' — ' : '') + d.denumire;
-          if (umInput && !umInput.value && d.um) umInput.value = d.um;
+          if (umInput && d.um && (d.umFix || !umInput.value)) umInput.value = d.um;
           trConfig.remove();
           var cant = rand.querySelector('input[name="cantitate[]"]');
           if (cant && !cant.value) cant.focus();
@@ -1258,6 +1258,10 @@ function register(router) {
       cod: p ? p.cod || p.cod_generat || "" : r.cod,
       denumire: p ? p.denumire : r.denumire,
       um: p ? p.unitate_masura || "" : "",
+      // Unitatea vine din caracteristici (hârtia: „Cutie (5 topuri)" sau
+      // „Top"), deci trece peste ce scrisese agentul pe linie: 10 „cutie" pe
+      // produsul „Top" ar fi însemnat 10 topuri vândute la preț de cutie.
+      umFix: Boolean(r && r.um),
       pret: p ? Number(p.pret_vanzare || 0) : 0,
       categorie: p ? p.categorie || "" : "",
     });
