@@ -931,7 +931,7 @@ function register(router) {
   async function facturaPentruSmartBill(id) {
     return await db
       .prepare(
-        `SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa, p.email,
+        `SELECT f.*, p.nume AS partener_nume, p.cui, p.reg_com, p.adresa, p.email,
                 p.tara, p.judet, p.localitate
            FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`
       )

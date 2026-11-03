@@ -53,7 +53,7 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
   const curate = AV.agrega(linii);
   if (!curate.length) throw new Error("Avizul n-are nicio linie cu produs și cantitate.");
   const p = nr(partenerId)
-    ? await db.prepare("SELECT id, nume, cui, adresa, judet, localitate, tara FROM parteneri WHERE id = ?").get(nr(partenerId))
+    ? await db.prepare("SELECT id, nume, cui, reg_com, adresa, judet, localitate, tara FROM parteneri WHERE id = ?").get(nr(partenerId))
     : null;
   if (!p) throw new Error("Clientul avizului nu există în ERP.");
 
@@ -73,9 +73,9 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
             WHERE cheie = 'aviz_urmator'
             RETURNING CAST(valoare AS INTEGER) - 1 AS numar
          )
-         INSERT INTO avize (serie, numar, data, partener_id, comanda_id, comanda_numar, client_nume, client_cui, client_adresa,
+         INSERT INTO avize (serie, numar, data, partener_id, comanda_id, comanda_numar, client_nume, client_cui, client_regcom, client_adresa,
                             furnizor, sursa, delegat, mijloc_transport, observatii, creat_de, creat_de_id)
-         SELECT ?, nr.numar, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM nr
+         SELECT ?, nr.numar, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM nr
          RETURNING id, serie, numar`
       )
       .get(
@@ -87,6 +87,7 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
         String(comandaNumar || "").trim() || null,
         p.nume,
         p.cui || null,
+        String(p.reg_com || "").trim() || null,
         AV.adresaClient(p) || null,
         JSON.stringify(AV.FURNIZOR),
         sursa === "depozit" ? "depozit" : "manual",

@@ -169,10 +169,19 @@ function register(router) {
                   href="/parteneri/export.xlsx?tip=${encodeURIComponent(tip)}${qs}"
                   title="Descarcă în Excel toți cei ${randuri.length} parteneri din filtrul curent, nu doar primii 300 de pe ecran. Doar administratorii văd butonul.">
                  ↓ Export Excel
-               </a>`
+               </a>
+               <form method="post" action="/parteneri/reg-com-anaf" class="inline-form"
+                     onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Se întreabă ANAF…'">
+                 <button class="btn secondary" type="submit"
+                   title="Ia de la ANAF, după CUI, Nr. Reg. Com. pentru toți partenerii români care nu-l au încă. Ce e deja scris nu se schimbă.">
+                   Completează Reg. Com. din ANAF
+                 </button>
+               </form>`
             : ""
         }
       </div>
+      ${ctx.query.ok ? `<div class="flash">${esc(String(ctx.query.ok))}</div>` : ""}
+      ${ctx.query.eroare ? `<p style="color:var(--danger);max-width:820px">${esc(String(ctx.query.eroare))}</p>` : ""}
       ${
         firmeGrup.length > 1
           ? `<div class="toolbar" style="flex-wrap:wrap;gap:6px">
@@ -301,6 +310,58 @@ function register(router) {
     send(ctx.res, 200, buf, XLS.antete(`${eticheta}-cash-machine-${acum.slice(0, 10)}`, buf.length));
   });
 
+  // Nr. Reg. Com. de la ANAF, pentru toți partenerii români care nu-l au.
+  //
+  // Vali, 03.11.2026: „fă și Reg. Com. pe client și urcă tot din SmartBill,
+  // dacă poți — inclusiv pentru facturi." SmartBill nu dă lista de clienți
+  // prin API (vezi lib/anaf.js), ANAF da — și e sursa oficială.
+  //
+  // Ce e deja scris nu se rescrie: un număr pus de mână în fișă e o decizie a
+  // cuiva. Doar adminul pornește completarea: scrie în fișele tuturor.
+  // Se înregistrează înaintea CRUD-ului, din același motiv ca exportul.
+  router.post("/parteneri/reg-com-anaf", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const inapoi = (camp, m) => redirect(ctx.res, `/parteneri?${camp}=${encodeURIComponent(m)}`);
+    if (!poateExporta(ctx.user)) return inapoi("eroare", "Doar administratorul poate completa Reg. Com. din ANAF.");
+    const ANAF = require("../lib/anaf");
+    const toti = await db
+      .prepare("SELECT id, cui FROM parteneri WHERE (reg_com IS NULL OR TRIM(reg_com) = '') AND cui IS NOT NULL AND TRIM(cui) <> ''")
+      .all();
+    const deIntrebat = toti.filter((p) => ANAF.cuiNumeric(p.cui));
+    const straini = toti.length - deIntrebat.length;
+    if (!deIntrebat.length) return inapoi("ok", "Toți partenerii români cu CUI au deja Nr. Reg. Com.");
+    let r;
+    try {
+      r = await ANAF.cauta(deIntrebat.map((p) => p.cui));
+    } catch (e) {
+      console.error("[parteneri] ANAF:", e.message);
+      return inapoi("eroare", "Nu s-a putut întreba ANAF: " + e.message + " Nu s-a schimbat nimic.");
+    }
+    let scrise = 0;
+    let faraNumar = 0;
+    for (const p of deIntrebat) {
+      const g = r.gasite.get(ANAF.cuiNumeric(p.cui));
+      if (!g) continue;
+      if (!g.nrRegCom || g.nrRegCom === "-") {
+        faraNumar++;
+        continue;
+      }
+      // „AND reg_com gol" și aici: dacă cineva l-a scris de mână între timp,
+      // rămâne al lui.
+      await db.prepare("UPDATE parteneri SET reg_com = ? WHERE id = ? AND (reg_com IS NULL OR TRIM(reg_com) = '')").run(g.nrRegCom, p.id);
+      scrise++;
+    }
+    const negasiti = deIntrebat.length - scrise - faraNumar;
+    console.log(`[parteneri] Reg. Com. din ANAF: ${scrise} scrise, ${faraNumar} fără număr, ${negasiti} negăsiți, ${straini} cu CUI străin/neobișnuit — de ${ctx.user.nume}`);
+    return inapoi(
+      "ok",
+      `Nr. Reg. Com. completat de la ANAF la ${scrise} ${scrise === 1 ? "partener" : "parteneri"}.` +
+        (faraNumar ? ` ${faraNumar} n-au număr la ANAF (PFA, asociații, instituții).` : "") +
+        (negasiti ? ` ${negasiti} nu au fost găsiți după CUI.` : "") +
+        (straini ? ` ${straini} au CUI străin sau neobișnuit și n-au fost întrebați.` : "")
+    );
+  });
+
   registerCrud(router, {
     path: "/parteneri",
     table: "parteneri",
@@ -321,6 +382,7 @@ function register(router) {
       },
       { name: "nume", label: "Nume / denumire firmă", required: true },
       { name: "cui", label: "CUI / CIF" },
+      { name: "reg_com", label: "Nr. Reg. Com. (ex. J40/1234/2015) — se completează și singur din ANAF" },
       { name: "email", label: "Email", type: "email" },
       { name: "telefon", label: "Telefon" },
       { name: "persoana_contact", label: "Persoană de contact" },
@@ -551,6 +613,7 @@ function register(router) {
           <div><div class="k">Tip</div>${esc(TIP_LABEL[partener.tip] || partener.tip)}</div>
           <div><div class="k">Stare</div>${esc(STARE_LABEL[partener.stare] || partener.stare || "—")}</div>
           <div><div class="k">CUI</div>${esc(partener.cui) || "—"}</div>
+          <div><div class="k">Nr. Reg. Com.</div>${esc(partener.reg_com) || "—"}</div>
           <div><div class="k">Email</div>${esc(partener.email) || "—"}</div>
           <div><div class="k">Telefon</div>${esc(partener.telefon) || "—"}</div>
           <div><div class="k">Persoană de contact</div>${esc(partener.persoana_contact) || "—"}</div>
