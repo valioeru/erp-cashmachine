@@ -446,6 +446,10 @@ function subtabs(activ, user) {
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
     ["/stocuri/ct-park/muta", "Mută marfă"],
     ["/stocuri/ct-park/iesire", "Ieșire marfă"],
+    // Avizele se emit de aici (ieșirea pe comandă) și se fac și manual. Le vede
+    // doar cine are bifa „Avize” — taburile se filtrează după acces, mai jos.
+    ["/avize", "Avize"],
+    ["/avize/nou", "Aviz nou"],
     ["/stocuri/ct-park/stoc", "Stoc la zi"],
     ["/stocuri/ct-park/paleti", "Paleți în depozit"],
     ["/stocuri/ct-park/configurare", "Configurare rânduri"],
