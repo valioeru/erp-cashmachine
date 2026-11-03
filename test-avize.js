@@ -193,6 +193,18 @@ function refaContor() {
   egal("agentul de vânzări nu le are din oficiu", auth.poateAccesa({ rol: "vanzari" }, "/avize"), false);
   egal("bifa Avize apare la utilizatori", auth.ZONE.some((z) => z.cheie === "/avize" && z.eticheta === "Avize"), true);
 
+  // Gabi intră în Depozit prin CT-Park, unde bara de taburi e a lui CT-Park:
+  // „Avize” trebuie să fie acolo, lângă „Ieșire marfă” — dar numai cu bifa.
+  let rt = await cer("get", "/stocuri/ct-park/iesire", { user: GABI });
+  contine("în CT-Park, cine are bifa vede taburile Avize și Aviz nou", rt.corp, ['href="/avize" class="subnav-link', 'href="/avize/nou" class="subnav-link']);
+  rt = await cer("get", "/stocuri/ct-park/iesire", { user: { id: 97603, nume: "Fără bifă", rol: "depozit", sectiuni: "/depozit" } });
+  contine("…fără bifă, taburile nu apar", rt.corp, [], ['href="/avize"', 'href="/avize/nou"']);
+
+  // „Pune linkul în comenzi, ăla cu avize" (Vali, 03.11.2026).
+  const R = require(path.join(RAD, "lib", "render.js"));
+  contine("în Comenzi, linkul Avize apare cu bifa", R.subnavComenzi("/comenzi", GABI), ['href="/avize"']);
+  contine("…și lipsește fără bifă", R.subnavComenzi("/comenzi", { rol: "vanzari" }), [], ['href="/avize"']);
+
   // --- avizul manual ---------------------------------------------------------------------
   let r = await cer("get", "/avize/nou", { user: GABI });
   contine("formularul de aviz manual", r.corp, ["Aviz de însoțire nou", 'name="produs[]"', 'name="cantitate[]"', 'name="comanda_numar"', "TST 5003", "AVZ-1 — Cutii tip III 250X150X50 TEST", 'data-um="kg"'], ["pret_unitar", "Preț"]);
