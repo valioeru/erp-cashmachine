@@ -5,8 +5,11 @@
 //   • o săptămână întârziere = GALBEN, mai mult = ROȘU, la zi = VERDE;
 //   • agentul poate bifa „notificare automată" pe o factură (email zilnic,
 //     adaptat la cât de veche e restanța) sau poate trimite manual;
-//   • pentru un client ROȘU agentul nu mai poate plasa comenzi până nu
-//     redevine verde;
+//   • un client cu facturi întârziate NU e blocat la comenzi: comanda se
+//     plasează, dar spune limpede că are întârzieri la plată. Vali,
+//     03.11.2026: „Nu mai bloca comenzile pentru clienții întârziați, doar
+//     menționează că au întârzieri la plată.” (Până atunci, un client ROȘU
+//     nu primea comenzi de la agent până nu redevenea verde.);
 //   • se văd și facturile care URMEAZĂ să fie scadente, iar cele cu scadență
 //     în următoarele 3 zile pot primi o notificare politicoasă;
 //   • dacă un client stă ROȘU cu o factură de 3 luni, toate notificările pe
@@ -45,7 +48,7 @@ function azi() {
 // tot istoricul, în ziua în care cineva configurează contul de email ar pleca
 // o sută de somații de plată către clienți care au achitat demult.
 //
-// Așa că notificările automate și blocarea comenzilor se aplică DOAR
+// Așa că notificările automate și mențiunea de pe comenzi se aplică DOAR
 // facturilor emise de la data asta încolo. Implicit e ziua în care s-a
 // pornit scadențarul; adminul o poate muta înapoi când e sigur pe date.
 let _start;
@@ -159,11 +162,12 @@ async function facturiCuSold(agentId) {
 function stariDinFacturi(facturi) {
   const m = new Map();
   for (const f of facturi) {
-    const c = m.get(f.partener_id) || { partener_id: f.partener_id, nume: f.client, zileMax: 0, sold: 0, soldNeverificat: 0, stare: "verde", notificari_oprite: f.notificari_oprite };
+    const c = m.get(f.partener_id) || { partener_id: f.partener_id, nume: f.client, zileMax: 0, sold: 0, soldIntarziat: 0, soldNeverificat: 0, stare: "verde", notificari_oprite: f.notificari_oprite };
     if (f.neverificat) {
       c.soldNeverificat += f.sold;
     } else {
       c.sold += f.sold;
+      if (f.zile > 0) c.soldIntarziat += f.sold;
       if (f.zile > c.zileMax) c.zileMax = f.zile;
     }
     m.set(f.partener_id, c);
@@ -176,8 +180,8 @@ function stariDinFacturi(facturi) {
   return m;
 }
 
-// Starea unui singur client — folosită de comenzi/oferte ca să blocheze
-// comenzile noi pe clienții roșii.
+// Starea unui singur client — folosită de comenzi/oferte ca să scrie pe
+// comandă că acel client are întârzieri la plată.
 async function stareClient(partenerId) {
   const f = await db
     .prepare(
@@ -195,31 +199,54 @@ async function stareClient(partenerId) {
   const deLa = await dataStart();
   let zileMax = 0;
   let sold = 0;
+  let soldIntarziat = 0;
   for (const r of f) {
     const emisa = r.data_emiterii ? String(r.data_emiterii).slice(0, 10) : "";
-    if (deLa && emisa && emisa < deLa) continue; // sold neverificat, nu blocăm pe el
+    if (deLa && emisa && emisa < deLa) continue; // sold neverificat, nu-l trecem ca întârziere
     const scad = scadentaEfectiva(r);
     const z = scad ? zileIntre(scad, aziStr) : 0;
     if (z > zileMax) zileMax = z;
-    sold += Number(r.total) - Number(r.platit);
+    const rest = Number(r.total) - Number(r.platit);
+    sold += rest;
+    if (z > 0) soldIntarziat += rest;
   }
-  return { stare: culoare(zileMax), zileMax, sold, blocatAutomat: zileMax >= ZILE_BLOCARE_TOTALA };
+  return { stare: culoare(zileMax), zileMax, sold, soldIntarziat, blocatAutomat: zileMax >= ZILE_BLOCARE_TOTALA };
 }
 
-// Poate agentul să comande pentru clientul ăsta? Adminul poate oricând —
-// el e cel care decide să-și asume riscul.
+// Textul care stă pe comandă — și lângă client, când e ales în formular — în
+// locul blocării de dinainte. Contează doar facturile trecute de scadență: o
+// factură care încă nu e scadentă nu e o întârziere, oricât de mare ar fi.
+// De-aia suma e `soldIntarziat`, nu tot soldul clientului.
+function mentiuneIntarziere(s) {
+  if (!s || !(Number(s.zileMax) > 0) || !(Number(s.soldIntarziat) > 0.5)) return null;
+  const z = Number(s.zileMax);
+  return `Clientul are întârzieri la plată: ${money(s.soldIntarziat)} cu scadența depășită, cea mai veche factură întârziată de ${z} ${z === 1 ? "zi" : "zile"}.`;
+}
+
+// Mențiunea pentru toți clienții odată, cu id-ul lor — pentru căsuța de
+// alegere a clientului, care are toată lista în pagină. Un singur query, nu
+// câte unul pe client.
+async function mentiuniClienti() {
+  const stari = stariDinFacturi(await facturiCuSold());
+  const m = new Map();
+  for (const c of stari.values()) {
+    const t = mentiuneIntarziere(c);
+    if (t) m.set(Number(c.partener_id), t);
+  }
+  return m;
+}
+
+// Poate agentul să comande pentru clientul ăsta? Da, oricând.
+//
+// Până pe 03.11.2026 un client ROȘU (o factură întârziată de peste 7 zile)
+// era blocat: agentul primea „Comandă blocată” și trebuia să-l cheme pe
+// admin. Vali: „Nu mai bloca comenzile pentru clienții întârziați, doar
+// menționează că au întârzieri la plată.” Răspunsul e deci mereu da, iar
+// `mentiune` spune, când e cazul, ce trebuie să știe cine plasează comanda.
 async function poateComanda(user, partenerId) {
   if (!user) return { ok: false, motiv: "Nu ești autentificat." };
-  if (user.rol === "admin") return { ok: true };
   const s = await stareClient(partenerId);
-  if (s.stare === "rosu") {
-    return {
-      ok: false,
-      motiv: `Clientul are ${money(s.sold)} restanți, cu o factură întârziată de ${s.zileMax} zile. Comenzile se deblochează când soldul restant e adus la zi.`,
-      stare: s,
-    };
-  }
-  return { ok: true, stare: s };
+  return { ok: true, stare: s, mentiune: mentiuneIntarziere(s) };
 }
 
 // ------------------------------------------------------------------
@@ -261,8 +288,11 @@ function compuneMesaj(f, firma) {
       corp:
         `Bună ziua,\n\nFactura ${nrDoc}, în valoare de ${suma}, este neîncasată de ${f.zile} zile ` +
         `(scadentă pe ${scad}).\n\n` +
-        `Vă rugăm să ne comunicați data la care se face plata. Până la stingerea restanței, livrările noi către ` +
-        `dumneavoastră sunt suspendate.\n\nDacă există o problemă cu factura, spuneți-ne — o rezolvăm.` +
+        // Aici scria „Până la stingerea restanței, livrările noi către
+        // dumneavoastră sunt suspendate.” Era adevărat cât ERP-ul bloca
+        // comenzile clienților roșii; de pe 03.11.2026 nu le mai blochează,
+        // deci fraza ar fi promis clientului ceva ce nu se întâmplă.
+        `Vă rugăm să ne comunicați data la care se face plata.\n\nDacă există o problemă cu factura, spuneți-ne — o rezolvăm.` +
         semnatura,
     };
   }
@@ -463,8 +493,8 @@ async function blocScadente(user, agentId) {
   const clientiRosii = [...stari.values()].filter((c) => c.stare === "rosu");
   const avertisment = clientiRosii.length
     ? `<p style="margin:6px 0 12px;font-size:13px">
-         <span class="badge rosu">${clientiRosii.length} clienți blocați</span>
-         Pentru ei nu se pot plasa comenzi noi până la stingerea restanței:
+         <span class="badge rosu">${clientiRosii.length} ${clientiRosii.length === 1 ? "client cu restanță" : "clienți cu restanță"}</span>
+         Comenzile lor se plasează, dar pe comandă scrie că au întârzieri la plată:
          ${clientiRosii.slice(0, 8).map((c) => `<a href="/parteneri/${c.partener_id}">${esc(c.nume)}</a>`).join(", ")}${clientiRosii.length > 8 ? " …" : ""}
        </p>`
     : "";
@@ -532,7 +562,7 @@ async function blocScadente(user, agentId) {
              Facturi emise înainte de <strong>${esc(deLa || "—")}</strong>, data de la care e activ scadențarul.
              Din SmartBill au venit 3.000 de facturi și doar 1.400 de încasări, deci multe dintre astea apar
              neîncasate pentru că plata lor n-a fost importată, nu pentru că n-ar fi fost plătită.
-             <strong>Nu generează notificări automate și nu blochează comenzi.</strong>
+             <strong>Nu generează notificări automate și nu apar ca întârziere pe comenzi.</strong>
              Se pot notifica manual, una câte una, după ce verifici soldul. Când ai încredere în date,
              adminul poate muta data de start înapoi și intră și ele în regimul normal.
            </p>
@@ -580,7 +610,7 @@ function register(router) {
               <span style="font-size:13px">Scadențarul e activ pentru facturi emise de la:</span>
               <input type="date" name="de_la" value="${esc(await dataStart())}">
               <button class="btn secondary small" type="submit">Salvează</button>
-              <span style="font-size:12px;color:var(--text-muted)">Facturile mai vechi rămân vizibile, dar nu trimit notificări automate și nu blochează comenzi.</span>
+              <span style="font-size:12px;color:var(--text-muted)">Facturile mai vechi rămân vizibile, dar nu trimit notificări automate și nu apar ca întârziere pe comenzi.</span>
             </form>`
           : ""
       }
@@ -651,6 +681,8 @@ module.exports = {
   stariDinFacturi,
   stareClient,
   poateComanda,
+  mentiuneIntarziere,
+  mentiuniClienti,
   ruleazaNotificariAutomate,
   compuneMesaj,
   culoare,

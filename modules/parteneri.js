@@ -528,7 +528,7 @@ function register(router) {
           <span>Încasări:</span>
           <span class="badge ${st.stare}">${esc(eticheta)}</span>
           ${st.sold > 0.5 ? `<span>sold restant <strong>${money(st.sold)}</strong>${st.zileMax > 0 ? `, cea mai veche factură de ${st.zileMax} zile` : ""}</span>` : "<span>fără sold restant</span>"}
-          ${st.stare === "rosu" ? `<span style="color:var(--danger)">agenții nu pot plasa comenzi pentru el</span>` : ""}
+          ${st.stare === "rosu" ? `<span style="color:var(--danger)">are întârzieri la plată — scrie și pe comenzile lui</span>` : ""}
           ${
             ctx.user && ctx.user.rol === "admin"
               ? `<form method="post" action="/parteneri/${partener.id}/notificari" class="inline-form">

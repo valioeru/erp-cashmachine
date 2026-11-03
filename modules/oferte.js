@@ -259,6 +259,7 @@ function register(router) {
     const body = `
       ${subnavCrm("/oferte", ctx.user)}
       ${ctx.query.eroare ? `<p style="color:var(--danger);max-width:640px">${esc(ctx.query.eroare)}</p>` : ""}
+      ${ctx.query.info ? `<p class="mentiune-oferta" style="max-width:640px;font-weight:600;color:var(--danger,#b42318)">${esc(ctx.query.info)}</p>` : ""}
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">Ofertă</div><strong>${esc(o.numar || nrDoc("OF", o.id))}</strong> ${o.versiune > 1 ? `<span class="badge gri">versiunea ${o.versiune}</span>` : ""}</div>
@@ -557,17 +558,20 @@ function register(router) {
     if (ctx.body.creeaza_contract && !contractId) { contractId = await faContract(o, ctx.user); facute.push("contract"); }
     // Dacă se nasc amândouă din aceeași ofertă, comanda rămâne legată de
     // contract — altfel, peste trei luni, nimeni nu mai știe pe ce contract
-    // s-a livrat. Iar dacă clientul e pe roșu, contractul se face, comanda nu.
-    let blocat = null;
+    // s-a livrat. Clientul cu întârzieri la plată nu mai e blocat (Vali,
+    // 03.11.2026): comanda se face, iar mesajul de după spune că are întârzieri.
+    let mentiune = null;
     if (ctx.body.creeaza_comanda && !o.comanda_id) {
-      const verdict = await require("./scadente").poateComanda(ctx.user, o.partener_id);
-      if (verdict.ok) { await faComanda(o, ctx.user, contractId); facute.push("comandă"); }
-      else blocat = verdict.motiv;
+      // Doar informativ: dacă scadențarul nu se poate citi, comanda se face oricum.
+      const verdict = await require("./scadente").poateComanda(ctx.user, o.partener_id).catch(() => ({ ok: true }));
+      await faComanda(o, ctx.user, contractId);
+      facute.push("comandă");
+      mentiune = verdict.mentiune || null;
     }
     await db
       .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'oferta', ?, ?, ?)")
       .run(o.partener_id, `Ofertă ${o.numar || nrDoc("OF", o.id)} acceptată`, facute.length ? `S-au creat: ${facute.join(" și ")}` : null, ctx.user.id);
-    redirect(ctx.res, blocat ? `/oferte/${o.id}?eroare=${encodeURIComponent(blocat)}` : `/oferte/${o.id}`);
+    redirect(ctx.res, mentiune ? `/oferte/${o.id}?info=${encodeURIComponent("Comanda s-a creat. " + mentiune)}` : `/oferte/${o.id}`);
   });
 
   router.post("/oferte/:id/spre-contract", async (ctx) => {
@@ -582,8 +586,8 @@ function register(router) {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const o = await db.prepare("SELECT * FROM oferte WHERE id = ?").get(ctx.params.id);
     if (!o || !poateEdita(ctx.user, o)) return redirect(ctx.res, `/oferte/${ctx.params.id}`);
-    const verdict = await require("./scadente").poateComanda(ctx.user, o.partener_id);
-    if (!verdict.ok) return redirect(ctx.res, `/oferte/${o.id}?eroare=${encodeURIComponent(verdict.motiv)}`);
+    // Fără blocare pe restanțe (Vali, 03.11.2026): pagina comenzii spune
+    // singură, sus, dacă clientul are întârzieri la plată.
     const id = o.comanda_id || (await faComanda(o, ctx.user));
     redirect(ctx.res, `/comenzi/${id}`);
   });

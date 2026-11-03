@@ -1112,6 +1112,9 @@ function register(router) {
     // fiecare linie. Se citesc o singură dată și se trimit ca date, nu câte un
     // tur la server pentru fiecare linie adăugată.
     const familiiPagina = await familiiPentruFormular();
+    // Clienții cu întârzieri la plată: textul apare sub căsuță când îl alegi.
+    // Dacă scadențarul nu se poate citi, formularul merge mai departe fără.
+    const mentiuni = await require("./scadente").mentiuniClienti().catch(() => null);
     if (parteneri.length === 0 || produse.length === 0) {
       return send(
         ctx.res,
@@ -1192,7 +1195,7 @@ function register(router) {
       </div>
     </form>
     <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
-    ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
+    ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
     ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"))}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
@@ -1346,26 +1349,12 @@ function register(router) {
       });
     }
 
-    // Client pe roșu = fără comenzi noi de la agent. Adminul poate trece
-    // peste, dar conștient — nu din reflex.
-    const verdict = await require("./scadente").poateComanda(ctx.user, partener_id);
-    if (!verdict.ok) {
-      return send(
-        ctx.res,
-        200,
-        layout({
-          user: ctx.user,
-          title: "Comandă blocată",
-          active: "/comenzi",
-          body: `<h1>Comandă blocată</h1>
-            <p style="color:var(--danger);max-width:640px">${esc(verdict.motiv)}</p>
-            <p style="max-width:640px;color:var(--text-muted)">Dacă e o situație pe care ai discutat-o deja cu clientul,
-              vorbește cu administratorul: el poate plasa comanda sau poate marca restanța ca rezolvată.</p>
-            <a class="btn secondary" href="/parteneri/${esc(String(partener_id))}">Vezi clientul</a>
-            <a class="btn secondary" href="/scadente">Scadențele mele</a>`,
-        })
-      );
-    }
+    // Clientul cu facturi întârziate NU mai e blocat aici. Până pe 03.11.2026
+    // un client roșu primea „Comandă blocată”; Vali: „Nu mai bloca comenzile
+    // pentru clienții întârziați, doar menționează că au întârzieri la plată.”
+    // Mențiunea apare când e ales clientul în formular și stă pe pagina
+    // comenzii cât timp restanța există — vezi `mentiuneIntarziere` din
+    // modules/scadente.js.
 
     // Cursul BNR se ÎNGHEAȚĂ pe comandă, nu se recalculează la fiecare
     // deschidere. Altfel suma în lei s-ar schimba singură în fiecare
@@ -1485,6 +1474,23 @@ function register(router) {
     const potiModifica = IST.poateEdita(ctx.user, comanda, clientFisa);
     const istoric = await citesteIstoric(comanda.id);
 
+    // Clientul are facturi trecute de scadență? Comanda nu se oprește (Vali,
+    // 03.11.2026) — doar se spune, sus, ca să știe oricine se uită pe ea.
+    // Se socotește acum, din solduri: un client care a plătit azi nu mai
+    // poartă mențiunea azi. Pe o comandă anulată n-are rost.
+    let intarziere = null;
+    if (comanda.status !== "anulata") {
+      try {
+        const sc = require("./scadente");
+        intarziere = sc.mentiuneIntarziere(await sc.stareClient(comanda.partener_id));
+      } catch (e) {
+        intarziere = null;
+      }
+    }
+    const vedeScadente = (() => {
+      try { return require("../lib/auth").poateAccesa(ctx.user, "/scadente"); } catch (e) { return false; }
+    })();
+
     const acceptaPartial = livrare.acceptaPartial(comanda);
     const potiRaspundeLivrare =
       ctx.user && (ctx.user.rol === "admin" || Number(comanda.agent_id) === Number(ctx.user.id) || ctx.user.rol === "vanzari");
@@ -1499,6 +1505,14 @@ function register(router) {
 
     const body = `
       ${baraStatus(comanda)}
+      ${
+        intarziere
+          ? `<div class="detail-box intarziere-plata" style="border-left:4px solid var(--danger,#b42318);max-width:820px;margin-bottom:12px">
+               <strong style="color:var(--danger,#b42318)">${esc(intarziere)}</strong>
+               ${vedeScadente ? `<a href="/scadente" style="margin-left:6px">Vezi scadențele</a>` : ""}
+             </div>`
+          : ""
+      }
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">Client</div>${esc(comanda.partener_nume)}</div>
@@ -1744,6 +1758,7 @@ function register(router) {
       .prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire")
       .all();
     const familiiPagina = await familiiPentruFormular();
+    const mentiuni = await require("./scadente").mentiuniClienti().catch(() => null);
 
     const liniiBaza = await db
       .prepare(
@@ -1829,7 +1844,7 @@ function register(router) {
         </div>
       </form>
       <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
-      ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
+      ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
       ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"))}`;
     send(
       ctx.res,
