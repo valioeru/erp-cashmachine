@@ -115,6 +115,10 @@ function curata() {
     q(`DELETE FROM ct_locuri WHERE rand_id = ${r}`);
     q(`DELETE FROM ct_randuri WHERE id = ${r}`);
   }
+  // Ieșirea pe comandă emite aviz (03.11.2026); avizul ține de client, deci
+  // pleacă înaintea lui.
+  q(`DELETE FROM avize_linii WHERE aviz_id IN (SELECT id FROM avize WHERE partener_id IN (SELECT id FROM parteneri WHERE nume = 'TEST-PAS Client'))`);
+  q(`DELETE FROM avize WHERE partener_id IN (SELECT id FROM parteneri WHERE nume = 'TEST-PAS Client')`);
   q(`DELETE FROM comenzi WHERE numar = 'TEST-PAS-CMD'`);
   q(`DELETE FROM parteneri WHERE nume = 'TEST-PAS Client'`);
   q(`DELETE FROM produse WHERE cod IN ('TST-PAS-1', 'TST-PAS-2')`);

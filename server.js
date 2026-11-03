@@ -25,6 +25,8 @@ require("./modules/cod-produs").register(router);
 require("./modules/produse").register(router);
 require("./modules/stocuri").register(router);
 require("./modules/inventar").register(router);
+// Înaintea lui ct-park: foaia avizului stă și la /stocuri/ct-park/aviz/:id.
+require("./modules/avize").register(router);
 require("./modules/ct-park").register(router);
 require("./modules/verificari").register(router);
 require("./modules/comenzi").register(router);
