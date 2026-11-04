@@ -30,6 +30,12 @@
 //   • Câmpurile calculate NU se scriu în bază — n-au coloană, iar un INSERT
 //     care le-ar include ar pica.
 //
+//   • PRODUSUL NOU SE FACE DIN CONFIGURATOR (04.11.2026, Vali: „codul
+//     produsului trebuie să se autogenereze conform algoritmului din
+//     configurări, nu să-l introducem noi"). Formularul lui are aceleași
+//     câmpuri ca fișa, iar „/produse/nou" duce la el. Produsele pe care se
+//     verifică lista sunt puse direct în bază, ca cele vechi, cu cod scris.
+//
 // Rulează pe PostgreSQL real, prin psql (vezi test-depozit.js pentru de ce).
 const path = require("path");
 const Module = require("module");
@@ -88,13 +94,16 @@ db.prepare = (sql) => ({
 });
 
 const produse = require(path.join(RAD, "modules", "produse.js"));
+const codProdus = require(path.join(RAD, "modules", "cod-produs.js"));
 
-// Captăm rutele și răspunsurile.
+// Captăm rutele și răspunsurile. Configuratorul întâi, ca în server.js.
 const rute = { get: {}, post: {} };
-produse.register({
+const routerTest = {
   get: (p, h) => { if (!rute.get[p]) rute.get[p] = h; },
   post: (p, h) => { if (!rute.post[p]) rute.post[p] = h; },
-});
+};
+codProdus.register(routerTest);
+produse.register(routerTest);
 const res = () => {
   const o = { cod: 0, antet: null, corp: "" };
   o.writeHead = (c, h) => { o.cod = c; o.antet = h; return o; };
@@ -128,9 +137,15 @@ function egal(eticheta, avut, asteptat) {
 }
 const rot = (v) => Math.round(Number(v) * 100) / 100;
 const PFX = "TSTNOM-";
+// Plicul AWB din configurator: Tip PA, lățime 997, lungime 996, grosime 95.
+const COD_PLIC = "PA99799695";
+function curata() {
+  exec(`DELETE FROM produse_cod_valori WHERE produs_id IN (SELECT id FROM produse WHERE cod_generat = '${COD_PLIC}' OR denumire LIKE 'TSTNOM %')`);
+  exec(`DELETE FROM produse WHERE cod LIKE '${PFX}%' OR cod_generat = '${COD_PLIC}' OR denumire LIKE 'TSTNOM %'`);
+}
 
 (async () => {
-  exec(`DELETE FROM produse WHERE cod LIKE '${PFX}%'`);
+  curata();
   exec(`DELETE FROM setari_app WHERE cheie = 'adaos_lista_implicit'`);
 
   console.log("\n1. Adaosul implicit al firmei");
@@ -141,34 +156,58 @@ const PFX = "TSTNOM-";
   await trimite("/produse/adaos", { adaos: "25" }, { user: { id: 2, rol: "agent" } });
   egal("un neadmin nu poate schimba adaosul", (await db.prepare("SELECT valoare FROM setari_app WHERE cheie='adaos_lista_implicit'").get()).valoare, "30");
 
-  console.log("\n2. Produs nou: câmpurile goale nu crapă și nu devin zero");
-  await trimite("/produse", {
-    cod: PFX + "GOL", denumire: "TST produs fara costuri", categorie: "Ambalaje", gestiune: "Depozit central",
+  console.log("\n2. Produs nou, din configurator: câmpurile goale nu crapă și nu devin zero");
+  const plic = await db.prepare("SELECT id FROM cod_familii WHERE nume = 'Plic AWB'").get();
+  bine("familia Plic AWB e în bază", !!plic, "lipsește");
+  const carPlic = plic ? await db.prepare("SELECT id, nume FROM cod_caracteristici WHERE familie_id = ?").all(Number(plic.id)) : [];
+  const cPlic = (nume) => "c_" + (carPlic.find((c) => c.nume === nume) || {}).id;
+  const rNou = await trimite("/produse/nou-cu-cod", {
+    familie: plic ? String(plic.id) : "0",
+    [cPlic("Tip")]: "Plic AWB", [cPlic("Lățime")]: "997", [cPlic("Lungime")]: "996", [cPlic("Grosime CPE")]: "95",
+    [cPlic("Buzunar documente")]: "Da",
+    denumire: "TSTNOM produs fara costuri", categorie: "Ambalaje", gestiune: "Depozit central",
     unitate_masura: "buc", pret_achizitie: "", pret_productie: "", adaos_lista: "", pret_minim: "",
     pret_vanzare: "", cota_tva: "21", stoc_minim: "",
   });
-  const gol = await db.prepare(`SELECT * FROM produse WHERE cod = ?`).get(PFX + "GOL");
-  bine("produsul s-a creat", !!gol, "lipsește");
+  const gol = await db.prepare(`SELECT * FROM produse WHERE cod_generat = ?`).get(COD_PLIC);
+  bine("produsul s-a creat și duce la fișa lui", !!gol && rNou.cod === 302 && rNou.antet.Location === "/produse/" + gol.id,
+    `${rNou.cod} ${JSON.stringify(rNou.antet)} ${rNou.corp.slice(0, 300)}`);
+  if (!gol) throw new Error("fără produsul din configurator nu are rost să continui");
+  egal("codul e cel generat", gol.cod, COD_PLIC);
+  egal("denumirea e cea scrisă", gol.denumire, "TSTNOM produs fara costuri");
   egal("pret_productie gol -> NULL", gol.pret_productie, null);
   egal("adaos_lista gol -> NULL", gol.adaos_lista, null);
   egal("pret_minim gol -> NULL", gol.pret_minim, null);
+  egal("prețul de vânzare gol -> 0", Number(gol.pret_vanzare), 0);
   egal("categoria s-a scris", gol.categorie, "Ambalaje");
   egal("gestiunea s-a scris", gol.gestiune, "Depozit central");
+  egal("TVA 21", Number(gol.cota_tva), 21);
+  egal("familia e ținută", Number(gol.cod_familie_id), Number(plic.id));
+  const carScrise = await db.prepare("SELECT nume, valoare, bucata FROM produse_cod_valori WHERE produs_id = ? ORDER BY caracteristica_id").all(Number(gol.id));
+  bine("caracteristicile stau pe produs, și cea care nu intră în cod",
+    carScrise.length === 5 && carScrise.some((c) => c.nume === "Buzunar documente" && c.valoare === "Da" && c.bucata == null),
+    JSON.stringify(carScrise));
 
   console.log("\n3. Cele trei trepte ale costului de bază");
+  // Puse direct în bază, ca produsele vechi, cu cod scris: aici se verifică
+  // lista, nu adăugarea.
   const fa = async (cod, den, camp) => {
-    await trimite("/produse", Object.assign({
-      cod: PFX + cod, denumire: den, categorie: "Folie", gestiune: "Producție", unitate_masura: "kg",
-      pret_achizitie: "", pret_productie: "", adaos_lista: "", pret_minim: "", pret_vanzare: "", cota_tva: "21", stoc_minim: "",
-    }, camp));
-    return (await db.prepare("SELECT * FROM produse WHERE cod = ?").get(PFX + cod)).id;
+    const c = Object.assign({ pret_achizitie: null, pret_productie: null, adaos_lista: null }, camp);
+    const r = await db
+      .prepare(`INSERT INTO produse (cod, denumire, categorie, gestiune, unitate_masura, pret_achizitie, pret_productie, adaos_lista, cota_tva)
+                VALUES (?,?,?,?,?,?,?,?,21) RETURNING id`)
+      .run(PFX + cod, den, "Folie", "Producție", "kg",
+           c.pret_achizitie == null ? null : Number(c.pret_achizitie),
+           c.pret_productie == null ? null : Number(c.pret_productie),
+           c.adaos_lista == null ? null : Number(c.adaos_lista));
+    return r.lastInsertRowid;
   };
   const idAch = await fa("ACH", "TST doar achizitie", { pret_achizitie: "10" });
   const idProd = await fa("PROD", "TST cu cost productie", { pret_achizitie: "10", pret_productie: "8" });
   const idRet = await fa("RET", "TST cu reteta", { pret_achizitie: "10", pret_productie: "8" });
   exec(`UPDATE produse SET cost_reteta = 6 WHERE id = ${idRet}`);
 
-  const lista = await cer("/produse", { query: { q: PFX } });
+  const lista = await cer("/produse", { query: { q: "TSTNOM" } });
   const corp = lista.corp;
   bine("pagina se randează", corp.length > 500, `lungime ${corp.length}`);
 
@@ -180,7 +219,7 @@ const PFX = "TSTNOM-";
   bine("sursa costului e scrisă în listă", corp.includes("rețetă") && corp.includes("producție") && corp.includes("achiziție"));
 
   console.log("\n4. Fără cost nu există preț de listă");
-  const randGol = corp.split("TST produs fara costuri")[1] || "";
+  const randGol = corp.split("TSTNOM produs fara costuri")[1] || "";
   bine("produsul fără cost nu primește un preț inventat", !/\b0,00\b.*listă/i.test(randGol.slice(0, 400)));
   bine("se afișează liniuță, nu zero", randGol.slice(0, 600).includes("—"));
 
@@ -204,9 +243,9 @@ const PFX = "TSTNOM-";
   console.log("\n7. Căutarea și filtrele");
   const cCaut = (await cer("/produse", { query: { q: "cu reteta" } })).corp;
   bine("căutarea după denumire găsește produsul", cCaut.includes("TST cu reteta"));
-  bine("și nu-l aduce pe cel fără legătură", !cCaut.includes("TST produs fara costuri"));
+  bine("și nu-l aduce pe cel fără legătură", !cCaut.includes("TSTNOM produs fara costuri"));
   const cFiltru = (await cer("/produse", { query: { categorie: "Ambalaje" } })).corp;
-  bine("filtrul pe categorie aduce Ambalaje", cFiltru.includes("TST produs fara costuri"));
+  bine("filtrul pe categorie aduce Ambalaje", cFiltru.includes("TSTNOM produs fara costuri"));
   bine("filtrul pe categorie exclude Folie", !cFiltru.includes("TST cu reteta"));
   bine("selectul de categorii conține valorile existente", cFiltru.includes(">Folie<") && cFiltru.includes(">Ambalaje<"));
 
@@ -239,15 +278,25 @@ const PFX = "TSTNOM-";
   egal("editarea a salvat prețul de achiziție", Number(dupa.pret_achizitie), 11);
   egal("editarea a lăsat costul de producție NULL", dupa.pret_productie, null);
 
-  console.log("\n11. Formularul de adăugare se deschide și are câmpurile noi");
-  const formular = (await cer("/produse/nou")).corp;
-  for (const camp of ["categorie", "gestiune", "pret_productie", "adaos_lista", "pret_minim"]) {
+  console.log("\n11. Produs nou: formularul din configurator, cu câmpurile fișei");
+  const spre = await cer("/produse/nou", { query: { familie: "4" } });
+  bine("„/produse/nou” duce la configurator, cu familia", spre.cod === 302 && spre.antet.Location === "/produse/nou-cu-cod?familie=4",
+    `${spre.cod} ${JSON.stringify(spre.antet)}`);
+  bine("butonul din listă duce tot acolo", /href="\/produse\/nou-cu-cod" class="btn">\+ produs nou/.test(cBanner));
+  const formular = (await cer("/produse/nou-cu-cod")).corp;
+  for (const camp of ["denumire", "categorie", "gestiune", "unitate_masura", "pret_achizitie", "pret_productie", "adaos_lista", "pret_minim", "pret_vanzare", "cota_tva", "stoc_minim"]) {
     bine(`formularul are câmpul ${camp}`, formular.includes(`name="${camp}"`));
   }
-  bine("categoria are sugestii (datalist)", formular.includes("<datalist id=\"dl_categorie\""));
+  bine("și nu are căsuță pentru cod", !/name="cod"/.test(formular));
+  bine("categoria are sugestii (datalist), cu cele din bază", formular.includes("<datalist id=\"dl_categorie\"") && formular.includes('<option value="Ambalaje">'));
   bine("TVA-ul implicit în formular e 21", /name="cota_tva" value="21"/.test(formular));
+  const vechi = await trimite("/produse", { cod: PFX + "VECHI", denumire: "TSTNOM din formularul vechi", pret_vanzare: "5" });
+  bine("formularul vechi nu mai scrie, trimite la configurator",
+    vechi.cod === 302 && vechi.antet.Location === "/produse/nou-cu-cod?vechi=1" &&
+    !(await db.prepare("SELECT id FROM produse WHERE cod = ?").get(PFX + "VECHI")), `${vechi.cod} ${JSON.stringify(vechi.antet)}`);
+  bine("iar configuratorul spune de ce", /Formularul vechi de produs nou nu mai scrie produse/.test((await cer("/produse/nou-cu-cod", { query: { vechi: "1" } })).corp));
 
-  exec(`DELETE FROM produse WHERE cod LIKE '${PFX}%'`);
+  curata();
   exec(`DELETE FROM setari_app WHERE cheie = 'adaos_lista_implicit'`);
 
   console.log(rele ? `\n${rele} probleme.` : "\nToate verificările trec.");

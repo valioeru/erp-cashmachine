@@ -5,12 +5,21 @@
 //   „Când introducem noi produs, codul introdus de noi rămâne codul peste tot
 //    în aplicație."
 //
+// 04.11.2026, tot Vali: „când adăugăm produs nou, codul produsului trebuie să
+// se autogenereze conform algoritmului din configurări, nu să-l introducem
+// noi". De atunci produsul nou se face doar din configurator, iar codul scris
+// de mână rămâne doar la Editare.
+//
 // CE APĂRĂ:
 //
-//   • UN COD, UN PRODUS. La Produs nou și la Editare, un cod care e deja pe alt
-//     produs (activ, neunificat — sau codul generat al altuia) e refuzat, cu
-//     numele produsului care îl are. Formularul revine cu ce a scris omul.
-//     Codurile duble vechi nu blochează o schimbare de preț.
+//   • LA PRODUS NOU, CODUL NU SE SCRIE. Formularul vechi nu mai scrie nimic,
+//     iar un `cod` trimis configuratorului nu se citește: produsul primește
+//     codul generat din caracteristici.
+//
+//   • UN COD, UN PRODUS. La Editare, un cod care e deja pe alt produs (activ,
+//     neunificat — sau codul generat al altuia) e refuzat, cu numele
+//     produsului care îl are. Formularul revine cu ce a scris omul. Codurile
+//     duble vechi nu blochează o schimbare de preț.
 //
 //   • NIMIC NU-L SCHIMBĂ SINGUR. Importul de produse din SmartBill punea codul
 //     lor peste al nostru când găsea produsul după denumire. Acum îl
@@ -89,6 +98,8 @@ const router = {
   get: (p, h) => { if (!rute.get[p]) rute.get[p] = h; },
   post: (p, h) => { if (!rute.post[p]) rute.post[p] = h; },
 };
+// Configuratorul întâi, ca în server.js.
+require(path.join(RAD, "modules", "cod-produs.js")).register(router);
 require(path.join(RAD, "modules", "produse.js")).register(router);
 require(path.join(RAD, "modules", "comenzi.js")).register(router);
 const { HANDLERE } = require(path.join(RAD, "modules", "punte.js"));
@@ -118,8 +129,10 @@ function bine(descriere, conditie, detaliu) {
 }
 
 const PREFIX = "TST-CPP";
+// Plicul AWB făcut din configurator: Tip PA, lățime 995, lungime 994, grosime 93.
+const COD_PLIC = "PA99599493";
 function curata() {
-  const ids = q(`SELECT id FROM produse WHERE cod ILIKE '${PREFIX}%' OR cod_generat ILIKE '${PREFIX}%' OR denumire LIKE 'TEST-CPP %'`).map((r) => Number(r.id));
+  const ids = q(`SELECT id FROM produse WHERE cod ILIKE '${PREFIX}%' OR cod_generat ILIKE '${PREFIX}%' OR denumire LIKE 'TEST-CPP %' OR cod_generat = '${COD_PLIC}'`).map((r) => Number(r.id));
   if (ids.length) {
     const l = ids.join(",");
     q(`DELETE FROM comenzi_linii WHERE produs_id IN (${l})`);
@@ -137,20 +150,40 @@ function curata() {
   curata();
   const produsDupaDenumire = (d) => q("SELECT * FROM produse WHERE denumire = ?", [d])[0] || null;
 
-  console.log("\n1. Produs nou: codul scris rămâne cum l-ați scris");
-  {
-    const r = await cer("post", "/produse", null, formular({ cod: `  ${PREFIX}-PS5  `, denumire: "TEST-CPP Bandă PET 5mm" }));
-    const p = produsDupaDenumire("TEST-CPP Bandă PET 5mm");
-    bine("produsul e scris", r.cod === 302 && !!p, r.cod);
-    bine("cu codul vostru, fără spațiile de la capete", p && p.cod === `${PREFIX}-PS5`, p && p.cod);
-  }
-
-  console.log("\n2. Același cod pe alt produs: refuzat, cu numele celui care îl are");
+  console.log("\n1. Produs nou: codul nu se mai scrie de mână");
   {
     const inainte = Number(unul("SELECT COUNT(*) FROM produse"));
-    const r = await cer("post", "/produse", null, formular({ cod: `${PREFIX}-ps5`.toLowerCase(), denumire: "TEST-CPP Altă bandă", pret_vanzare: "12,5" }));
+    const r = await cer("post", "/produse", null, formular({ cod: `  ${PREFIX}-PS5  `, denumire: "TEST-CPP Bandă PET 5mm" }));
+    bine("formularul vechi nu mai scrie nimic", Number(unul("SELECT COUNT(*) FROM produse")) === inainte && !produsDupaDenumire("TEST-CPP Bandă PET 5mm"));
+    bine("și trimite la configurator", r.cod === 302 && r.antet && r.antet.Location === "/produse/nou-cu-cod?vechi=1", JSON.stringify(r.antet));
+    const plic = q("SELECT id FROM cod_familii WHERE nume = 'Plic AWB'")[0];
+    const car = plic ? q("SELECT id, nume FROM cod_caracteristici WHERE familie_id = ?", [Number(plic.id)]) : [];
+    const c = (nume) => "c_" + (car.find((x) => x.nume === nume) || {}).id;
+    const rc = await cer("post", "/produse/nou-cu-cod", null, formular({
+      familie: plic ? String(plic.id) : "0", cod: `${PREFIX}-SCRIS-DE-MANA`, denumire: "TEST-CPP Plic din configurator",
+      [c("Tip")]: "Plic AWB", [c("Lățime")]: "995", [c("Lungime")]: "994", [c("Grosime CPE")]: "93", [c("Buzunar documente")]: "Nu",
+    }));
+    const p = produsDupaDenumire("TEST-CPP Plic din configurator");
+    bine("configuratorul scrie produsul", rc.cod === 302 && !!p, rc.cod + " " + rc.corp.slice(0, 200));
+    bine("cu codul generat, nu cu cel trimis de mână", p && p.cod === COD_PLIC && p.cod_generat === COD_PLIC, p && p.cod);
+    const rd = await cer("post", "/produse/nou-cu-cod", null, formular({
+      familie: plic ? String(plic.id) : "0", denumire: "TEST-CPP Plic de două ori",
+      [c("Tip")]: "Plic AWB", [c("Lățime")]: "995", [c("Lungime")]: "994", [c("Grosime CPE")]: "93", [c("Buzunar documente")]: "Nu",
+    }));
+    bine("a doua oară e refuzat, cu produsul care există", rd.cod === 400 && /Produsul există deja/.test(rd.corp) && /TEST-CPP Plic din configurator/.test(rd.corp), rd.cod);
+    bine("iar formularul revine cu ce ai scris", /value="TEST-CPP Plic de două ori"/.test(rd.corp) && /value="995"/.test(rd.corp));
+    bine("și nu se scrie al doilea", !produsDupaDenumire("TEST-CPP Plic de două ori"));
+  }
+
+  // Produsele de mai jos stau cu cod scris, ca cele vechi din nomenclator.
+  q(`INSERT INTO produse (cod, denumire) VALUES ('${PREFIX}-PS5', 'TEST-CPP Bandă PET 5mm'), ('${PREFIX}-ALTA', 'TEST-CPP Altă bandă')`);
+  const alta = produsDupaDenumire("TEST-CPP Altă bandă");
+
+  console.log("\n2. Același cod pe alt produs: refuzat la editare, cu numele celui care îl are");
+  {
+    const r = await cer("post", "/produse/:id/editare", { id: String(alta.id) }, formular({ cod: `${PREFIX}-ps5`.toLowerCase(), denumire: "TEST-CPP Altă bandă", pret_vanzare: "12,5" }));
     bine("nu se scrie (400)", r.cod === 400, r.cod);
-    bine("nimic nou în nomenclator", Number(unul("SELECT COUNT(*) FROM produse")) === inainte);
+    bine("produsul rămâne cu codul lui", produsDupaDenumire("TEST-CPP Altă bandă").cod === `${PREFIX}-ALTA`);
     bine("mesajul spune pe ce produs e codul", /e deja pe produsul/.test(r.corp) && /TEST-CPP Bandă PET 5mm/.test(r.corp));
     bine("formularul revine cu ce ai scris", /value="TEST-CPP Altă bandă"/.test(r.corp) && /value="12.5"/.test(r.corp));
     bine("literele mici nu fac alt cod", /e deja pe produsul/.test(r.corp));
@@ -159,14 +192,14 @@ function curata() {
   console.log("\n3. Un produs unificat sau inactiv nu mai ține codul ocupat");
   {
     q(`INSERT INTO produse (cod, denumire, activ) VALUES ('${PREFIX}-VECHI', 'TEST-CPP Produs inactiv', 0)`);
-    const r = await cer("post", "/produse", null, formular({ cod: `${PREFIX}-VECHI`, denumire: "TEST-CPP Produs nou peste cod vechi" }));
-    bine("se scrie", r.cod === 302, r.cod);
+    const r = await cer("post", "/produse/:id/editare", { id: String(alta.id) }, formular({ cod: `${PREFIX}-VECHI`, denumire: "TEST-CPP Altă bandă" }));
+    bine("se scrie", r.cod === 302 && produsDupaDenumire("TEST-CPP Altă bandă").cod === `${PREFIX}-VECHI`, r.cod);
   }
 
   console.log("\n4. Codul generat al altui produs e tot ocupat");
   {
     q(`INSERT INTO produse (cod, cod_generat, denumire) VALUES ('${PREFIX}-PROPRIU', '${PREFIX}GEN1', 'TEST-CPP Configurat')`);
-    const r = await cer("post", "/produse", null, formular({ cod: `${PREFIX}GEN1`, denumire: "TEST-CPP Scris de mână" }));
+    const r = await cer("post", "/produse/:id/editare", { id: String(alta.id) }, formular({ cod: `${PREFIX}GEN1`, denumire: "TEST-CPP Altă bandă" }));
     bine("refuzat", r.cod === 400 && /TEST-CPP Configurat/.test(r.corp), r.cod);
   }
 
@@ -230,8 +263,8 @@ function curata() {
     }
     const gasit = await CP.produsulCodului(`${PREFIX}GEN1`);
     bine("codul generat al celui înghițit duce la cel păstrat, nu la cel dezactivat", gasit && Number(gasit.id) === Number(pastrat.id), JSON.stringify(gasit));
-    const r = await cer("post", "/produse", null, formular({ cod: `${PREFIX}-PROPRIU`, denumire: "TEST-CPP Pe codul celui înghițit" }));
-    bine("codul celui înghițit nu mai e ocupat", r.cod === 302, r.cod);
+    const r = await cer("post", "/produse/:id/editare", { id: String(alta.id) }, formular({ cod: `${PREFIX}-PROPRIU`, denumire: "TEST-CPP Altă bandă" }));
+    bine("codul celui înghițit nu mai e ocupat", r.cod === 302 && produsDupaDenumire("TEST-CPP Altă bandă").cod === `${PREFIX}-PROPRIU`, r.cod);
   }
 
   curata();
