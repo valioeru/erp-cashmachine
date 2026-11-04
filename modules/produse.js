@@ -99,6 +99,13 @@ const lei = (v) => (v == null ? '<span style="color:var(--text-muted)">—</span
 // La EDITARE se verifică doar dacă omul a SCHIMBAT codul. Cele câteva coduri
 // care stau deja pe două produse, din importurile vechi, nu trebuie să
 // blocheze o schimbare de preț; ele se rezolvă la Unificarea codurilor.
+//
+// 04.11.2026, tot Vali: „când adăugăm produs nou, codul produsului trebuie să
+// se autogenereze conform algoritmului din configurări, nu să-l introducem
+// noi". De atunci produsul NOU se face doar din configurator
+// (/produse/nou-cu-cod, în modules/cod-produs.js), iar formularul generic de
+// aici rămâne pentru editare. Verificarea de mai jos lucrează deci doar la
+// editare.
 const normCod = (c) => String(c == null ? "" : c).trim().toUpperCase();
 
 async function produsulCuCodul(cod, exceptId) {
@@ -144,6 +151,9 @@ function register(router) {
     ordine: "denumire",
     inainte: async () => { adaosCurent = await adaosImplicit(); },
     valideaza: verificaCodul,
+    // Produsul nou: familia, caracteristicile, codul generat și restul
+    // câmpurilor de mai jos, într-un singur formular.
+    adaugare: "/produse/nou-cu-cod",
     banner: async (ctx) => {
       const r = await db.prepare("SELECT COUNT(*) AS n FROM produse WHERE cota_tva = 19").get().catch(() => ({ n: 0 }));
       const n = Number((r && r.n) || 0);
@@ -171,7 +181,7 @@ function register(router) {
       {
         name: "cod",
         label: "Cod produs",
-        ajutor: "Codul vostru. Rămâne codul produsului peste tot — comenzi, stoc, CT-Park, etichete, producție. Un cod poate fi pe un singur produs.",
+        ajutor: "La un produs nou se generează singur, din caracteristici. Rămâne codul produsului peste tot — comenzi, stoc, CT-Park, etichete, producție. Un cod poate fi pe un singur produs.",
       },
       { name: "denumire", label: "Denumire", required: true },
       { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },

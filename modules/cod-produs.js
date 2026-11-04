@@ -9,6 +9,7 @@ const db = require("../lib/db");
 const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const C = require("../lib/cod-produs");
+const PC = require("../lib/pret-camp");
 
 const CALE = "/configurari/cod-produs";
 const nr = (v) => {
@@ -354,7 +355,7 @@ function register(router) {
              )}`
           : ""
       }
-      <p style="margin-top:18px"><a class="btn secondary" href="/produse/nou-cu-cod">Produs nou, cu cod generat →</a></p>
+      <p style="margin-top:18px"><a class="btn secondary" href="/produse/nou-cu-cod${inapoi(familieId)}">Produs nou${familia ? " · " + esc(familia.nume) : ""} →</a></p>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Codul produsului", active: "/configurari", body }));
   });
@@ -555,112 +556,23 @@ function register(router) {
   });
 
   // ---- Produs nou, cu cod generat ---------------------------------------
+  //
+  // Singurul formular din care se face un produs nou. Cererea lui Vali,
+  // 04.11.2026: „când adăugăm produs nou, codul produsului trebuie să se
+  // autogenereze conform algoritmului din configurări, nu să-l introducem noi,
+  // iar câmpurile trebuie să fie și cele din configurare". Butonul „Produs
+  // nou" din Produse duce aici (vezi `adaugare` în lib/crud.js), iar
+  // formularul are tot ce avea cel vechi, în afară de cod: categorie,
+  // gestiune, prețuri, adaos, TVA, stoc minim. Nimic de completat după, din
+  // Editare.
   router.get("/produse/nou-cu-cod", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
-    const fam = await familii();
-    const familieId = Number(ctx.query.familie) || (fam[0] ? Number(fam[0].id) : 0);
-    const car = await citesteCaracteristici(false, familieId);
-    const campuri = car
-      .map((c) => {
-        const et = `${esc(c.nume)}${c.um ? ` <span style="color:var(--text-muted)">(${esc(c.um)})</span>` : ""}${
-          c.obligatoriu ? "" : " <span style=\"color:var(--text-muted)\">(opțional)</span>"
-        }`;
-        if (c.fel === "numar") {
-          return `<label class="field" style="flex:0 1 200px">${et}
-            <input type="number" step="any" name="c_${c.id}" data-carac="${c.id}"
-                   ${c.min_val != null ? `min="${nr(c.min_val)}"` : ""} ${c.max_val != null ? `max="${nr(c.max_val)}"` : ""}>
-          </label>`;
-        }
-        return `<label class="field" style="flex:0 1 220px">${et}
-          <select name="c_${c.id}" data-carac="${c.id}">
-            <option value="">—</option>
-            ${(c.valori || []).map((v) => `<option value="${esc(v.valoare)}">${esc(v.valoare)}</option>`).join("")}
-          </select>
-        </label>`;
-      })
-      .join("");
-
-    const body = `
-      <h1 style="margin:6px 0 2px">Produs nou</h1>
-      <p class="explic">
-        Alege caracteristicile; codul și denumirea se scriu singure. Dacă produsul există deja, îți spun care e
-        și nu-l mai fac a doua oară. Caracteristicile se definesc în
-        <a href="${CALE}">Configurări · Codul produsului</a>.
-      </p>
-      ${
-        fam.length > 1
-          ? `<div class="toolbar" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">
-               <span style="font-size:13px;color:var(--text-muted);align-self:center">Familia:</span>
-               ${fam.map((f) => `<a class="btn small ${Number(f.id) === familieId ? "" : "secondary"}" href="/produse/nou-cu-cod?familie=${f.id}">${esc(f.nume)}</a>`).join("")}
-             </div>`
-          : ""
-      }
-      ${car.length ? "" : `<div class="flash">Familia asta n-are nicio caracteristică. Începe din <a href="${CALE}">Configurări · Codul produsului</a>.</div>`}
-      <form method="post" action="/produse/nou-cu-cod" class="form" style="max-width:860px" id="f-produs">
-        <input type="hidden" name="familie" id="f-familie" value="${familieId}">
-        <div style="display:flex;gap:10px;flex-wrap:wrap">${campuri}</div>
-        <div class="card" style="margin:12px 0;max-width:620px">
-          <div class="label">Codul</div>
-          <div class="value" id="cod-preview" style="font-family:ui-monospace,monospace">—</div>
-          <div class="mic" id="den-preview"></div>
-          <div class="mic" id="avertisment" style="color:var(--warn)"></div>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <label class="field" style="flex:0 1 160px">UM<input name="unitate_masura" value="buc"></label>
-          <label class="field" style="flex:0 1 160px">Preț vânzare<input type="number" step="0.0001" name="pret_vanzare" value="0"></label>
-          <label class="field" style="flex:0 1 160px">Stoc minim<input type="number" step="any" name="stoc_minim" value="0"></label>
-        </div>
-        <button class="btn" type="submit" id="btn-salveaza">Adaugă produsul</button>
-      </form>
-      <script>
-      (function () {
-        var f = document.getElementById("f-produs");
-        if (!f) return;
-        var cod = document.getElementById("cod-preview");
-        var den = document.getElementById("den-preview");
-        var av = document.getElementById("avertisment");
-        var ceas = null;
-        // Previzualizarea cere serverului sa genereze codul. Nu rescriem
-        // regula si in browser: doua implementari ale aceleiasi reguli o iau
-        // razna separat, si atunci ecranul arata un cod, iar baza scrie altul.
-        function cere() {
-          var d = {};
-          f.querySelectorAll("[data-carac]").forEach(function (el) {
-            if (el.value !== "") d[el.dataset.carac] = el.value;
-          });
-          d.__familie = document.getElementById("f-familie").value;
-          fetch("/produse/nou-cu-cod/preview", {
-            method: "POST", credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(d),
-          })
-            .then(function (r) { return r.json(); })
-            .then(function (x) {
-              cod.textContent = x.cod || "—";
-              den.textContent = x.denumire || "";
-              var m = [];
-              if (x.lipsa && x.lipsa.length) m.push("mai lipsește: " + x.lipsa.join(", "));
-              if (x.gresite && x.gresite.length) m.push(x.gresite.join("; "));
-              if (x.exista) m.push("EXISTĂ DEJA: " + x.exista.denumire + " (id " + x.exista.id + ")");
-              if (x.ambiguu) m.push("numerele n-au lungime fixă — codul se poate lovi de altul");
-              av.textContent = m.join(" · ");
-              // Unitatea dată de caracteristici (hârtia: cutie / top) se vede
-              // în căsuță și nu se poate schimba — oricum la salvare câștigă ea.
-              var umIn = f.querySelector('input[name="unitate_masura"]');
-              if (umIn) {
-                if (x.um) { umIn.value = x.um; umIn.readOnly = true; umIn.title = "Vine din caracteristicile alese"; }
-                else if (umIn.readOnly) { umIn.readOnly = false; umIn.value = "buc"; umIn.title = ""; }
-              }
-              document.getElementById("btn-salveaza").disabled = !x.ok || !!x.exista;
-            })
-            .catch(function () {});
-        }
-        f.addEventListener("input", function () { clearTimeout(ceas); ceas = setTimeout(cere, 180); });
-        f.addEventListener("change", cere);
-        cere();
-      })();
-      </script>
-    `;
+    const q = ctx.query || {};
+    const mesaj = q.vechi
+      ? "Formularul vechi de produs nou nu mai scrie produse: codul se generează acum din caracteristici. " +
+        "Ce scriseseși acolo nu s-a salvat — completează aici."
+      : "";
+    const body = await formularProdusNou({ familieId: Number(q.familie) || 0, mesaj: esc(mesaj) });
     send(ctx.res, 200, layout({ user: ctx.user, title: "Produs nou", active: "/produse", body }));
   });
 
@@ -678,29 +590,308 @@ function register(router) {
     const b = ctx.body || {};
     const alegeri = {};
     for (const k of Object.keys(b)) if (k.startsWith("c_")) alegeri[k.slice(2)] = b[k];
+    // Un cod scris de mână nu se citește. Formularul nu-l mai are, dar ce vine
+    // prin HTTP nu se crede pe cuvânt: un tab vechi sau un script ar putea
+    // trimite `cod`, și atunci produsul ar intra cu un cod care nu iese din
+    // caracteristicile lui. Codul e cel generat, punct.
     const familieId = Number(b.familie) || 0;
+    const fisa = citesteFisa(b);
+    const den = String(b.denumire == null ? "" : b.denumire).trim();
     const r = await genereaza(alegeri, familieId);
-    if (!r.ok || r.exista) {
-      const motiv = r.exista
-        ? `Produsul există deja: ${r.exista.denumire} (cod ${r.exista.cod || r.exista.cod_generat || "—"}).`
-        : [...(r.lipsa.length ? ["mai lipsește: " + r.lipsa.join(", ")] : []), ...r.gresite].join("; ");
-      return send(
+
+    // Ce nu e bun se spune tot o dată, deasupra formularului, care revine cu
+    // tot ce a scris omul — nu o pagină de eroare cu „Înapoi" după care
+    // prețurile, categoria și gestiunea trebuie tastate din nou.
+    const refuza = async (mesaj) =>
+      send(
         ctx.res,
         400,
         layout({
           user: ctx.user, title: "Produs nou", active: "/produse",
-          body: `<h1>Produsul nu s-a scris</h1><p>${esc(motiv)}</p>
-                 <p><a class="btn secondary" href="/produse/nou-cu-cod">Înapoi</a></p>`,
+          body: await formularProdusNou({ familieId, valori: b, mesaj, denAuto: !den || den === r.denumire }),
         })
       );
+    const existent = (p) =>
+      `Produsul există deja: <a href="/produse/${Number(p.id)}">${esc(p.denumire)}</a>` +
+      ` (cod ${esc(p.cod || p.cod_generat || "—")}). Nu l-am mai făcut a doua oară.`;
+
+    const probleme = [];
+    if (r.exista) probleme.push(existent(r.exista));
+    else if (!r.ok) {
+      if (r.lipsa.length) probleme.push(esc("Mai lipsește: " + r.lipsa.join(", ") + "."));
+      for (const g of r.gresite) probleme.push(esc(g));
+      if (!r.lipsa.length && !r.gresite.length) probleme.push(esc("Din caracteristicile alese nu iese niciun cod."));
     }
-    const { id } = await scrieProdusul(r, familieId, {
-      um: b.unitate_masura,
-      pret: b.pret_vanzare,
-      stoc_minim: b.stoc_minim,
-    });
-    redirect(ctx.res, `/produse/${id}`);
+    for (const g of fisa.gresite) probleme.push(esc(g));
+    if (probleme.length) return refuza(probleme.join("<br>"));
+
+    let scris;
+    try {
+      scris = await scrieProdusul(r, familieId, {
+        ...fisa.valori,
+        um: fisa.valori.unitate_masura,
+        denumire: den,
+        creat_de: ctx.user.id,
+      });
+    } catch (e) {
+      // Două ferestre care salvează același produs în aceeași secundă: a doua
+      // se lovește de indexul unic pe codul generat. Omul află care e
+      // produsul, nu primește o pagină de eroare a serverului.
+      if (e && e.code === "23505") {
+        const p = await produsulCodului(r.cod);
+        return refuza(p ? existent(p) : esc("Produsul cu codul " + r.cod + " există deja."));
+      }
+      throw e;
+    }
+    redirect(ctx.res, `/produse/${scris.id}`);
   });
+}
+
+// Câmpurile fișei de produs, aceleași ca la Editare (modules/produse.js), fără
+// cod — care se generează — și fără denumire, care are rândul ei, legat de
+// caracteristici. testul test-produs-nou-configurat.js se uită ca fiecare câmp
+// scris al fișei să fie și aici: unul adăugat doar acolo ar fi rămas gol la
+// fiecare produs nou.
+//
+// Numerele se scriu în căsuțe de text, nu `type="number"`: un browser în
+// engleză nu primește „0,16" într-un câmp numeric și oprește formularul fără
+// să spună de ce. Se citesc ca prețurile de pe comandă (lib/pret-camp.js).
+const CAMPURI_FISA = [
+  { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },
+  { name: "gestiune", label: "Gestiune", datalist: true, ajutor: "Gestiunea din contabilitate în care stă produsul." },
+  { name: "unitate_masura", label: "Unitate de măsură", default: "buc", ajutor: "La hârtie se pune singură: cutie sau top." },
+  { name: "pret_achizitie", label: "Preț achiziție", type: "number", default: 0, ajutor: "Pentru marfa pe care o cumpărăm." },
+  { name: "pret_productie", label: "Cost de producție", type: "number", ajutor: "Pentru ce facem noi. Lasă gol dacă produsul va avea rețetă — atunci costul se ia din ea." },
+  { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", ajutor: "Lasă gol ca să folosească adaosul implicit al firmei." },
+  { name: "pret_minim", label: "Preț minim de vânzare", type: "number", ajutor: "Sub prețul ăsta pagina te avertizează. Lasă gol dacă n-ai o limită." },
+  { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", default: 0, ajutor: "Prețul folosit efectiv în oferte și facturi." },
+  { name: "cota_tva", label: "Cotă TVA (%)", type: "number", default: 21 },
+  { name: "stoc_minim", label: "Stoc minim (alertă)", type: "number", default: 0 },
+];
+
+// Ce a scris omul în câmpurile fișei. Textul, fără spații la capete; un număr
+// gol ia valoarea implicită a câmpului, iar unde nu există una rămâne NULL —
+// „nu știu costul de producție" e un răspuns valid și nu devine zero. Un
+// număr care nu se poate citi oprește salvarea, cu numele câmpului: altfel
+// „1.234,50" ar fi intrat ca zero și nimeni n-ar fi văzut până la prima
+// factură.
+function citesteFisa(b) {
+  const valori = {};
+  const gresite = [];
+  for (const f of CAMPURI_FISA) {
+    const brut = b ? b[f.name] : undefined;
+    if (f.type === "number") {
+      const t = String(brut == null ? "" : brut).replace(/\s+/g, "");
+      if (t === "") {
+        valori[f.name] = f.default !== undefined ? Number(f.default) : null;
+        continue;
+      }
+      const n = PC.pretDinCamp(t);
+      if (!n.ok) {
+        gresite.push(`${f.label}: „${String(brut).trim()}" nu e un număr pozitiv (ex. 12,50).`);
+        continue;
+      }
+      valori[f.name] = n.valoare;
+    } else {
+      const t = String(brut == null ? "" : brut).trim();
+      valori[f.name] = t || (f.default !== undefined ? String(f.default) : null);
+    }
+  }
+  return { valori, gresite };
+}
+
+// Valorile deja folosite într-o coloană, pentru sugestii. Numele coloanei
+// intră în SQL, deci se ia doar din lista de mai sus.
+async function valoriFolosite(coloana) {
+  if (!CAMPURI_FISA.some((f) => f.datalist && f.name === coloana)) return [];
+  const r = await db
+    .prepare(`SELECT DISTINCT ${coloana} AS v FROM produse WHERE ${coloana} IS NOT NULL AND ${coloana} <> '' ORDER BY 1`)
+    .all()
+    .catch(() => []);
+  return r.map((x) => String(x.v));
+}
+
+// Formularul de produs nou: familia, caracteristicile ei, codul care iese și
+// fișa produsului. `valori` e ce a trimis omul, când formularul revine după
+// un refuz; `mesaj` e HTML gata scăpat.
+async function formularProdusNou({ familieId, valori, mesaj, denAuto } = {}) {
+  const fam = await familii();
+  const fid = fam.some((f) => Number(f.id) === Number(familieId)) ? Number(familieId) : fam[0] ? Number(fam[0].id) : 0;
+  const familia = fam.find((f) => Number(f.id) === fid) || null;
+  const car = fid ? await citesteCaracteristici(false, fid) : [];
+  const v = valori || {};
+  const scris = (k) => (v[k] === undefined || v[k] === null ? "" : String(v[k]));
+  const gri = (t) => ` <span style="color:var(--text-muted)">${t}</span>`;
+
+  const campuri = car
+    .map((c) => {
+      const et = `${esc(c.nume)}${c.um ? gri("(" + esc(c.um) + ")") : ""}${c.obligatoriu ? "" : gri("(opțional)")}`;
+      const ales = scris("c_" + c.id);
+      if (c.fel === "numar") {
+        return `<label class="field" style="flex:0 1 200px"><span>${et}</span>
+          <input type="number" step="any" name="c_${c.id}" data-carac="${c.id}" value="${esc(ales)}"
+                 ${c.min_val != null ? `min="${nr(c.min_val)}"` : ""} ${c.max_val != null ? `max="${nr(c.max_val)}"` : ""}>
+        </label>`;
+      }
+      return `<label class="field" style="flex:0 1 220px"><span>${et}</span>
+        <select name="c_${c.id}" data-carac="${c.id}">
+          <option value="">—</option>
+          ${(c.valori || [])
+            .map((x) => `<option value="${esc(x.valoare)}"${ales !== "" && String(x.valoare) === ales ? " selected" : ""}>${esc(x.valoare)}</option>`)
+            .join("")}
+        </select>
+      </label>`;
+    })
+    .join("");
+
+  const sugestii = {};
+  for (const f of CAMPURI_FISA) if (f.datalist) sugestii[f.name] = await valoriFolosite(f.name);
+  const campFisa = (f) => {
+    const val = v[f.name] !== undefined && v[f.name] !== null ? String(v[f.name]) : f.default !== undefined ? String(f.default) : "";
+    let input;
+    if (f.datalist) {
+      input = `<input type="text" name="${f.name}" value="${esc(val)}" list="dl_${f.name}" autocomplete="off">
+        <datalist id="dl_${f.name}">${(sugestii[f.name] || []).map((x) => `<option value="${esc(x)}">`).join("")}</datalist>`;
+    } else if (f.type === "number") {
+      input = `<input type="text" inputmode="decimal" name="${f.name}" value="${esc(val)}">`;
+    } else {
+      input = `<input type="text" name="${f.name}" value="${esc(val)}">`;
+    }
+    const ajutor = f.ajutor ? `<small style="display:block;color:var(--text-muted);font-size:12px;margin-top:3px">${esc(f.ajutor)}</small>` : "";
+    return `<label class="field" style="flex:1 1 200px;max-width:300px">${esc(f.label)}${input}${ajutor}</label>`;
+  };
+  const rand = (nume) => `<div style="display:flex;gap:10px;flex-wrap:wrap">${CAMPURI_FISA.filter((f) => nume.includes(f.name)).map(campFisa).join("")}</div>`;
+
+  const fara = !fam.length
+    ? `<div class="flash">Nu e definită nicio familie de produse. Începe din <a href="${CALE}">Configurări · Codul produsului</a>.</div>`
+    : !car.length
+      ? `<div class="flash">Familia asta n-are nicio caracteristică, deci nu iese niciun cod. Începe din <a href="${CALE}${inapoi(fid)}">Configurări · Codul produsului</a>.</div>`
+      : "";
+  const den = scris("denumire");
+
+  // Titlul „Produs nou" îl pune layout-ul; încă unul aici ar fi apărut de două ori.
+  return `
+    <p class="explic">
+      Alege familia și caracteristicile: codul se generează singur, după regula familiei din
+      <a href="${CALE}${inapoi(fid)}">Configurări · Codul produsului</a>, și nu se scrie de mână. Dacă produsul
+      există deja, îți spun care e și nu-l mai fac a doua oară. Un fel de produs care nu se potrivește în nicio
+      familie se adaugă întâi acolo, ca familie nouă.
+    </p>
+    ${mesaj ? `<div class="flash flash-rosu">${mesaj}</div>` : ""}
+    ${
+      fam.length > 1
+        ? `<div class="toolbar" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">
+             <span style="font-size:13px;color:var(--text-muted);align-self:center">Familia:</span>
+             ${fam.map((f) => `<a class="btn small ${Number(f.id) === fid ? "" : "secondary"}" href="/produse/nou-cu-cod?familie=${f.id}">${esc(f.nume)}</a>`).join("")}
+           </div>`
+        : ""
+    }
+    ${fara}
+    <form method="post" action="/produse/nou-cu-cod" class="form" style="max-width:960px" id="f-produs">
+      <input type="hidden" name="familie" id="f-familie" value="${fid}">
+      <h3 style="margin:8px 0 6px">Caracteristici${familia ? " · " + esc(familia.nume) : ""}</h3>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">${campuri}</div>
+      <div class="card" style="margin:12px 0;max-width:620px">
+        <div class="label">Codul</div>
+        <div class="value" id="cod-preview" style="font-family:ui-monospace,monospace">—</div>
+        <div class="mic" id="den-preview"></div>
+        <div class="mic" id="avertisment" style="color:var(--warn)"></div>
+      </div>
+      <h3 style="margin:14px 0 6px">Fișa produsului</h3>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <label class="field" style="flex:1 1 420px;max-width:620px">Denumire
+          <input type="text" name="denumire" value="${esc(den)}" data-auto="${denAuto === false ? "0" : "1"}" autocomplete="off">
+          <small style="display:block;color:var(--text-muted);font-size:12px;margin-top:3px">Se scrie din caracteristici. O poți schimba; dacă o golești, rămâne cea din caracteristici.</small>
+        </label>
+      </div>
+      ${rand(["categorie", "gestiune", "unitate_masura"])}
+      ${rand(["pret_achizitie", "pret_productie", "adaos_lista"])}
+      ${rand(["pret_minim", "pret_vanzare", "cota_tva", "stoc_minim"])}
+      <div class="form-actions">
+        <button class="btn" type="submit" id="btn-salveaza">Adaugă produsul</button>
+        <a href="/produse" class="btn secondary">Renunță</a>
+      </div>
+    </form>
+    <script>
+    (function () {
+      var f = document.getElementById("f-produs");
+      if (!f) return;
+      var cod = document.getElementById("cod-preview");
+      var den = document.getElementById("den-preview");
+      var av = document.getElementById("avertisment");
+      var btn = document.getElementById("btn-salveaza");
+      var denIn = f.querySelector('input[name="denumire"]');
+      var umIn = f.querySelector('input[name="unitate_masura"]');
+      var ceas = null;
+      var ultima = 0;
+      // Denumirea urmează caracteristicile până când omul scrie el ceva în
+      // ea. Golită, se întoarce la cea din caracteristici.
+      if (denIn) denIn.addEventListener("input", function () { denIn.dataset.auto = denIn.value.trim() ? "0" : "1"; });
+      // Previzualizarea cere serverului sa genereze codul. Nu rescriem
+      // regula si in browser: doua implementari ale aceleiasi reguli o iau
+      // razna separat, si atunci ecranul arata un cod, iar baza scrie altul.
+      function cere() {
+        var nr = ++ultima;
+        var d = {};
+        f.querySelectorAll("[data-carac]").forEach(function (el) {
+          if (el.value !== "") d[el.dataset.carac] = el.value;
+        });
+        d.__familie = document.getElementById("f-familie").value;
+        fetch("/produse/nou-cu-cod/preview", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(d),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (x) {
+            // Răspunsurile pot veni în altă ordine decât cererile. Unul vechi,
+            // sosit după cel nou, ar fi pus pe ecran codul de dinainte și ar fi
+            // pornit butonul pentru alegeri care nu mai sunt cele din formular.
+            if (nr !== ultima) return;
+            cod.textContent = x.cod || "—";
+            den.textContent = x.denumire || "";
+            if (denIn) {
+              denIn.placeholder = x.denumire || "";
+              if (denIn.dataset.auto !== "0") denIn.value = x.denumire || "";
+            }
+            var m = [];
+            if (x.lipsa && x.lipsa.length) m.push("mai lipsește: " + x.lipsa.join(", "));
+            if (x.gresite && x.gresite.length) m.push(x.gresite.join("; "));
+            if (x.exista) m.push("EXISTĂ DEJA: " + x.exista.denumire + " (id " + x.exista.id + ")");
+            if (x.ambiguu) m.push("numerele n-au lungime fixă — codul se poate lovi de altul");
+            av.textContent = m.join(" · ");
+            if (x.exista) {
+              var a = document.createElement("a");
+              a.href = "/produse/" + Number(x.exista.id);
+              a.textContent = "deschide-l";
+              av.appendChild(document.createTextNode(" · "));
+              av.appendChild(a);
+            }
+            // Unitatea dată de caracteristici (hârtia: cutie / top) se vede
+            // în căsuță și nu se poate schimba — oricum la salvare câștigă ea.
+            if (umIn) {
+              if (x.um) { umIn.value = x.um; umIn.readOnly = true; umIn.title = "Vine din caracteristicile alese"; }
+              else if (umIn.readOnly) { umIn.readOnly = false; umIn.value = "buc"; umIn.title = ""; }
+            }
+            btn.disabled = !x.ok || !!x.exista;
+          })
+          .catch(function () {});
+      }
+      // Doar caracteristicile schimbă codul; prețurile și categoria nu cer
+      // o previzualizare nouă la fiecare tastă.
+      function peCaracteristica(e) { return !!(e.target && e.target.dataset && e.target.dataset.carac); }
+      f.addEventListener("input", function (e) {
+        if (!peCaracteristica(e)) return;
+        clearTimeout(ceas);
+        ceas = setTimeout(cere, 180);
+      });
+      f.addEventListener("change", function (e) { if (peCaracteristica(e)) cere(); });
+      // Un dublu-clic nu face două cereri de salvare.
+      f.addEventListener("submit", function () { setTimeout(function () { btn.disabled = true; }, 0); });
+      cere();
+    })();
+    </script>
+  `;
 }
 
 // Scrierea produsului dintr-un rezultat deja generat.
@@ -709,25 +900,56 @@ function register(router) {
 // comanda agentului. Dacă fiecare ar scrie cu INSERT-ul lui, unul dintre ele
 // ar uita mai devreme sau mai târziu `cod_generat` sau caracteristicile, iar
 // produsul ar intra în sistem fără codul după care îl caută toată lumea.
-async function scrieProdusul(r, familieId, { um, pret, stoc_minim } = {}) {
+//
+// `extra` e fișa produsului: { um, denumire, categorie, gestiune,
+// pret_achizitie, pret_productie, adaos_lista, pret_minim, pret_vanzare (sau
+// `pret`, cum îl dădea formularul vechi), cota_tva, stoc_minim, creat_de }.
+// Comanda dă doar `um`; restul iau valorile cu care intra și până acum un
+// produs nou: prețuri zero, TVA 21%, costurile și adaosul necunoscute (NULL).
+async function scrieProdusul(r, familieId, extra = {}) {
+  const e = extra || {};
   // Unitatea dată de o valoare aleasă bate ce scrie în căsuță. La hârtie,
   // căsuța pornește cu „buc", iar o cutie scrisă „buc" ar arăta pe factură ca
   // o bucată, nu ca cinci topuri. Unde nicio valoare nu dă unitate (toate
   // celelalte familii), rămâne ce a scris omul.
-  const unitate = String((r && r.um) || um || "buc").trim() || "buc";
+  const unitate = String((r && r.um) || e.um || "buc").trim() || "buc";
+  // Denumirea scrisă de om, dacă a scris una; altfel cea din caracteristici.
+  const denumire = String(e.denumire == null ? "" : e.denumire).trim() || r.denumire;
+  const numar = (v) => {
+    if (v === null || v === undefined || String(v).trim() === "") return null;
+    const x = Number(String(v).replace(",", "."));
+    return Number.isFinite(x) ? x : null;
+  };
+  const text = (v) => String(v == null ? "" : v).trim() || null;
+  const tva = numar(e.cota_tva);
+  const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
+  // Primele șapte coloane stau în aceeași ordine ca înainte; cele noi vin
+  // după ele.
   const ins = await db
     .prepare(
-      `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id)
-       VALUES (?,?,?,?,?,?,?) RETURNING id`
+      `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id,
+                            categorie, gestiune, pret_achizitie, pret_productie, adaos_lista, pret_minim, cota_tva,
+                            creat_de, creat_la)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
     )
-    .run(r.cod, r.cod, r.denumire, unitate, Number(pret) || 0, Number(stoc_minim) || 0, familieId || null);
+    .run(
+      r.cod, r.cod, denumire, unitate,
+      numar(e.pret_vanzare !== undefined ? e.pret_vanzare : e.pret) || 0,
+      numar(e.stoc_minim) || 0,
+      familieId || null,
+      text(e.categorie), text(e.gestiune),
+      numar(e.pret_achizitie) || 0,
+      numar(e.pret_productie), numar(e.adaos_lista), numar(e.pret_minim),
+      tva === null ? 21 : tva,
+      Number(e.creat_de) || null, acum
+    );
   const id = Number(ins.lastInsertRowid);
   for (const buc of r.bucati_toate) {
     await db
       .prepare("INSERT INTO produse_cod_valori (produs_id, caracteristica_id, nume, valoare, bucata) VALUES (?,?,?,?,?)")
       .run(id, buc.id, buc.nume, buc.valoare, buc.cod || null);
   }
-  return { id, cod: r.cod, denumire: r.denumire };
+  return { id, cod: r.cod, denumire };
 }
 
 // Produsul pentru un set de caracteristici: îl găsește dacă există, îl scrie
