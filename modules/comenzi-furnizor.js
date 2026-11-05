@@ -14,7 +14,12 @@
 // … rămân comenzile în curs sau livrate cu data solicitată și data recepție …
 // istoric preț … filtre pe toate astea plus suma totală comandată".
 //
-// DOUĂ DECIZII care se văd peste tot în fișier:
+// Și, din 05.11.2026: „să poți adăuga moneda și schimb la curs pus de noi, să
+// se calculeze și în RON automat și în EUR dacă moneda standard e RON, buton
+// de export PDF și de modificare ulterioară. Dacă se modifică ceva rămâne în
+// istoric cine a modificat ce și când."
+//
+// DECIZII care se văd peste tot în fișier:
 //
 //   • ISTORICUL DE PREȚ NU ARE TABELĂ PROPRIE. Istoricul sunt chiar liniile
 //     comenzilor vechi. O a doua tabelă ar începe să mintă din prima zi în
@@ -25,11 +30,21 @@
 //     un produs, omul ar inventa unul ca să treacă de formular, iar nomenclatorul
 //     s-ar umple de fantome. Denumirea scrisă de mână e de ajuns; produsul, când
 //     există, leagă comanda de istoricul de preț și de stoc.
+//
+//   • CURSUL E AL COMENZII. Se propune BNR-ul din ziua comenzii, dar se scrie
+//     pe comandă cel pus de om, și de acolo nu se mai mișcă singur. Socoteala
+//     e în lib/comenzi-furnizor-logica.js, cu testul ei.
+//
+//   • ISTORICUL MODIFICĂRILOR NU SE ȘTERGE ȘI NU SE CORECTEAZĂ. Fiecare rând
+//     ține numele omului copiat în clipa scrierii, nu doar legătura: peste doi
+//     ani omul poate fi plecat din firmă, iar „modificat de (nimeni)" nu apără
+//     pe nimeni.
 const db = require("../lib/db");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const mail = require("../lib/mail");
 const L = require("../lib/comenzi-furnizor-logica");
+const PDF = require("../lib/comanda-furnizor-pdf");
 
 // Adresa de pe care pleacă, cerută explicit. Rămâne schimbabilă din formular
 // pentru cine are și alte căsuțe — lib/mail verifică singur dacă are voie.
@@ -37,16 +52,19 @@ const EXPEDITOR = "comercial@cashmachine.ro";
 
 const MONEDE = ["RON", "EUR", "USD"];
 const UNITATI = ["kg", "buc", "ml", "mp", "tonă", "rolă", "palet", "set", "litru", "oră"];
-const CURS_IMPLICIT = 5.25;
 
 const nr = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
-const azi = () => new Date().toISOString().slice(0, 10);
-const acum = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+// Ziua și ora din România. `toISOString()`, folosit aici înainte, dă ora UTC:
+// în istoric, „cine a modificat și când" cu două ore pe lângă e un răspuns
+// greșit, iar între miezul nopții și ora 2 și ziua ar fi cea de ieri.
+const azi = () => new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Bucharest" });
+const acum = () => new Date().toLocaleString("sv-SE", { timeZone: "Europe/Bucharest" }).replace("T", " ").slice(0, 19);
 const text = (v) => String(v === null || v === undefined ? "" : v).trim();
 const asArray = (v) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+const eData = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
 
 // Numărul cu zecimale, scris ca în România. Nu `money()`: acolo scrie „lei",
 // iar jumătate din comenzile astea sunt în euro.
@@ -54,21 +72,22 @@ function sumaCu(v, moneda) {
   return nr(v).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " " + (moneda || "RON");
 }
 
-async function curs() {
-  try {
-    const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = 'ach_curs_eur'").get();
-    const v = Number(String((r && r.valoare) || "").replace(",", "."));
-    return v > 0 ? v : CURS_IMPLICIT;
-  } catch (e) {
-    return CURS_IMPLICIT;
-  }
+// „2026-11-05 13:20:11" → „05.11.2026 13:20".
+function cand(v) {
+  const s = String(v || "");
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}:\d{2}))?/);
+  if (!m) return s;
+  return `${m[3]}.${m[2]}.${m[1]}${m[4] ? " " + m[4] : ""}`;
 }
 
-function inLei(v, moneda, c) {
-  const p = nr(v);
-  if (moneda === "RON") return p;
-  if (moneda === "USD") return p * c * 0.92;
-  return p * c;
+// Ce se scrie într-un câmp de formular: virgulă, fără puncte de mii, fără
+// zerouri de umplutură — „1,51", „28", „0,4235".
+function campNumar(v, zecimale) {
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "string") return v; // ce a tastat omul, întors neatins
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "";
+  return n.toFixed(zecimale).replace(/0+$/, "").replace(/\.$/, "").replace(".", ",");
 }
 
 // Cine are voie să înregistreze și să trimită comenzi. Pagina stă sub zona
@@ -76,6 +95,14 @@ function inLei(v, moneda, c) {
 // ce e ireversibil — trimiterea unui email și anularea unei comenzi.
 function poateTrimite(user) {
   return Boolean(user && (user.rol === "admin" || user.rol === "depozit" || user.rol === "financiar"));
+}
+
+// Cine poate modifica o comandă după ce a fost salvată: cine poate s-o și
+// trimită, plus omul care a scris-o — el știe ce a vorbit cu furnizorul.
+function poateModifica(user, c) {
+  if (!user || !c) return false;
+  if (poateTrimite(user)) return true;
+  return Boolean(c.creata_de) && Number(c.creata_de) === Number(user.id);
 }
 
 const badgeStatus = (s) => {
@@ -92,6 +119,111 @@ async function liniile(comandaId) {
         WHERE l.comanda_id = ? ORDER BY l.id`
     )
     .all(comandaId);
+}
+
+async function comandaCuFurnizor(id) {
+  return db
+    .prepare(
+      `SELECT c.*, p.nume AS furnizor, p.email AS furnizor_email, p.cui AS furnizor_cui, p.adresa AS furnizor_adresa,
+              u.nume AS creata_nume, um.nume AS modificata_nume
+         FROM comenzi_furnizor c
+         LEFT JOIN parteneri p ON p.id = c.furnizor_id
+         LEFT JOIN utilizatori u ON u.id = c.creata_de
+         LEFT JOIN utilizatori um ON um.id = c.modificata_de
+        WHERE c.id = ?`
+    )
+    .get(id);
+}
+
+// ---------------------------------------------------------------------------
+// Monedele și cursul BNR.
+
+// Monedele din care se poate alege: cele trei obișnuite sus, apoi tot ce
+// publică BNR (GBP, CHF, PLN, HUF, CNY…). Aurul și DST-ul FMI nu sunt monede în
+// care se plătește o factură. Moneda unei comenzi vechi rămâne în listă chiar
+// dacă BNR n-o mai publică, altfel formularul de modificare ar schimba-o tăcut.
+async function monedeDisponibile(curenta) {
+  const r = await db.prepare("SELECT DISTINCT moneda FROM cursuri_bnr ORDER BY moneda").all().catch(() => []);
+  const toate = [...MONEDE];
+  for (const x of r || []) {
+    const m = String((x && x.moneda) || "").toUpperCase();
+    if (/^[A-Z]{3}$/.test(m) && m !== "XAU" && m !== "XDR" && !toate.includes(m)) toate.push(m);
+  }
+  const c = String(curenta || "").toUpperCase();
+  if (/^[A-Z]{3}$/.test(c) && !toate.includes(c)) toate.push(c);
+  return toate;
+}
+
+// Cursul BNR al fiecărei monede la o zi. Dacă ziua lipsește (weekend,
+// sărbătoare, BNR n-a publicat încă) se ia ultima zi de DINAINTE, cum face și
+// contabilitatea — niciodată cursul de după, care la data comenzii nu exista.
+async function cursuriBnr(data) {
+  const r = await db
+    .prepare("SELECT DISTINCT ON (moneda) moneda, valoare, data FROM cursuri_bnr WHERE data <= ? ORDER BY moneda, data DESC")
+    .all(eData(data) ? data : azi())
+    .catch(() => []);
+  const o = {};
+  for (const x of r || []) {
+    const v = Number(x.valoare);
+    if (v > 0) o[String(x.moneda).toUpperCase()] = { valoare: v, data: String(x.data || "").slice(0, 10) };
+  }
+  return o;
+}
+
+// Cursurile cu care se socotește o comandă, cu BNR-ul zilei ei acolo unde pe
+// comandă nu e scris niciunul (comenzile de dinainte de 05.11.2026). Se spune
+// de unde vine fiecare, ca pagina să nu dea drept „pus de noi" un curs pe
+// care nu l-a pus nimeni.
+async function cursulEfectiv(c) {
+  const moneda = String((c && c.moneda) || "RON").toUpperCase();
+  const bnr = await cursuriBnr(String((c && c.data) || azi()).slice(0, 10));
+  let curs = moneda === "RON" ? 1 : nr(c.curs) > 0 ? nr(c.curs) : null;
+  let dinBnr = false;
+  if (moneda !== "RON" && !curs && bnr[moneda]) {
+    curs = bnr[moneda].valoare;
+    dinBnr = true;
+  }
+  let cursEur = moneda === "EUR" ? curs : nr(c.curs_eur) > 0 ? nr(c.curs_eur) : null;
+  let eurDinBnr = moneda === "EUR" ? dinBnr : false;
+  if (moneda !== "EUR" && !cursEur && bnr.EUR) {
+    cursEur = bnr.EUR.valoare;
+    eurDinBnr = true;
+  }
+  return { moneda, curs, cursEur, dinBnr, eurDinBnr, bnr };
+}
+
+// ---------------------------------------------------------------------------
+// Istoricul: cine a schimbat ce și când.
+//
+// Dacă scrierea istoricului cade, cade toată cererea — nu e prinsă în
+// try/catch. O comandă schimbată fără urmă e exact ce s-a cerut să nu existe.
+async function scrieIstoric(comandaId, user, schimbari) {
+  if (!schimbari || !schimbari.length) return 0;
+  const la = acum();
+  for (const s of schimbari) {
+    await db
+      .prepare(
+        `INSERT INTO comenzi_furnizor_istoric (comanda_id, utilizator_id, utilizator_nume, ce, vechi, nou, la)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        comandaId,
+        user ? user.id : null,
+        user ? user.nume || user.email || "" : "",
+        String(s.ce || "").slice(0, 300),
+        s.vechi === null || s.vechi === undefined || s.vechi === "" ? null : String(s.vechi).slice(0, 2000),
+        s.nou === null || s.nou === undefined || s.nou === "" ? null : String(s.nou).slice(0, 2000),
+        la
+      );
+  }
+  return schimbari.length;
+}
+
+async function citesteIstoric(comandaId) {
+  return db
+    .prepare("SELECT * FROM comenzi_furnizor_istoric WHERE comanda_id = ? ORDER BY id DESC LIMIT 300")
+    .all(comandaId)
+    .catch(() => []);
 }
 
 // Ultimul preț plătit pe fiecare produs, din liniile comenzilor de dinainte.
@@ -184,7 +316,8 @@ function datalistProduse(produse, preturi) {
     // Ce se întâmplă când omul a ales un produs: se completează unitatea și,
     // dacă n-a scris deja un preț, ultimul preț plătit — ca propunere, nu ca
     // adevăr. Scrie dedesubt de când e și de la cine, ca să se vadă dacă mai
-    // are vreo legătură cu realitatea.
+    // are vreo legătură cu realitatea. Prețul se propune doar dacă a fost în
+    // aceeași monedă: 1,51 € pus pe o comandă în lei ar fi de cinci ori mai mic.
     function cfLeagaRand(rand) {
       var inp = rand.querySelector(".cf-produs");
       if (!inp || inp.dataset.legat) return;
@@ -195,24 +328,35 @@ function datalistProduse(produse, preturi) {
         var um = rand.querySelector(".cf-um");
         var pret = rand.querySelector(".cf-pret");
         var nota = rand.querySelector(".cf-nota");
+        var sel = document.getElementById("cf-moneda");
+        var moneda = sel ? sel.value : "";
         if (!p) { if (ascuns) ascuns.value = ""; if (nota) nota.textContent = ""; return; }
         if (ascuns) ascuns.value = p[0];
         if (um && !um.value) um.value = p[2];
         if (p[4] !== null && p[4] !== undefined) {
-          if (pret && !pret.value) pret.value = p[4];
-          if (nota) nota.textContent = "ultima dată " + p[4] + " " + p[5] + " la " + p[6] + (p[7] ? " de la " + p[7] : "");
+          if (pret && !pret.value && (!p[5] || !moneda || p[5] === moneda)) pret.value = String(p[4]).replace(".", ",");
+          if (nota) nota.textContent = "ultima dată " + String(p[4]).replace(".", ",") + " " + p[5] + " la " + p[6] + (p[7] ? " de la " + p[7] : "");
         } else if (nota) {
           nota.textContent = "n-a mai fost comandat prin ERP";
         }
       });
     }
 
+    // Rândul nou vine dintr-un <template>, nu dintr-o copie a primului rând:
+    // pe pagina de modificare primul rând e o poziție existentă, cu ID-ul ei,
+    // cu cât s-a primit din ea și cu bifa de ștergere — nimic din astea nu
+    // are ce căuta pe o poziție nouă.
     function cfRandNou() {
       var corp = document.getElementById("cf-linii");
-      var sablon = corp.querySelector("tr");
-      var rand = sablon.cloneNode(true);
-      rand.querySelectorAll("input").forEach(function (i) { i.value = ""; delete i.dataset.legat; });
-      var n = rand.querySelector(".cf-nota"); if (n) n.textContent = "";
+      var sablon = document.getElementById("cf-rand-sablon");
+      var rand;
+      if (sablon && sablon.content && sablon.content.firstElementChild) {
+        rand = sablon.content.firstElementChild.cloneNode(true);
+      } else {
+        rand = corp.querySelector("tr").cloneNode(true);
+        rand.querySelectorAll("input").forEach(function (i) { i.value = ""; delete i.dataset.legat; });
+        var n = rand.querySelector(".cf-nota"); if (n) n.textContent = "";
+      }
       corp.appendChild(rand);
       cfLeagaRand(rand);
     }
@@ -233,6 +377,339 @@ function datalistProduse(produse, preturi) {
     </script>`;
 }
 
+// Cursul și totalul, socotite în pagină în timp ce omul scrie — același
+// calcul ca pe server (lib/comenzi-furnizor-logica.js), ca să nu vadă o cifră
+// în formular și alta după salvare.
+//
+// Câmpul de curs se completează cu BNR-ul doar cât timp omul nu l-a atins.
+// Odată scris de mână, rămâne al lui: schimbarea datei comenzii nu-i mai
+// suprascrie cursul negociat.
+function scriptCurs(bnr) {
+  return `
+    <script>
+    var CF_BNR = ${JSON.stringify(bnr || {}).replace(/</g, "\\u003c")};
+    (function () {
+      function nrCamp(v) {
+        var t = String(v === null || v === undefined ? "" : v).replace(/\\s+/g, "");
+        if (t === "") return null;
+        if (!/^(\\d+([.,]\\d*)?|[.,]\\d+)$/.test(t)) return NaN;
+        return Number(t.replace(",", "."));
+      }
+      function bani(x) { return Math.round(Number((x * 100).toPrecision(12))) / 100; }
+      function scrie(x) { return x.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+      function scrieCurs(x) { return x.toLocaleString("ro-RO", { minimumFractionDigits: 4, maximumFractionDigits: 6, useGrouping: false }); }
+      var sel, campCurs, curs, eur, notaCurs, notaEur, total, data;
+      function moneda() { return sel ? sel.value : "RON"; }
+      function nota(el, m, input) {
+        if (!el || !input) return;
+        var b = CF_BNR[m];
+        if (!b) { el.textContent = "BNR n-are curs " + m + " la data comenzii — scrie-l voi."; return; }
+        var v = nrCamp(input.value);
+        var html = "BNR " + b.data.split("-").reverse().join(".") + ": " + scrieCurs(b.valoare);
+        if (v && !isNaN(v) && Math.abs(v - b.valoare) > 0.0000005) {
+          var ab = Math.round(((v - b.valoare) / b.valoare) * 1000) / 10;
+          html += " · al vostru " + (ab > 0 ? "+" : "") + String(ab).replace(".", ",") + "%";
+          if (Math.abs(ab) > 10) html = '<span style="color:var(--danger,#b3261e)">' + html + " — verificați cursul</span>";
+          html += ' · <a href="#" data-bnr="' + (input === curs ? "curs" : "eur") + '">pune BNR</a>';
+        }
+        el.innerHTML = html;
+      }
+      function etichete() {
+        var m = moneda();
+        if (campCurs) campCurs.style.display = m === "RON" || m === "EUR" ? "none" : "";
+        document.querySelectorAll(".cf-m").forEach(function (s) { s.textContent = m; });
+        var rost = document.getElementById("cf-rost-eur");
+        if (rost) rost.textContent = m === "EUR" ? "din el iese valoarea în lei" : m === "RON" ? "din el iese valoarea în euro" : "din el iese echivalentul în euro";
+      }
+      function propune() {
+        var m = moneda();
+        if (curs && !curs.dataset.atins) curs.value = m !== "RON" && m !== "EUR" && CF_BNR[m] ? scrieCurs(CF_BNR[m].valoare) : "";
+        if (eur && !eur.dataset.atins) eur.value = CF_BNR.EUR ? scrieCurs(CF_BNR.EUR.valoare) : "";
+      }
+      function socoteste() {
+        var m = moneda(), suma = 0, fara = 0, gresit = 0;
+        document.querySelectorAll("#cf-linii tr").forEach(function (r) {
+          var st = r.querySelector(".cf-sterge");
+          if (st && st.checked) return;
+          var den = String((r.querySelector(".cf-produs") || {}).value || "").trim();
+          var q = nrCamp((r.querySelector(".cf-cant") || {}).value);
+          var p = nrCamp((r.querySelector(".cf-pret") || {}).value);
+          if (!den && q === null) return;
+          if (q === null || isNaN(q) || (p !== null && isNaN(p))) { gresit++; return; }
+          if (p === null) { fara++; return; }
+          suma += bani(p * q);
+        });
+        suma = bani(suma);
+        var c = m === "RON" ? 1 : m === "EUR" ? nrCamp(eur && eur.value) : nrCamp(curs && curs.value);
+        var ce = m === "EUR" ? c : nrCamp(eur && eur.value);
+        var parti = ["Total: <strong>" + scrie(suma) + " " + m + "</strong>"];
+        if (m !== "RON") parti.push(c && !isNaN(c) ? "= " + scrie(bani(suma * c)) + " lei" : "în lei: lipsește cursul");
+        if (m !== "EUR") parti.push(c && ce && !isNaN(c) && !isNaN(ce) ? "= " + scrie(bani((suma * c) / ce)) + " EUR" : "în euro: lipsește cursul");
+        if (fara) parti.push(fara + (fara === 1 ? " poziție" : " poziții") + " fără preț");
+        if (gresit) parti.push('<span style="color:var(--danger,#b3261e)">' + gresit + (gresit === 1 ? " poziție" : " poziții") + " cu cantitatea sau prețul scrise greșit</span>");
+        if (total) total.innerHTML = parti.join(" · ");
+        if (m !== "RON" && m !== "EUR") nota(notaCurs, m, curs); else if (notaCurs) notaCurs.textContent = "";
+        nota(notaEur, "EUR", eur);
+      }
+      document.addEventListener("DOMContentLoaded", function () {
+        sel = document.getElementById("cf-moneda");
+        campCurs = document.getElementById("cf-camp-curs");
+        curs = document.getElementById("cf-curs");
+        eur = document.getElementById("cf-curs-eur");
+        notaCurs = document.getElementById("cf-nota-curs");
+        notaEur = document.getElementById("cf-nota-eur");
+        total = document.getElementById("cf-total");
+        data = document.querySelector("input[name=data]");
+        if (!sel) return;
+        [curs, eur].forEach(function (i) {
+          if (i) i.addEventListener("input", function () { i.dataset.atins = "1"; socoteste(); });
+        });
+        sel.addEventListener("change", function () {
+          // Cursul de dolari nu are ce căuta pe o comandă trecută în lire.
+          if (curs) delete curs.dataset.atins;
+          etichete(); propune(); socoteste();
+        });
+        document.addEventListener("input", function (e) {
+          if (e.target && e.target.closest && e.target.closest("#cf-linii")) socoteste();
+        });
+        document.addEventListener("change", function (e) {
+          if (e.target && e.target.classList && e.target.classList.contains("cf-sterge")) socoteste();
+        });
+        document.addEventListener("click", function (e) {
+          var a = e.target && e.target.closest ? e.target.closest("a[data-bnr]") : null;
+          if (!a) return;
+          e.preventDefault();
+          var peCurs = a.getAttribute("data-bnr") === "curs";
+          var i = peCurs ? curs : eur;
+          var m = peCurs ? moneda() : "EUR";
+          if (i && CF_BNR[m]) { i.value = scrieCurs(CF_BNR[m].valoare); delete i.dataset.atins; socoteste(); }
+        });
+        if (data) data.addEventListener("change", function () {
+          if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(data.value)) return;
+          fetch("/procurement/comenzi/curs.json?data=" + encodeURIComponent(data.value), { credentials: "same-origin" })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (j) { if (j && j.cursuri) { CF_BNR = j.cursuri; propune(); socoteste(); } })
+            .catch(function () {});
+        });
+        etichete(); propune(); socoteste();
+      });
+    })();
+    </script>`;
+}
+
+// Un rând din tabelul de poziții. `l` vine din bază (pagina de modificare)
+// sau din ce a trimis omul (formularul întors cu eroare) — de-aia numerele
+// pot fi și text, și se scriu înapoi exact cum le-a tastat.
+function randLinie(l, modificare) {
+  const x = l || {};
+  const primit = nr(x.cantitate_primita);
+  const areId = Boolean(x.id);
+  return `
+      <tr>
+        <td>
+          <input class="cf-produs" list="cf-produse" name="denumire[]" value="${esc(x.denumire || "")}" placeholder="scrie sau alege din nomenclator" style="width:100%" autocomplete="off">
+          <input type="hidden" class="cf-produs-id" name="produs_id[]" value="${esc(x.produs_id || "")}">
+          ${modificare ? `<input type="hidden" name="linie_id[]" value="${esc(areId ? x.id : "")}">` : ""}
+          <div class="cf-nota" style="font-size:12px;color:var(--text-muted);min-height:15px"></div>
+        </td>
+        <td><input class="cf-cant" name="cantitate[]" value="${esc(campNumar(x.cantitate, 3))}" inputmode="decimal" autocomplete="off" style="width:110px"></td>
+        <td><input class="cf-um" name="um[]" value="${esc(x.um || "")}" list="cf-unitati" style="width:90px"></td>
+        <td><input class="cf-pret" name="pret_unitar[]" value="${esc(campNumar(x.pret_unitar, 4))}" inputmode="decimal" autocomplete="off" style="width:120px" placeholder="opțional"></td>
+        ${
+          modificare
+            ? `<td style="white-space:nowrap;font-size:13px">${
+                primit > 0 ? `${esc(primit.toLocaleString("ro-RO", { maximumFractionDigits: 3 }))} ${esc(x.um || "")}` : '<span style="color:var(--text-muted)">—</span>'
+              }</td>
+        <td style="text-align:center">${
+          areId
+            ? primit > 0
+              ? '<span title="A intrat deja marfă pe ea — se poate schimba cantitatea, nu se poate șterge" style="color:var(--text-muted);font-size:12px">are marfă</span>'
+              : `<input type="checkbox" class="cf-sterge" name="sterge_id[]" value="${esc(x.id)}" aria-label="șterge poziția"${x.sters ? " checked" : ""}>`
+            : ""
+        }</td>`
+            : ""
+        }
+      </tr>`;
+}
+
+// Formularul comenzii: același pentru comandă nouă și pentru modificare.
+//
+// o.mod        — "nou" sau "modifica"
+// o.c          — capul comenzii (valorile de pus în câmpuri)
+// o.linii      — pozițiile
+// o.atins      — { curs, eur }: câmpurile de curs scrise deja de om, pe care
+//                BNR-ul nu le mai suprascrie
+function formularComanda(o) {
+  const c = o.c || {};
+  const modificare = o.mod === "modifica";
+  const moneda = String(c.moneda || "RON").toUpperCase();
+  const linii = (o.linii && o.linii.length ? o.linii : [{}, {}, {}]).slice();
+  if (!modificare) while (linii.length < 3) linii.push({});
+  const coloane = modificare
+    ? '<tr><th style="width:46%">Produs / denumire</th><th>Cantitate</th><th>UM</th><th>Preț unitar (<span class="cf-m">' + esc(moneda) + "</span>)</th><th>Primit</th><th>Șterge</th></tr>"
+    : '<tr><th style="width:52%">Produs / denumire</th><th>Cantitate</th><th>UM</th><th>Preț unitar (<span class="cf-m">' + esc(moneda) + "</span>)</th></tr>";
+  const cursAltaMoneda = moneda !== "RON" && moneda !== "EUR" ? c.curs : "";
+  const cursEur = moneda === "EUR" ? (c.curs_eur !== undefined && c.curs_eur !== null && c.curs_eur !== "" ? c.curs_eur : c.curs) : c.curs_eur;
+  const atins = o.atins || {};
+  const scrieCursCamp = (v) => (typeof v === "string" ? v : L.scrieCurs(v));
+
+  return `
+      <form class="form" method="post" action="${esc(o.actiune)}" style="max-width:980px">
+        <h2>Către cine</h2>
+        <div style="display:grid;grid-template-columns:${modificare ? "1fr" : "3fr auto"};gap:12px;align-items:end">
+          <label class="field"><span>Furnizor</span>
+            <select name="furnizor_id" required>
+              <option value="">— alege —</option>
+              ${o.furnizori
+                .map((f) => `<option value="${f.id}"${Number(c.furnizor_id) === Number(f.id) ? " selected" : ""}>${esc(f.nume)}${f.email ? " · " + esc(f.email) : ""}</option>`)
+                .join("")}
+            </select>
+          </label>
+          ${modificare ? "" : `<button type="button" class="btn secondary" id="cf-buton-furnizor-nou" onclick="cfDeschideFurnizor()">+ Furnizor nou</button>`}
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <label class="field"><span>Data comenzii</span><input type="date" name="data" value="${esc(String(c.data || azi()).slice(0, 10))}" required></label>
+          <label class="field"><span>Data solicitată de livrare</span><input type="date" name="data_solicitata" value="${esc(String(c.data_solicitata || "").slice(0, 10))}"></label>
+        </div>
+
+        <h2>Moneda și cursul</h2>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;align-items:start">
+          <label class="field"><span>Moneda comenzii</span>
+            <select name="moneda" id="cf-moneda">${o.monede.map((m) => `<option value="${m}"${m === moneda ? " selected" : ""}>${m}</option>`).join("")}</select>
+          </label>
+          <label class="field" id="cf-camp-curs"${moneda === "RON" || moneda === "EUR" ? ' style="display:none"' : ""}><span>Curs <b class="cf-m">${esc(moneda)}</b> — lei pentru 1 <b class="cf-m">${esc(moneda)}</b></span>
+            <input name="curs" id="cf-curs" value="${esc(scrieCursCamp(cursAltaMoneda))}" inputmode="decimal" autocomplete="off"${atins.curs ? ' data-atins="1"' : ""}>
+            <small id="cf-nota-curs" style="display:block;font-size:12px;color:var(--text-muted);margin-top:3px"></small>
+          </label>
+          <label class="field"><span>Curs EUR — lei pentru 1 EUR</span>
+            <input name="curs_eur" id="cf-curs-eur" value="${esc(scrieCursCamp(cursEur))}" inputmode="decimal" autocomplete="off"${atins.eur ? ' data-atins="1"' : ""}>
+            <small id="cf-nota-eur" style="display:block;font-size:12px;color:var(--text-muted);margin-top:3px"></small>
+          </label>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:0">
+          Cursul îl puneți voi — cel negociat cu banca sau cu furnizorul. Se propune cursul BNR din ziua comenzii;
+          dacă lăsați câmpul gol, se ia BNR-ul. Cursul EUR: <span id="cf-rost-eur"></span>.
+          Rămâne scris pe comandă și nu se mai schimbă singur când se mișcă cursul.
+        </p>
+
+        <h2>Ce comandăm</h2>
+        <label class="field" style="max-width:380px"><span>Filtrează produsele pe categorie</span>
+          <select id="cf-categorie"><option value="">toate categoriile</option></select>
+        </label>
+        <div class="tabel-scroll">
+        <table class="tabel">
+          <thead>${coloane}</thead>
+          <tbody id="cf-linii">${linii.map((l) => randLinie(l, modificare)).join("")}</tbody>
+        </table>
+        </div>
+        <template id="cf-rand-sablon">${randLinie({}, modificare).trim()}</template>
+        <p><button type="button" class="btn small secondary" id="cf-adauga">+ Încă o poziție</button></p>
+        <div id="cf-total" class="detail-box" style="margin:6px 0 14px;font-size:14px" aria-live="polite"></div>
+
+        <label class="field"><span>Observații pentru furnizor (intră în email și în PDF)</span><textarea name="observatii" rows="2" placeholder="ex. livrare la Afumați, în intervalul 8–16">${esc(c.observatii || "")}</textarea></label>
+
+        ${
+          modificare
+            ? `<label class="field"><span>De ce modifici? (intră în istoric, opțional)</span>
+          <input type="text" name="motiv" maxlength="200" value="${esc(o.motiv || "")}" placeholder="ex. furnizorul a confirmat alt preț">
+        </label>
+        <div class="form-actions">
+          <button class="btn" type="submit">Salvează modificările</button>
+          <a href="/procurement/comenzi/${esc(c.id)}" class="btn secondary">Renunță</a>
+        </div>`
+            : `<div class="form-actions">
+          <button class="btn" type="submit" name="actiune" value="salveaza">Salvează comanda</button>
+          <a href="/procurement/comenzi" class="btn secondary">Renunță</a>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted)">
+          Se salvează ca ciornă. Emailul către furnizor se trimite din pagina comenzii, după ce îl vezi scris.
+        </p>`
+        }
+      </form>`;
+}
+
+// Ce a trimis formularul, citit și verificat. Același pentru comandă nouă și
+// pentru modificare.
+//
+// La prima greșeală întoarce { eroare: cod } — „furnizor", „linii",
+// „cantitate", „pret", „curs". Altfel { antet, linii }, unde fiecare linie
+// păstrată are `id`-ul ei, iar cele noi au id null.
+function citesteFormular(b, monede) {
+  const furnizorId = parseInt(b.furnizor_id, 10) || null;
+  if (!furnizorId) return { eroare: "furnizor" };
+
+  const ids = asArray(b["linie_id[]"]);
+  const denumiri = asArray(b["denumire[]"]);
+  const produse = asArray(b["produs_id[]"]);
+  const cantitati = asArray(b["cantitate[]"]);
+  const unitati = asArray(b["um[]"]);
+  const preturi = asArray(b["pret_unitar[]"]);
+  const sterse = new Set(asArray(b["sterge_id[]"]).map((x) => String(parseInt(x, 10))));
+
+  const linii = [];
+  for (let i = 0; i < denumiri.length; i++) {
+    const id = parseInt(ids[i], 10) || null;
+    if (id && sterse.has(String(id))) continue; // bifată „șterge"
+    const den = text(denumiri[i]);
+    const cantText = text(cantitati[i]);
+    if (!den && !cantText) continue; // rând gol, lăsat de formular (sau golit dinadins)
+    // O denumire fără cantitate e o greșeală de completare, nu o comandă de
+    // zero bucăți. Se spune omului, nu se salvează tăcut.
+    const cant = L.numarDinCamp(cantText, 3);
+    if (!den || !cant.ok || !(cant.valoare > 0)) return { eroare: "cantitate", linie: den };
+    // Prețul gol e „de confirmat", nu zero. Prețul scris greșit e o greșeală
+    // spusă omului — înainte se transforma tăcut în „fără preț".
+    const pret = L.numarDinCamp(text(preturi[i]), 4);
+    if (!pret.ok) return { eroare: "pret", linie: den };
+    linii.push({
+      id,
+      produs_id: parseInt(produse[i], 10) || null,
+      denumire: den.slice(0, 300),
+      cantitate: cant.valoare,
+      um: text(unitati[i]).slice(0, 20) || null,
+      pret_unitar: pret.valoare,
+    });
+  }
+  if (!linii.length) return { eroare: "linii" };
+
+  const moneda = monede.includes(text(b.moneda).toUpperCase()) ? text(b.moneda).toUpperCase() : "RON";
+  const cursM = L.cursDinCamp(b.curs);
+  const cursE = L.cursDinCamp(b.curs_eur);
+  if ((moneda !== "RON" && moneda !== "EUR" && !cursM.ok) || !cursE.ok) return { eroare: "curs" };
+
+  const antet = {
+    furnizor_id: furnizorId,
+    data: eData(text(b.data).slice(0, 10)) ? text(b.data).slice(0, 10) : azi(),
+    data_solicitata: eData(text(b.data_solicitata).slice(0, 10)) ? text(b.data_solicitata).slice(0, 10) : null,
+    moneda,
+    curs: moneda === "RON" ? null : moneda === "EUR" ? cursE.valoare : cursM.valoare,
+    curs_eur: cursE.valoare,
+    observatii: text(b.observatii) || null,
+  };
+  return { antet, linii };
+}
+
+// Cursurile lăsate goale se iau de la BNR, din ziua comenzii. Ce nu are nici
+// BNR-ul rămâne gol — pagina spune atunci că lipsește, nu inventează unul.
+async function completeazaCursuri(antet) {
+  const bnr = await cursuriBnr(antet.data);
+  if (antet.moneda === "RON") antet.curs = null;
+  else if (!antet.curs && bnr[antet.moneda]) antet.curs = bnr[antet.moneda].valoare;
+  if (antet.moneda === "EUR") antet.curs_eur = antet.curs;
+  else if (!antet.curs_eur && bnr.EUR) antet.curs_eur = bnr.EUR.valoare;
+  return bnr;
+}
+
+const MESAJE_EROARE = {
+  furnizor: "Alege un furnizor sau adaugă-l cu butonul de lângă.",
+  linii: "O comandă fără nicio poziție cu denumire și cantitate n-are ce trimite.",
+  cantitate: "O poziție are denumire dar n-are cantitate (sau cantitatea nu e un număr). Scrie cantitatea sau șterge rândul.",
+  pret: "Un preț nu e un număr. Scrie-l cu virgulă sau cu punct, fără puncte de mii — de exemplu 1250,50.",
+  curs: "Cursul nu e un număr pozitiv. Scrie-l ca la BNR, de exemplu 5,0912 — sau lasă câmpul gol și se ia cursul BNR.",
+  primita: "",
+};
+
 function register(router) {
   // ---- lista, cu filtre pe tot ce s-a cerut ------------------------------
   router.get("/procurement/comenzi", async (ctx) => {
@@ -244,7 +721,6 @@ function register(router) {
     const panaLa = text(q.pana_la).slice(0, 10);
     const solDeLa = text(q.sol_de_la).slice(0, 10);
     const recDeLa = text(q.rec_de_la).slice(0, 10);
-    const c = await curs();
 
     const unde = [];
     const args = [];
@@ -284,6 +760,8 @@ function register(router) {
       args.push(`%${cauta}%`, `%${cauta}%`, `%${cauta}%`);
     }
 
+    // Cursul fiecărei comenzi: cel scris pe ea; la comenzile de dinainte de
+    // 05.11.2026, care n-au niciunul, BNR-ul din ziua lor.
     const comenzi = await db
       .prepare(
         `SELECT c.*, COALESCE(p.nume, '—') AS furnizor, u.nume AS creata_nume,
@@ -291,7 +769,13 @@ function register(router) {
                 (SELECT COALESCE(SUM(l.cantitate * l.pret_unitar), 0) FROM comenzi_furnizor_linii l
                   WHERE l.comanda_id = c.id AND l.pret_unitar IS NOT NULL) AS total,
                 (SELECT COUNT(*) FROM comenzi_furnizor_linii l
-                  WHERE l.comanda_id = c.id AND l.pret_unitar IS NULL) AS fara_pret
+                  WHERE l.comanda_id = c.id AND l.pret_unitar IS NULL) AS fara_pret,
+                COALESCE(c.curs, (SELECT b.valoare FROM cursuri_bnr b
+                                   WHERE b.moneda = UPPER(c.moneda) AND b.data <= COALESCE(NULLIF(c.data, ''), '9999-12-31')
+                                   ORDER BY b.data DESC LIMIT 1)) AS curs_ef,
+                COALESCE(c.curs_eur, (SELECT b.valoare FROM cursuri_bnr b
+                                   WHERE b.moneda = 'EUR' AND b.data <= COALESCE(NULLIF(c.data, ''), '9999-12-31')
+                                   ORDER BY b.data DESC LIMIT 1)) AS curs_eur_ef
            FROM comenzi_furnizor c
            LEFT JOIN parteneri p ON p.id = c.furnizor_id
            LEFT JOIN utilizatori u ON u.id = c.creata_de
@@ -305,20 +789,39 @@ function register(router) {
       .prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 3000")
       .all();
 
-    const peMoneda = L.totaluriPeMoneda(comenzi.filter((x) => x.status !== "anulata"));
-    const totalLei = [...peMoneda.entries()].reduce((s, [m, v]) => s + inLei(v, m, c), 0);
+    const valabile = comenzi.filter((x) => x.status !== "anulata");
+    const peMoneda = L.totaluriPeMoneda(valabile);
+    const echivalent = (x) => L.echivalente(nr(x.total), { moneda: x.moneda, curs: x.curs_ef, curs_eur: x.curs_eur_ef });
+    let totalLei = 0;
+    let totalEur = 0;
+    let faraCurs = 0;
+    for (const x of valabile) {
+      const e = echivalent(x);
+      if (e.ron === null || e.eur === null) faraCurs++;
+      if (e.ron !== null) totalLei += e.ron;
+      if (e.eur !== null) totalEur += e.eur;
+    }
+    totalLei = L.BANI(totalLei);
+    totalEur = L.BANI(totalEur);
     const deschise = comenzi.filter((x) => L.DESCHISE.includes(x.status));
     const intarziate = deschise.filter((x) => x.data_solicitata && String(x.data_solicitata).slice(0, 10) < azi());
 
     const randuri = comenzi.map((x) => {
       const intr = L.intarziere(x.data_solicitata, x.data_receptie);
+      const m = String(x.moneda || "RON").toUpperCase();
+      const e = echivalent(x);
+      const sub = [];
+      if (m !== "RON") sub.push(e.ron === null ? "lei: fără curs" : sumaCu(e.ron, "lei"));
+      if (m !== "EUR") sub.push(e.eur === null ? "EUR: fără curs" : sumaCu(e.eur, "EUR"));
       return [
         `<a href="/procurement/comenzi/${x.id}"><strong>${esc(x.numar || "#" + x.id)}</strong></a>`,
         esc(String(x.data || "").slice(0, 10)),
         esc(x.furnizor),
         badgeStatus(x.status),
         String(x.nr_linii),
-        `<strong>${esc(sumaCu(x.total, x.moneda))}</strong>${x.fara_pret ? `<br><span style="font-size:12px;color:var(--text-muted)">+${x.fara_pret} fără preț</span>` : ""}`,
+        `<strong>${esc(sumaCu(x.total, m))}</strong>` +
+          (nr(x.total) > 0 && sub.length ? `<br><span style="font-size:12px;color:var(--text-muted)">= ${esc(sub.join(" · "))}</span>` : "") +
+          (nr(x.fara_pret) ? `<br><span style="font-size:12px;color:var(--text-muted)">+${esc(x.fara_pret)} fără preț</span>` : ""),
         x.data_solicitata
           ? esc(String(x.data_solicitata).slice(0, 10)) +
             (!x.data_receptie && String(x.data_solicitata).slice(0, 10) < azi() && L.DESCHISE.includes(x.status)
@@ -364,23 +867,26 @@ function register(router) {
         <div class="card"><div class="label">Cu termen depășit</div><div class="value">${intarziate.length}</div></div>
         <div class="card"><div class="label">Total comandat</div><div class="value">${esc(
           [...peMoneda.entries()].map(([m, v]) => sumaCu(v, m)).join(" + ") || "0,00 RON"
-        )}</div>${peMoneda.size > 1 ? `<div class="label">≈ ${esc(money(totalLei))}</div>` : ""}</div>
+        )}</div></div>
+        <div class="card"><div class="label">Total în lei</div><div class="value">${esc(sumaCu(totalLei, "lei"))}</div><div class="label">la cursul fiecărei comenzi</div></div>
+        <div class="card"><div class="label">Total în euro</div><div class="value">${esc(sumaCu(totalEur, "EUR"))}</div>${
+          faraCurs ? `<div class="label">${faraCurs} ${faraCurs === 1 ? "comandă" : "comenzi"} fără curs, nesocotite</div>` : ""
+        }</div>
       </div>
 
       ${
         comenzi.length
-          ? table(
+          ? `<div class="tabel-scroll">${table(
               ["Număr", "Data", "Furnizor", "Stare", "Poziții", "Valoare", "Solicitată", "Recepție"],
               randuri
-            )
+            )}</div>`
           : `<p>Nicio comandă în filtrul ales. <a href="/procurement/comenzi/noua">Înregistrează prima</a>.</p>`
       }
 
-      ${
-        peMoneda.size > 1
-          ? `<p style="font-size:12px;color:var(--text-muted)">Totalul în lei e doar pentru comparație, la cursul de ${esc(String(c).replace(".", ","))} lei/euro din Procurement. Nu e o sumă contabilă.</p>`
-          : ""
-      }
+      <p style="font-size:12px;color:var(--text-muted)">
+        Lei și euro sunt la cursul scris pe fiecare comandă; unde nu e scris niciunul (comenzile mai vechi), la cursul BNR din ziua comenzii.
+        Comenzile anulate nu intră în totaluri. Nu sunt sume contabile.
+      </p>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comenzi către furnizori", active: "/procurement/comenzi", body }));
   });
@@ -460,6 +966,16 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Istoric prețuri de achiziție", active: "/procurement/comenzi", body }));
   });
 
+  // ---- cursul BNR al unei zile, pentru formular --------------------------
+  // Stă înainte de /procurement/comenzi/:id, altfel „curs.json" ar fi luat
+  // drept numărul unei comenzi.
+  router.get("/procurement/comenzi/curs.json", async (ctx) => {
+    const data = eData(text((ctx.query || {}).data)) ? text(ctx.query.data) : azi();
+    const cursuri = await cursuriBnr(data);
+    ctx.res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    ctx.res.end(JSON.stringify({ data, cursuri }));
+  });
+
   // ---- formular de comandă nouă ------------------------------------------
   router.get("/procurement/comenzi/noua", async (ctx) => {
     const eroare = text((ctx.query || {}).eroare);
@@ -471,60 +987,20 @@ function register(router) {
       .prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000")
       .all();
     const preturi = await ultimelePreturi();
-
-    const randGol = `
-      <tr>
-        <td>
-          <input class="cf-produs" list="cf-produse" name="denumire[]" placeholder="scrie sau alege din nomenclator" style="width:100%" autocomplete="off">
-          <input type="hidden" class="cf-produs-id" name="produs_id[]" value="">
-          <div class="cf-nota" style="font-size:12px;color:var(--text-muted);min-height:15px"></div>
-        </td>
-        <td><input type="number" step="0.001" class="cf-cant" name="cantitate[]" style="width:110px"></td>
-        <td><input class="cf-um" name="um[]" list="cf-unitati" style="width:90px"></td>
-        <td><input type="number" step="0.0001" class="cf-pret" name="pret_unitar[]" style="width:120px" placeholder="opțional"></td>
-      </tr>`;
+    const monede = await monedeDisponibile();
+    const bnr = await cursuriBnr(azi());
 
     const body = `
-      ${eroare ? `<div class="flash eroare">${esc({ furnizor: "Alege un furnizor sau adaugă-l cu butonul de lângă.", linii: "O comandă fără nicio poziție cu denumire și cantitate n-are ce trimite.", cantitate: "O poziție are denumire dar n-are cantitate. Scrie cantitatea sau șterge rândul." }[eroare] || "Comanda nu s-a putut salva.")}</div>` : ""}
+      ${eroare ? `<div class="flash eroare">${esc(MESAJE_EROARE[eroare] || "Comanda nu s-a putut salva.")}</div>` : ""}
 
-      <form class="form" method="post" action="/procurement/comenzi" style="max-width:980px">
-        <h2>Către cine</h2>
-        <div style="display:grid;grid-template-columns:3fr auto;gap:12px;align-items:end">
-          <label class="field"><span>Furnizor</span>
-            <select name="furnizor_id" required>
-              <option value="">— alege —</option>
-              ${furnizori.map((f) => `<option value="${f.id}"${furnizorAles === f.id ? " selected" : ""}>${esc(f.nume)}${f.email ? " · " + esc(f.email) : ""}</option>`).join("")}
-            </select>
-          </label>
-          <button type="button" class="btn secondary" id="cf-buton-furnizor-nou" onclick="cfDeschideFurnizor()">+ Furnizor nou</button>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
-          <label class="field"><span>Data comenzii</span><input type="date" name="data" value="${azi()}" required></label>
-          <label class="field"><span>Data solicitată de livrare</span><input type="date" name="data_solicitata"></label>
-          <label class="field"><span>Moneda</span><select name="moneda">${MONEDE.map((m) => `<option value="${m}">${m}</option>`).join("")}</select></label>
-        </div>
-
-        <h2>Ce comandăm</h2>
-        <label class="field" style="max-width:380px"><span>Filtrează produsele pe categorie</span>
-          <select id="cf-categorie"><option value="">toate categoriile</option></select>
-        </label>
-        <table class="tabel">
-          <thead><tr><th style="width:52%">Produs / denumire</th><th>Cantitate</th><th>UM</th><th>Preț unitar</th></tr></thead>
-          <tbody id="cf-linii">${randGol}${randGol}${randGol}</tbody>
-        </table>
-        <p><button type="button" class="btn small secondary" id="cf-adauga">+ Încă o poziție</button></p>
-
-        <label class="field"><span>Observații pentru furnizor (intră în email)</span><textarea name="observatii" rows="2" placeholder="ex. livrare la Afumați, în intervalul 8–16"></textarea></label>
-
-        <div class="form-actions">
-          <button class="btn" type="submit" name="actiune" value="salveaza">Salvează comanda</button>
-          <a href="/procurement/comenzi" class="btn secondary">Renunță</a>
-        </div>
-        <p style="font-size:12px;color:var(--text-muted)">
-          Se salvează ca ciornă. Emailul către furnizor se trimite din pagina comenzii, după ce îl vezi scris.
-        </p>
-      </form>
+      ${formularComanda({
+        mod: "nou",
+        actiune: "/procurement/comenzi",
+        c: { furnizor_id: furnizorAles, data: azi(), moneda: "RON" },
+        linii: [],
+        furnizori,
+        monede,
+      })}
 
       <!-- Furnizorul nou se adaugă din aceeași pagină, dar cu formularul lui:
            altfel un câmp gol de la furnizor ar bloca salvarea comenzii, sau
@@ -596,6 +1072,7 @@ function register(router) {
 
       <datalist id="cf-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${datalistProduse(produse, preturi)}
+      ${scriptCurs(bnr)}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă către furnizor", active: "/procurement/comenzi", body }));
   });
@@ -603,36 +1080,13 @@ function register(router) {
   // ---- salvarea comenzii --------------------------------------------------
   router.post("/procurement/comenzi", async (ctx) => {
     const b = ctx.body || {};
-    const furnizorId = parseInt(b.furnizor_id, 10) || null;
-    if (!furnizorId) return redirect(ctx.res, "/procurement/comenzi/noua?eroare=furnizor");
+    const monede = await monedeDisponibile();
+    const f = citesteFormular(b, monede);
+    if (f.eroare) return redirect(ctx.res, "/procurement/comenzi/noua?eroare=" + f.eroare);
+    const { antet, linii } = f;
+    await completeazaCursuri(antet);
 
-    const denumiri = asArray(b["denumire[]"]);
-    const produse = asArray(b["produs_id[]"]);
-    const cantitati = asArray(b["cantitate[]"]);
-    const unitati = asArray(b["um[]"]);
-    const preturi = asArray(b["pret_unitar[]"]);
-
-    const linii = [];
-    for (let i = 0; i < denumiri.length; i++) {
-      const den = text(denumiri[i]);
-      const cantText = text(cantitati[i]).replace(",", ".");
-      if (!den && !cantText) continue; // rând gol, lăsat de formular
-      // O denumire fără cantitate e o greșeală de completare, nu o comandă de
-      // zero bucăți. Se spune omului, nu se salvează tăcut.
-      if (!den || !(Number(cantText) > 0)) return redirect(ctx.res, "/procurement/comenzi/noua?eroare=cantitate");
-      const pretText = text(preturi[i]).replace(",", ".");
-      const pret = pretText === "" ? null : Number(pretText);
-      linii.push({
-        produs_id: parseInt(produse[i], 10) || null,
-        denumire: den.slice(0, 300),
-        cantitate: Number(cantText),
-        um: text(unitati[i]).slice(0, 20) || null,
-        pret_unitar: pret !== null && Number.isFinite(pret) && pret >= 0 ? pret : null,
-      });
-    }
-    if (!linii.length) return redirect(ctx.res, "/procurement/comenzi/noua?eroare=linii");
-
-    const an = (text(b.data) || azi()).slice(0, 4);
+    const an = antet.data.slice(0, 4);
     const ultim = await db
       .prepare("SELECT numar FROM comenzi_furnizor WHERE numar LIKE ? ORDER BY numar DESC LIMIT 1")
       .get("CF-" + an + "-%");
@@ -640,17 +1094,20 @@ function register(router) {
 
     const ins = await db
       .prepare(
-        `INSERT INTO comenzi_furnizor (numar, furnizor_id, data, data_solicitata, status, moneda, observatii, creata_de)
-         VALUES (?, ?, ?, ?, 'ciorna', ?, ?, ?) RETURNING id`
+        `INSERT INTO comenzi_furnizor (numar, furnizor_id, data, data_solicitata, status, moneda, curs, curs_eur, observatii, creata_de, creata_la)
+         VALUES (?, ?, ?, ?, 'ciorna', ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         numar,
-        furnizorId,
-        text(b.data).slice(0, 10) || azi(),
-        text(b.data_solicitata).slice(0, 10) || null,
-        MONEDE.includes(text(b.moneda)) ? text(b.moneda) : "RON",
-        text(b.observatii) || null,
-        ctx.user ? ctx.user.id : null
+        antet.furnizor_id,
+        antet.data,
+        antet.data_solicitata,
+        antet.moneda,
+        antet.curs,
+        antet.curs_eur,
+        antet.observatii,
+        ctx.user ? ctx.user.id : null,
+        acum()
       );
     const id = ins.lastInsertRowid;
 
@@ -662,6 +1119,18 @@ function register(router) {
         )
         .run(id, l.produs_id, l.denumire, l.cantitate, l.um, l.pret_unitar);
     }
+
+    // Primul rând din istoric: cine a scris-o, când, cu ce.
+    const t = L.totalComanda(linii);
+    const cursuri = L.cursurile(antet);
+    const despre = [
+      `${linii.length} ${linii.length === 1 ? "poziție" : "poziții"}`,
+      sumaCu(t.total, antet.moneda) + (t.faraPret ? ` (+${t.faraPret} fără preț)` : ""),
+    ];
+    if (antet.moneda !== "RON" && cursuri.curs) despre.push(`curs ${L.scrieCurs(cursuri.curs)} lei/${antet.moneda}`);
+    if (antet.moneda !== "EUR" && cursuri.cursEur) despre.push(`curs EUR ${L.scrieCurs(cursuri.cursEur)}`);
+    await scrieIstoric(id, ctx.user, [{ ce: "Comandă creată", vechi: "", nou: despre.join(" · ") }]);
+
     redirect(ctx.res, `/procurement/comenzi/${id}`);
   });
 
@@ -726,18 +1195,283 @@ function register(router) {
     redirect(ctx.res, `/procurement/comenzi/noua?furnizor=${id}`);
   });
 
+  // ---- modificarea ulterioară ------------------------------------------
+  //
+  // Se poate schimba tot ce s-a scris la creare: furnizorul, datele, moneda,
+  // cursul, observațiile și pozițiile (adăugate, schimbate, șterse). Fiecare
+  // schimbare intră în istoric, cu numele omului și ora.
+  //
+  // Ce NU se poate:
+  //   • o comandă anulată nu se modifică — e scoasă din totaluri și din
+  //     istoricul de preț, iar o modificare pe ea n-ar ajunge nicăieri;
+  //   • o poziție pe care a intrat deja marfă nu se șterge — i se poate
+  //     schimba cantitatea, dar recepția ei trebuie să rămână undeva.
+  async function paginaModificare(ctx, c, liniiVechi, o) {
+    const opt = o || {};
+    const furnizori = await db
+      .prepare("SELECT id, nume, email FROM parteneri WHERE tip IN ('furnizor','ambele') OR id = ? ORDER BY nume LIMIT 3000")
+      .all(c.furnizor_id || 0);
+    const produse = await db
+      .prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000")
+      .all();
+    const preturi = await ultimelePreturi();
+    const monede = await monedeDisponibile(c.moneda);
+    const ef = await cursulEfectiv(c);
+
+    let valori;
+    let linii;
+    let atins;
+    if (opt.valori) {
+      // Formularul întors cu eroare: exact ce a scris omul, cu tot cu
+      // cantitatea primită pe pozițiile existente (care nu vine din formular).
+      const b = opt.valori;
+      const dupaId = new Map(liniiVechi.map((l) => [String(l.id), l]));
+      const ids = asArray(b["linie_id[]"]);
+      const den = asArray(b["denumire[]"]);
+      const prod = asArray(b["produs_id[]"]);
+      const cant = asArray(b["cantitate[]"]);
+      const um = asArray(b["um[]"]);
+      const pret = asArray(b["pret_unitar[]"]);
+      const bifate = new Set(asArray(b["sterge_id[]"]).map((x) => String(parseInt(x, 10))));
+      linii = den.map((d, i) => {
+        const v = dupaId.get(String(parseInt(ids[i], 10)));
+        return {
+          id: v ? v.id : null,
+          sters: Boolean(v && bifate.has(String(v.id))),
+          produs_id: prod[i] || "",
+          denumire: d,
+          cantitate: String(cant[i] === undefined ? "" : cant[i]),
+          um: um[i] || "",
+          pret_unitar: String(pret[i] === undefined ? "" : pret[i]),
+          cantitate_primita: v ? v.cantitate_primita : 0,
+        };
+      });
+      valori = {
+        id: c.id,
+        furnizor_id: b.furnizor_id,
+        data: b.data,
+        data_solicitata: b.data_solicitata,
+        moneda: text(b.moneda).toUpperCase() || c.moneda,
+        curs: String(b.curs === undefined ? "" : b.curs),
+        curs_eur: String(b.curs_eur === undefined ? "" : b.curs_eur),
+        observatii: b.observatii,
+      };
+      atins = { curs: text(b.curs) !== "", eur: text(b.curs_eur) !== "" };
+    } else {
+      // Numerele din bază se dau formularului ca numere, ca să fie scrise cu
+      // virgulă; doar ce a tastat omul se întoarce ca text, neatins.
+      const numar = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
+      linii = liniiVechi.map((l) => Object.assign({}, l, { cantitate: numar(l.cantitate), pret_unitar: numar(l.pret_unitar) }));
+      // Cursurile scrise pe comandă rămân ale ei. La comenzile vechi, fără
+      // curs, se propune BNR-ul zilei lor (și nu se socotește drept „atins").
+      valori = Object.assign({}, c, {
+        curs: ef.moneda === "RON" || ef.moneda === "EUR" ? null : ef.curs,
+        curs_eur: ef.cursEur,
+      });
+      atins = { curs: nr(c.curs) > 0 && ef.moneda !== "EUR", eur: (ef.moneda === "EUR" ? nr(c.curs) : nr(c.curs_eur)) > 0 };
+    }
+
+    const avert = [];
+    if (c.trimisa_la) {
+      avert.push(
+        `Comanda a plecat deja la furnizor (${cand(c.trimisa_la)}, către ${c.trimisa_catre || "furnizor"}). ` +
+          "Ce schimbi aici nu ajunge singur la el: după salvare, retrimite-o din pagina comenzii sau trimite-i PDF-ul nou."
+      );
+    }
+    if (liniiVechi.some((l) => nr(l.cantitate_primita) > 0)) {
+      avert.push("Pe unele poziții a intrat deja marfă. Acelea nu se pot șterge; dacă le schimbi cantitatea, starea comenzii se recalculează din ce s-a primit.");
+    }
+
+    const body = `
+      <div class="toolbar"><a href="/procurement/comenzi/${c.id}" class="btn secondary">← Înapoi la comandă</a></div>
+      <p style="margin-top:0">${badgeStatus(c.status)} <span style="color:var(--text-muted)">${esc(c.furnizor || "")}${c.furnizor ? " · " : ""}Tot ce schimbi aici se scrie în istoricul comenzii, cu numele tău și ora — și rămâne acolo.</span></p>
+      ${opt.eroare ? `<div class="flash flash-rosu">${esc(opt.eroare)}</div>` : ""}
+      ${
+        avert.length
+          ? `<div class="detail-box" style="max-width:940px;border-color:var(--warn);background:#fffaf0">
+               <strong>Citește înainte să salvezi</strong>
+               <ul style="margin:6px 0 0;padding-left:18px">${avert.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>
+             </div>`
+          : ""
+      }
+      ${formularComanda({
+        mod: "modifica",
+        actiune: `/procurement/comenzi/${c.id}/modifica`,
+        c: valori,
+        linii,
+        furnizori,
+        monede,
+        atins,
+        motiv: opt.valori ? opt.valori.motiv : "",
+      })}
+      <datalist id="cf-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
+      ${datalistProduse(produse, preturi)}
+      ${scriptCurs(ef.bnr)}
+    `;
+    send(
+      ctx.res,
+      opt.eroare ? 400 : 200,
+      layout({ user: ctx.user, title: "Modifică " + (c.numar || "#" + c.id), active: "/procurement/comenzi", body })
+    );
+  }
+
+  router.get("/procurement/comenzi/:id/modifica", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const c = await comandaCuFurnizor(id);
+    if (!c) return redirect(ctx.res, "/procurement/comenzi");
+    if (!poateModifica(ctx.user, c) || c.status === "anulata") return redirect(ctx.res, `/procurement/comenzi/${id}`);
+    await paginaModificare(ctx, c, await liniile(id));
+  });
+
+  router.post("/procurement/comenzi/:id/modifica", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const c = await comandaCuFurnizor(id);
+    if (!c) return redirect(ctx.res, "/procurement/comenzi");
+    if (!poateModifica(ctx.user, c) || c.status === "anulata") return redirect(ctx.res, `/procurement/comenzi/${id}`);
+    const b = ctx.body || {};
+    const liniiVechi = await liniile(id);
+    const monede = await monedeDisponibile(c.moneda);
+    const f = citesteFormular(b, monede);
+    if (f.eroare) {
+      const mesaj = MESAJE_EROARE[f.eroare] + (f.linie ? ` (poziția „${f.linie}”)` : "");
+      return paginaModificare(ctx, c, liniiVechi, { eroare: mesaj, valori: b });
+    }
+    const { antet, linii } = f;
+
+    // Un ID de linie care nu e al comenzii ăsteia (formular vechi, pagină
+    // deschisă de două ori) nu are voie să atingă linia altei comenzi.
+    const dupaId = new Map(liniiVechi.map((l) => [String(l.id), l]));
+    for (const l of linii) if (l.id && !dupaId.has(String(l.id))) l.id = null;
+    const pastrate = new Set(linii.filter((l) => l.id).map((l) => String(l.id)));
+    const deSters = liniiVechi.filter((l) => !pastrate.has(String(l.id)));
+    const cuMarfa = deSters.find((l) => nr(l.cantitate_primita) > 0);
+    if (cuMarfa) {
+      return paginaModificare(ctx, c, liniiVechi, {
+        eroare: `Poziția „${cuMarfa.denumire}” are deja marfă intrată (${nr(cuMarfa.cantitate_primita).toLocaleString("ro-RO", { maximumFractionDigits: 3 })} ${cuMarfa.um || ""}). Nu se poate șterge — schimbă-i cantitatea.`,
+        valori: b,
+      });
+    }
+
+    // Câmpul arată prețul cu cel mult patru zecimale. Dacă omul nu l-a
+    // schimbat, rămâne prețul exact din bază — formularul nu are voie să
+    // rotunjească singur un preț și să scrie în istoric o schimbare pe care
+    // n-a făcut-o nimeni.
+    for (const l of linii) {
+      const v = l.id ? dupaId.get(String(l.id)) : null;
+      if (!v) continue;
+      if (l.pret_unitar !== null && v.pret_unitar !== null && v.pret_unitar !== undefined && v.pret_unitar !== "" &&
+          Math.abs(Math.round(Number(v.pret_unitar) * 1e4) / 1e4 - l.pret_unitar) < 1e-9) l.pret_unitar = Number(v.pret_unitar);
+      if (Math.abs(Math.round(Number(v.cantitate) * 1e3) / 1e3 - l.cantitate) < 1e-9) l.cantitate = Number(v.cantitate);
+    }
+
+    await completeazaCursuri(antet);
+    const furnizor = await db.prepare("SELECT id, nume FROM parteneri WHERE id = ?").get(antet.furnizor_id);
+    if (!furnizor) return paginaModificare(ctx, c, liniiVechi, { eroare: MESAJE_EROARE.furnizor, valori: b });
+
+    // Comparația se face cu cursul pe care pagina îl arăta deja: la comenzile
+    // vechi, fără curs scris, e BNR-ul zilei lor. Altfel prima modificare a
+    // unei comenzi vechi ar scrie în istoric „curs: — → 5,0912", deși cifra
+    // de pe ecran n-a schimbat-o nimeni.
+    const ef = await cursulEfectiv(c);
+    const schimbari = L.diferenteAntet(
+      {
+        furnizor: c.furnizor,
+        data: c.data,
+        data_solicitata: c.data_solicitata,
+        moneda: c.moneda,
+        curs: ef.moneda === "RON" ? null : ef.curs,
+        curs_eur: ef.cursEur,
+        observatii: c.observatii,
+      },
+      Object.assign({}, antet, { furnizor: furnizor.nume })
+    ).concat(L.diferenteLinii(liniiVechi, linii, antet.moneda));
+
+    if (!schimbari.length) return redirect(ctx.res, `/procurement/comenzi/${id}?ok=nimic`);
+
+    await db
+      .prepare(
+        `UPDATE comenzi_furnizor SET furnizor_id = ?, data = ?, data_solicitata = ?, moneda = ?, curs = ?, curs_eur = ?,
+                observatii = ?, modificata_la = ?, modificata_de = ?
+          WHERE id = ?`
+      )
+      .run(
+        antet.furnizor_id,
+        antet.data,
+        antet.data_solicitata,
+        antet.moneda,
+        antet.curs,
+        antet.curs_eur,
+        antet.observatii,
+        acum(),
+        ctx.user ? ctx.user.id : null,
+        id
+      );
+    for (const l of linii) {
+      if (l.id) {
+        await db
+          .prepare(
+            `UPDATE comenzi_furnizor_linii SET produs_id = ?, denumire = ?, cantitate = ?, um = ?, pret_unitar = ?
+              WHERE id = ? AND comanda_id = ?`
+          )
+          .run(l.produs_id, l.denumire, l.cantitate, l.um, l.pret_unitar, l.id, id);
+      } else {
+        await db
+          .prepare(
+            `INSERT INTO comenzi_furnizor_linii (comanda_id, produs_id, denumire, cantitate, um, pret_unitar)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          )
+          .run(id, l.produs_id, l.denumire, l.cantitate, l.um, l.pret_unitar);
+      }
+    }
+    for (const l of deSters) {
+      await db
+        .prepare("DELETE FROM comenzi_furnizor_linii WHERE id = ? AND comanda_id = ? AND COALESCE(cantitate_primita, 0) = 0")
+        .run(l.id, id);
+    }
+
+    // Pe o comandă din care a intrat deja marfă, starea se socotește din nou:
+    // o cantitate mărită pe o comandă „primită" o face iar „primită parțial".
+    const liniiDupa = await liniile(id);
+    if (liniiDupa.some((l) => nr(l.cantitate_primita) > 0)) {
+      const s = L.statusDupaReceptie(liniiDupa, c.status);
+      if (s !== c.status) {
+        await db.prepare("UPDATE comenzi_furnizor SET status = ? WHERE id = ?").run(s, id);
+        schimbari.push({ ce: "Stare", vechi: L.STATUS_ETICHETA[c.status] || c.status, nou: L.STATUS_ETICHETA[s] || s });
+      }
+    }
+    const n = schimbari.length;
+    const motiv = text(b.motiv).slice(0, 200);
+    if (motiv) schimbari.push({ ce: "Motivul modificării", vechi: "", nou: motiv });
+    await scrieIstoric(id, ctx.user, schimbari);
+    redirect(ctx.res, `/procurement/comenzi/${id}?ok=modificat&n=${n}`);
+  });
+
+  // ---- PDF-ul comenzii ----------------------------------------------------
+  router.get("/procurement/comenzi/:id/pdf", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const c = await comandaCuFurnizor(id);
+    if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Comanda nu există", active: "/procurement/comenzi", body: "<p>Comanda asta nu există.</p>" }));
+    const linii = await liniile(id);
+    const ef = await cursulEfectiv(c);
+    const limba = text((ctx.query || {}).limba) === "en" ? "en" : "ro";
+    const html = PDF.pagina({
+      comanda: Object.assign({}, c, { curs: ef.curs, curs_eur: ef.cursEur }),
+      linii,
+      limba,
+      tipar: text((ctx.query || {}).tipar) === "1",
+      emitent: { nume: c.creata_nume || (ctx.user && ctx.user.nume) || "", email: EXPEDITOR },
+      inapoi: `/procurement/comenzi/${id}`,
+      alta: `/procurement/comenzi/${id}/pdf?limba=${limba === "en" ? "ro" : "en"}`,
+      generatLa: acum(),
+    });
+    send(ctx.res, 200, html);
+  });
+
   // ---- o comandă: linii, istoric de preț, email, recepție ----------------
   router.get("/procurement/comenzi/:id", async (ctx) => {
     const id = parseInt(ctx.params.id, 10);
-    const c = await db
-      .prepare(
-        `SELECT c.*, p.nume AS furnizor, p.email AS furnizor_email, p.cui AS furnizor_cui, u.nume AS creata_nume
-           FROM comenzi_furnizor c
-           LEFT JOIN parteneri p ON p.id = c.furnizor_id
-           LEFT JOIN utilizatori u ON u.id = c.creata_de
-          WHERE c.id = ?`
-      )
-      .get(id);
+    const q = ctx.query || {};
+    const c = await comandaCuFurnizor(id);
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Comanda nu există", active: "/procurement/comenzi", body: "<p>Comanda asta nu există.</p>" }));
 
     const linii = await liniile(id);
@@ -746,9 +1480,16 @@ function register(router) {
       .prepare("SELECT nume, functie, email FROM mk_contacte WHERE partener_id = ? AND COALESCE(activ,1) = 1 AND COALESCE(email,'') <> '' ORDER BY nume")
       .all(c.furnizor_id || 0)
       .catch(() => []);
+    const istoric = await citesteIstoric(id);
 
     const eDeschisa = L.DESCHISE.includes(c.status);
     const intr = L.intarziere(c.data_solicitata, c.data_receptie);
+    const ef = await cursulEfectiv(c);
+    const m = ef.moneda;
+    const cursObj = { moneda: m, curs: ef.curs, curs_eur: ef.cursEur };
+    const ech = L.echivalente(t.total, cursObj);
+    const potiModifica = poateModifica(ctx.user, c) && c.status !== "anulata";
+    const limba = text(q.limba) === "en" ? "en" : "ro";
 
     // Istoricul de preț, pe fiecare poziție care are produs în nomenclator.
     const istorii = new Map();
@@ -756,6 +1497,7 @@ function register(router) {
       if (l.produs_id && !istorii.has(l.produs_id)) istorii.set(l.produs_id, await istoricProdus(l.produs_id, id));
     }
 
+    const coloanaEchiv = m === "RON" ? "În euro" : "În lei";
     const randuriLinii = linii.map((l) => {
       const v = L.valoareLinie(l);
       const ist = l.produs_id ? istorii.get(l.produs_id) || [] : [];
@@ -769,13 +1511,16 @@ function register(router) {
         fata = `<span style="font-size:12px;color:var(--text-muted)">prima comandă prin ERP</span>`;
       }
       const primit = nr(l.cantitate_primita);
+      const e = v === null ? { ron: null, eur: null } : L.echivalente(v, cursObj);
+      const echivLinie = m === "RON" ? e.eur : e.ron;
       return [
         `${esc(l.denumire)}${l.produs_cod ? `<br><span style="font-size:12px;color:var(--text-muted)">cod ${esc(l.produs_cod)}</span>` : ""}`,
         esc(nr(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 3 })) + (l.um ? " " + esc(l.um) : ""),
         l.pret_unitar === null || l.pret_unitar === undefined
           ? '<span style="color:var(--text-muted)">de confirmat</span>'
-          : `${esc(nr(l.pret_unitar).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 }))} ${esc(c.moneda)}`,
-        v === null ? '<span style="color:var(--text-muted)">—</span>' : `<strong>${esc(sumaCu(v, c.moneda))}</strong>`,
+          : `${esc(nr(l.pret_unitar).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 }))} ${esc(m)}`,
+        v === null ? '<span style="color:var(--text-muted)">—</span>' : `<strong>${esc(sumaCu(v, m))}</strong>`,
+        echivLinie === null ? '<span style="color:var(--text-muted)">—</span>' : esc(sumaCu(echivLinie, m === "RON" ? "EUR" : "lei")),
         primit > 0
           ? `${esc(primit.toLocaleString("ro-RO", { maximumFractionDigits: 3 }))}${primit + 0.0001 < nr(l.cantitate) ? ' <span class="badge galben">parțial</span>' : ' <span class="badge verde">complet</span>'}`
           : '<span style="color:var(--text-muted)">—</span>',
@@ -783,45 +1528,137 @@ function register(router) {
       ];
     });
 
+    // De unde e cursul, spus pe față: pus pe comandă (și cât diferă de BNR)
+    // sau luat de la BNR pentru că pe comandă nu e niciunul.
+    const descrieCurs = (valoare, moneda, dinBnr) => {
+      if (!valoare) return `<div class="label">lipsește — pune-l din „Modifică”</div>`;
+      const b = ef.bnr[moneda];
+      if (dinBnr) return `<div class="label">BNR din ${esc(cand(b ? b.data : ""))}, nescris pe comandă</div>`;
+      if (!b) return `<div class="label">pus pe comandă</div>`;
+      const ab = L.abatereFataDeBnr(valoare, b.valoare);
+      if (ab === 0) return `<div class="label">pus pe comandă · = BNR din ${esc(cand(b.data))}</div>`;
+      return `<div class="label">pus pe comandă · BNR ${esc(cand(b.data))}: ${esc(L.scrieCurs(b.valoare))} (${ab > 0 ? "+" : ""}${esc(String(ab).replace(".", ","))}%)</div>`;
+    };
+    const carduriCurs = [];
+    if (m !== "RON") {
+      carduriCurs.push(
+        `<div class="card"><div class="label">În lei</div><div class="value">${ech.ron === null ? "—" : esc(sumaCu(ech.ron, "lei"))}</div></div>`
+      );
+    }
+    if (m !== "EUR") {
+      carduriCurs.push(
+        `<div class="card"><div class="label">În euro</div><div class="value">${ech.eur === null ? "—" : esc(sumaCu(ech.eur, "EUR"))}</div></div>`
+      );
+    }
+    if (m !== "RON") {
+      carduriCurs.push(
+        `<div class="card"><div class="label">Curs ${esc(m)}</div><div class="value">${ef.curs ? esc(L.scrieCurs(ef.curs)) + " lei" : "—"}</div>${descrieCurs(ef.curs, m, ef.dinBnr)}</div>`
+      );
+    }
+    if (m !== "EUR") {
+      carduriCurs.push(
+        `<div class="card"><div class="label">Curs EUR</div><div class="value">${ef.cursEur ? esc(L.scrieCurs(ef.cursEur)) + " lei" : "—"}</div>${descrieCurs(ef.cursEur, "EUR", ef.eurDinBnr)}</div>`
+      );
+    }
+
     const corp = L.corpEmail({
       comanda: c,
       linii,
       furnizor: c.furnizor,
-      semnatura: `Cu stimă,\n${ctx.user ? ctx.user.nume : ""}\nCash Machine SRL\n${EXPEDITOR}`,
+      limba,
+      semnatura:
+        limba === "en"
+          ? `Best regards,\n${ctx.user ? ctx.user.nume : ""}\nCash Machine SRL\n${EXPEDITOR}`
+          : `Cu stimă,\n${ctx.user ? ctx.user.nume : ""}\nCash Machine SRL\n${EXPEDITOR}`,
     });
 
     const destinatari = [];
     if (text(c.furnizor_email)) destinatari.push({ eticheta: c.furnizor + " (firmă)", email: text(c.furnizor_email) });
     for (const p of contacte) destinatari.push({ eticheta: p.nume + (p.functie ? ", " + p.functie : ""), email: text(p.email) });
 
+    // Comanda schimbată după ce a plecat: furnizorul are încă varianta veche.
+    const modificataDupaTrimitere = c.trimisa_la && c.modificata_la && String(c.modificata_la) > String(c.trimisa_la);
+
+    // Rândurile istoricului. Comenzile de dinainte de 05.11.2026 n-au rândul
+    // „Comandă creată" — se arată din ce știe comanda despre ea (ziua, fără
+    // oră: ora de atunci s-a scris în ora serverului, nu în a noastră).
+    const randuriIstoric = istoric.map((h) => [
+      esc(cand(h.la)),
+      esc(h.utilizator_nume || "—"),
+      esc(h.ce),
+      h.vechi ? esc(h.vechi) : '<span style="color:var(--text-muted)">—</span>',
+      h.nou ? esc(h.nou) : '<span style="color:var(--text-muted)">—</span>',
+    ]);
+    if (!istoric.some((h) => h.ce === "Comandă creată")) {
+      randuriIstoric.push([
+        esc(cand(String(c.creata_la || c.data || "").slice(0, 10))),
+        esc(c.creata_nume || "—"),
+        "Comandă creată",
+        '<span style="color:var(--text-muted)">—</span>',
+        '<span style="color:var(--text-muted)">înainte de istoric</span>',
+      ]);
+    }
+
+    const MESAJE = {
+      modificat: `Salvat. ${Number(q.n) || 0} ${Number(q.n) === 1 ? "schimbare scrisă" : "schimbări scrise"} în istoricul comenzii.`,
+      nimic: "N-a fost nimic de schimbat — comanda a rămas cum era.",
+    };
+    const flash = MESAJE[text(q.ok)] || null;
+    const eroareTrimitere = text(q.eroare);
+
     const body = `
-      <div class="toolbar">
+      <div class="toolbar" style="flex-wrap:wrap">
         <a href="/procurement/comenzi" class="btn secondary">← Toate comenzile</a>
+        ${potiModifica ? `<a href="/procurement/comenzi/${c.id}/modifica" class="btn">Modifică comanda</a>` : ""}
+        <a href="/procurement/comenzi/${c.id}/pdf?tipar=1" target="_blank" rel="noopener" class="btn secondary" title="Se deschide comanda gata de tipărit; alege „Salvează ca PDF”">Export PDF</a>
+        <a href="/procurement/comenzi/${c.id}/pdf?limba=en&amp;tipar=1" target="_blank" rel="noopener" class="btn secondary" title="Comanda în engleză, pentru furnizorii din afară">PDF în engleză</a>
         ${c.furnizor_id ? `<a href="/parteneri/${c.furnizor_id}" class="btn secondary">Fișa furnizorului</a>` : ""}
         <a href="/procurement/comenzi/preturi?q=${encodeURIComponent(linii[0] ? linii[0].denumire : "")}" class="btn secondary">Istoric prețuri</a>
       </div>
 
+      ${
+        eroareTrimitere
+          ? `<div class="flash flash-rosu">${esc(eroareTrimitere === "destinatar" ? "Emailul n-a plecat: alege cel puțin un destinatar." : "Emailul n-a plecat: " + eroareTrimitere)}</div>`
+          : ""
+      }
+
       <h1 style="margin-bottom:4px">${esc(c.numar || "#" + c.id)} ${badgeStatus(c.status)}</h1>
       <p style="color:var(--text-muted);margin-top:0">
         ${esc(c.furnizor || "fără furnizor")} · emisă ${esc(String(c.data || "").slice(0, 10))}${c.creata_nume ? " de " + esc(c.creata_nume) : ""}
-        ${c.trimisa_la ? ` · trimisă ${esc(String(c.trimisa_la).slice(0, 16))} către ${esc(c.trimisa_catre || "")}` : ""}
+        ${c.trimisa_la ? ` · trimisă ${esc(cand(c.trimisa_la))} către ${esc(c.trimisa_catre || "")}` : ""}
+        ${c.modificata_la ? ` · modificată ${esc(cand(c.modificata_la))}${c.modificata_nume ? " de " + esc(c.modificata_nume) : ""}` : ""}
       </p>
 
+      ${
+        modificataDupaTrimitere && eDeschisa
+          ? `<div class="detail-box" style="max-width:940px;border-color:var(--warn);background:#fffaf0">
+               <strong>Comanda a fost modificată după ce a plecat la furnizor.</strong>
+               Furnizorul are încă varianta din ${esc(cand(c.trimisa_la))}. Retrimite-o de mai jos sau trimite-i PDF-ul nou.
+             </div>`
+          : ""
+      }
+
       <div class="cards">
-        <div class="card"><div class="label">Valoare</div><div class="value">${esc(sumaCu(t.total, c.moneda))}</div>${t.faraPret ? `<div class="label">${t.faraPret} fără preț</div>` : ""}</div>
+        <div class="card"><div class="label">Valoare</div><div class="value">${esc(sumaCu(t.total, m))}</div>${t.faraPret ? `<div class="label">${t.faraPret} fără preț</div>` : ""}</div>
+        ${carduriCurs.join("")}
         <div class="card"><div class="label">Data solicitată</div><div class="value">${esc(String(c.data_solicitata || "—").slice(0, 10))}</div></div>
         <div class="card"><div class="label">Data recepției</div><div class="value">${esc(String(c.data_receptie || "—").slice(0, 10))}</div>${
           intr === null ? "" : `<div class="label">${intr > 0 ? "cu " + intr + " zile întârziere" : intr === 0 ? "la timp" : "cu " + -intr + " zile mai devreme"}</div>`
         }</div>
       </div>
 
-      ${table(["Poziție", "Cantitate", "Preț unitar", "Valoare", "Primit", "Față de ultima"], randuriLinii)}
+      <div class="tabel-scroll">
+      ${table(["Poziție", "Cantitate", "Preț unitar", "Valoare", coloanaEchiv, "Primit", "Față de ultima"], randuriLinii)}
+      </div>
       ${c.observatii ? `<p><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
 
       ${
         eDeschisa && poateTrimite(ctx.user)
           ? `
-      <h2 style="margin-top:28px">Trimite comanda</h2>
+      <h2 style="margin-top:28px" id="trimite">Trimite comanda</h2>
+      <p style="font-size:13px;margin-top:-6px">
+        Mesajul în: ${limba === "en" ? `<a href="/procurement/comenzi/${c.id}#trimite">română</a> · <strong>engleză</strong>` : `<strong>română</strong> · <a href="/procurement/comenzi/${c.id}?limba=en#trimite">engleză</a>`}
+      </p>
       ${
         destinatari.length
           ? `<form class="form" method="post" action="/procurement/comenzi/${c.id}/trimite" style="max-width:860px"
@@ -836,7 +1673,7 @@ function register(router) {
           </div>
           <label class="field"><span>…și/sau alte adrese, despărțite cu virgulă</span><input name="catre_text" placeholder="nume@furnizor.ro"></label>
           <label class="field"><span>De pe adresa</span><input name="de_la" value="${esc(EXPEDITOR)}"></label>
-          <label class="field"><span>Subiect</span><input name="subiect" value="Comandă ${esc(c.numar || "")} — Cash Machine SRL" required></label>
+          <label class="field"><span>Subiect</span><input name="subiect" value="${esc(limba === "en" ? `Purchase order ${c.numar || ""} — Cash Machine SRL` : `Comandă ${c.numar || ""} — Cash Machine SRL`)}" required></label>
           <label class="field"><span>Mesaj</span><textarea name="corp" rows="16" style="font-family:monospace;font-size:13px">${esc(corp)}</textarea></label>
           <div class="form-actions"><button class="btn" type="submit">Trimite comanda pe email</button></div>
         </form>`
@@ -890,8 +1727,16 @@ function register(router) {
       </form>`
           : ""
       }
+
+      <h2 style="margin-top:32px">Istoric — cine a modificat ce și când</h2>
+      <p style="margin:-6px 0 8px;color:var(--text-muted);font-size:13px">
+        Cea mai nouă schimbare sus. Rândurile de aici nu se șterg și nu se corectează — asta e tot rostul lor.
+      </p>
+      <div class="tabel-scroll">
+      ${table(["Când", "Cine", "Ce", "Era", "A rămas"], randuriIstoric)}
+      </div>
     `;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă " + (c.numar || "#" + c.id), active: "/procurement/comenzi", body }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă " + (c.numar || "#" + c.id), active: "/procurement/comenzi", body, flash }));
   });
 
   // ---- trimiterea pe email ------------------------------------------------
@@ -927,6 +1772,9 @@ function register(router) {
                   trimisa_la = ?, trimisa_catre = ? WHERE id = ?`
         )
         .run(acum(), catre.join(", ").slice(0, 400), id);
+      const schimbari = [{ ce: "Trimisă pe email", vechi: "", nou: `către ${catre.join(", ")}` }];
+      if (c.status === "ciorna") schimbari.push({ ce: "Stare", vechi: L.STATUS_ETICHETA.ciorna, nou: L.STATUS_ETICHETA.trimisa });
+      await scrieIstoric(id, ctx.user, schimbari);
       // Urma rămâne și pe fișa furnizorului: peste șase luni, când cineva
       // întreabă „i-am mai comandat?", răspunsul trebuie să fie pe fișă, nu
       // în memoria cuiva.
@@ -948,9 +1796,12 @@ function register(router) {
     const ids = asArray(b["linie_id[]"]);
     const primite = asArray(b["primit[]"]);
     const tot = text(b.tot) === "1";
+    const inainte = await db.prepare("SELECT status, data_receptie FROM comenzi_furnizor WHERE id = ?").get(id);
+    if (!inainte) return redirect(ctx.res, "/procurement/comenzi");
 
     const linii = await liniile(id);
     const dupaId = new Map(linii.map((l) => [String(l.id), l]));
+    const schimbari = [];
 
     for (let i = 0; i < ids.length; i++) {
       const l = dupaId.get(String(ids[i]));
@@ -968,6 +1819,14 @@ function register(router) {
         v = n;
       }
       await db.prepare("UPDATE comenzi_furnizor_linii SET cantitate_primita = ? WHERE id = ?").run(v, l.id);
+      if (!L.acelasiNumar(nr(l.cantitate_primita), v)) {
+        const um = l.um ? " " + l.um : "";
+        schimbari.push({
+          ce: "Primit · " + l.denumire,
+          vechi: nr(l.cantitate_primita).toLocaleString("ro-RO", { maximumFractionDigits: 3 }) + um,
+          nou: v.toLocaleString("ro-RO", { maximumFractionDigits: 3 }) + um,
+        });
+      }
       l.cantitate_primita = v;
     }
 
@@ -976,6 +1835,11 @@ function register(router) {
     await db
       .prepare("UPDATE comenzi_furnizor SET status = ?, data_receptie = CASE WHEN ? = 'primita' OR ? = 'partial' THEN ? ELSE data_receptie END WHERE id = ?")
       .run(status, status, status, dataRec, id);
+    if (status !== inainte.status) schimbari.push({ ce: "Stare", vechi: L.STATUS_ETICHETA[inainte.status] || inainte.status, nou: L.STATUS_ETICHETA[status] || status });
+    if ((status === "primita" || status === "partial") && String(inainte.data_receptie || "").slice(0, 10) !== dataRec) {
+      schimbari.push({ ce: "Data recepției", vechi: String(inainte.data_receptie || "").slice(0, 10), nou: dataRec });
+    }
+    await scrieIstoric(id, ctx.user, schimbari);
     redirect(ctx.res, `/procurement/comenzi/${id}`);
   });
 
@@ -985,9 +1849,14 @@ function register(router) {
   router.post("/procurement/comenzi/:id/anuleaza", async (ctx) => {
     const id = parseInt(ctx.params.id, 10);
     if (!poateTrimite(ctx.user)) return redirect(ctx.res, `/procurement/comenzi/${id}`);
-    await db.prepare("UPDATE comenzi_furnizor SET status = 'anulata' WHERE id = ?").run(id);
+    const inainte = await db.prepare("SELECT status FROM comenzi_furnizor WHERE id = ?").get(id);
+    if (!inainte) return redirect(ctx.res, "/procurement/comenzi");
+    if (inainte.status !== "anulata") {
+      await db.prepare("UPDATE comenzi_furnizor SET status = 'anulata' WHERE id = ?").run(id);
+      await scrieIstoric(id, ctx.user, [{ ce: "Stare", vechi: L.STATUS_ETICHETA[inainte.status] || inainte.status, nou: L.STATUS_ETICHETA.anulata }]);
+    }
     redirect(ctx.res, `/procurement/comenzi/${id}`);
   });
 }
 
-module.exports = { register, EXPEDITOR, MONEDE, UNITATI };
+module.exports = { register, EXPEDITOR, MONEDE, UNITATI, poateModifica, citesteFormular };
