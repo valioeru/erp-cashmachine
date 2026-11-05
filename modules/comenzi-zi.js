@@ -33,6 +33,20 @@ const { parseFisier, normalizeHeader } = require("../lib/import-utils");
 const CLIENT = "Sameday";
 const CALE = "/rapoarte/comenzi-la-zi";
 
+// Cine poate urca o zi (comenzile aprobate sau AWB-urile): administratorul și
+// oricine are acces la raportul ăsta. Vali, 05.11.2026: Gabi Tecuceanu are doar
+// raportul Sameday, ca să urce ea comenzile zilnice — fără restul rapoartelor.
+// Prețurile, aliasurile și legăturile la nomenclator rămân ale administratorului.
+function poateUrca(user) {
+  if (!user) return false;
+  if (user.rol === "admin") return true;
+  try {
+    return require("../lib/auth").poateAccesa(user, CALE);
+  } catch (e) {
+    return false;
+  }
+}
+
 const nr = (v) => Number(v || 0);
 
 // Ziua de azi la București, nu în UTC: între miezul nopții și 3 dimineața
@@ -557,6 +571,11 @@ async function importaAwb(etichete, opt) {
 
   for (const [zi, lista] of peZiua) raport.detaliu.push(await scrieZiDinAwb(zi, lista, o));
   raport.scris = true;
+  // Fiecare zi scrisă își face (sau își pune la zi) comanda — vezi comandaZilei.
+  if (!o.faraComanda) {
+    raport.comenzi = [];
+    for (const zi of raport.zile) raport.comenzi.push(await comandaZilei(zi, o.user || o.userId, "AWB-urile"));
+  }
   return raport;
 }
 
@@ -822,7 +841,219 @@ async function importaComenziAprobate(randuri, opt) {
   }
   raport.detaliu = await scrieZiDinAwb(zi, lista, { userId: o.userId, sursa: "comenzi aprobate" });
   raport.scris = true;
+  if (!o.faraComanda) raport.comanda = await comandaZilei(zi, o.user || o.userId, "comenzile aprobate");
   return raport;
+}
+
+// ---------------------------------------------------------------------------
+// COMANDA ZILEI, FĂCUTĂ DE ERP
+//
+// Cererea lui Vali, 05.11.2026: „După ce se urcă acel raport, generează o
+// comandă nouă, cum face Gabi oricum zilnic, cu produsele zilnice" · „Dacă
+// urcă și Gabi o zi și tu preiei singur, nu da două comenzi pe aceeași zi."
+//
+// Ziua din raport devine comanda clientului Sameday (DELIVERY SOLUTIONS S.A.),
+// cu produsele legate la nomenclator și prețul înghețat pe linia zilei. O zi
+// are o singură comandă: legătura stă pe consumabile_zile.comanda_id, iar
+// indexul unic din bază o păzește și când două urcări vin în aceeași secundă.
+//
+//   • ziua urcată prima dată → comandă nouă, ca a lui Gabi, cu anunțul pe
+//     email ca la orice comandă;
+//   • ziua urcată din nou (Gabi, apoi jobul de noapte cu AWB-urile, care iau
+//     locul comenzilor aprobate) → aceeași comandă, cu liniile puse la zi —
+//     dar numai cât timp e „nouă". Una confirmată deja n-o mai rescrie un
+//     import: se spune, și atât;
+//   • o comandă scrisă de mână pentru ziua aia (cum făcea Gabi până acum) e
+//     adoptată, nu dublată, și nu se rescrie;
+//   • un produs al raportului fără legătură la nomenclator nu poate intra pe
+//     o comandă — se spune pe nume, cu valoarea care lipsește.
+const PARTENER_SAMEDAY = "DELIVERY SOLUTIONS%";
+
+async function partenerSameday() {
+  const setat = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = 'sameday_partener_id'").get().catch(() => null);
+  const ales = parseInt(setat && setat.valoare, 10);
+  if (ales) {
+    const p = await db.prepare("SELECT id, nume, agent_id FROM parteneri WHERE id = ?").get(ales);
+    if (p) return p;
+  }
+  // Dacă sunt mai multe rânduri cu numele ăsta (dubluri din importuri), cel
+  // adevărat e cel cu cele mai multe comenzi și facturi.
+  return db
+    .prepare(
+      `SELECT p.id, p.nume, p.agent_id FROM parteneri p
+        WHERE p.nume ILIKE ?
+        ORDER BY (SELECT COUNT(*) FROM comenzi c WHERE c.partener_id = p.id) DESC,
+                 (SELECT COUNT(*) FROM facturi f WHERE f.partener_id = p.id) DESC, p.id
+        LIMIT 1`
+    )
+    .get(PARTENER_SAMEDAY);
+}
+
+// Ce trebuie făcut cu comanda unei zile. Fără bază de date, ca să poată fi
+// verificat: aici se hotărăște dacă se face o comandă a doua.
+//
+// o.linii     — liniile zilei: { produs_id (din nomenclator sau null), denumire, cantitate, pret, um }
+// o.existenta — comanda deja legată de zi: { id, status, sursa, linii } sau null
+function planComandaZi(o) {
+  const linii = Array.isArray(o && o.linii) ? o.linii : [];
+  const bani = (x) => Math.round(Number(x) * 100) / 100;
+  // Două produse ale raportului legate la același produs din nomenclator, la
+  // același preț, fac o singură linie pe comandă (cantitățile se adună).
+  const deScris = [];
+  for (const l of linii) {
+    if (!(Number(l.produs_id) > 0 && nr(l.cantitate) > 0)) continue;
+    const rand = { produs_id: Number(l.produs_id), denumire: l.denumire || "", cantitate: nr(l.cantitate), pret_unitar: nr(l.pret), um: l.um || null };
+    const acelasi = deScris.find((x) => x.produs_id === rand.produs_id && x.pret_unitar === rand.pret_unitar && x.um === rand.um);
+    if (acelasi) acelasi.cantitate = Math.round((acelasi.cantitate + rand.cantitate) * 1000) / 1000;
+    else deScris.push(rand);
+  }
+  const nelegate = linii
+    .filter((l) => !(Number(l.produs_id) > 0) && nr(l.cantitate) > 0)
+    .map((l) => ({ denumire: l.denumire || "", cantitate: nr(l.cantitate), valoare: bani(nr(l.cantitate) * nr(l.pret)) }));
+  const e = (o && o.existenta) || null;
+  const plan = (actiune, motiv) => ({ actiune, motiv: motiv || "", linii: deScris, nelegate });
+
+  if (e) {
+    if (e.status === "anulata") return plan("lasa", "comanda zilei a fost anulată — n-o refac");
+    if (e.sursa !== "sameday") return plan("lasa", "comanda zilei a fost scrisă de mână — n-o rescriu");
+    if (e.status !== "noua") return plan("lasa", "comanda zilei e deja confirmată — un import n-o mai rescrie");
+    if (!deScris.length) return plan("lasa", "ziua nu mai are niciun produs legat la nomenclator — comanda rămâne cum e");
+    const cheie = (l) => `${Number(l.produs_id)}|${Math.round(nr(l.cantitate) * 1000)}|${Math.round(nr(l.pret_unitar !== undefined ? l.pret_unitar : l.pret) * 10000)}`;
+    const a = (e.linii || []).map(cheie).sort().join(";");
+    const b = deScris.map(cheie).sort().join(";");
+    if (a === b) return plan("lasa", "comanda zilei e deja la zi");
+    return plan("actualizeaza");
+  }
+  if (!deScris.length) return plan("nimic", "niciun produs al zilei nu e legat la nomenclator");
+  return plan("creeaza");
+}
+
+// Comanda zilei: o face, o pune la zi sau spune de ce n-o atinge.
+// Nu aruncă niciodată: raportul s-a scris deja, iar o comandă care nu iese nu
+// are voie să strice urcarea zilei. Ce n-a mers se întoarce cu motivul.
+async function comandaZilei(zi, userSauId, deUnde) {
+  try {
+    let user = userSauId && typeof userSauId === "object" ? userSauId : null;
+    if (!user && userSauId) user = await db.prepare("SELECT id, nume, email FROM utilizatori WHERE id = ?").get(userSauId).catch(() => null);
+    const ziRand = await db.prepare("SELECT id, comanda_id FROM consumabile_zile WHERE client = ? AND data = ?").get(CLIENT, zi);
+    if (!ziRand) return { zi, actiune: "nimic", motiv: "ziua nu e în raport" };
+    const partener = await partenerSameday();
+    if (!partener) return { zi, actiune: "nimic", motiv: "nu găsesc clientul DELIVERY SOLUTIONS S.A. în parteneri" };
+
+    const linii = await db
+      .prepare(
+        `SELECT l.cantitate, l.pret, cp.produs_id, COALESCE(p.denumire, cp.denumire) AS denumire,
+                COALESCE(NULLIF(cp.um, ''), p.unitate_masura) AS um
+           FROM consumabile_linii l
+           JOIN consumabile_produse cp ON cp.id = l.produs_id
+           LEFT JOIN produse p ON p.id = cp.produs_id
+          WHERE l.zi_id = ? AND l.cantitate > 0
+          ORDER BY cp.ordine, cp.id`
+      )
+      .all(ziRand.id);
+
+    // Comanda deja legată de zi — sau una scrisă de mână pentru aceeași zi,
+    // pe același client, încă nelegată de altă zi: aia se adoptă.
+    let existenta = null;
+    if (ziRand.comanda_id) {
+      existenta = await db.prepare("SELECT id, status, sursa FROM comenzi WHERE id = ?").get(ziRand.comanda_id);
+    }
+    if (!existenta) {
+      const deMana = await db
+        .prepare(
+          `SELECT id, status, sursa FROM comenzi
+            WHERE partener_id = ? AND status <> 'anulata' AND COALESCE(sursa, '') <> 'sameday'
+              AND (data_livrare_ceruta = ? OR SUBSTR(COALESCE(data, ''), 1, 10) = ?)
+              AND id NOT IN (SELECT comanda_id FROM consumabile_zile WHERE comanda_id IS NOT NULL)
+            ORDER BY id LIMIT 1`
+        )
+        .get(partener.id, zi, zi);
+      if (deMana) {
+        const leg = await db
+          .prepare("UPDATE consumabile_zile SET comanda_id = ? WHERE id = ? AND comanda_id IS NULL RETURNING id")
+          .run(deMana.id, ziRand.id)
+          .catch(() => ({ changes: 0 }));
+        if (leg.changes) return { zi, actiune: "adoptata", comanda_id: Number(deMana.id), motiv: "există deja comanda scrisă de mână pentru ziua asta — n-am făcut alta" };
+      }
+    }
+    if (existenta) {
+      existenta.linii = await db.prepare("SELECT produs_id, cantitate, pret_unitar FROM comenzi_linii WHERE comanda_id = ?").all(existenta.id);
+    }
+
+    const plan = planComandaZi({ linii, existenta });
+    const rezultat = { zi, actiune: plan.actiune, motiv: plan.motiv, nelegate: plan.nelegate, comanda_id: existenta ? Number(existenta.id) : null };
+    const C = require("./comenzi");
+    const total = plan.linii.reduce((s, l) => s + l.cantitate * l.pret_unitar, 0);
+    const despre = `ziua ${dataRo(zi)} din raportul Sameday (${deUnde || "import"}), ${plan.linii.length} produse, ${total.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei${user && user.nume ? ", urcată de " + user.nume : ""}`;
+
+    if (plan.actiune === "actualizeaza") {
+      rezultat.schimbari = await C.inlocuiesteLiniile(existenta.id, plan.linii, user, despre);
+      return rezultat;
+    }
+    if (plan.actiune !== "creeaza") return rezultat;
+
+    // Agentul comenzii: cel de pe ultima comandă a clientului (Gabi, cea care
+    // le scria până acum), altfel cel de pe fișa clientului, altfel cine a urcat ziua.
+    const ultima = await db
+      .prepare("SELECT agent_id, livrare_partiala FROM comenzi WHERE partener_id = ? AND status <> 'anulata' AND agent_id IS NOT NULL ORDER BY id DESC LIMIT 1")
+      .get(partener.id)
+      .catch(() => null);
+    const id = await C.creeazaComandaAutomata(
+      {
+        partener_id: partener.id,
+        numar: "Sameday " + dataRo(zi),
+        observatii: `Comanda zilnică de consumabile Sameday pentru ${dataRo(zi)}, făcută de ERP din raportul de comenzi. Dacă ziua se urcă din nou, se pune la zi singură cât timp e „nouă”.`,
+        agent_id: (ultima && ultima.agent_id) || partener.agent_id || (user && user.id) || null,
+        data_livrare_ceruta: zi,
+        livrare_partiala: (ultima && ultima.livrare_partiala) || "da",
+        sursa: "sameday",
+        linii: plan.linii,
+      },
+      user,
+      despre
+    );
+    // Legătura e scrisă abia acum, și doar dacă ziua n-a primit între timp
+    // altă comandă. Cine pierde cursa își șterge comanda înainte să anunțe.
+    const leg = await db
+      .prepare("UPDATE consumabile_zile SET comanda_id = ? WHERE id = ? AND comanda_id IS NULL RETURNING id")
+      .run(id, ziRand.id)
+      .catch(() => ({ changes: 0 }));
+    if (!leg.changes) {
+      await C.stergeComandaAutomata(id);
+      const castigatoare = await db.prepare("SELECT comanda_id FROM consumabile_zile WHERE id = ?").get(ziRand.id);
+      return { zi, actiune: "lasa", motiv: "ziua a primit comanda din altă urcare, în aceeași clipă", comanda_id: castigatoare ? Number(castigatoare.comanda_id) : null, nelegate: plan.nelegate };
+    }
+    try {
+      await C.anuntaComandaNoua(id, user);
+    } catch (e) {
+      console.error("[comenzi-zi] anunț comandă Sameday:", e.message);
+    }
+    rezultat.comanda_id = id;
+    return rezultat;
+  } catch (e) {
+    console.error("[comenzi-zi] comanda zilei", zi, e.message);
+    return { zi, actiune: "eroare", motiv: String(e.message || e).slice(0, 200) };
+  }
+}
+
+// Rândul de pe pagina de după urcare: ce s-a întâmplat cu comanda zilei.
+function textComandaZi(c) {
+  if (!c) return "";
+  const link = c.comanda_id ? ` <a href="/comenzi/${c.comanda_id}">comanda #${c.comanda_id} →</a>` : "";
+  const spune = {
+    creeaza: `Am făcut comanda zilei ${dataRo(c.zi)}.`,
+    actualizeaza: `Am pus la zi comanda zilei ${dataRo(c.zi)}${c.schimbari ? ` (${c.schimbari} ${c.schimbari === 1 ? "schimbare" : "schimbări"}, scrise în istoricul ei)` : ""}.`,
+    adoptata: `Comanda zilei ${dataRo(c.zi)}: ${c.motiv}.`,
+    lasa: `Comanda zilei ${dataRo(c.zi)}: ${c.motiv}.`,
+    nimic: `Comanda zilei ${dataRo(c.zi)} nu s-a făcut: ${c.motiv}.`,
+    eroare: `Comanda zilei ${dataRo(c.zi)} nu s-a putut face: ${c.motiv}.`,
+  }[c.actiune] || "";
+  const nelegate = (c.nelegate || []).length
+    ? `<br><span style="color:var(--warn)">Nu au intrat pe comandă, fiindcă nu sunt legate la nomenclator: ${c.nelegate
+        .map((n) => `${esc(n.denumire)} (${nr(n.cantitate).toLocaleString("ro-RO")} buc, ${money(n.valoare)})`)
+        .join(", ")}. Leagă-le din „Arată legăturile la nomenclator” și urcă ziua din nou.</span>`
+    : "";
+  return `<div class="flash" style="margin:10px 0">${esc(spune)}${link}${nelegate}</div>`;
 }
 
 // ---- interogările raportului ------------------------------------------------
@@ -1013,47 +1244,6 @@ async function awbClient(clientId, limita) {
 
 // ---- bucăți de pagină -------------------------------------------------------
 
-// ---- perioadele de facturare ------------------------------------------------
-// Vali, 29.10.2026: facturăm de două ori pe lună, pe 15 și la sfârșitul lunii;
-// dacă ziua aceea cade sâmbătă sau duminică, factura se face vineri.
-//
-// Sumele zilnice din raport sunt FĂRĂ TVA (confirmat de Vali, 29.10.2026), deci
-// suma de facturat e suma simplă a zilelor — nu se împarte nimic la 1,21. TVA-ul
-// se adaugă pe factură, peste bază.
-//
-// Toată aritmetica e pe șiruri „YYYY-MM-DD", prin ziPlus/ultimaZiDinLuna. Nu se
-// atinge ceasul: singura funcție care știe ce zi e azi rămâne azi(), care e pe
-// ora Bucureștiului. Un Date.now() local aici ar putea cădea cu o zi alături.
-function ziuaSaptamanii(zi) {
-  return new Date(Date.parse(String(zi).slice(0, 10) + "T00:00:00Z")).getUTCDay();
-}
-
-function vineriDacaWeekend(zi) {
-  const z = ziuaSaptamanii(zi);
-  if (z === 6) return ziPlus(zi, -1); // sâmbătă
-  if (z === 0) return ziPlus(zi, -2); // duminică
-  return zi;
-}
-
-// Cele două perioade ale unei luni, fiecare cu data ei de facturare.
-function perioadeFacturare(luna) {
-  const ultima = ultimaZiDinLuna(luna);
-  return [
-    { deLa: `${luna}-01`, panaLa: `${luna}-15`, facturare: vineriDacaWeekend(`${luna}-15`) },
-    { deLa: `${luna}-16`, panaLa: ultima, facturare: vineriDacaWeekend(ultima) },
-  ];
-}
-
-// Perioada de facturare în care cade o zi, și dacă e închisă la data de azi.
-// Închisă = azi a trecut de data de facturare. În ziua facturării perioada e
-// încă deschisă: factura se face din ce există atunci.
-function perioadaFacturarii(zi, aziZi) {
-  const luna = String(zi).slice(0, 7);
-  const p = perioadeFacturare(luna);
-  const sel = Number(String(zi).slice(8, 10)) <= 15 ? p[0] : p[1];
-  return { ...sel, luna, inchisa: String(aziZi) > sel.facturare };
-}
-
 function cardulLunii(titlu, t) {
   const venit = nr(t.venit);
   const cuCost = venit - nr(t.venit_fara_cost);
@@ -1087,42 +1277,9 @@ function tabelProduse(produse, totalMarja) {
       areCost && totalMarja > 0 ? procent(marja, totalMarja).toFixed(1) + "%" : "—",
     ];
   });
-  // Rândul de total, cerut de Vali pe 29.10.2026: „sub acest table fa si total
-  // pe fiecare coloana".
-  //
-  // Două lucruri se calculează altfel decât prin însumarea coloanei:
-  //
-  //   MARJA % se ia DIN TOTALURI, nu ca medie a procentelor de pe rânduri.
-  //   Media tratează un produs de 600 lei la fel ca unul de 6.200 și dă alt
-  //   număr — pe produsele unei zile obișnuite, diferența e de câteva puncte.
-  //
-  //   CANTITATEA nu se adună când unitățile diferă: plicuri la bucată plus
-  //   folie la rolă dau un număr fără sens. Se adună doar dacă toate rândurile
-  //   au aceeași unitate; altfel rândul spune câte produse sunt.
-  const venitTot = produse.reduce((x, p) => x + nr(p.venit), 0);
-  const cuCostTot = produse.reduce((x, p) => x + (nr(p.venit) - nr(p.venit_fara_cost)), 0);
-  const costTot = produse.reduce((x, p) => x + nr(p.cost), 0);
-  const marjaTot = cuCostTot - costTot;
-  const um = new Set(produse.map((p) => String(p.um || "buc")));
-  const cantCelula =
-    um.size === 1
-      ? produse.reduce((x, p) => x + nr(p.cantitate), 0).toLocaleString("ro-RO") + " " + esc([...um][0])
-      : `${produse.length} produse`;
-
   return table(
     ["Produs", "Cantitate", "Venit", "Cost", "Marjă", "Marjă %", "Din marja perioadei"],
-    randuri,
-    {
-      total: [
-        "<strong>Total</strong>",
-        `<strong>${cantCelula}</strong>`,
-        `<strong>${money(venitTot)}</strong>`,
-        cuCostTot > 0 ? `<strong>${money(costTot)}</strong>` : "—",
-        cuCostTot > 0 ? `<strong>${money(marjaTot)}</strong>` : "—",
-        cuCostTot > 0 ? `<strong>${procent(marjaTot, cuCostTot).toFixed(1)}%</strong>` : "—",
-        cuCostTot > 0 ? "<strong>100%</strong>" : "—",
-      ],
-    }
+    randuri
   );
 }
 
@@ -1152,60 +1309,14 @@ function coloaneBani(t) {
   ];
 }
 
-// Rândul de facturare dintre zile: suma perioadei, fără TVA.
-// O perioadă trecută de data facturării e „De facturat"; una încă deschisă e
-// „De facturat la zi", cu ziua până la care s-a numărat scrisă în etichetă —
-// altfel nu se vede dacă suma e de ieri sau de azi.
-function randFacturare(zileleP, p) {
-  const t = sumaZile(zileleP);
-  const panaLaReal = zileleP[0].data; // zilele vin descrescător: prima e cea mai nouă
-  const et = p.inchisa
-    ? `De facturat ${dataRo(p.deLa)} – ${dataRo(p.panaLa)}`
-    : `De facturat la zi ${dataRo(p.deLa)} – ${dataRo(panaLaReal)}`;
-  const badge = p.inchisa
-    ? '<span class="badge">închisă</span>'
-    : `<span class="badge rosu">în curs, se facturează ${dataRo(p.facturare)}</span>`;
-  return [
-    `<strong>${esc(et)}</strong> ${badge}`,
-    ...coloaneBani(t).map((c) => `<strong>${c}</strong>`),
-    `${t.zile} zile`,
-    "",
-  ];
-}
-
-function tabelZile(zile, eticheta, aziZi) {
+function tabelZile(zile, eticheta) {
   if (!zile.length) return '<p style="color:var(--text-muted)">Nicio zi cu comenzi în perioada aleasă.</p>';
   const t = sumaZile(zile);
-  const az = aziZi || azi();
-
-  // Zilele vin descrescător. Subtotalul unei perioade se pune SUB blocul ei,
-  // adică imediat după ultima zi (cea mai veche) din perioada respectivă.
-  const randuri = [];
-  let grup = [];
-  for (let i = 0; i < zile.length; i++) {
-    const z = zile[i];
-    randuri.push([`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || "")]);
-    grup.push(z);
-    const p = perioadaFacturarii(z.data, az);
-    const urm = zile[i + 1];
-    const altaPerioada = !urm || perioadaFacturarii(urm.data, az).deLa !== p.deLa;
-    if (altaPerioada) {
-      randuri.push(randFacturare(grup, p));
-      grup = [];
-    }
-  }
-
   return table(
     ["Ziua", "Venit", "Cost", "Marjă", "Marjă %", "Produse", "Sursa"],
-    randuri,
-    {
-      total: [
-        `<strong>Total${eticheta ? " " + esc(eticheta) : ""}</strong>`,
-        ...coloaneBani(t).map((c) => `<strong>${c}</strong>`),
-        `${t.zile} zile`,
-        "",
-      ],
-    }
+    zile
+      .map((z) => [`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || "")])
+      .concat([[`<strong>Total${eticheta ? " " + esc(eticheta) : ""}</strong>`, ...coloaneBani(t).map((c) => `<strong>${c}</strong>`), `${t.zile} zile`, ""]])
   );
 }
 
@@ -1562,7 +1673,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       ${tabelProduse(pProd, marjaLuna)}
 
       <h2>Pe zi — ${esc(per.eticheta)}</h2>
-      ${tabelZile(zile, per.eticheta, azi())}
+      ${tabelZile(zile, per.eticheta)}
 
       <h2>Pe luni</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Apasă pe o lună ca să-i vezi zilele, cu totalul lunii dedesubt.</p>
@@ -1666,6 +1777,8 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         )
         .run(zi.id, p.id, cant, nr(p.pret), p.cost == null ? null : nr(p.cost));
     }
+    // O zi corectată de mână își pune la zi și comanda (cât timp e „nouă").
+    await comandaZilei(data, ctx.user, "corectura de mână");
     return redirect(ctx.res, `${CALE}?luna=${data.slice(0, 7)}&zi=${data}`);
   });
 
@@ -1693,26 +1806,6 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
           cost == null || !Number.isFinite(cost) ? null : "scris de mână",
           p.id
         );
-    }
-
-    // Costul scris aici trebuie să ajungă și pe zilele DEJA scrise, altfel
-    // „am completat costul" nu schimbă nimic în raport și omul crede că marja
-    // e stricată. Pățit pe 29.10.2026: cinci costuri completate de mână, iar
-    // „Top produse" a rămas cu „—" pe toate rândurile, pentru că liniile lunii
-    // fuseseră scrise la importul AWB, când produsele n-aveau încă niciun cost.
-    //
-    // Până acum backfill-ul se făcea doar din formularul de legare la
-    // nomenclator (bifa „umple și zilele vechi") și după importul AWB — adică
-    // exact pe drumurile pe care nu treci când completezi un cost de mână.
-    //
-    // umpleCosturiLipsa() atinge DOAR liniile cu cost NULL. O linie care are
-    // deja un cost înghețat rămâne cum e, chiar dacă prețul de pe produs s-a
-    // schimbat între timp: ăla era costul la data ei. Trecutul nu se rescrie.
-    const umplut = await umpleCosturiLipsa().catch(() => ({ linii: 0, linii_awb: 0 }));
-    if (nr(umplut.linii) || nr(umplut.linii_awb)) {
-      console.log(
-        `[comenzi-zi] costuri scrise de mână: ${nr(umplut.linii)} linii umplute + ${nr(umplut.linii_awb)} pe AWB`
-      );
     }
     return redirect(ctx.res, CALE);
   });
@@ -1831,7 +1924,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
   // diferit. „Probă uscată" calculează și arată ziua fără să scrie nimic; e
   // modul în care se verifică o zi înainte s-o accepți.
   router.post(`${CALE}/comenzi-aprobate`, async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    if (!poateUrca(ctx.user)) return redirect(ctx.res, CALE);
     const b = ctx.body || {};
     const f = ((b.__files && b.__files.fisier) || [])[0];
     const zi = String(b.zi || "").slice(0, 10);
@@ -1845,6 +1938,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         zi,
         uscat: String(b.uscat || "") === "1",
         userId: ctx.user.id,
+        user: ctx.user,
         fisier: f.filename,
       });
     } catch (e) {
@@ -1874,12 +1968,13 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
           : ""
       }
       ${d && r.scris ? `<p><strong>Scris: ${money(d.venit)}</strong>, ${nr(d.clienti)} clienți. <a href="${CALE}?perioada=custom&de=${zi}&pana=${zi}">Vezi ziua în raport →</a></p>` : ""}
+      ${r.comanda ? textComandaZi(r.comanda) : ""}
     `;
     send(ctx.res, 200, rapoarte.pagina(ctx, "Comenzi aprobate", CALE, corp));
   });
 
   router.post(`${CALE}/awb`, async (ctx) => {
-    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    if (!poateUrca(ctx.user)) return redirect(ctx.res, CALE);
     const b = ctx.body || {};
     let etichete;
     try {
@@ -1898,7 +1993,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       );
     }
     const uscat = String(b.uscat || "") === "1";
-    const r = await importaAwb(etichete, { uscat, userId: ctx.user ? ctx.user.id : null });
+    const r = await importaAwb(etichete, { uscat, userId: ctx.user ? ctx.user.id : null, user: ctx.user });
     if (!uscat && r.scris) await umpleCosturiLipsa();
 
     const corp = `
@@ -1946,6 +2041,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
           : ""
       }
       ${nr(r.fara_data) ? `<p style="color:var(--warn)">${nr(r.fara_data)} etichete fără AWB sau fără dată — sărite.</p>` : ""}
+      ${(r.comenzi || []).map(textComandaZi).join("")}
     `;
     send(ctx.res, 200, rapoarte.pagina(ctx, uscat ? "Probă uscată AWB" : "Import AWB", CALE, corp));
   });
@@ -1961,6 +2057,9 @@ module.exports = {
   umpleCosturiLipsa,
   importaAwb,
   ziuaDeRaport,
+  comandaZilei,
+  planComandaZi,
+  poateUrca,
   // Expuse pentru teste: recunoașterea produsului e piesa de care atârnă jobul
   // de noapte, iar ea se verifică pe cele 419 etichete reale, nu din priviri.
   __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil },

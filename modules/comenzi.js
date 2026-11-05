@@ -2435,4 +2435,85 @@ function register(router) {
   });
 }
 
-module.exports = { register, STATUS_LABEL };
+// ---------------------------------------------------------------------------
+// Comenzi scrise de ERP, nu de om.
+//
+// Prima folosire (Vali, 05.11.2026): comanda zilnică Sameday, făcută din
+// raportul de consumabile când se urcă ziua — exact comanda pe care o scria
+// Gabi de mână în fiecare zi. Scrierea e aceeași cu a formularului (comanda,
+// liniile cu UM-ul lor, istoricul), doar fără formular. Anunțul pe email îl
+// trimite cine o cheamă, după ce e sigur că a păstrat-o (vezi
+// modules/comenzi-zi.js — două urcări în aceeași secundă fac o singură
+// comandă, iar cea de-a doua se șterge înainte să anunțe pe cineva).
+async function creeazaComandaAutomata(d, user, motiv) {
+  const info = await db
+    .prepare(
+      `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, moneda, sursa, creata_de)
+       VALUES (?, ?, ?, ?, ?, ?, 'RON', ?, ?) RETURNING id`
+    )
+    .run(
+      d.partener_id,
+      d.numar || "",
+      d.observatii || "",
+      d.agent_id || null,
+      d.data_livrare_ceruta || null,
+      d.livrare_partiala || "da",
+      d.sursa || null,
+      user && user.id ? user.id : null
+    );
+  const id = Number(info.lastInsertRowid);
+  for (const l of d.linii || []) {
+    await db
+      .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?, ?, ?, ?, ?)")
+      .run(id, l.produs_id, l.cantitate, l.pret_unitar, l.um || null);
+  }
+  await scrieIstoric(id, user, [{ ce: "Comandă creată automat", vechi: "", nou: motiv || "" }]);
+  return id;
+}
+
+// Comanda făcută automat, scoasă înapoi (a doua urcare a câștigat cursa).
+// Nu trece prin istoric: n-a existat pentru nimeni, n-a anunțat pe nimeni.
+async function stergeComandaAutomata(id) {
+  await db.prepare("DELETE FROM comenzi_istoric WHERE comanda_id = ?").run(id).catch(() => {});
+  await db.prepare("DELETE FROM comenzi_linii WHERE comanda_id = ?").run(id);
+  await db.prepare("DELETE FROM comenzi WHERE id = ?").run(id);
+}
+
+// Liniile unei comenzi automate, puse la zi dintr-un import nou. Ce s-a
+// schimbat intră în istoric, linie cu linie, ca la o modificare de mână.
+//
+// Rândul liniei rămâne ACELAȘI (același id) cât timp produsul e tot pe
+// comandă — exact ca la modificarea de mână de mai sus. De id-ul liniei țin
+// cererile de aprovizionare din depozit (butonul verde „✓ Comandat”),
+// rezervările de stoc și ce s-a livrat deja; o rescriere de la zero le-ar
+// rupe legătura și depozitul ar comanda a doua oară.
+async function inlocuiesteLiniile(id, linii, user, motiv) {
+  const vechi = await db
+    .prepare(
+      `SELECT cl.id, cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um, p.denumire
+         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ? ORDER BY cl.id`
+    )
+    .all(id);
+  const schimbari = IST.diferenteLinii(vechi, linii);
+  const pastrate = new Set();
+  for (const l of linii) {
+    const v = vechi.find((x) => Number(x.produs_id) === Number(l.produs_id) && !pastrate.has(Number(x.id)));
+    if (v) {
+      pastrate.add(Number(v.id));
+      await db
+        .prepare("UPDATE comenzi_linii SET cantitate = ?, pret_unitar = ?, um = ? WHERE id = ?")
+        .run(l.cantitate, l.pret_unitar, l.um || null, v.id);
+    } else {
+      await db
+        .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?, ?, ?, ?, ?)")
+        .run(id, l.produs_id, l.cantitate, l.pret_unitar, l.um || null);
+    }
+  }
+  for (const v of vechi) {
+    if (!pastrate.has(Number(v.id))) await db.prepare("DELETE FROM comenzi_linii WHERE id = ?").run(v.id);
+  }
+  await scrieIstoric(id, user, schimbari.concat([{ ce: "Pusă la zi automat", vechi: "", nou: motiv || "" }]));
+  return schimbari.length;
+}
+
+module.exports = { register, STATUS_LABEL, creeazaComandaAutomata, stergeComandaAutomata, inlocuiesteLiniile, anuntaComandaNoua };

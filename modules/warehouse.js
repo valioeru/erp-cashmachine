@@ -346,9 +346,30 @@ function register(router) {
       const rezervare = l.rezervare
         ? `<div style="font-size:12px;color:var(--text-muted)">rezervat ${nr(l.rezervare.cantitate)} până la ${esc(String(l.rezervare.expira_la || "").slice(0, 16))}</div>`
         : "";
+      // Ce s-a comandat deja pentru linia asta. Vali, 05.11.2026, cu poza
+      // comenzii Sameday de 13 linii: „după ce apeși Comandă, să se schimbe
+      // culoarea butonului”. Toate butoanele arătau la fel, deci după a
+      // cincea linie nu se mai știa care a plecat. Acum linia comandată are
+      // butonul verde, „✓ Comandat”, scrie dedesubt ce și când, iar o a doua
+      // apăsare întreabă înainte — altfel marfa se comandă de două ori.
+      const cerute = aprov.filter((a) => Number(a.linie_id) === Number(l.id) && !["anulata", "refuzata"].includes(String(a.status)));
+      // nr() de aici e afișare („1.250”), nu număr — suma se face pe numere.
+      const dejaCerut = nr(cerute.reduce((s, a) => s + (Number(a.cantitate) || 0), 0));
+      const notaCerute = cerute.length
+        ? `<div style="font-size:12px;color:var(--success);margin-top:3px">${cerute
+            .map(
+              (a) =>
+                `comandat ${esc(String(nr(a.cantitate)))} ${a.sursa === "productie" ? "din producție" : "de la terț"}${a.furnizor ? " · " + esc(a.furnizor) : ""} · ${esc(String(a.status || ""))}${a.creata_la ? " · " + esc(String(a.creata_la).slice(0, 16)) : ""}${a.cerut_de ? " · " + esc(a.cerut_de) : ""}`
+            )
+            .join("<br>")}</div>`
+        : "";
       const cereForm =
         l.lipsa > 0.0001 && poateDepozit(ctx.user)
-          ? `<form method="post" action="/depozit/comanda/${id}/aprovizionare" class="inline-form" style="gap:6px;flex-wrap:wrap">
+          ? `<form method="post" action="/depozit/comanda/${id}/aprovizionare" class="inline-form" style="gap:6px;flex-wrap:wrap"${
+              cerute.length
+                ? ` onsubmit="return confirm('Pentru linia asta ai comandat deja ${esc(String(dejaCerut))}. Mai comanzi o dată?')"`
+                : ""
+            }>
                <input type="hidden" name="linie_id" value="${l.id}">
                <input type="number" step="0.001" name="cantitate" value="${l.lipsa.toFixed(3)}" style="width:90px">
                <select name="sursa">
@@ -358,9 +379,13 @@ function register(router) {
                <select name="furnizor_id" class="sel-ingust"><option value="">— furnizor —</option>${furnizori
                  .map((f) => `<option value="${f.id}" title="${esc(f.nume)}">${esc(f.nume)}</option>`)
                  .join("")}</select>
-               <button class="btn small" type="submit">Comandă</button>
-             </form>`
-          : "";
+               ${
+                 cerute.length
+                   ? `<button class="btn small btn-comandat" type="submit" style="background:var(--success);border-color:var(--success);color:#fff" title="Deja comandat — apasă doar dacă mai trebuie o dată">✓ Comandat</button>`
+                   : `<button class="btn small" type="submit">Comandă</button>`
+               }
+             </form>${notaCerute}`
+          : notaCerute;
       return [
         esc(l.denumire),
         `${nr(l.cerut)} ${esc(l.unitate_masura || "")}`,

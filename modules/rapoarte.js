@@ -365,15 +365,27 @@ function pragVechime(cheie) {
   return zi(Date.UTC(+a.slice(0, 4), +a.slice(5, 7) - 1 - (luni || 12), +a.slice(8, 10)));
 }
 
-function subnav(activ) {
+// Bara rapoartelor arată doar ce poate deschide omul: cine are doar raportul
+// Sameday (Gabi) nu vede o bară de linkuri care-i răspund „Nu ai acces”.
+function subnav(activ, user) {
+  const poate = (href) => {
+    if (!user) return true;
+    try {
+      return require("../lib/auth").poateAccesa(user, href);
+    } catch (e) {
+      return true;
+    }
+  };
   const linkuri = CATEGORII.flatMap((c) => c.rapoarte)
+    .filter((r) => poate(r.href))
     .map((r) => `<a href="${r.href}" class="subnav-link${activ === r.href ? " activ" : ""}">${esc(r.nume)}</a>`)
     .join("");
-  return `<div class="subnav"><a href="/rapoarte" class="subnav-link${activ === "/rapoarte" ? " activ" : ""}">Toate rapoartele</a>${linkuri}</div>`;
+  const toate = poate("/rapoarte") ? `<a href="/rapoarte" class="subnav-link${activ === "/rapoarte" ? " activ" : ""}">Toate rapoartele</a>` : "";
+  return `<div class="subnav">${toate}${linkuri}</div>`;
 }
 
 function pagina(ctx, titlu, activ, continut) {
-  return layout({ user: ctx.user, title: titlu, active: "/rapoarte", body: subnav(activ) + continut });
+  return layout({ user: ctx.user, title: titlu, active: "/rapoarte", body: subnav(activ, ctx.user) + continut });
 }
 
 // ===========================================================================
