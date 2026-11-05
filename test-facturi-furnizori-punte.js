@@ -82,7 +82,7 @@ function bine(descriere, conditie, detaliu) {
 const egal = (d, a, b) => bine(d + " = " + JSON.stringify(b), JSON.stringify(a) === JSON.stringify(b), JSON.stringify(a));
 
 function curata() {
-  const f = q(`SELECT id FROM facturi WHERE document_extern LIKE 'TSTFF%'`).map((x) => Number(x.id)).join(",") || "0";
+  const f = q(`SELECT id FROM facturi WHERE document_extern LIKE '%TSTFF%'`).map((x) => Number(x.id)).join(",") || "0";
   q(`DELETE FROM facturi_linii WHERE factura_id IN (${f})`);
   q(`DELETE FROM plati WHERE factura_id IN (${f})`);
   q(`DELETE FROM facturi WHERE id IN (${f})`);
@@ -97,30 +97,37 @@ function curata() {
   // din antet, nu pe cea implicită.
   q(`INSERT INTO firme (id, nume, cui, culoare, in_grup, implicita, operationala) VALUES (97602, 'TEST-FF Alta Firma SRL', 'TSTFF2', '#000', 1, 1, 1)`);
   q(`INSERT INTO parteneri (tip, nume, cui) VALUES ('furnizor', 'TEST-FF Hartii SRL', 'RO7700001')`);
-  const ANTET = ["#", "Furnizor", "CIF", "Document", "Data", "Scadenta", "Valoare fara TVA", "TVA", "Total", "Moneda"];
+  // Antetul pe care îl pune punte/sincronizare.js (S.furnizori) din raportul v2.
+  const ANTET = ["Furnizor", "CIF", "Document", "Data", "Scadenta", "Valoare fara TVA", "TVA", "Total", "Moneda", "Total RON", "Status"];
   const rand = (c) => ({ antet: ANTET, celule: c, firma: "TEST-FF FIRMA NOASTRĂ S.R.L." });
+  // Cum vin din SmartBill: „Fact SERIENR", data zz/ll/aaaa, sume cu punct zecimal.
   const lot = [
-    rand(["1", "TEST-FF Hartii SRL", "RO7700001", "TSTFF 1001", "01.10.2026", "31.10.2026", "1.000,00", "210,00", "1.210,00", "RON"]),
-    rand(["2", "TEST-FF Furnizor Nou SRL", "RO7700002", "TSTFF 2002", "15.10.2026", "", "500,00", "105,00", "605,00", "RON"]),
-    rand(["3", "TEST-FF Hartii SRL", "RO7700001", "TSTFF 1001", "03.11.2026", "", "100,00", "21,00", "121,00", "RON"]),
+    rand(["TEST-FF Hartii SRL", "RO7700001", "Fact TSTFF1001", "01/10/2026", "31/10/2026", "1000", "210", "1210", "RON", "1210", "Neplatita"]),
+    rand(["TEST-FF Furnizor Nou SRL", "RO7700002", "Fact TSTFF2002", "15/10/2026", "", "500", "105", "605", "RON", "605", "Platita"]),
+    rand(["TEST-FF Hartii SRL", "RO7700001", "Fact TSTFF1001", "03/11/2026", "", "100", "21", "121", "RON", "121", "Platita"]),
   ];
 
   console.log("\n1. Primul lot");
   const r1 = await HANDLERE.facturi_furnizori(lot);
   egal("trei facturi scrise (același număr, altă dată = alt document)", r1.create, 3);
-  const scrise = q(`SELECT f.document_extern, f.directie, f.firma_id, f.data_emiterii, p.nume, p.tip FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.document_extern LIKE 'TSTFF%' ORDER BY f.data_emiterii`);
+  const scrise = q(`SELECT f.document_extern, f.directie, f.firma_id, f.data_emiterii, p.nume, p.tip FROM facturi f JOIN parteneri p ON p.id = f.partener_id WHERE f.document_extern LIKE '%TSTFF%' ORDER BY f.data_emiterii`);
   egal("pe achiziție, pe firma din antet", [...new Set(scrise.map((x) => x.directie + "/" + x.firma_id))], ["achizitie/97601"]);
   egal("datele citite din raport", scrise.map((x) => x.data_emiterii.slice(0, 10)), ["2026-10-01", "2026-10-15", "2026-11-03"]);
   egal("furnizorul nou e furnizor", scrise.filter((x) => x.nume === "TEST-FF Furnizor Nou SRL").map((x) => x.tip), ["furnizor"]);
-  const totaluri = q(`SELECT ROUND(SUM(l.cantitate * l.pret_unitar * (1 + l.cota_tva / 100))::numeric, 2) AS t FROM facturi_linii l JOIN facturi f ON f.id = l.factura_id WHERE f.document_extern LIKE 'TSTFF%'`)[0];
+  const totaluri = q(`SELECT ROUND(SUM(l.cantitate * l.pret_unitar * (1 + l.cota_tva / 100))::numeric, 2) AS t FROM facturi_linii l JOIN facturi f ON f.id = l.factura_id WHERE f.document_extern LIKE '%TSTFF%'`)[0];
   egal("valorile, cu TVA, la ban", Number(totaluri.t), 1936);
 
   console.log("\n2. Același raport, a doua oară");
   const r2 = await HANDLERE.facturi_furnizori(lot);
   egal("nimic nou", r2.create, 0);
-  egal("tot trei facturi", Number(unul(`SELECT COUNT(*) FROM facturi WHERE document_extern LIKE 'TSTFF%'`)), 3);
+  egal("tot trei facturi", Number(unul(`SELECT COUNT(*) FROM facturi WHERE document_extern LIKE '%TSTFF%'`)), 3);
 
-  console.log("\n3. Lot stricat");
+  console.log("\n3. SmartBill deschis pe altă firmă (nu e în ERP)");
+  const rStraina = await HANDLERE.facturi_furnizori([{ antet: ANTET, celule: ["TEST-FF Altcineva SRL", "RO7700009", "Fact TSTFF9009", "02/10/2026", "", "10", "2.1", "12.1", "RON", "12.1", "Platita"], firma: "SC YACHTMAG SRL" }]);
+  bine("nu scrie nimic pe firma implicită și spune de ce", rStraina.create === 0 && /nu e în ERP/.test((rStraina.erori || []).join(" ")), JSON.stringify(rStraina).slice(0, 200));
+  egal("…nicio factură TSTFF9009", Number(unul(`SELECT COUNT(*) FROM facturi WHERE document_extern LIKE '%TSTFF9009%'`)), 0);
+
+  console.log("\n4. Lot stricat");
   const r3 = await HANDLERE.facturi_furnizori([{ celule: ["x"] }]);
   bine("fără antet nu scrie nimic și spune de ce", r3.create === 0 && /antet/.test((r3.erori || []).join(" ")), JSON.stringify(r3));
 
