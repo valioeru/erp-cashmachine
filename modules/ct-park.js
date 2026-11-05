@@ -13,6 +13,7 @@ const { SUB_STOC } = require("../lib/stoc");
 const { esc, layout, table, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { poateAccesa } = require("../lib/auth");
+const XLS = require("../lib/export-xlsx");
 // Planul intrării de marfă (ce palet pe ce loc) — vezi comentariul de acolo.
 const CI = require("../lib/ct-intrare");
 const CPL = require("../lib/ct-palet-linii");
@@ -1644,17 +1645,21 @@ function register(router) {
   // intrat și pe ce raft stă. E lista pe care o ceri când sună cineva și
   // întreabă „mai avem din aia?" — de-aia are căutare, și de-aia caută în tot
   // (produs, cod, lot, furnizor, adresă), nu doar în denumire.
-  router.get("/stocuri/ct-park/stoc", async (ctx) => {
-    const cauta = String((ctx.query && ctx.query.q) || "").trim();
+  // Ce e acum în depozit, cu filtrul de căutare. O citesc două rute: pagina și
+  // exportul în Excel. Scrisă de două ori, exportul ar fi ajuns să scoată alte
+  // rânduri decât cele de pe ecran — și n-ar fi observat nimeni până nu s-ar fi
+  // certat două persoane pe același număr.
+  async function stocLaZi(query, user) {
+    const cauta = String((query && query.q) || "").trim();
 
     // Cine are din Depozit doar pagina asta — agentul de vânzări — vede marfa,
     // cantitatea și locul, nu și furnizorul sau prețul de intrare: aceeași
     // regulă ca la Cereri de preț (modules/rfq.js). Nici căutarea nu merge pe
     // furnizor, altfel l-ar afla căutând. Cine are tot Depozitul vede tot.
-    const vedeTot = poateAccesa(ctx.user, "/stocuri/ct-park");
+    const vedeTot = poateAccesa(user, "/stocuri/ct-park");
     // Butonul „Intrare marfă" rămâne la vedere, ca să știe că operația există,
     // dar e inactiv pentru cine nu poate face intrarea.
-    const poateIntra = poateAccesa(ctx.user, "/stocuri/ct-park/intrare");
+    const poateIntra = poateAccesa(user, "/stocuri/ct-park/intrare");
 
     // Paleții din depozit. Locurile se aduc separat și se lipesc în JS: un
     // palet lat stă pe două-trei locuri, iar un JOIN ar multiplica rândul
@@ -1722,6 +1727,7 @@ function register(router) {
         ...p,
         marfa: p.produs || p.produs_text || "(fără denumire)",
         cod: p.produs_cod || p.cod || "",
+        cod_palet: p.cod || "",
         um: p.um || p.unitate_masura || "",
         adrese: ls.map((l) => l.adresa),
         rand: ls.length ? ls[0].rand : null,
@@ -1754,6 +1760,12 @@ function register(router) {
     const valoareTotala = vizibile.reduce((s, r) => s + r.valoare, 0);
     const faraPret = vizibile.filter((r) => !nr(r.pret_unitar)).length;
     const locuriOcupate = vizibile.reduce((s, r) => s + r.adrese.length, 0);
+    return { cauta, vedeTot, poateIntra, cuFurnizor, randuriStoc, vizibile, ordine, grupe, valoareTotala, faraPret, locuriOcupate };
+  }
+
+  router.get("/stocuri/ct-park/stoc", async (ctx) => {
+    const { cauta, vedeTot, poateIntra, cuFurnizor, randuriStoc, vizibile, ordine, grupe, valoareTotala, faraPret, locuriOcupate } =
+      await stocLaZi(ctx.query, ctx.user);
 
     const cap = ["Marfă", "Cod", "Lot", "Cantitate", "Furnizor", "Intrat în stoc", "Unde stă", "Valoare"];
     const randCatre = (r) => [
@@ -1829,6 +1841,12 @@ function register(router) {
         <button class="btn" type="submit">Caută</button>
         ${cauta ? `<a class="btn secondary" href="/stocuri/ct-park/stoc">Vezi tot</a>` : ""}
         ${
+          ctx.user && ctx.user.rol === "admin"
+            ? `<a class="btn secondary" href="/stocuri/ct-park/stoc/export.xlsx${cauta ? "?q=" + encodeURIComponent(cauta) : ""}"
+                  title="${cauta ? "Doar paleții găsiți la căutare" : "Tot stocul"}, cu furnizor, preț și valoare">Export Excel</a>`
+            : ""
+        }
+        ${
           poateIntra
             ? `<a class="btn secondary" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>`
             : `<button type="button" class="btn secondary" disabled title="Intrarea de marfă o face depozitul" style="opacity:.45;cursor:not-allowed">+ Intrare marfă</button>`
@@ -1851,6 +1869,137 @@ function register(router) {
       ${vizibile.length ? sectiuni : `<p style="margin-top:18px">${cauta ? "Nimic nu se potrivește cu „" + esc(cauta) + "”." : "Depozitul e gol."}</p>`}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Stoc la zi · CT-Park", active: "/stocuri/ct-park", body }));
+  });
+
+  // Stocul la zi, în Excel. Cererea lui Vali, 05.11.2026: „să se poată exporta
+  // și în xls asta de către admini".
+  //
+  // Doar administratorii: fișierul are furnizorii și prețurile de intrare ale
+  // întregului depozit. Pe ecran se văd; descărcate, pleacă mai departe.
+  // Aceeași regulă ca la exportul de parteneri.
+  //
+  // Scoate exact rândurile paginii (aceeași funcție, același filtru de
+  // căutare), dar cu toate coloanele: codul paletului separat de codul
+  // produsului, locurile toate, prețul pe unitate. Un .xlsx adevărat, nu .xls:
+  // se deschide fără avertisment în Excel (vezi lib/export-xlsx.js).
+  router.get("/stocuri/ct-park/stoc/export.xlsx", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    if (ctx.user.rol !== "admin") {
+      // Nu redirectăm spre pagină: un „export" care descarcă pagina de stoc în
+      // loc de Excel l-ar face pe om să creadă că s-a stricat butonul.
+      return send(ctx.res, 403, layout({
+        user: ctx.user,
+        title: "Export stoc la zi",
+        active: "/stocuri/ct-park",
+        body: `<p>Exportul stocului în Excel e rezervat administratorilor.</p>
+               <p style="color:var(--text-muted);max-width:620px">Fișierul are furnizorii și prețurile de intrare ale
+               întregului depozit. Pe ecran le vezi; descărcate, pleacă mai departe. Dacă ai nevoie de el, cere-i-l unui
+               administrator.</p>
+               <p><a class="btn secondary" href="/stocuri/ct-park/stoc">Înapoi la stoc</a></p>`,
+      }));
+    }
+
+    const d = await stocLaZi(ctx.query, ctx.user);
+    const randuri = [];
+    for (const c of d.ordine) {
+      for (const r of d.grupe.get(c)) {
+        const pret = nr(r.pret_unitar);
+        randuri.push({
+          categorie: c,
+          marfa: r.marfa,
+          cod_produs: r.produs_cod || "",
+          cod_palet: r.cod_palet || "",
+          lot: r.lot || "",
+          cantitate: nr(r.cantitate),
+          um: r.um || "",
+          furnizor: r.furnizor || (r.furnizorDedus ? r.furnizorDedus + " (dedus din facturi)" : ""),
+          intrat: String(r.data_intrare || "").slice(0, 10),
+          adrese: r.adrese.join(", "),
+          rand: r.rand,
+          camp: r.camp,
+          nivel: r.nivel,
+          // Fără preț, celula rămâne goală, nu zero: un zero s-ar aduna în
+          // sumă ca o valoare adevărată, iar cine filtrează în Excel n-ar mai
+          // vedea care paleți n-au preț.
+          pret: pret || "",
+          valoare: pret ? r.valoare : "",
+          sursa_pret: pret ? r.pret_sursa || "" : "",
+        });
+      }
+    }
+    const foaie = {
+      nume: "Stoc la zi",
+      coloane: [
+        { titlu: "Categorie", cheie: "categorie", tip: "text", latime: 20 },
+        { titlu: "Marfă", cheie: "marfa", tip: "text", latime: 46 },
+        { titlu: "Cod produs", cheie: "cod_produs", tip: "text", latime: 24 },
+        { titlu: "Cod palet", cheie: "cod_palet", tip: "text", latime: 16 },
+        { titlu: "Lot", cheie: "lot", tip: "text", latime: 14 },
+        { titlu: "Cantitate", cheie: "cantitate", tip: "zecimal", latime: 12 },
+        { titlu: "UM", cheie: "um", tip: "text", latime: 8 },
+        { titlu: "Furnizor", cheie: "furnizor", tip: "text", latime: 32 },
+        { titlu: "Intrat în stoc", cheie: "intrat", tip: "data", latime: 14 },
+        { titlu: "Unde stă", cheie: "adrese", tip: "text", latime: 24 },
+        { titlu: "Rând", cheie: "rand", tip: "zecimal", latime: 8 },
+        { titlu: "Câmp", cheie: "camp", tip: "zecimal", latime: 8 },
+        { titlu: "Nivel", cheie: "nivel", tip: "zecimal", latime: 8 },
+        { titlu: "Preț de intrare / UM (lei)", cheie: "pret", tip: "zecimal", latime: 16 },
+        { titlu: "Valoare (lei)", cheie: "valoare", tip: "bani", latime: 16 },
+        { titlu: "De unde e prețul", cheie: "sursa_pret", tip: "text", latime: 18 },
+      ],
+      randuri,
+    };
+
+    // Totalurile pe categorii, ca pe pagină. Stau pe foaia lor: un rând de
+    // total între rânduri ar fi stricat sortarea și filtrul din Excel.
+    const peCategorii = {
+      nume: "Pe categorii",
+      coloane: [
+        { titlu: "Categorie", cheie: "c", tip: "text", latime: 24 },
+        { titlu: "Paleți", cheie: "paleti", tip: "numar", latime: 10 },
+        { titlu: "Locuri ocupate", cheie: "locuri", tip: "numar", latime: 14 },
+        { titlu: "Valoare (lei)", cheie: "valoare", tip: "bani", latime: 18 },
+        { titlu: "Paleți fără preț", cheie: "fara", tip: "numar", latime: 16 },
+      ],
+      randuri: d.ordine
+        .filter((c) => d.grupe.get(c).length)
+        .map((c) => {
+          const l = d.grupe.get(c);
+          return {
+            c,
+            paleti: l.length,
+            locuri: l.reduce((s, r) => s + r.adrese.length, 0),
+            valoare: l.reduce((s, r) => s + r.valoare, 0),
+            fara: l.filter((r) => !nr(r.pret_unitar)).length,
+          };
+        })
+        .concat([{ c: "TOTAL", paleti: d.vizibile.length, locuri: d.locuriOcupate, valoare: d.valoareTotala, fara: d.faraPret }]),
+    };
+
+    // Ce filtru era pus și când. Peste o lună nimeni nu mai știe dacă
+    // fișierul de pe disc e tot depozitul sau doar ce s-a găsit la „R3".
+    const ora = new Date().toLocaleString("ro-RO", { timeZone: "Europe/Bucharest" });
+    const cum = {
+      nume: "Cum a fost scos",
+      coloane: [
+        { titlu: "Ce", cheie: "ce", tip: "text", latime: 30 },
+        { titlu: "Valoare", cheie: "val", tip: "text", latime: 70 },
+      ],
+      randuri: [
+        { ce: "Scos din", val: "ERP Cash Machine, Depozit · CT-Park · Stoc la zi" },
+        { ce: "Data și ora (România)", val: ora },
+        { ce: "Scos de", val: ctx.user.nume || ctx.user.email || "administrator" },
+        { ce: "Căutare", val: d.cauta || "(fără — tot stocul)" },
+        { ce: "Paleți în fișier", val: String(d.vizibile.length) + (d.cauta ? " din " + d.randuriStoc.length + " în depozit" : "") },
+        { ce: "Valoare la preț de intrare", val: lei(d.valoareTotala) },
+        { ce: "Paleți fără preț", val: String(d.faraPret) + " (valoarea lor nu intră în sumă)" },
+        { ce: "Furnizor „(dedus din facturi)\"", val: "nu e scris pe palet; e luat din ultima factură de achiziție a produsului" },
+      ],
+    };
+
+    const buf = XLS.carte([foaie, peCategorii, cum]);
+    const zi = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Bucharest" });
+    send(ctx.res, 200, buf, XLS.antete(`stoc-la-zi-ct-park-${zi}`, buf.length));
   });
 
   // ---- Fața unui rând ----------------------------------------------------
