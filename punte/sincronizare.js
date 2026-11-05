@@ -369,9 +369,9 @@
   // doar se pun câmpurile într-un tabel cu antetul de mai jos. `{ uscat: true }`
   // arată primele rânduri și cât s-a sărit, fără să trimită nimic.
   const ANTET_FURNIZORI = ["Furnizor", "CIF", "Document", "Data", "Scadenta", "Valoare fara TVA", "TVA", "Total", "Moneda", "Total RON", "Status"];
-  const zzllaaaa = (iso) => { const [a, l, z] = String(iso).split("-"); return `${z}/${l}/${a}`; };
   S.furnizori = async function (zile, o) {
-    const de = zzllaaaa(acumMinus(zile)), pana = zzllaaaa(aziText());
+    // acumMinus/aziText dau deja „zz/ll/aaaa", exact ce cere raportul.
+    const de = acumMinus(zile), pana = aziText();
     const firma = S.firma();
     const docs = [];
     let total = null;
