@@ -1488,7 +1488,13 @@ async function ingestFacturiFurnizori(randuri) {
   // Machine SRL", iar „NOASTRĂ" = „Noastra" (ă-ul nu se pierde din cheie).
   const cheie = (v) => String(v || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const f = firme.find((x) => cheie(x.nume) && cheie(x.nume) === cheie(prim.firma));
-  const firmaId = f ? Number(f.id) : ((await require("../lib/grup").firmaImplicita()) || {}).id || null;
+  // O firmă pe care ERP-ul n-o cunoaște (SmartBill deschis pe altă firmă a
+  // lui Vali, ex. YACHTMAG) NU cade pe firma implicită: facturile altei firme
+  // ar fi intrat ca achiziții ale Cash Machine. Nu se scrie nimic.
+  if (!f) {
+    return { create: 0, sarite: toate.length, erori: [`Firma din SmartBill („${prim.firma || "—"}”) nu e în ERP. N-am scris nimic: comută SmartBill pe firma potrivită și sincronizează din nou.`] };
+  }
+  const firmaId = Number(f.id);
   const rez = await require("./import").importaFacturi(tabel, { directie: "achizitie", firmaId });
   return {
     create: rez.create,
