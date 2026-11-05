@@ -60,7 +60,12 @@ async function familiiPentruFormular() {
   const CP = require("./cod-produs");
   const fam = await CP.familii();
   const peFamilie = {};
-  for (const f of fam) peFamilie[f.id] = await CP.citesteCaracteristici(false, f.id);
+  for (const f of fam) {
+    peFamilie[f.id] = await CP.citesteCaracteristici(false, f.id);
+    // Textul liber (furnizor, denumire) vine cu sugestiile lui: ce s-a mai
+    // scris, ca același furnizor să nu intre în două feluri.
+    for (const c of peFamilie[f.id]) if (c.fel === "text") c.sugestii = await CP.sugestiiText(c);
+  }
   return K.familiiPentruPagina(fam, peFamilie);
 }
 
@@ -583,7 +588,14 @@ function lineRowsScript(produse, familii, eAdmin) {
         var eticheta = comenziEscHtml(c.nume) + (c.um ? ' (' + comenziEscHtml(c.um) + ')' : '') +
                        (c.obligatoriu ? ' <span class="steluta">*</span>' : '');
         var intrare;
-        if (c.fel === 'numar') {
+        if (c.fel === 'text') {
+          var dl = 'dl-config-' + c.id + '-' + Math.random().toString(36).slice(2, 7);
+          intrare = '<input type="text" class="config-val" data-id="' + c.id + '" maxlength="120" autocomplete="off" list="' + dl + '"' +
+                    ' title="În cod intră primele ' + (c.litere || 3) + ' litere">' +
+                    '<datalist id="' + dl + '">' + (c.sugestii || []).map(function (v) {
+                      return '<option value="' + comenziEscHtml(v) + '">';
+                    }).join('') + '</datalist>';
+        } else if (c.fel === 'numar') {
           intrare = '<input type="number" step="any" class="config-val" data-id="' + c.id + '"' +
                     (c.min != null ? ' min="' + c.min + '"' : '') +
                     (c.max != null ? ' max="' + c.max + '"' : '') + '>';
