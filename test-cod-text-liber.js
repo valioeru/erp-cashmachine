@@ -197,6 +197,18 @@ function curata() {
   const rand1 = q(`SELECT cod, cod_generat, cod_semnatura, denumire FROM produse WHERE id = ${p1}`)[0] || {};
   egal("produsul are codul WBVFOL01 și peste tot (cod = cod generat)", [rand1.cod, rand1.cod_generat], ["WBVFOL01", "WBVFOL01"]);
   bine("ține minte tot ce s-a scris (semnătura)", /WBVGMBH/.test(rand1.cod_semnatura || "") && /FOLIEALUMINIU/.test(rand1.cod_semnatura || ""), rand1.cod_semnatura);
+  egal("numele produsului e denumirea, fără furnizor", rand1.denumire, "Folie aluminiu");
+  const idWbv = Number(unul(`SELECT id FROM parteneri WHERE nume = 'S.C. WBV GMBH'`));
+  egal("produsul e legat de furnizorul din Parteneri („S.C. WBV GMBH” = „WBV GmbH”)", Number(unul(`SELECT furnizor_id FROM produse WHERE id = ${p1}`)), idWbv);
+  const ruteProd = { get: {}, post: {} };
+  require(path.join(RAD, "modules", "produse.js")).register({
+    get: (p, h) => { if (!ruteProd.get[p]) ruteProd.get[p] = h; },
+    post: (p, h) => { if (!ruteProd.post[p]) ruteProd.post[p] = h; },
+    put: () => {}, delete: () => {},
+  });
+  const rp = res();
+  await ruteProd.get["/produse/:id"]({ user: VALI, params: { id: String(p1) }, query: {}, body: {}, res: rp, req: { url: "/produse/" + p1 } });
+  bine("fișa produsului arată furnizorul, cu link", rp.corp.includes(`<a href="/parteneri/${idWbv}">S.C. WBV GMBH</a>`), rp.cod);
   egal("pe fișă: furnizorul și denumirea, cu bucata lor de cod",
     q(`SELECT nume, valoare, bucata FROM produse_cod_valori WHERE produs_id = ${p1} ORDER BY id`).map((x) => [x.nume, x.valoare, x.bucata]),
     [["Furnizor", "WBV GmbH", "WBV"], ["Denumire", "Folie aluminiu", "FOL"]]);
@@ -226,6 +238,14 @@ function curata() {
   r = await nou("Delivery Solutions", "Cutie mare");
   egal("Delivery Solutions · Cutie mare → DECUT01", unul(`SELECT cod_generat FROM produse WHERE id = ${Number((loc(r).match(/\/produse\/(\d+)/) || [])[1] || 0)}`), "DECUT01");
   egal("felul nu se schimbă din Modifică (rămâne text)", unul(`SELECT fel FROM cod_caracteristici WHERE id = ${FZ}`), "text");
+  egal("furnizorul rămâne în afara denumirii după Modifică", Number(unul(`SELECT in_denumire FROM cod_caracteristici WHERE id = ${FZ}`)), 0);
+  await cer("post", `${CALE}/:id/editare`, VALI, { id: String(FZ) }, { familie_id: String(fam), nume: "Furnizor", ordine: "1", cifre: "2", in_cod: "1", obligatoriu: "1", activ: "1", are_in_denumire: "1", in_denumire: "1" });
+  egal("bifa „intră în denumire” se poate pune", Number(unul(`SELECT in_denumire FROM cod_caracteristici WHERE id = ${FZ}`)), 1);
+  egal("…iar denumirea o ia atunci și pe ea", (await CP.genereaza({ [FZ]: "Delivery Solutions", [DEN]: "Cutie mică" }, fam)).denumire, "Delivery Solutions Cutie mică");
+  await cer("post", `${CALE}/:id/editare`, VALI, { id: String(FZ) }, { familie_id: String(fam), nume: "Furnizor", ordine: "1", cifre: "2", in_cod: "1", obligatoriu: "1", activ: "1", are_in_denumire: "1" });
+  egal("…și se poate scoate la loc", Number(unul(`SELECT in_denumire FROM cod_caracteristici WHERE id = ${FZ}`)), 0);
+  egal("fără nicio caracteristică în denumire, numele nu rămâne gol",
+    C.genereazaCod([Object.assign({}, car[0], { in_denumire: 0 })], { 701: "WBV GmbH" }).denumire, "WBV GmbH");
   r = await cer("post", `${CALE}/caracteristica`, VALI, {}, { familie_id: String(fam), nume: "Cod furnizor", fel: "text", cifre: "", ordine: "3", min_val: "5", max_val: "9", um: "kg" });
   egal("o caracteristică text nouă: 3 litere implicit, fără UM sau interval",
     q(`SELECT fel, cifre, um, min_val, max_val, in_cod FROM cod_caracteristici WHERE familie_id = ${fam} AND nume = 'Cod furnizor'`).map((x) => [x.fel, Number(x.cifre), x.um, x.min_val, x.max_val, Number(x.in_cod)]),
