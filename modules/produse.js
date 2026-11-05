@@ -555,6 +555,11 @@ function register(router) {
       .prepare("SELECT * FROM produse_caracteristici WHERE produs_id = ? AND activ = 1 ORDER BY ordine, id")
       .all(produs.id);
     const fuzionate = await db.prepare("SELECT id, cod, denumire FROM produse WHERE fuzionat_in = ?").all(produs.id);
+    // Furnizorul, când produsul s-a născut dintr-o categorie cu „Furnizor"
+    // scris și firma e în Parteneri (vezi modules/cod-produs.js).
+    const furnizor = produs.furnizor_id
+      ? await db.prepare("SELECT id, nume FROM parteneri WHERE id = ?").get(produs.furnizor_id).catch(() => null)
+      : null;
 
     const body = `
       <div class="detail-box">
@@ -565,6 +570,7 @@ function register(router) {
           <div><div class="k">TVA</div>${esc(produs.cota_tva)}%</div>
           <div><div class="k">Stoc minim</div>${esc(produs.stoc_minim)} ${esc(produs.unitate_masura)}</div>
           <div><div class="k">Stoc total curent</div>${esc(stocTotal)} ${esc(produs.unitate_masura)}</div>
+          ${furnizor ? `<div><div class="k">Furnizor</div><a href="/parteneri/${Number(furnizor.id)}">${esc(furnizor.nume)}</a></div>` : ""}
         </div>
         <div class="toolbar" style="margin-top:10px"><a href="/produse/${produs.id}/editare" class="btn secondary small">Editează datele</a></div>
       </div>

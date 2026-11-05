@@ -176,7 +176,8 @@ function register(router) {
         : c.fel === "text"
           ? `<span class="mic">se scrie la fiecare produs; în cod intră primele ${C.literePentru(c)} litere</span>`
           : (c.valori || []).map((v) => `${bucataAfisata(v)} ${esc(v.valoare)}${umAfisata(v)}`).join("<br>") || "—",
-      c.in_cod ? '<span class="badge verde">în cod</span>' : '<span class="badge">doar în denumire</span>',
+      (c.in_cod ? '<span class="badge verde">în cod</span>' : '<span class="badge">doar în denumire</span>') +
+        (c.in_denumire != null && !Number(c.in_denumire) ? ' <span class="badge">nu intră în denumire</span>' : ""),
       nr(c.ordine),
       c.fel === "numar"
         ? nr(c.cifre) ? nr(c.cifre) + " cifre" : '<span class="badge rosu">lungime liberă</span>'
@@ -210,6 +211,8 @@ function register(router) {
                  : ""
            }
            <label class="bif"><input type="checkbox" name="in_cod" value="1"${c.in_cod ? " checked" : ""}> intră în cod</label>
+           <input type="hidden" name="are_in_denumire" value="1">
+           <label class="bif"><input type="checkbox" name="in_denumire" value="1"${c.in_denumire == null || Number(c.in_denumire) ? " checked" : ""}> intră în denumire</label>
            <label class="bif"><input type="checkbox" name="obligatoriu" value="1"${c.obligatoriu ? " checked" : ""}> obligatorie</label>
            <label class="bif"><input type="checkbox" name="activ" value="1"${c.activ ? " checked" : ""}> activă</label>
            <button class="btn small" type="submit">Salvează</button>
@@ -372,6 +375,8 @@ function register(router) {
           fiindcă primele litere nu sunt unice, iar produsul existent se recunoaște după tot textul scris.
         </p>
         <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" name="in_cod" value="1" checked> intră în cod</label>
+        <input type="hidden" name="are_in_denumire" value="1">
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" name="in_denumire" value="1" checked> intră în denumirea produsului</label>
         <label style="display:flex;gap:6px;align-items:center;margin-bottom:8px"><input type="checkbox" name="obligatoriu" value="1" checked> obligatorie</label>
         <button class="btn" type="submit">Adaugă caracteristica</button>
       </form>
@@ -507,19 +512,19 @@ function register(router) {
     // furnizorului, apoi 3 ale denumirii, apoi numărul de ordine (WBVFOL01).
     // Cererea lui Vali, 05.11.2026.
     if (b.copie_din === "sablon:furnizor") {
-      for (const [cn, ordine] of [["Furnizor", 1], ["Denumire", 2]]) {
+      for (const [cn, ordine, inDen] of [["Furnizor", 1, 0], ["Denumire", 2, 1]]) {
         await db
           .prepare(
-            `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
-             VALUES (?, ?, 'text', NULL, 1, ?, 1, 3, NULL, NULL)`
+            `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val, in_denumire)
+             VALUES (?, ?, 'text', NULL, 1, ?, 1, 3, NULL, NULL, ?)`
           )
-          .run(id, cn, ordine)
+          .run(id, cn, ordine, inDen)
           .catch(() => null);
       }
       return redirect(
         ctx.res,
         `${CALE}?familie=${id}&ok=` +
-          encodeURIComponent(`Categoria „${nume}” e făcută, cu Furnizor și Denumire scrise liber. Codul iese din primele 3 litere ale fiecăruia plus un număr de ordine (ex. WBVFOL01). Poți schimba câte litere intră, din „Modifică”.`)
+          encodeURIComponent(`Categoria „${nume}” e făcută, cu Furnizor și Denumire scrise liber. Codul iese din primele 3 litere ale fiecăruia plus un număr de ordine (ex. WBVFOL01), iar numele produsului e denumirea, fără furnizor. Poți schimba câte litere intră și ce intră în denumire, din „Modifică”.`)
       );
     }
     const sursa = toate.find((f) => Number(f.id) === (parseInt(b.copie_din, 10) || -1));
@@ -528,11 +533,12 @@ function register(router) {
       for (const c of await citesteCaracteristici(false, sursa.id)) {
         const ins = await db
           .prepare(
-            `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
-             VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`
+            `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val, in_denumire)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
           )
           .run(id, c.nume, c.fel, c.um || null, Number(c.in_cod) ? 1 : 0, nr(c.ordine), Number(c.obligatoriu) ? 1 : 0,
-               nr(c.cifre), c.min_val == null ? null : Number(c.min_val), c.max_val == null ? null : Number(c.max_val))
+               nr(c.cifre), c.min_val == null ? null : Number(c.min_val), c.max_val == null ? null : Number(c.max_val),
+               c.in_denumire == null || Number(c.in_denumire) ? 1 : 0)
           .catch(() => null);
         if (!ins) continue;
         copiate++;
@@ -593,8 +599,8 @@ function register(router) {
     const fel = b.fel === "numar" ? "numar" : b.fel === "text" ? "text" : "lista";
     await db
       .prepare(
-        `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val, in_denumire)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         parseInt(b.familie_id, 10) || null,
@@ -606,7 +612,8 @@ function register(router) {
         b.obligatoriu ? 1 : 0,
         fel === "text" ? C.literePentru({ cifre: parseInt(b.cifre, 10) || 3 }) : parseInt(b.cifre, 10) || 0,
         fel !== "numar" || b.min_val === "" || b.min_val == null ? null : Number(b.min_val),
-        fel !== "numar" || b.max_val === "" || b.max_val == null ? null : Number(b.max_val)
+        fel !== "numar" || b.max_val === "" || b.max_val == null ? null : Number(b.max_val),
+        b.are_in_denumire && !b.in_denumire ? 0 : 1
       )
       .catch(() => null);
     redirect(ctx.res, CALE + inapoi(b.familie_id));
@@ -628,7 +635,7 @@ function register(router) {
     await db
       .prepare(
         `UPDATE cod_caracteristici SET nume = ?, um = ?, in_cod = ?, ordine = ?, obligatoriu = ?,
-            cifre = ?, min_val = ?, max_val = ?, activ = ?
+            cifre = ?, min_val = ?, max_val = ?, activ = ?, in_denumire = ?
           WHERE id = ?`
       )
       .run(
@@ -641,6 +648,8 @@ function register(router) {
         areNum ? (b.min_val === "" || b.min_val == null ? null : Number(b.min_val)) : c.min_val,
         areNum ? (b.max_val === "" || b.max_val == null ? null : Number(b.max_val)) : c.max_val,
         b.activ ? 1 : 0,
+        // Un formular vechi (fără căsuța nouă) nu schimbă nimic aici.
+        b.are_in_denumire ? (b.in_denumire ? 1 : 0) : c.in_denumire == null ? 1 : Number(c.in_denumire) ? 1 : 0,
         c.id
       )
       .catch(() => null);
@@ -1181,8 +1190,8 @@ async function scrieProdusul(r, familieId, extra = {}) {
       .prepare(
         `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id,
                               categorie, gestiune, pret_achizitie, pret_productie, adaos_lista, pret_minim, cota_tva,
-                              creat_de, creat_la, cod_semnatura)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
+                              creat_de, creat_la, cod_semnatura, furnizor_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
       )
       .run(
         r.cod, r.cod, denumire, unitate,
@@ -1194,8 +1203,10 @@ async function scrieProdusul(r, familieId, extra = {}) {
         numar(e.pret_productie), numar(e.adaos_lista), numar(e.pret_minim),
         tva === null ? 21 : tva,
         Number(e.creat_de) || null, acum,
-        r.contor ? r.semnatura : null
+        r.contor ? r.semnatura : null,
+        furnizorId
       );
+  const furnizorId = await furnizorulScris(r);
   // La textul liber, numărul de ordine se ia din nou chiar înainte de scriere:
   // cel din previzualizare poate fi fost luat între timp. Dacă tot se lovește
   // (două ferestre în aceeași clipă), se mai încearcă de câteva ori; dacă s-a
@@ -1273,6 +1284,19 @@ async function produsulCodului(cod) {
     )
     .get(c, c)
     .catch(() => null);
+}
+
+// Furnizorul produsului din Parteneri, când la o caracteristică „Furnizor" s-a
+// scris numele unei firme de acolo („S.C. WBV GMBH" = „WBV GmbH"). Dacă se
+// potrivesc două firme, nu se alege nimic: un furnizor greșit pe produs e mai
+// rău decât niciunul.
+async function furnizorulScris(r) {
+  const b = ((r && r.bucati_toate) || []).find((x) => /furniz/i.test(String(x.nume || "")));
+  const cheie = b ? C.litereText(b.valoare) : "";
+  if (!cheie) return null;
+  const fz = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele')").all().catch(() => []);
+  const gasite = fz.filter((p) => C.litereText(p.nume) === cheie);
+  return gasite.length === 1 ? Number(gasite[0].id) : null;
 }
 
 // Produsul unei categorii cu text liber, după tot ce s-a scris pe el. Ca la
