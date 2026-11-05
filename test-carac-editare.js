@@ -41,9 +41,10 @@ function fals(sql) {
     async all() { return []; },
     async run(...a) {
       if (/UPDATE cod_caracteristici SET nume/i.test(s)) {
-        const r = BAZA.randuri[Number(a[9])];
+        // Din 05.11.2026 UPDATE-ul scrie și in_denumire (a[9]); id-ul e ultimul.
+        const r = BAZA.randuri[Number(a[10])];
         if (r) Object.assign(r, { nume: a[0], um: a[1], in_cod: a[2], ordine: a[3], obligatoriu: a[4],
-          cifre: a[5], min_val: a[6], max_val: a[7], activ: a[8] });
+          cifre: a[5], min_val: a[6], max_val: a[7], activ: a[8], in_denumire: a[9] });
       }
       return { lastInsertRowid: 1 };
     },
