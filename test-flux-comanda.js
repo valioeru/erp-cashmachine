@@ -332,6 +332,42 @@ function curata() {
   bine("se finalizează, cu dată", cv.status === "finalizata" && Boolean(cv.data_finalizare));
   bine("dar fără recepție în depozit", !cv.receptie_id && Number(unul(`SELECT COUNT(*) FROM receptii WHERE comanda_productie_id = ${vechi}`)) === 0);
 
+  console.log("\n13. Comenzile puse pe „Finalizată” înainte de update se aduc la zi");
+  const comanda3 = Number(q(`INSERT INTO comenzi (partener_id, numar, data, status) VALUES (${client}, '${PREFIX}-3', '2026-11-04', 'in_productie') RETURNING id`)[0].id);
+  q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${comanda3}, ${p2}, 30, 2)`);
+  const a4 = Number(q(`INSERT INTO aprovizionari (comanda_id, produs_id, cantitate, sursa, status, termen_cerut) VALUES (${comanda3}, ${p2}, 30, 'productie', 'confirmata', '2026-11-10') RETURNING id`)[0].id);
+  // Cum le lăsa lista veche: producția „finalizată”, nimic altceva mișcat.
+  const cp4 = Number(q(`INSERT INTO comenzi_productie (numar, comanda_id, aprovizionare_id, partener_id, tip_produs, cantitate, um, status, sursa, observatii)
+     VALUES ('${PREFIX}-P4', ${comanda3}, ${a4}, ${client}, 'TEST-FLUX Bandă', '30', 'buc', 'finalizata', 'depozit', '${PREFIX} vechi') RETURNING id`)[0].id);
+  q(`INSERT INTO comenzi_productie_linii (comanda_id, produs_id, denumire, cantitate, um) VALUES (${cp4}, ${p2}, 'TEST-FLUX Bandă', '30', 'buc')`);
+  // A doua comandă de producție a ei e deja trimisă în depozit (recepție
+  // neîncepută): nu primește încă una.
+  const cp4b = Number(q(`INSERT INTO comenzi_productie (numar, comanda_id, partener_id, tip_produs, cantitate, um, status, sursa, observatii)
+     VALUES ('${PREFIX}-P4B', ${comanda3}, ${client}, 'TEST-FLUX Bandă', '5', 'buc', 'finalizata', 'manual', '${PREFIX} vechi') RETURNING id`)[0].id);
+  const r4b = Number(q(`INSERT INTO receptii (numar, sursa, comanda_productie_id, comanda_id, stare, data) VALUES ('REC-TESTFLUX-4B', 'productie', ${cp4b}, ${comanda3}, 'asteptata', '2026-11-04') RETURNING id`)[0].id);
+  q(`UPDATE comenzi_productie SET trimisa_depozit_la = '2026-11-04', receptie_id = ${r4b} WHERE id = ${cp4b}`);
+  // Și una cu ceva încă în lucru, care NU e rămasă în urmă.
+  const comanda4 = Number(q(`INSERT INTO comenzi (partener_id, numar, data, status) VALUES (${client}, '${PREFIX}-4', '2026-11-04', 'in_productie') RETURNING id`)[0].id);
+  q(`INSERT INTO comenzi_productie (numar, comanda_id, status, sursa, observatii) VALUES ('${PREFIX}-P5', ${comanda4}, 'finalizata', 'manual', '${PREFIX} vechi'), ('${PREFIX}-P6', ${comanda4}, 'in_productie', 'manual', '${PREFIX} vechi')`);
+  const lista = await cer("get", "/productie", VALI);
+  bine("adminul vede comanda rămasă în urmă, cu butonul", lista.corp.includes(`>${PREFIX}-3<`) && /Du-le mai departe/.test(lista.corp));
+  bine("dar nu și pe cea care încă se produce", !lista.corp.includes(`>${PREFIX}-4<`));
+  const listaMihai = await cer("get", "/productie", MIHAI);
+  bine("producția nu vede butonul (e o schimbare pe comenzi reale)", !/Du-le mai departe/.test(listaMihai.corp));
+  await cer("post", "/productie/adu-la-zi", MIHAI);
+  bine("și nici nu-l poate apăsa pe ascuns", unul(`SELECT status FROM comenzi WHERE id = ${comanda3}`) === "in_productie");
+  r = await cer("post", "/productie/adu-la-zi", VALI);
+  bine("aduse la zi, cu mesaj", /„producție finalizată”/.test(loc(r)) && /recepți/.test(loc(r)), loc(r));
+  bine("comanda clientului e „producție finalizată”", unul(`SELECT status FROM comenzi WHERE id = ${comanda3}`) === "productie_finalizata");
+  bine("cererea depozitului e „gata”", unul(`SELECT status FROM aprovizionari WHERE id = ${a4}`) === "gata");
+  const c4 = q(`SELECT * FROM comenzi_productie WHERE id = ${cp4}`)[0];
+  bine("marfa e la „De preluat din producție”, cu cantitatea", c4.receptie_id && unul(`SELECT stare FROM receptii WHERE id = ${c4.receptie_id}`) === "asteptata" && unul(`SELECT cantitate_asteptata FROM receptii_linii WHERE receptie_id = ${c4.receptie_id}`) === "30");
+  bine("data finalizării nu se inventează", !c4.data_finalizare);
+  bine("comanda de producție deja trimisă nu primește a doua recepție", Number(unul(`SELECT COUNT(*) FROM receptii WHERE comanda_productie_id = ${cp4b}`)) === 1);
+  bine("cealaltă comandă rămâne „în producție”", unul(`SELECT status FROM comenzi WHERE id = ${comanda4}`) === "in_productie");
+  r = await cer("post", "/productie/adu-la-zi", VALI);
+  bine("a doua apăsare nu mai face nimic (nici a doua recepție)", Number(unul(`SELECT COUNT(*) FROM receptii WHERE comanda_productie_id = ${cp4}`)) === 1 && /^\/productie\?ok=0 /.test(loc(r)), loc(r));
+
   curata();
   console.log(esecuri ? `\n${esecuri} PROBLEME` : "\nToate verificările au trecut.");
   process.exit(esecuri ? 1 : 0);
