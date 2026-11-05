@@ -507,20 +507,20 @@ function randLinie(l, modificare) {
   return `
       <tr>
         <td>
-          <input class="cf-produs" list="cf-produse" name="denumire[]" value="${esc(x.denumire || "")}" placeholder="scrie sau alege din nomenclator" style="width:100%" autocomplete="off">
+          <input class="cf-produs" list="cf-produse" name="denumire[]" value="${esc(x.denumire || "")}" placeholder="scrie sau alege din nomenclator" autocomplete="off">
           <input type="hidden" class="cf-produs-id" name="produs_id[]" value="${esc(x.produs_id || "")}">
           ${modificare ? `<input type="hidden" name="linie_id[]" value="${esc(areId ? x.id : "")}">` : ""}
-          <div class="cf-nota" style="font-size:12px;color:var(--text-muted);min-height:15px"></div>
+          <div class="cf-nota"></div>
         </td>
-        <td><input class="cf-cant" name="cantitate[]" value="${esc(campNumar(x.cantitate, 3))}" inputmode="decimal" autocomplete="off" style="width:110px"></td>
-        <td><input class="cf-um" name="um[]" value="${esc(x.um || "")}" list="cf-unitati" style="width:90px"></td>
-        <td><input class="cf-pret" name="pret_unitar[]" value="${esc(campNumar(x.pret_unitar, 4))}" inputmode="decimal" autocomplete="off" style="width:120px" placeholder="opțional"></td>
+        <td><input class="cf-cant" name="cantitate[]" value="${esc(campNumar(x.cantitate, 3))}" inputmode="decimal" autocomplete="off"></td>
+        <td><input class="cf-um" name="um[]" value="${esc(x.um || "")}" list="cf-unitati" autocomplete="off"></td>
+        <td><input class="cf-pret" name="pret_unitar[]" value="${esc(campNumar(x.pret_unitar, 4))}" inputmode="decimal" autocomplete="off" placeholder="opțional"></td>
         ${
           modificare
-            ? `<td style="white-space:nowrap;font-size:13px">${
+            ? `<td class="cf-primit">${
                 primit > 0 ? `${esc(primit.toLocaleString("ro-RO", { maximumFractionDigits: 3 }))} ${esc(x.um || "")}` : '<span style="color:var(--text-muted)">—</span>'
               }</td>
-        <td style="text-align:center">${
+        <td class="cf-del">${
           areId
             ? primit > 0
               ? '<span title="A intrat deja marfă pe ea — se poate schimba cantitatea, nu se poate șterge" style="color:var(--text-muted);font-size:12px">are marfă</span>'
@@ -545,9 +545,14 @@ function formularComanda(o) {
   const moneda = String(c.moneda || "RON").toUpperCase();
   const linii = (o.linii && o.linii.length ? o.linii : [{}, {}, {}]).slice();
   if (!modificare) while (linii.length < 3) linii.push({});
+  // Lățimile coloanelor se dau o singură dată, în <colgroup>, iar câmpurile
+  // umplu celula. Înainte fiecare câmp avea lățimea lui scrisă de mână, iar
+  // tabelul n-avea clasa tabelelor din ERP — rândurile ieșeau decalate
+  // (raportat de Vali cu poză, 05.11.2026).
   const coloane = modificare
-    ? '<tr><th style="width:46%">Produs / denumire</th><th>Cantitate</th><th>UM</th><th>Preț unitar (<span class="cf-m">' + esc(moneda) + "</span>)</th><th>Primit</th><th>Șterge</th></tr>"
-    : '<tr><th style="width:52%">Produs / denumire</th><th>Cantitate</th><th>UM</th><th>Preț unitar (<span class="cf-m">' + esc(moneda) + "</span>)</th></tr>";
+    ? '<tr><th>Produs / denumire</th><th class="cf-num">Cantitate</th><th>UM</th><th class="cf-num">Preț unitar (<span class="cf-m">' + esc(moneda) + '</span>)</th><th>Primit</th><th class="cf-del">Șterge</th></tr>'
+    : '<tr><th>Produs / denumire</th><th class="cf-num">Cantitate</th><th>UM</th><th class="cf-num">Preț unitar (<span class="cf-m">' + esc(moneda) + "</span>)</th></tr>";
+  const latimi = modificare ? [40, 13, 12, 15, 12, 8] : [50, 16, 14, 20];
   const cursAltaMoneda = moneda !== "RON" && moneda !== "EUR" ? c.curs : "";
   const cursEur = moneda === "EUR" ? (c.curs_eur !== undefined && c.curs_eur !== null && c.curs_eur !== "" ? c.curs_eur : c.curs) : c.curs_eur;
   const atins = o.atins || {};
@@ -597,8 +602,25 @@ function formularComanda(o) {
         <label class="field" style="max-width:380px"><span>Filtrează produsele pe categorie</span>
           <select id="cf-categorie"><option value="">toate categoriile</option></select>
         </label>
+        <style>
+          .cf-tabel { table-layout: fixed; min-width: 640px; }
+          .cf-tabel th { padding: 9px 10px; vertical-align: bottom; }
+          .cf-tabel td { padding: 8px 10px; vertical-align: top; }
+          .cf-tabel input:not([type=checkbox]):not([type=hidden]) {
+            width: 100%; box-sizing: border-box; min-width: 0; margin: 0;
+            font-family: inherit; font-size: 14px; padding: 8px 10px;
+            border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: #fff;
+          }
+          .cf-tabel .cf-cant, .cf-tabel .cf-pret, .cf-tabel th.cf-num { text-align: right; }
+          .cf-tabel .cf-nota { font-size: 12px; color: var(--text-muted); min-height: 15px; margin-top: 3px; }
+          .cf-tabel td.cf-primit { padding-top: 17px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .cf-tabel .cf-del { text-align: center; }
+          .cf-tabel td.cf-del { padding-top: 16px; font-size: 12px; color: var(--text-muted); }
+          .cf-tabel td.cf-del input { width: 18px; height: 18px; margin: 0; }
+        </style>
         <div class="tabel-scroll">
-        <table class="tabel">
+        <table class="table cf-tabel">
+          <colgroup>${latimi.map((w) => `<col style="width:${w}%">`).join("")}</colgroup>
           <thead>${coloane}</thead>
           <tbody id="cf-linii">${linii.map((l) => randLinie(l, modificare)).join("")}</tbody>
         </table>
@@ -607,7 +629,7 @@ function formularComanda(o) {
         <p><button type="button" class="btn small secondary" id="cf-adauga">+ Încă o poziție</button></p>
         <div id="cf-total" class="detail-box" style="margin:6px 0 14px;font-size:14px" aria-live="polite"></div>
 
-        <label class="field"><span>Observații pentru furnizor (intră în email și în PDF)</span><textarea name="observatii" rows="2" placeholder="ex. livrare la Afumați, în intervalul 8–16">${esc(c.observatii || "")}</textarea></label>
+        <label class="field"><span>Observații pentru furnizor (intră în email și în PDF; orarul de descărcare, luni – vineri 09:00 – 17:30, se pune singur)</span><textarea name="observatii" rows="2" placeholder="ex. livrare la Afumați, în intervalul 8–16">${esc(c.observatii || "")}</textarea></label>
 
         ${
           modificare
@@ -1453,7 +1475,9 @@ function register(router) {
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Comanda nu există", active: "/procurement/comenzi", body: "<p>Comanda asta nu există.</p>" }));
     const linii = await liniile(id);
     const ef = await cursulEfectiv(c);
-    const limba = text((ctx.query || {}).limba) === "en" ? "en" : "ro";
+    // Fără limbă cerută, cea a furnizorului: engleză la cei din afară.
+    const ceruta = text((ctx.query || {}).limba);
+    const limba = ceruta === "en" || ceruta === "ro" ? ceruta : L.limbaImplicita(c.furnizor_cui);
     const html = PDF.pagina({
       comanda: Object.assign({}, c, { curs: ef.curs, curs_eur: ef.cursEur }),
       linii,
@@ -1489,7 +1513,12 @@ function register(router) {
     const cursObj = { moneda: m, curs: ef.curs, curs_eur: ef.cursEur };
     const ech = L.echivalente(t.total, cursObj);
     const potiModifica = poateModifica(ctx.user, c) && c.status !== "anulata";
-    const limba = text(q.limba) === "en" ? "en" : "ro";
+    // Limba documentelor pentru furnizor (PDF și email): engleză la cei din
+    // afară — CIF cu alt prefix decât RO, ca WBV (DE…). Cealaltă rămâne la un
+    // click. Pagina, pentru noi, rămâne în română.
+    const limbaFurnizor = L.limbaImplicita(c.furnizor_cui);
+    const altaLimba = limbaFurnizor === "en" ? "ro" : "en";
+    const limba = text(q.limba) === "en" || text(q.limba) === "ro" ? text(q.limba) : limbaFurnizor;
 
     // Istoricul de preț, pe fiecare poziție care are produs în nomenclator.
     const istorii = new Map();
@@ -1610,8 +1639,8 @@ function register(router) {
       <div class="toolbar" style="flex-wrap:wrap">
         <a href="/procurement/comenzi" class="btn secondary">← Toate comenzile</a>
         ${potiModifica ? `<a href="/procurement/comenzi/${c.id}/modifica" class="btn">Modifică comanda</a>` : ""}
-        <a href="/procurement/comenzi/${c.id}/pdf?tipar=1" target="_blank" rel="noopener" class="btn secondary" title="Se deschide comanda gata de tipărit; alege „Salvează ca PDF”">Export PDF</a>
-        <a href="/procurement/comenzi/${c.id}/pdf?limba=en&amp;tipar=1" target="_blank" rel="noopener" class="btn secondary" title="Comanda în engleză, pentru furnizorii din afară">PDF în engleză</a>
+        <a href="/procurement/comenzi/${c.id}/pdf?limba=${limbaFurnizor}&amp;tipar=1" target="_blank" rel="noopener" class="btn secondary" title="Se deschide comanda gata de tipărit; alege „Salvează ca PDF”">Export PDF${limbaFurnizor === "en" ? " (engleză)" : ""}</a>
+        <a href="/procurement/comenzi/${c.id}/pdf?limba=${altaLimba}&amp;tipar=1" target="_blank" rel="noopener" class="btn secondary">PDF în ${altaLimba === "en" ? "engleză" : "română"}</a>
         ${c.furnizor_id ? `<a href="/parteneri/${c.furnizor_id}" class="btn secondary">Fișa furnizorului</a>` : ""}
         <a href="/procurement/comenzi/preturi?q=${encodeURIComponent(linii[0] ? linii[0].denumire : "")}" class="btn secondary">Istoric prețuri</a>
       </div>
@@ -1651,13 +1680,16 @@ function register(router) {
       ${table(["Poziție", "Cantitate", "Preț unitar", "Valoare", coloanaEchiv, "Primit", "Față de ultima"], randuriLinii)}
       </div>
       ${c.observatii ? `<p><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
+      <p style="font-size:12px;color:var(--text-muted)">Pe PDF și în email se pune singur și ${esc(L.orarDescarcare("ro").replace(/^O/, "o"))}.</p>
 
       ${
         eDeschisa && poateTrimite(ctx.user)
           ? `
       <h2 style="margin-top:28px" id="trimite">Trimite comanda</h2>
       <p style="font-size:13px;margin-top:-6px">
-        Mesajul în: ${limba === "en" ? `<a href="/procurement/comenzi/${c.id}#trimite">română</a> · <strong>engleză</strong>` : `<strong>română</strong> · <a href="/procurement/comenzi/${c.id}?limba=en#trimite">engleză</a>`}
+        Mesajul în: ${limba === "en" ? `<a href="/procurement/comenzi/${c.id}?limba=ro#trimite">română</a> · <strong>engleză</strong>` : `<strong>română</strong> · <a href="/procurement/comenzi/${c.id}?limba=en#trimite">engleză</a>`}${
+          limbaFurnizor === "en" ? ' <span style="color:var(--text-muted)">(furnizor din afară — pornește în engleză)</span>' : ""
+        }
       </p>
       ${
         destinatari.length
