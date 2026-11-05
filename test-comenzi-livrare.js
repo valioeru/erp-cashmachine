@@ -430,11 +430,13 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
   // ------------------------------------------------- cine mută ce status
   console.log("\nCine mută statusurile:");
   const comandaLuiGabi = { id: 1, agent_id: GABI.id, status: "noua" };
+  // Din 05.11.2026 (fluxul complet, lib/stadiu-comanda.js): producția are și
+  // „producție finalizată", depozitul și „gata de livrare" / „în livrare".
   egal("producția mută doar pașii ei",
-    stari.stariPermise({ rol: "productie", id: 9 }, comandaLuiGabi), ["in_productie", "in_stoc_depozit"]);
+    stari.stariPermise({ rol: "productie", id: 9 }, comandaLuiGabi), ["in_productie", "productie_finalizata", "in_stoc_depozit"]);
   egal("depozitul are și livrarea",
     stari.stariPermise({ rol: "depozit", id: 9 }, comandaLuiGabi),
-    ["confirmata", "asteapta_marfa", "in_stoc_depozit", "livrata", "anulata"]);
+    ["confirmata", "asteapta_marfa", "in_stoc_depozit", "gata_livrare", "in_livrare", "livrata", "anulata"]);
   egal("agentul își poate anula comanda lui", stari.stariPermise(GABI, comandaLuiGabi), ["anulata"]);
   egal("dar nu pe a altuia",
     stari.stariPermise({ rol: "vanzari", id: 999 }, comandaLuiGabi), []);
