@@ -1038,6 +1038,46 @@ async function areColoana(tabel, coloana) {
 // cădea cu „cuFurnizorLaIntrare is not defined" și nu se salva nimic — nici
 // marfa, nici locul ales. Acum întrebarea despre coloană se pune aici, unde
 // se și folosește.
+// Rândul de recepție din care vine marfa, pentru Intrare marfă: ce e, cât a
+// venit, cât s-a pus deja pe raft și cât mai e de pus. Vali, 05.11.2026:
+// „recepție marfă: când preiau spun și unde îl plasez, pe ce rafturi, loc".
+async function dinReceptie(lid) {
+  if (!lid) return null;
+  const l = await db
+    .prepare(
+      `SELECT l.*, r.id AS rid, r.numar AS receptie_numar, r.partener_id, pa.tip AS partener_tip,
+              p.denumire, p.unitate_masura
+         FROM receptii_linii l
+         JOIN receptii r ON r.id = l.receptie_id
+         LEFT JOIN produse p ON p.id = l.produs_id
+         LEFT JOIN parteneri pa ON pa.id = r.partener_id
+        WHERE l.id = ?`
+    )
+    .get(lid)
+    .catch(() => null);
+  if (!l) return null;
+  const pus = await db
+    .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
+    .get(lid)
+    .catch(() => ({ c: 0 }));
+  const primit = nr(l.cantitate_primita);
+  return {
+    linie_id: Number(l.id),
+    receptie_id: Number(l.rid),
+    numar: l.receptie_numar || "#" + l.rid,
+    produs_id: l.produs_id ? Number(l.produs_id) : null,
+    denumire: l.denumire || l.produs_text || "",
+    produs_text: l.produs_id ? "" : l.produs_text || "",
+    um: l.um || l.unitate_masura || "",
+    lot: l.lot || "",
+    pret: l.pret_unitar == null ? "" : String(l.pret_unitar).replace(".", ","),
+    furnizor_id: ["furnizor", "ambele"].includes(String(l.partener_tip || "")) ? Number(l.partener_id) : null,
+    primit,
+    pus: nr(pus && pus.c),
+    ramas: Math.max(0, Math.round((primit - nr(pus && pus.c)) * 1000) / 1000),
+  };
+}
+
 async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
   const data = aziStr();
   const cuFurnizor = await areColoana("ct_paleti", "furnizor_id");
@@ -1093,6 +1133,14 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
     const id = r.lastInsertRowid;
     if (!id) continue;
     await db.prepare("UPDATE ct_paleti SET cod = ? WHERE id = ?").run(codPalet(id, data), id);
+    // Paletul venit dintr-o recepție o ține minte (vezi modules/receptie.js):
+    // recepția știe astfel cât mai e de pus pe raft.
+    if (nr(b.receptie_linie_id)) {
+      await db
+        .prepare("UPDATE ct_paleti SET receptie_id = ?, receptie_linie_id = ? WHERE id = ?")
+        .run(nr(b.receptie_id) || null, nr(b.receptie_linie_id), id)
+        .catch(() => null);
+    }
     for (const locId of locuri) await db.prepare("INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (?, ?)").run(id, locId);
     // Linia paletului (lib/ct-palet-linii.js): conținutul lui, de unde se vor
     // face ieșirile parțiale. Migrarea de la pornire o scrie oricum pentru
@@ -3379,7 +3427,7 @@ function register(router) {
           <div class="destinatii">
             ${DESTINATII.map(
               ([cheie, eticheta, explicatie]) => `<label class="destinatie">
-                <input type="radio" name="destinatie" value="${cheie}" required>
+                <input type="radio" name="destinatie" value="${cheie}" required${String(ctx.query.destinatie || "") === cheie ? " checked" : ""}>
                 <span><strong>${esc(eticheta)}</strong><br><span class="ajutor" style="margin:0">${esc(explicatie)}</span></span>
               </label>`
             ).join("")}
@@ -3393,7 +3441,7 @@ function register(router) {
             ${comenzi
               .map(
                 (c) =>
-                  `<option value="${c.id}">${esc(c.numar || "#" + c.id)} · ${esc(c.client)} · ${esc(String(c.data || "").slice(0, 10))}${
+                  `<option value="${c.id}"${nr(ctx.query.comanda_id) === Number(c.id) ? " selected" : ""}>${esc(c.numar || "#" + c.id)} · ${esc(c.client)} · ${esc(String(c.data || "").slice(0, 10))}${
                     c.status ? " · " + esc(c.status) : ""
                   }</option>`
               )
@@ -3434,7 +3482,7 @@ function register(router) {
 
         <label class="field" id="camp-peste-rand" style="display:none;border-left:3px solid var(--warn);padding-left:10px">
           <span>De ce scoți peste rând</span>
-          <input name="peste_rand" placeholder="ex. paletul vechi e blocat în spate, clientul cere lotul ăsta">
+          <input name="peste_rand" placeholder="ex. paletul vechi e blocat în spate, clientul cere lotul ăsta" value="${esc(String(ctx.query.motiv || ""))}">
           <span class="ajutor">Ai bifat un palet deși există unul mai vechi din aceeași marfă. Scrie motivul — rămâne pe ieșire.</span>
         </label>
 
@@ -3745,6 +3793,9 @@ function register(router) {
   // de ce arată așa.
   router.get("/stocuri/ct-park/intrare", async (ctx) => {
     const randuri = await sumarRanduri();
+    // Venit din recepție: marfa, cantitatea, lotul, prețul și furnizorul se
+    // știu deja — omul spune doar unde o pune.
+    const pre = await dinReceptie(nr(ctx.query.receptie_linie));
     // Furnizorii, ca să se poată alege la recepție de unde a venit marfa.
     // Fără asta, „de la cine e paletul ăsta" se poate doar deduce din facturi.
     const furnizori = await db
@@ -3790,6 +3841,7 @@ function register(router) {
           { locuri: aleseDinHarta.join(",") },
           ctx.query.rand ? { rand: String(ctx.query.rand) } : {},
           cauta ? { q: cauta } : {},
+          pre ? { receptie_linie: String(pre.linie_id) } : {},
           extra
         )
       ).toString();
@@ -3833,11 +3885,29 @@ function register(router) {
         ${celulaCantitate}
         ${celulaScoate}
       </tr>`;
-    const randuriTabel = grupuriHarta.length ? grupuriHarta.map(randDinHarta).join("") : randScris(ctx.query.rand);
+    let randuriTabel = grupuriHarta.length ? grupuriHarta.map(randDinHarta).join("") : randScris(ctx.query.rand);
+    // Cât mai e de pus din recepție intră pe primul palet; restul îl împarte omul.
+    if (pre && pre.ramas > 0) {
+      randuriTabel = randuriTabel.replace(
+        'name="loc_cantitate[]" placeholder="cât"',
+        `name="loc_cantitate[]" value="${esc(String(pre.ramas).replace(".", ","))}" placeholder="cât"`
+      );
+    }
 
     const body = `
       ${subtabs("/stocuri/ct-park/intrare", ctx.user)}
       <h1 style="margin:6px 0 2px">Intrare marfă în CT-Park</h1>
+      ${
+        pre
+          ? `<div class="detail-box" style="border-left:4px solid var(--success,#1a7f37);margin-bottom:14px">
+               Din recepția <a href="/depozit/receptie/${pre.receptie_id}">${esc(pre.numar)}</a>:
+               <strong>${esc(pre.denumire || "marfă")}</strong> — au venit ${esc(String(pre.primit))} ${esc(pre.um)},
+               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.
+               ${pre.ramas > 0 ? "" : '<br><span class="badge galben">Tot ce a venit pe rândul ăsta e deja pus. Ce adaugi acum intră în plus.</span>'}
+               <p style="margin:6px 0 0;font-size:12px;color:var(--text-muted)">Spune unde se pune: rândul, nivelul, câmpul și poziția (sau doar rândul, ori nimic, și ERP-ul propune locuri libere). Paletul rămâne legat de recepție.</p>
+             </div>`
+          : ""
+      }
       ${
         locuriAlese.length
           ? `<div class="detail-box" style="border-left:4px solid var(--accent,#2f6fde);margin-bottom:14px">
@@ -3865,12 +3935,22 @@ function register(router) {
         <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută produsul în catalog…" style="min-width:280px">
         ${ctx.query.rand ? `<input type="hidden" name="rand" value="${esc(String(ctx.query.rand))}">` : ""}
         ${aleseDinHarta.length ? `<input type="hidden" name="locuri" value="${esc(aleseDinHarta.join(","))}">` : ""}
+        ${pre ? `<input type="hidden" name="receptie_linie" value="${pre.linie_id}">` : ""}
         ${separat ? `<input type="hidden" name="separat" value="1">` : ""}
         <button class="btn small" type="submit">Caută</button>
       </form>
 
       <form class="form" method="post" action="/stocuri/ct-park/intrare" style="max-width:980px">
         <h2 style="margin:4px 0 8px;font-size:16px">Ce intră</h2>
+        ${pre ? `<input type="hidden" name="receptie_id" value="${pre.receptie_id}"><input type="hidden" name="receptie_linie_id" value="${pre.linie_id}">` : ""}
+        ${
+          pre && pre.produs_id && !gasite.length
+            ? `<div class="field"><span>Produsul din recepție</span>
+                 <label style="display:flex;gap:8px;align-items:center;margin:0;font-size:13px">
+                   <input type="radio" name="produs_id" value="${pre.produs_id}" checked> ${esc(pre.denumire)}
+                 </label></div>`
+            : ""
+        }
         ${
           gasite.length
             ? `<div class="field"><span>Produsul găsit</span>
@@ -3889,9 +3969,9 @@ function register(router) {
               : ""
         }
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px">
-          <label class="field">…sau denumirea scrisă liber<input name="produs_text" placeholder="folie stretch 23µ reciclat"></label>
-          <label class="field">UM<input name="um" placeholder="kg"></label>
-          <label class="field">Preț de achiziție (lei / UM)<input type="text" inputmode="decimal" name="pret_unitar" placeholder="ex. 7,35"></label>
+          <label class="field">…sau denumirea scrisă liber<input name="produs_text" placeholder="folie stretch 23µ reciclat" value="${esc(pre ? pre.produs_text : "")}"></label>
+          <label class="field">UM<input name="um" placeholder="kg" value="${esc(pre ? pre.um : "")}"></label>
+          <label class="field">Preț de achiziție (lei / UM)<input type="text" inputmode="decimal" name="pret_unitar" placeholder="ex. 7,35" value="${esc(pre ? pre.pret : "")}"></label>
         </div>
         <p class="explic" style="margin-top:-6px">
           Prețul rămâne lipit de paletul ăsta. Când marfa iese, se scoate cu costul cu care a intrat — ăsta e
@@ -3902,11 +3982,11 @@ function register(router) {
           <label class="field">Furnizor
             <select name="furnizor_id">
               <option value="">— nu știu acum —</option>
-              ${(furnizori || []).map((f) => `<option value="${f.id}">${esc(f.nume)}</option>`).join("")}
+              ${(furnizori || []).map((f) => `<option value="${f.id}"${pre && pre.furnizor_id === Number(f.id) ? " selected" : ""}>${esc(f.nume)}</option>`).join("")}
             </select>
           </label>
           <label class="field">…sau scris liber<input name="furnizor_text" placeholder="dacă nu e în listă"></label>
-          <label class="field">Lot<input name="lot"></label>
+          <label class="field">Lot<input name="lot" value="${esc(pre ? pre.lot : "")}"></label>
           <label class="field">Categorie
             <select name="categorie">
               <option value="">—</option>
@@ -4044,7 +4124,9 @@ function register(router) {
       <input type="hidden" name="furnizor_text" value="${esc(String(b.furnizor_text || ""))}">
       <input type="hidden" name="lot" value="${esc(String(b.lot || ""))}">
       <input type="hidden" name="categorie" value="${esc(categorie || "")}">
-      <input type="hidden" name="observatii" value="${esc(String(b.observatii || ""))}">`;
+      <input type="hidden" name="observatii" value="${esc(String(b.observatii || ""))}">
+      <input type="hidden" name="receptie_id" value="${esc(String(b.receptie_id || ""))}">
+      <input type="hidden" name="receptie_linie_id" value="${esc(String(b.receptie_linie_id || ""))}">`;
     const randNr = (i) => (randuriForm.length > 1 ? `Paletul de pe rândul ${i + 1} din formular: ` : "");
 
     const body = `
@@ -5044,6 +5126,7 @@ async function regenereazaLocuri(randId) {
 
 module.exports = {
   register,
+  puneMarfa,
   eticheteCampuri,
   cheieMarfa,
   culoareMarfa,

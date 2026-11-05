@@ -110,6 +110,88 @@ async function creeaza(date, linii) {
   return id;
 }
 
+// După finalizare: unde se pune marfa. Pentru fiecare rând bun, cât a venit,
+// cât e deja în CT-Park (paleții legați de el, cu adresele) și cât mai e de
+// pus — cu cele două drumuri: pe raft (Intrare marfă, cu tot completat) sau
+// direct la livrare (ieșirea din CT-Park, cu avizul sau eticheta de ieșire).
+async function sectiuneCtPark(r, linii) {
+  if (r.stare !== "finalizata") return "";
+  const bune = linii.filter((l) => l.stare === "primita" && (!l.conditie || l.conditie === "bun") && nr(l.cantitate_primita) > 0);
+  if (!bune.length) return "";
+  const ids = bune.map((l) => Number(l.id));
+  const paleti = await db
+    .prepare(
+      `SELECT p.id, p.cod, p.cantitate, p.um, p.data_iesire, p.receptie_linie_id,
+              (SELECT string_agg(lo.adresa, ' + ' ORDER BY lo.camp, lo.pozitie) FROM ct_ocupari o JOIN ct_locuri lo ON lo.id = o.loc_id WHERE o.palet_id = p.id) AS adrese,
+              (SELECT i.destinatie FROM ct_iesiri i WHERE i.palet_id = p.id ORDER BY i.id DESC LIMIT 1) AS plecat_la
+         FROM ct_paleti p WHERE p.receptie_linie_id IN (${ids.map(() => "?").join(",")}) ORDER BY p.id`
+    )
+    .all(...ids)
+    .catch(() => []);
+  const comenzi = await db
+    .prepare(
+      `SELECT c.id, c.numar, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
+        WHERE c.status NOT IN ('anulata', 'livrata') ORDER BY c.id DESC LIMIT 200`
+    )
+    .all()
+    .catch(() => []);
+  const fmt = (v) => Number(v).toLocaleString("ro-RO", { maximumFractionDigits: 3 });
+  const randuri = bune.map((l) => {
+    const ale = paleti.filter((p) => Number(p.receptie_linie_id) === Number(l.id));
+    const pus = ale.reduce((s, p) => s + nr(p.cantitate), 0);
+    const ramas = Math.round((nr(l.cantitate_primita) - pus) * 1000) / 1000;
+    const um = esc(l.um || l.unitate_masura || "");
+    const unde = ale.length
+      ? ale
+          .map((p) =>
+            `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a> · ${fmt(nr(p.cantitate))} ${esc(p.um || "")} · ${
+              p.data_iesire
+                ? `<span class="badge gri">plecat${p.plecat_la ? " la " + esc(p.plecat_la) : ""}</span>`
+                : p.adrese
+                  ? `<span class="badge albastru">${esc(p.adrese)}</span>`
+                  : '<span class="badge galben">fără loc</span>'
+            } <a href="/stocuri/ct-park/etichete?paleti=${p.id}" target="_blank" class="mic">etichetă</a>`
+          )
+          .join("<br>")
+      : '<span style="color:var(--text-muted)">încă nimic</span>';
+    const actiuni =
+      ramas > R.EPS
+        ? `<a class="btn small" href="/stocuri/ct-park/intrare?receptie_linie=${l.id}">Pune în CT-Park →</a>
+           <form method="post" action="/depozit/receptie/${r.id}/linie/${l.id}/livrare" class="inline-form" style="gap:6px;flex-wrap:wrap;margin-top:6px">
+             <select name="destinatie" required aria-label="Unde pleacă">
+               <option value="">direct la…</option>
+               <option value="comanda"${r.comanda_id ? " selected" : ""}>comanda unui client</option>
+               <option value="fulfillment">fulfillment</option>
+               <option value="productie">producție</option>
+             </select>
+             <select name="comanda_id" aria-label="Comanda" style="max-width:220px">
+               <option value="">— comanda —</option>
+               ${comenzi.map((c) => `<option value="${c.id}"${Number(c.id) === Number(r.comanda_id) ? " selected" : ""}>${esc(c.numar || "#" + c.id)} · ${esc(c.client)}</option>`).join("")}
+             </select>
+             <button class="btn small secondary" type="submit">Direct la livrare →</button>
+           </form>`
+        : ramas < -R.EPS
+          ? `<span class="badge galben">pus cu ${fmt(-ramas)} ${um} mai mult decât a venit</span>`
+          : '<span class="badge verde">tot pus</span>';
+    return [
+      esc(l.produs_denumire || l.produs_text || "—") + (l.lot ? `<br><span class="mic">lot ${esc(l.lot)}</span>` : ""),
+      `${fmt(nr(l.cantitate_primita))} ${um}`,
+      unde,
+      ramas > R.EPS ? `<strong>${fmt(ramas)} ${um}</strong>` : "—",
+      actiuni,
+    ];
+  });
+  return `
+    <h3 style="margin-top:22px">Unde pui marfa — CT-Park</h3>
+    <p class="explic" style="max-width:860px">
+      Depozitul e unul singur, CT-Park. Pentru fiecare rând spune unde pui marfa: <strong>Pune în CT-Park</strong>
+      deschide Intrarea marfă cu produsul, cantitatea, lotul, prețul și furnizorul deja scrise — alegi rândul, nivelul,
+      câmpul și poziția, iar la final ies etichetele paleților. <strong>Direct la livrare</strong> nu o mai urcă pe raft:
+      deschide ieșirea din CT-Park cu marfa bifată și destinația aleasă (comanda clientului, cu avizul, sau fulfillment).
+    </p>
+    ${table(["Produs", "A venit", "În CT-Park", "De pus", ""], randuri)}`;
+}
+
 function register(router) {
   // ---- Lista -------------------------------------------------------------
   router.get("/depozit/receptie", async (ctx) => {
@@ -154,7 +236,6 @@ function register(router) {
       .map(([v, et]) => `<a class="btn small ${filtru === v ? "" : "secondary"}" href="/depozit/receptie?stare=${v}">${esc(et)}</a>`)
       .join(" ");
 
-    const locuri = await db.prepare("SELECT COUNT(*) AS n FROM locuri_depozit").get();
     const body = `
       ${subnavDepozit("/depozit/receptie", ctx.user)}
       ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:760px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
@@ -162,21 +243,14 @@ function register(router) {
       <p style="max-width:820px;color:var(--text-muted)">
         Tot ce intră în depozit trece pe aici: marfă de la furnizor, marfă terminată de producție, și ce se întoarce —
         de la client sau din fulfilment. Recepția se face <strong>rând cu rând</strong>: pe fiecare linie scrii cât ai
-        primit <em>de fapt</em> și pe ce raft ai pus marfa. Diferența dintre cât s-a anunțat și cât a venit e exact
-        lucrul pentru care există documentul ăsta — la furnizor, pe ea se face reclamația.
+        primit <em>de fapt</em>. Diferența dintre cât s-a anunțat și cât a venit e exact lucrul pentru care există
+        documentul ăsta — la furnizor, pe ea se face reclamația. După finalizare spui unde pui marfa în
+        <a href="/stocuri/ct-park">CT-Park</a> (rând, nivel, câmp, poziție) sau o trimiți direct la livrare.
       </p>
-      ${
-        !Number(locuri && locuri.n)
-          ? `<p class="badge galben" style="display:block;max-width:820px;white-space:normal;line-height:1.5">
-               Depozitul n-are niciun loc definit, deci deocamdată nu se poate scrie unde pui marfa.
-               <a href="/depozit/locuri">Adaugă rafturile</a> — se scriu o dată.
-             </p>`
-          : ""
-      }
       <div style="display:flex;gap:8px;align-items:center;margin:14px 0;flex-wrap:wrap">
         ${filtre}<span style="flex:1"></span>
         <a class="btn small secondary" href="/depozit/receptie/noua">Recepție nouă</a>
-        <a class="btn small secondary" href="/depozit/locuri">Locuri în depozit</a>
+        <a class="btn small secondary" href="/stocuri/ct-park">Harta CT-Park</a>
       </div>
       ${table(["Număr", "De unde", "De la cine", "Document", "Data", "Rânduri", "Stare"], randuri)}
     `;
@@ -260,16 +334,11 @@ function register(router) {
 
     const linii = await liniile(id);
     const z = R.rezumat(linii);
-    const locuri = await db
-      .prepare("SELECT id, cod, zona FROM locuri_depozit WHERE blocat = 0 ORDER BY cod LIMIT 2000")
-      .all();
+    // Locul nu se mai alege dintr-o listă de coduri: depozitul e unul singur,
+    // CT-Park, iar marfa se pune pe hartă după finalizare (secțiunea de jos).
     const produse = await db.prepare("SELECT id, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
     const retur = R.esteRetur(r.sursa);
     const inchisa = r.stare === "finalizata" || r.stare === "anulata";
-
-    const optLoc = (ales) =>
-      `<option value="">—</option>` +
-      locuri.map((l) => `<option value="${l.id}"${Number(ales) === Number(l.id) ? " selected" : ""}>${esc(l.cod)}${l.zona ? " · " + esc(l.zona) : ""}</option>`).join("");
 
     const randuri = linii.map((l) => {
       const denumire = l.produs_denumire || l.produs_text || "—";
@@ -298,9 +367,6 @@ function register(router) {
                ${retur ? '<option value="">— alege —</option>' : ""}
                ${R.CONDITII.map((c) => `<option value="${c}"${String(l.conditie || (retur ? "" : "bun")) === c ? " selected" : ""}>${c}</option>`).join("")}
              </select>`,
-        inchisa
-          ? esc(l.loc_cod || "—")
-          : `<select form="lin-${l.id}" name="loc_id" style="width:130px">${optLoc(l.loc_id)}</select>`,
         inchisa
           ? esc(l.motiv || "")
           : `<input form="lin-${l.id}" name="lot" value="${esc(l.lot || "")}" placeholder="lot" style="width:90px">
@@ -352,7 +418,8 @@ function register(router) {
           ? `<p style="color:var(--text-muted)">${z.gata} din ${z.total} rânduri făcute${z.cuLipsa ? ` · <strong>${z.cuLipsa}</strong> cu lipsă` : ""}${z.stricate ? ` · <strong>${z.stricate}</strong> cu marfă stricată` : ""}</p>`
           : ""
       }
-      ${table(["Produs", "Anunțat", "Primit", "Diferență", "Stare marfă", "Loc", "Lot / de ce", ""], randuri)}
+      ${table(["Produs", "Anunțat", "Primit", "Diferență", "Stare marfă", "Lot / de ce", ""], randuri)}
+      ${await sectiuneCtPark(r, linii)}
 
       ${
         inchisa
@@ -418,14 +485,9 @@ function register(router) {
     const l = await db.prepare("SELECT * FROM receptii_linii WHERE id = ? AND receptie_id = ?").get(lid, id);
     if (!l) return redirect(ctx.res, `/depozit/receptie/${id}`);
 
-    const areLocuri = await db.prepare("SELECT COUNT(*) AS n FROM locuri_depozit WHERE blocat = 0").get();
-    // Daca receptia a fost deschisa din harta, locurile sunt deja alese si
-    // nu se mai cer pe rand.
-    const vineDinHarta = !!String(r.locuri_alese || "").trim();
-    const v = R.validareLinie(l, ctx.body || {}, {
-      sursa: r.sursa,
-      cereLoc: !vineDinHarta && Number((areLocuri && areLocuri.n) || 0) > 0,
-    });
+    // Locul nu se mai cere pe rând: marfa se pune în CT-Park după
+    // finalizare, pe hartă, sau pleacă direct la livrare.
+    const v = R.validareLinie(l, ctx.body || {}, { sursa: r.sursa, cereLoc: false });
     if (v.eroare) {
       return redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(v.eroare.slice(0, 220)));
     }
@@ -583,8 +645,62 @@ function register(router) {
     if (v.respinse.length) parti.push(v.respinse.length + " respins" + (v.respinse.length === 1 ? "" : "e"));
     redirect(
       ctx.res,
-      `/depozit/receptie/${id}?ok=` + encodeURIComponent("Recepție finalizată: " + parti.join(" · ") + "." + (spuneComanda ? " " + spuneComanda : ""))
+      `/depozit/receptie/${id}?ok=` +
+        encodeURIComponent(
+          "Recepție finalizată: " + parti.join(" · ") + "." + (spuneComanda ? " " + spuneComanda : "") +
+            (scrise ? " Acum spune, mai jos, unde pui marfa în CT-Park — sau trimite-o direct la livrare." : "")
+        )
     );
+  });
+
+  // Direct la livrare: marfa nu urcă pe raft. Se face paletul ei, fără loc,
+  // legat de recepție, și se deschide ieșirea din CT-Park cu el bifat și cu
+  // destinația aleasă — acolo iese avizul (la comandă) sau eticheta de ieșire.
+  router.post("/depozit/receptie/:id/linie/:lid/livrare", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/depozit/receptie");
+    const id = parseInt(ctx.params.id, 10);
+    const lid = parseInt(ctx.params.lid, 10);
+    const inapoi = (m) => redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(m));
+    const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
+    if (!r) return redirect(ctx.res, "/depozit/receptie");
+    if (r.stare !== "finalizata") return inapoi("Întâi finalizează recepția: atunci marfa e pe stoc și poate pleca.");
+    const l = (await liniile(id)).find((x) => Number(x.id) === lid);
+    if (!l || l.stare !== "primita" || (l.conditie && l.conditie !== "bun")) return inapoi("Pleacă la livrare doar marfa primită în stare bună.");
+    const b = ctx.body || {};
+    const destinatie = ["comanda", "fulfillment", "productie"].includes(String(b.destinatie || "")) ? String(b.destinatie) : "";
+    if (!destinatie) return inapoi("Alege unde pleacă marfa: comanda unui client, fulfillment sau producție.");
+    const pus = await db
+      .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
+      .get(lid)
+      .catch(() => ({ c: 0 }));
+    const ramas = Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000;
+    if (!(ramas > R.EPS)) return inapoi("Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat.");
+    const CT = require("./ct-park");
+    const ids = await CT.puneMarfa(
+      ctx,
+      {
+        produs_id: l.produs_id || "",
+        produs_text: l.produs_id ? "" : l.produs_text || "",
+        um: l.um || l.unitate_masura || "",
+        lot: l.lot || "",
+        pret_unitar: l.pret_unitar == null ? "" : String(l.pret_unitar),
+        furnizor_id: r.sursa === "furnizor" ? r.partener_id || "" : "",
+        observatii: `Direct la livrare din recepția ${r.numar || "#" + r.id}`,
+        receptie_id: r.id,
+        receptie_linie_id: lid,
+      },
+      [[]],
+      ramas
+    );
+    if (!ids.length) return inapoi("Paletul pentru livrare nu s-a putut face.");
+    const cid = destinatie === "comanda" ? parseInt(b.comanda_id, 10) || r.comanda_id || "" : "";
+    const q = new URLSearchParams({
+      palet: String(ids[0]),
+      destinatie,
+      ...(cid ? { comanda_id: String(cid) } : {}),
+      motiv: `livrare directă din recepția ${r.numar || "#" + r.id}`,
+    });
+    redirect(ctx.res, "/stocuri/ct-park/iesire?" + q.toString());
   });
 
   router.post("/depozit/receptie/:id/anuleaza", async (ctx) => {
