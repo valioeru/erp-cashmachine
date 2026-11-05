@@ -867,6 +867,18 @@ function lineRowsScript(produse, familii, eAdmin) {
        Fără ea, un câmp gol s-ar strânge cel mai tare din tot rândul. */
     .lines-table .camp-pret { min-width:100px; }
     .lines-table .pret-exact { font-size:11px; color:var(--text-muted); margin-top:3px; white-space:nowrap; }
+    /* Pe laptop, câmpurile unui rând stau pe aceeași linie. Celula de produs
+       are sub câmp linkul „configurează un produs nou", deci e mai înaltă, iar
+       cu vertical-align:middle din foaia principală cantitatea, UM-ul și prețul
+       coborau la mijlocul ei — rândul arăta decalat (poza lui Vali,
+       05.11.2026). Sus toate, iar „Șterge" coborât cât să stea în dreptul
+       câmpurilor. Pe telefon rândul e cartelă și regula nu se aplică. */
+    @media (min-width: 981px) {
+      .lines-table td { vertical-align: top; }
+      .lines-table th { vertical-align: bottom; }
+      .lines-table td[data-eticheta=""] { padding-top: 16px; }
+      .lines-table td input, .lines-table td select { height: 32px; box-sizing: border-box; }
+    }
     /* Formularul de comandă (form-comanda) e lat de 980 px, nu de 820. Tabelul
        de linii are nevoie de vreo 840 — categorie, produs, cantitate, UM, preț,
        șterge —, iar la 820 ieșea cu 109 px în afara casetei: prețul și
