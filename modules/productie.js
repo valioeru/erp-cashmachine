@@ -683,8 +683,27 @@ function register(router) {
     const costDeschise = acoperireCost.cost;
     const lotN = acoperireCost.deVerificat.length;
     const lotPrimele = acoperireCost.deVerificat.slice(0, 3);
+    // Comenzile clienților rămase „în producție" deși producția lor e gata
+    // (puse pe „Finalizată" înainte de 05.11.2026). Doar adminul le vede și
+    // le aduce la zi; vezi lib/stadiu-comanda.js.
+    const inUrma = ctx.user && ctx.user.rol === "admin" ? await STADIU.ramaseInUrma().catch(() => []) : [];
 
     const body = `
+      ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:760px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
+      ${
+        inUrma.length
+          ? `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:900px;margin-bottom:12px">
+               <strong>${inUrma.length} ${inUrma.length === 1 ? "comandă de client arată" : "comenzi de clienți arată"} încă „în producție”, deși producția lor e gata.</strong>
+               Au fost puse pe „Finalizată” înainte ca starea să meargă singură mai departe.
+               <div class="mic" style="margin:6px 0">${inUrma
+                 .map((c) => `<a href="/comenzi/${c.id}">${esc(c.numar || "#" + c.id)}</a> ${esc(c.client || "")} (${c.productie.length} ${c.productie.length === 1 ? "comandă de producție" : "comenzi de producție"})`)
+                 .join(" · ")}</div>
+               <form method="post" action="/productie/adu-la-zi" class="inline-form">
+                 <button class="btn small" type="submit">Du-le mai departe: „producție finalizată” și de preluat în depozit</button>
+               </form>
+             </div>`
+          : ""
+      }
       <div class="toolbar">
         <a href="/productie/noua" class="btn">+ Comandă nouă în producție</a>
         <a href="/productie/planificare" class="btn secondary">Planificare</a>
@@ -1220,6 +1239,20 @@ function register(router) {
       return ctx.res.end();
     }
     redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
+  });
+
+  // Comenzile clienților rămase în urmă, aduse la zi de un admin.
+  router.post("/productie/adu-la-zi", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/productie");
+    const r = await STADIU.aduLaZi({ user: ctx.user });
+    redirect(
+      ctx.res,
+      "/productie?ok=" +
+        encodeURIComponent(
+          `${r.comenzi} ${r.comenzi === 1 ? "comandă de client e" : "comenzi de clienți sunt"} acum „producție finalizată”; ` +
+            `${r.receptii} ${r.receptii === 1 ? "recepție deschisă" : "recepții deschise"} la „De preluat din producție” în depozit.`
+        )
+    );
   });
 
   router.post("/productie/agent", async (ctx) => {

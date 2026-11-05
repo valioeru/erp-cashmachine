@@ -121,6 +121,42 @@ async function seed() {
   console.log("[cod-produs] " + START.length + " familii de produse au fost puse");
 }
 
+// Cu ce începe codul fiecărei categorii: bucățile de cod ale primei
+// caracteristici care intră în cod. Două categorii care încep la fel (sau una
+// cu începutul celeilalte, „P" și „PA") pot da același cod pentru două produse
+// diferite — iar atunci al doilea produs ar „exista deja" și comanda ar cădea
+// pe produsul altei categorii. Cererea lui Vali, 05.11.2026, ca oricine să-și
+// facă singur categorii noi, face pasul ăsta ușor de greșit, deci se spune.
+async function inceputuri(fam) {
+  const m = new Map();
+  for (const f of fam) {
+    const car = (await citesteCaracteristici(false, f.id)).filter((c) => Number(c.in_cod));
+    const prima = car[0];
+    m.set(Number(f.id), prima
+      ? { fel: prima.fel, nume: prima.nume, bucati: prima.fel === "lista" ? (prima.valori || []).map((v) => C.curat(v.cod)).filter(Boolean) : [] }
+      : { fel: null, nume: null, bucati: [] });
+  }
+  return m;
+}
+
+function coliziuni(familieId, fam, inc) {
+  const a = inc.get(Number(familieId));
+  if (!a || !a.fel) return [];
+  const out = [];
+  if (a.fel === "numar") out.push({ numar: true, nume: a.nume });
+  for (const f of fam) {
+    if (Number(f.id) === Number(familieId)) continue;
+    const b = inc.get(Number(f.id));
+    if (!b || b.fel !== "lista") continue;
+    for (const x of a.bucati) {
+      for (const y of b.bucati) {
+        if (x.startsWith(y) || y.startsWith(x)) out.push({ x, y, familie: f.nume });
+      }
+    }
+  }
+  return out;
+}
+
 function register(router) {
   // ---- Configurare -------------------------------------------------------
   router.get(CALE, async (ctx) => {
@@ -173,54 +209,116 @@ function register(router) {
            <button class="btn small" type="submit">Salvează</button>
          </form>
        </details>
-       <form method="post" action="${CALE}/${c.id}/sterge" class="inline-form"
+       <form method="post" action="${CALE}/${c.id}/sterge${inapoi(familieId)}" class="inline-form"
              onsubmit="return confirm('Ștergi caracteristica „${esc(c.nume)}”? Codurile deja generate rămân cum sunt.')">
          <button class="link-btn danger" type="submit">Șterge</button>
        </form>`,
     ]);
 
+    const admin = ctx.user.rol === "admin";
+    // Unde stă categoria: ce mai lipsește ca să se poată face un produs.
+    const active = car.filter((c) => c.activ);
+    const inCod = active.filter((c) => Number(c.in_cod));
+    const listeGoale = inCod.filter((c) => c.fel === "lista" && !(c.valori || []).some((v) => C.curat(v.cod)));
+    const faraCifre = inCod.filter((c) => c.fel === "numar" && !nr(c.cifre));
+    const gataDeFolosit = inCod.length > 0 && !listeGoale.length;
+    const lovite = familia ? coliziuni(familia.id, fam, await inceputuri(fam)) : [];
+
     const body = `
       ${subnav(CALE)}
-      <h1 style="margin:6px 0 2px">Codul produsului</h1>
+      <h1 style="margin:6px 0 2px">Categorii de produs și codul lor</h1>
       <p class="explic">
-        Codul unui produs se scrie singur, din caracteristicile familiei lui. Tu alegi care caracteristici intră
-        în cod și în ce ordine; restul rămân doar în denumire. La produs nou, sistemul verifică dacă mai
-        există deja un produs cu codul ieșit — și te oprește dacă da.
+        Fiecare categorie de produs (în ERP îi spunem și „familie”) are caracteristicile ei: culoare, lățime,
+        grosime… Tu le definești pe toate: care intră în cod, în ce ordine și cu ce bucată de cod. La Produs nou,
+        codul se generează singur din ele, iar un produs care există deja e oprit.
       </p>
-
-      <div class="toolbar" style="flex-wrap:wrap;gap:6px">
-        ${fam
-          .map((f) => `<a class="btn ${Number(f.id) === familieId ? "" : "secondary"}" href="${CALE}?familie=${f.id}">${esc(f.nume)}</a>`)
-          .join("")}
-        ${fam.length ? "" : '<span style="color:var(--text-muted)">Nicio familie încă.</span>'}
-      </div>
+      ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:760px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
+      ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:760px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
       ${
-        ctx.user.rol === "admin"
-          ? `<details style="margin:6px 0 14px"><summary style="cursor:pointer;font-size:13px;color:var(--text-muted)">Familie nouă / șterge familia</summary>
-               <form method="post" action="${CALE}/familie" class="form" style="max-width:720px;margin-top:10px">
+        admin
+          ? `<details class="categorie-noua"${fam.length ? "" : " open"} style="margin:8px 0 14px">
+               <summary class="btn" style="display:inline-block;list-style:none;cursor:pointer">+ Categorie nouă de produs</summary>
+               <form method="post" action="${CALE}/familie" class="form card" style="max-width:780px;margin-top:10px">
                  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-                   <label class="field" style="flex:1 1 220px">Denumirea familiei<input name="nume" required placeholder="Pungă curier"></label>
-                   <label class="field" style="flex:0 1 120px">Ordine<input type="number" name="ordine" value="${fam.length + 1}"></label>
-                   <button class="btn small" type="submit">Adaugă familia</button>
+                   <label class="field" style="flex:1 1 240px">Denumirea categoriei<input name="nume" required placeholder="Etichete autoadezive" maxlength="80"></label>
+                   <label class="field" style="flex:0 1 100px">Ordine<input type="number" name="ordine" value="${fam.length + 1}"></label>
+                   <label class="field" style="flex:1 1 220px">Pornește de la
+                     <select name="copie_din">
+                       <option value="">o categorie goală</option>
+                       ${fam.map((f) => `<option value="${f.id}">copie după „${esc(f.nume)}”</option>`).join("")}
+                     </select>
+                   </label>
+                   <button class="btn" type="submit">Creează categoria</button>
                  </div>
-                 <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">
-                   O familie e un fel de produs cu atributele lui: punga curier are clapetă, banda adezivă are
-                   zgomot. Fiecare își ține caracteristicile separat, deci „Culoare" poate exista la toate, cu
-                   alte valori.
-                 </p>
+                 <ol class="mic" style="margin:10px 0 0 18px;color:var(--text-muted);line-height:1.6">
+                   <li>Creezi categoria: goală, sau copiată după una care seamănă, cu caracteristicile și valorile ei.</li>
+                   <li>Adaugi caracteristicile: listă de valori (ex. Culoare) sau număr (ex. Lățime, cu câte cifre are în cod).
+                       Bifezi care intră în cod și le pui în ordine. Prima dă începutul codului, deci trebuie să fie a ei.</li>
+                   <li>La fiecare listă scrii valorile, fiecare cu bucata ei de cod (ex. Alb → A).</li>
+                   <li>Gata: la Produs nou alegi categoria, completezi caracteristicile, iar codul iese singur.</li>
+                 </ol>
                </form>
-               ${
-                 familia
-                   ? `<form method="post" action="${CALE}/familie/${familia.id}/sterge" class="inline-form" style="margin-top:8px"
-                            onsubmit="return confirm('Ștergi familia „${esc(familia.nume)}” cu tot cu caracteristicile ei? Produsele deja făcute rămân cum sunt.')">
-                        <button class="link-btn danger" type="submit">Șterge familia „${esc(familia.nume)}"</button>
-                      </form>`
-                   : ""
-               }
              </details>`
           : ""
       }
-      ${fam.length ? `<h2 style="margin:4px 0 2px">${esc(familia ? familia.nume : "—")}</h2>` : ""}
+
+      <div class="toolbar" style="flex-wrap:wrap;gap:6px">
+        ${fam.length ? '<span style="font-size:13px;color:var(--text-muted);align-self:center">Categoria:</span>' : ""}
+        ${fam
+          .map((f) => `<a class="btn ${Number(f.id) === familieId ? "" : "secondary"}" href="${CALE}?familie=${f.id}">${esc(f.nume)}</a>`)
+          .join("")}
+        ${fam.length ? "" : '<span style="color:var(--text-muted)">Nicio categorie încă.</span>'}
+      </div>
+      ${
+        familia
+          ? `<div style="display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;margin:10px 0 4px">
+               <h2 style="margin:0">${esc(familia.nume)}</h2>
+               ${
+                 admin
+                   ? `<details class="editeaza-carac"><summary>Redenumește</summary>
+                        <form method="post" action="${CALE}/familie/${familia.id}/editare" class="form editeaza-form">
+                          <label>Denumire<input name="nume" value="${esc(familia.nume)}" required maxlength="80"></label>
+                          <label>Ordine<input type="number" name="ordine" value="${nr(familia.ordine)}"></label>
+                          <button class="btn small" type="submit">Salvează</button>
+                        </form>
+                      </details>
+                      <form method="post" action="${CALE}/familie/${familia.id}/sterge" class="inline-form"
+                            onsubmit="return confirm('Ștergi categoria „${esc(familia.nume)}” cu tot cu caracteristicile ei? Produsele deja făcute rămân cum sunt.')">
+                        <button class="link-btn danger" type="submit">Șterge categoria</button>
+                      </form>`
+                   : ""
+               }
+             </div>
+             <div class="detail-box" style="max-width:780px;margin:8px 0 12px">
+               <strong>Cum stă categoria</strong>
+               <ul style="margin:6px 0 0 18px;line-height:1.7">
+                 <li>${active.length ? "✓" : "✗"} ${active.length} ${active.length === 1 ? "caracteristică" : "caracteristici"}, din care ${inCod.length} ${inCod.length === 1 ? "intră" : "intră"} în cod${inCod.length ? "" : " — bifează „intră în cod” la cel puțin una"}</li>
+                 <li>${listeGoale.length ? `✗ lipsesc valorile cu bucată de cod la: ${listeGoale.map((c) => esc(c.nume)).join(", ")}` : "✓ toate listele din cod au valori cu bucata lor de cod"}</li>
+                 ${faraCifre.length ? `<li>⚠ fără număr fix de cifre: ${faraCifre.map((c) => esc(c.nume)).join(", ")} — două produse diferite pot ieși cu același cod</li>` : ""}
+                 <li>${
+                   gataDeFolosit
+                     ? `✓ gata de folosit: <a href="/produse/nou-cu-cod${inapoi(familieId)}">Produs nou · ${esc(familia.nume)}</a>`
+                     : "încă nu se poate face un produs din categoria asta: completează ce lipsește mai sus"
+                 }</li>
+               </ul>
+             </div>
+             ${
+               lovite.length
+                 ? `<div class="detail-box" style="max-width:780px;margin:0 0 12px;border-left:4px solid var(--danger,#b42318)">
+                      <strong style="color:var(--danger,#b42318)">Atenție: începutul codului se poate lovi de altă categorie.</strong>
+                      <ul style="margin:6px 0 0 18px">${lovite
+                        .map((l) =>
+                          l.numar
+                            ? `<li>Codul începe cu un număr („${esc(l.nume)}”). Pune întâi o listă (ex. Tip) cu o bucată de cod care e doar a categoriei.</li>`
+                            : `<li>„${esc(l.x)}” de aici și „${esc(l.y)}” din „${esc(l.familie)}”: un produs de aici poate ieși cu codul unui produs de acolo.</li>`
+                        )
+                        .join("")}</ul>
+                      <div class="mic" style="margin-top:6px">Schimbă bucata de cod a primei caracteristici (din „Modifică” la valoare), cu litere pe care nu le are nicio altă categorie.</div>
+                    </div>`
+                 : ""
+             }`
+          : ""
+      }
       ${
         sab.length
           ? `<div class="card" style="max-width:720px;margin-bottom:16px">
@@ -239,7 +337,7 @@ function register(router) {
         .editeaza-form label.bif { flex-direction:row; align-items:center; gap:6px; font-size:12px; color:var(--text,#1c2230); }
         .editeaza-form .btn { grid-column:1 / -1; justify-self:start; }
       </style>
-      ${table(["Caracteristică", "Fel", "Valori / interval", "În cod", "Ordine", "Cifre", "Obligatorie", ""], randuri)}
+      <div class="tabel-scroll">${table(["Caracteristică", "Fel", "Valori / interval", "În cod", "Ordine", "Cifre", "Obligatorie", ""], randuri)}</div>
 
       <h2>Adaugă o caracteristică</h2>
       <form method="post" action="${CALE}/caracteristica" class="form" style="max-width:720px">
@@ -338,7 +436,7 @@ function register(router) {
                  .rand-valoare .cod-valoare, .rand-valoare .um-valoare { flex:1 1 100px; }
                }
              </style>
-             ${table(
+             <div class="tabel-scroll">${table(
                ["Caracteristică", "Valoare", "Cod", "UM produs", ""],
                car
                  .filter((c) => c.fel === "lista")
@@ -348,11 +446,25 @@ function register(router) {
                      esc(v.valoare),
                      bucataAfisata(v),
                      v.um != null && String(v.um).trim() ? esc(String(v.um).trim()) : "—",
-                     `<form method="post" action="${CALE}/valoare/${v.id}/sterge" class="inline-form">
+                     // Valoarea se poate și modifica, nu doar șterge și rescrie
+                     // (05.11.2026): o categorie copiată pornește cu valorile
+                     // celeilalte și trebuie să-și schimbe bucata de cod.
+                     `<details class="editeaza-carac">
+                        <summary>Modifică</summary>
+                        <form method="post" action="${CALE}/valoare/${v.id}/editare" class="form editeaza-form">
+                          <input type="hidden" name="familie_id" value="${familieId}">
+                          <label>Valoare<input name="valoare" value="${esc(v.valoare)}" required></label>
+                          <label>Bucata de cod<input name="cod" value="${esc(v.cod || "")}" maxlength="8" style="text-transform:uppercase"></label>
+                          <label>UM produs<input name="um" value="${esc(v.um || "")}" maxlength="12"></label>
+                          <button class="btn small" type="submit">Salvează</button>
+                          <span class="mic" style="grid-column:1 / -1;color:var(--text-muted)">Produsele deja făcute își păstrează codul; noua bucată merge de acum înainte.</span>
+                        </form>
+                      </details>
+                      <form method="post" action="${CALE}/valoare/${v.id}/sterge${inapoi(familieId)}" class="inline-form">
                         <button class="link-btn danger" type="submit">Șterge</button></form>`,
                    ])
                  )
-             )}`
+             )}</div>`
           : ""
       }
       <p style="margin-top:18px"><a class="btn secondary" href="/produse/nou-cu-cod${inapoi(familieId)}">Produs nou${familia ? " · " + esc(familia.nume) : ""} →</a></p>
@@ -360,16 +472,64 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Codul produsului", active: "/configurari", body }));
   });
 
+  // Categorie nouă de produs: goală sau copiată după alta (caracteristici și
+  // valori, cu tot cu bucățile de cod — pe care apoi le schimbi).
   router.post(`${CALE}/familie`, async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
     const b = ctx.body || {};
-    const nume = String(b.nume || "").trim();
-    if (!nume) return redirect(ctx.res, CALE);
+    const nume = String(b.nume || "").trim().slice(0, 80);
+    if (!nume) return redirect(ctx.res, CALE + "?eroare=" + encodeURIComponent("Scrie denumirea categoriei."));
+    const toate = await familii();
+    const dubla = toate.find((f) => C.curat(f.nume) === C.curat(nume));
+    if (dubla) {
+      return redirect(ctx.res, `${CALE}?familie=${dubla.id}&eroare=` + encodeURIComponent(`Există deja categoria „${dubla.nume}”.`));
+    }
     const r = await db
       .prepare("INSERT INTO cod_familii (nume, ordine) VALUES (?, ?) RETURNING id")
-      .run(nume, parseInt(b.ordine, 10) || 0)
+      .run(nume, parseInt(b.ordine, 10) || toate.length + 1)
       .catch(() => null);
-    redirect(ctx.res, CALE + inapoi(r && r.lastInsertRowid));
+    const id = Number(r && r.lastInsertRowid) || 0;
+    if (!id) return redirect(ctx.res, CALE + "?eroare=" + encodeURIComponent("Categoria nu s-a putut scrie."));
+
+    const sursa = toate.find((f) => Number(f.id) === (parseInt(b.copie_din, 10) || -1));
+    let copiate = 0;
+    if (sursa) {
+      for (const c of await citesteCaracteristici(false, sursa.id)) {
+        const ins = await db
+          .prepare(
+            `INSERT INTO cod_caracteristici (familie_id, nume, fel, um, in_cod, ordine, obligatoriu, cifre, min_val, max_val)
+             VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`
+          )
+          .run(id, c.nume, c.fel, c.um || null, Number(c.in_cod) ? 1 : 0, nr(c.ordine), Number(c.obligatoriu) ? 1 : 0,
+               nr(c.cifre), c.min_val == null ? null : Number(c.min_val), c.max_val == null ? null : Number(c.max_val))
+          .catch(() => null);
+        if (!ins) continue;
+        copiate++;
+        for (const v of c.valori || []) {
+          await db
+            .prepare("INSERT INTO cod_valori (caracteristica_id, valoare, cod, ordine, um) VALUES (?,?,?,?,?)")
+            .run(Number(ins.lastInsertRowid), v.valoare, v.cod, nr(v.ordine), v.um || null);
+        }
+      }
+    }
+    const ok = sursa
+      ? `Categoria „${nume}” e făcută, cu cele ${copiate} caracteristici din „${sursa.nume}”. Schimbă acum bucata de cod a primei caracteristici, ca codurile să nu se lovească de ale lui „${sursa.nume}”.`
+      : `Categoria „${nume}” e făcută. Acum adaugă-i caracteristicile, mai jos.`;
+    redirect(ctx.res, `${CALE}?familie=${id}&ok=` + encodeURIComponent(ok));
+  });
+
+  // Redenumirea și ordinea unei categorii. Produsele deja făcute nu se schimbă:
+  // denumirea lor e scrisă pe ele.
+  router.post(`${CALE}/familie/:id/editare`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    const id = parseInt(ctx.params.id, 10);
+    const b = ctx.body || {};
+    const nume = String(b.nume || "").trim().slice(0, 80);
+    if (!nume) return redirect(ctx.res, `${CALE}?familie=${id}&eroare=` + encodeURIComponent("Denumirea nu poate fi goală."));
+    const dubla = (await familii()).find((f) => Number(f.id) !== id && C.curat(f.nume) === C.curat(nume));
+    if (dubla) return redirect(ctx.res, `${CALE}?familie=${id}&eroare=` + encodeURIComponent(`Există deja categoria „${dubla.nume}”.`));
+    await db.prepare("UPDATE cod_familii SET nume = ?, ordine = ? WHERE id = ?").run(nume, parseInt(b.ordine, 10) || 0, id);
+    redirect(ctx.res, `${CALE}?familie=${id}&ok=` + encodeURIComponent("Salvat."));
   });
 
   router.post(`${CALE}/familie/:id/sterge`, async (ctx) => {
@@ -385,10 +545,13 @@ function register(router) {
     if (nr(folosita && folosita.n) > 0) {
       await db.prepare("UPDATE cod_familii SET activ = 0 WHERE id = ?").run(id);
     } else {
+      // Valorile pleacă odată cu caracteristicile (ON DELETE CASCADE în bază).
       await db.prepare("DELETE FROM cod_caracteristici WHERE familie_id = ?").run(id).catch(() => null);
       await db.prepare("DELETE FROM cod_familii WHERE id = ?").run(id).catch(() => null);
     }
-    redirect(ctx.res, CALE);
+    redirect(ctx.res, CALE + "?ok=" + encodeURIComponent(nr(folosita && folosita.n) > 0
+      ? "Categoria are deja produse, deci n-a fost ștearsă de tot: nu mai apare la Produs nou, iar produsele ei rămân cum sunt."
+      : "Categoria a fost ștearsă."));
   });
 
   router.post(`${CALE}/caracteristica`, async (ctx) => {
@@ -552,7 +715,32 @@ function register(router) {
   router.post(`${CALE}/valoare/:id/sterge`, async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
     await db.prepare("DELETE FROM cod_valori WHERE id = ?").run(ctx.params.id).catch(() => null);
-    redirect(ctx.res, CALE);
+    // Înapoi la categoria la care lucra omul, nu la prima din listă.
+    redirect(ctx.res, CALE + inapoi((ctx.query && ctx.query.familie) || (ctx.body && ctx.body.familie_id)));
+  });
+
+  // Modificarea unei valori: denumirea, bucata de cod, UM-ul. Aceleași reguli
+  // ca la adăugare — o bucată de cod e a unei singure valori din listă, iar o
+  // valoare nu apare de două ori. Bucata goală rămâne voie doar unde era deja
+  // goală („Nepersonalizată" la bandă, vezi lib/cod-familii.js).
+  router.post(`${CALE}/valoare/:id/editare`, async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
+    const b = ctx.body || {};
+    const inapoiLa = CALE + inapoi(b.familie_id);
+    const sep = inapoiLa.includes("?") ? "&" : "?";
+    const v = await db.prepare("SELECT * FROM cod_valori WHERE id = ?").get(ctx.params.id);
+    if (!v) return redirect(ctx.res, inapoiLa);
+    const valoare = String(b.valoare || "").trim();
+    const cod = C.curat(b.cod);
+    const um = String(b.um || "").trim().slice(0, 12) || null;
+    const refuz = (m) => redirect(ctx.res, inapoiLa + sep + "eroare=" + encodeURIComponent(m));
+    if (!valoare) return refuz("Valoarea nu poate fi goală.");
+    if (!cod && C.curat(v.cod)) return refuz(`„${valoare}”: bucata de cod nu poate rămâne goală — fără ea, codul ar ieși scurt și s-ar putea lovi de altul.`);
+    const altele = await db.prepare("SELECT valoare, cod FROM cod_valori WHERE caracteristica_id = ? AND id <> ?").all(v.caracteristica_id, v.id);
+    if (cod && altele.some((x) => C.curat(x.cod) === cod)) return refuz(`Bucata de cod „${cod}” e deja la altă valoare din aceeași listă.`);
+    if (altele.some((x) => C.curat(x.valoare) === C.curat(valoare))) return refuz(`„${valoare}” există deja în listă.`);
+    await db.prepare("UPDATE cod_valori SET valoare = ?, cod = ?, um = ? WHERE id = ?").run(valoare, cod, um, v.id);
+    redirect(ctx.res, inapoiLa + sep + "ok=" + encodeURIComponent(`„${valoare}” salvată. Produsele deja făcute își păstrează codul.`));
   });
 
   // ---- Produs nou, cu cod generat ---------------------------------------
