@@ -70,6 +70,10 @@ const STARI = {
   anulata: '<span class="badge rosu">anulată</span>',
 };
 const stareEticheta = (s) => STARI[String(s || "")] || esc(String(s || "—"));
+// Stările comenzii clientului — aceleași în toate paginile.
+const STARI_COMANDA = require("../lib/comenzi-stari");
+// „Pe drum" și „Livrată" mută și comanda clientului (lib/stadiu-comanda.js).
+const STADIU = require("../lib/stadiu-comanda");
 
 // --- Citirea transportatorilor în forma pe care o cere lib/transport-cost --
 
@@ -172,14 +176,17 @@ function register(router) {
         `SELECT co.id, co.numar, co.status, co.data_livrare_promisa, co.data_livrare_ceruta, p.nume AS client, p.adresa
            FROM comenzi co
            JOIN parteneri p ON p.id = co.partener_id
-          WHERE co.status IN ('in_stoc_depozit','facturata')
+          WHERE co.status IN ('in_stoc_depozit','gata_livrare','facturata')
             AND NOT EXISTS (SELECT 1 FROM transport_curse c WHERE c.comanda_id = co.id AND c.stare <> 'anulata')
-          ORDER BY co.id DESC LIMIT 50`
+          ORDER BY CASE co.status WHEN 'gata_livrare' THEN 0 WHEN 'facturata' THEN 1 ELSE 2 END, co.id DESC LIMIT 50`
       )
       .all();
 
     const randuriGata = gata.map((g) => [
       esc(g.numar || "#" + g.id),
+      // „Gata de livrare" = depozitul a pregătit-o; „în stoc depozit" = marfa
+      // e acolo, dar n-a pregătit-o încă nimeni. Se văd sus cele pregătite.
+      STARI_COMANDA.eticheta(g.status),
       esc(g.client || ""),
       esc(g.adresa || "—"),
       esc(g.data_livrare_promisa || g.data_livrare_ceruta || "—"),
@@ -212,10 +219,11 @@ function register(router) {
         randuriGata.length
           ? `<h3 style="margin-top:28px">Gata de livrat, fără cursă deschisă</h3>
              <p style="max-width:720px;color:var(--text-muted)">
-               Comenzi care au marfa în depozit sau sunt deja facturate și n-au transport alocat. Butonul deschide cursa
+               Comenzi pregătite de depozit („gata de livrare”), cu marfa în depozit sau deja facturate, care n-au
+               transport alocat. Cele pregătite stau sus. Butonul deschide cursa
                cu ce știe ERP-ul — clientul, adresa și termenul — iar tu completezi câți paleți sunt.
              </p>
-             ${table(["Comanda", "Client", "Adresă", "Termen", ""], randuriGata)}`
+             ${table(["Comanda", "Stare", "Client", "Adresă", "Termen", ""], randuriGata)}`
           : ""
       }
     `;
@@ -413,6 +421,27 @@ function register(router) {
       ${table(["", "Transportator", "Cost", "Tarif aplicat", "Durată", "Față de termen", ""], randuri)}
 
       ${
+        ["alocata", "in_curs"].includes(c.stare)
+          ? `<div class="toolbar" style="margin-top:14px;gap:8px;flex-wrap:wrap">
+               ${
+                 c.stare === "alocata"
+                   ? `<form method="post" action="/logistica/cursa/${c.id}/pe-drum" class="inline-form">
+                        <button class="btn" type="submit">Pe drum — a plecat mașina</button>
+                      </form>`
+                   : `<span class="badge albastru">pe drum din ${esc(String(c.pornita_la || "").slice(0, 16))}</span>`
+               }
+               <form method="post" action="/logistica/cursa/${c.id}/livrata" class="inline-form" style="gap:6px">
+                 <input type="date" name="data" value="${esc(ziua)}" title="Ziua în care a ajuns la client">
+                 <button class="btn ${c.stare === "alocata" ? "secondary" : ""}" type="submit">Livrată — a ajuns la client</button>
+               </form>
+               ${c.comanda_id ? '<span style="font-size:12px;color:var(--text-muted)">Comanda clientului trece singură „în livrare”, apoi „livrată”.</span>' : ""}
+             </div>`
+          : c.stare === "livrata"
+            ? `<p style="margin-top:14px"><span class="badge verde">livrată</span> pe ${esc(c.data_livrare_reala || "")}${c.livrata_de ? " · marcată de " + esc(c.livrata_de) : ""}</p>`
+            : ""
+      }
+
+      ${
         alocata
           ? `<p style="margin-top:14px">
                Alocată lui <strong>${esc(c.transportator || "")}</strong> pe ${esc(c.alocata_la || "")} de ${esc(c.alocata_de || "")},
@@ -438,6 +467,48 @@ function register(router) {
       }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Cursa #${c.id}`, active: "/logistica", body }));
+  });
+
+  // Mașina a plecat: cursa e pe drum, iar comanda clientului „în livrare".
+  router.post("/logistica/cursa/:id/pe-drum", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/logistica");
+    const id = parseInt(ctx.params.id, 10);
+    const c = await db.prepare("SELECT id, comanda_id, stare FROM transport_curse WHERE id = ?").get(id);
+    if (!c) return redirect(ctx.res, "/logistica");
+    if (c.stare !== "alocata") {
+      return redirect(ctx.res, `/logistica/cursa/${id}?eroare=` + encodeURIComponent("Pe drum pleacă doar o cursă alocată unui transportator."));
+    }
+    await db
+      .prepare("UPDATE transport_curse SET stare = 'in_curs', pornita_la = ?, pornita_de = ? WHERE id = ? AND stare = 'alocata'")
+      .run(new Date().toISOString().slice(0, 19).replace("T", " "), ctx.user.nume || null, id);
+    if (c.comanda_id) {
+      await STADIU.dupaCursa(c.comanda_id, "in_curs", { user: ctx.user, motiv: `Cursa #${id} a plecat (${ctx.user.nume}).` }).catch((e) =>
+        console.error("[logistica] comanda in livrare:", e.message)
+      );
+    }
+    redirect(ctx.res, `/logistica/cursa/${id}`);
+  });
+
+  // Marfa a ajuns: cursa e livrată, la fel și comanda clientului. Din
+  // „alocată" se poate sări direct aici — nu toată lumea apasă „Pe drum".
+  router.post("/logistica/cursa/:id/livrata", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/logistica");
+    const id = parseInt(ctx.params.id, 10);
+    const c = await db.prepare("SELECT id, comanda_id, stare FROM transport_curse WHERE id = ?").get(id);
+    if (!c) return redirect(ctx.res, "/logistica");
+    if (!["alocata", "in_curs"].includes(c.stare)) {
+      return redirect(ctx.res, `/logistica/cursa/${id}?eroare=` + encodeURIComponent("Livrată poate fi doar o cursă alocată sau pe drum."));
+    }
+    const data = /^\d{4}-\d{2}-\d{2}$/.test(String((ctx.body || {}).data || "")) ? String(ctx.body.data) : azi();
+    await db
+      .prepare("UPDATE transport_curse SET stare = 'livrata', data_livrare_reala = ?, livrata_de = ? WHERE id = ? AND stare IN ('alocata', 'in_curs')")
+      .run(data, ctx.user.nume || null, id);
+    if (c.comanda_id) {
+      await STADIU.dupaCursa(c.comanda_id, "livrata", { user: ctx.user, motiv: `Cursa #${id} a ajuns la client pe ${data} (${ctx.user.nume}).` }).catch((e) =>
+        console.error("[logistica] comanda livrata:", e.message)
+      );
+    }
+    redirect(ctx.res, `/logistica/cursa/${id}`);
   });
 
   router.post("/logistica/cursa/:id/detalii", async (ctx) => {

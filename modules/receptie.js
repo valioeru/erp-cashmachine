@@ -554,6 +554,24 @@ function register(router) {
         .catch(() => {});
     }
 
+    // Și comanda clientului pentru care a venit marfa: dacă acum stocul o
+    // acoperă, trece „în stoc depozit" și agentul o poate factura. Până pe
+    // 05.11.2026 recepția scria stocul, dar comanda rămânea unde era — „Intră
+    // în stoc" din De aprovizionat o muta, recepția nu.
+    let spuneComanda = "";
+    if (r.comanda_id) {
+      try {
+        const m = await require("../lib/stadiu-comanda").dupaIntrareMarfa(r.comanda_id, {
+          user: ctx.user,
+          motiv: `Recepția ${r.numar || "#" + r.id}${r.sursa === "productie" ? " (din producție)" : ""} a fost finalizată de ${ctx.user.nume}.`,
+          potrivire: require("./warehouse").potrivire,
+        });
+        if (m.schimbat) spuneComanda = `Comanda clientului e acum „${require("../lib/comenzi-stari").TEXTE[m.status] || m.status}”.`;
+      } catch (e) {
+        console.error("[receptie] nu am putut muta comanda clientului:", e.message);
+      }
+    }
+
     const parti = [];
     parti.push(scrise + (scrise === 1 ? " rând a intrat pe stoc" : " rânduri au intrat pe stoc"));
     if (v.nevandabile.length) {
@@ -563,7 +581,10 @@ function register(router) {
     }
     if (v.lipsuri.length) parti.push(v.lipsuri.length + " cu lipsă față de cât s-a anunțat");
     if (v.respinse.length) parti.push(v.respinse.length + " respins" + (v.respinse.length === 1 ? "" : "e"));
-    redirect(ctx.res, `/depozit/receptie/${id}?ok=` + encodeURIComponent("Recepție finalizată: " + parti.join(" · ") + "."));
+    redirect(
+      ctx.res,
+      `/depozit/receptie/${id}?ok=` + encodeURIComponent("Recepție finalizată: " + parti.join(" · ") + "." + (spuneComanda ? " " + spuneComanda : ""))
+    );
   });
 
   router.post("/depozit/receptie/:id/anuleaza", async (ctx) => {
@@ -578,6 +599,12 @@ function register(router) {
       );
     }
     await db.prepare("UPDATE receptii SET stare = 'anulata' WHERE id = ?").run(id);
+    // O recepție din producție anulată: comanda de producție nu mai are
+    // trimiterea în depozit, deci se poate trimite din nou din fișa ei.
+    await db
+      .prepare("UPDATE comenzi_productie SET trimisa_depozit_la = NULL, receptie_id = NULL WHERE receptie_id = ?")
+      .run(id)
+      .catch(() => {});
     redirect(ctx.res, "/depozit/receptie");
   });
 

@@ -1456,6 +1456,21 @@ function register(router) {
     const valoare = nr(v && v.valoare);
     const faraPret = nr(v && v.fara_pret);
 
+    // Marfa terminată de producție și nepreluată încă (05.11.2026). Butonul
+    // „Depozit" din bară duce aici, deci aici trebuie să se vadă — altfel
+    // depozitul află abia când întreabă agentul.
+    let dePreluat = [];
+    if (poateAccesa(ctx.user, "/depozit")) {
+      dePreluat = await require("./warehouse").marfaDePreluat().catch(() => []);
+    }
+    const bandaPreluat = dePreluat.length
+      ? `<div class="detail-box" style="border-left:4px solid var(--warn,#c07018);max-width:880px;margin-bottom:12px">
+           <strong>De preluat din producție: ${dePreluat.length}</strong> —
+           ${dePreluat.slice(0, 3).map((x) => esc(x.ce)).join(" · ")}${dePreluat.length > 3 ? " …" : ""}
+           <a class="btn small" style="margin-left:8px" href="/depozit#de-preluat">Preia</a>
+         </div>`
+      : "";
+
     if (!randuri.length) {
       const body = `
         ${subtabs("/stocuri/ct-park", ctx.user)}
@@ -1473,6 +1488,7 @@ function register(router) {
 
     const body = `
       ${subtabs("/stocuri/ct-park", ctx.user)}
+      ${bandaPreluat}
       <div class="toolbar">
         <a class="btn" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>
         <a class="btn secondary" href="/stocuri/ct-park/paleti">Paleți în depozit</a>

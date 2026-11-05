@@ -885,9 +885,13 @@ function register(router) {
       avertismentStoc = "Stocul nu s-a putut actualiza: " + e.message;
     }
 
-    // Marchează comanda ca facturată.
+    // Marchează comanda ca facturată. Doar înainte pe drum: o comandă deja
+    // plecată sau livrată (cu aviz, înaintea facturii) rămâne „în livrare" /
+    // „livrată" — factura e legată de ea oricum (05.11.2026, lib/stadiu-comanda.js).
     if (factura.comanda_id) {
-      await db.prepare("UPDATE comenzi SET status = 'facturata' WHERE id = ?").run(factura.comanda_id);
+      await db
+        .prepare("UPDATE comenzi SET status = 'facturata' WHERE id = ? AND status NOT IN ('in_livrare', 'livrata', 'livrata_partial')")
+        .run(factura.comanda_id);
     }
 
     // Trimite în SmartBill, dacă e configurat. Dacă nu, factura rămâne validă

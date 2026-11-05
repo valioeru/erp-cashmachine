@@ -20,6 +20,10 @@ const { fluxulComenzii } = require("../lib/flux-comanda");
 // n-ar fi fost de ajuns s-o schimb într-un singur loc. Acum culoarea vine
 // dintr-un singur tabel, deci o comandă arată la fel în orice pagină.
 const STARI = require("../lib/comenzi-stari");
+// Ce mută o schimbare de stare în restul ERP-ului — comanda clientului,
+// cererea depozitului, recepția „de preluat din producție". Una singură,
+// folosită de listă, de fișă și de alocarea pe utilaje.
+const STADIU = require("../lib/stadiu-comanda");
 const COST = require("../lib/cost");
 // Prețuri pe bucată cu până la 4 zecimale: un plic de 0,0125 lei afișat
 // „0,01 lei" ar face raportul „de 2.595 ori" să pară greșit.
@@ -1197,7 +1201,18 @@ function register(router) {
       if (!ctx.body.inapoi) return send(ctx.res, 400, "stare sau comandă greșită");
       return redirect(ctx.res, inapoi.startsWith("/") ? inapoi : "/productie");
     }
+    const inainte = await db.prepare("SELECT status FROM comenzi_productie WHERE id = ?").get(comandaId);
     await db.prepare("UPDATE comenzi_productie SET status = ? WHERE id = ?").run(stare, comandaId);
+    // Pana pe 05.11.2026 ruta asta schimba DOAR producția. Din lista se lucreaza
+    // de fapt, deci „Finalizată" pusa aici nu ajungea nici la agent, nici la
+    // depozit — doar fisa comenzii stia sa le anunte. Acum trece pe acelasi
+    // drum ca fisa. O greseala acolo nu are voie sa strice schimbarea de
+    // stare, care e deja scrisa: se scrie in log si gata.
+    try {
+      await STADIU.laSchimbareaProductiei(comandaId, inainte ? inainte.status : null, stare, { user: ctx.user });
+    } catch (e) {
+      console.error("[productie] nu am putut duce starea mai departe:", e.message);
+    }
     // Chemata din lista, prin fetch, fara „inapoi": raspundem scurt, ca sa nu
     // trimitem o pagina intreaga pe care browserul o arunca oricum.
     if (!ctx.body.inapoi) {
@@ -1710,6 +1725,14 @@ function register(router) {
 
     const utilizatoriComanda = await db.prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 ORDER BY nume").all();
     const fluxuriLista = await db.prepare("SELECT id, cod, denumire FROM fluxuri WHERE activ = 1 ORDER BY cod").all();
+    // Unde e marfa după producție: recepția din depozit și comanda clientului.
+    // Producția vede aici că „Finalizată" a ajuns mai departe, fără să sune.
+    const receptia = c.receptie_id
+      ? await db.prepare("SELECT id, numar, stare, finalizata_la, primita_de FROM receptii WHERE id = ?").get(c.receptie_id).catch(() => null)
+      : null;
+    const vanzarea = c.comanda_id
+      ? await db.prepare("SELECT id, numar, status FROM comenzi WHERE id = ?").get(c.comanda_id).catch(() => null)
+      : null;
 
     // Costul comenzii, din rețeta produsului. Registrul de comenzi n-are
     // prețuri, dar rețeta știe din ce e făcut produsul — deci costul comenzii
@@ -1899,8 +1922,17 @@ function register(router) {
         ${
           ["finalizata", "facturata"].includes(c.status)
             ? c.trimisa_depozit_la
-              ? `<p style="margin-top:12px"><span class="badge verde">trimisă în depozit</span>
-                   la ${esc(c.trimisa_depozit_la)}${c.receptie_id ? ` · <a href="/depozit/receptie/${c.receptie_id}">vezi recepția</a>` : ""}</p>`
+              ? `<p style="margin-top:12px">${
+                  receptia && receptia.stare === "finalizata"
+                    ? `<span class="badge verde">preluată în depozit</span> la ${esc(String(receptia.finalizata_la || "").slice(0, 16))}${receptia.primita_de ? " de " + esc(receptia.primita_de) : ""}`
+                    : receptia && receptia.stare === "in_lucru"
+                      ? `<span class="badge galben">depozitul o preia acum</span>`
+                      : `<span class="badge galben">de preluat în depozit</span> din ${esc(c.trimisa_depozit_la)}`
+                }${c.receptie_id ? ` · <a href="/depozit/receptie/${c.receptie_id}">recepția ${esc((receptia && receptia.numar) || "")}</a>` : ""}${
+                  vanzarea
+                    ? ` · comanda clientului <a href="/comenzi/${vanzarea.id}">${esc(vanzarea.numar || "#" + vanzarea.id)}</a> ${STARI.eticheta(vanzarea.status)}`
+                    : ""
+                }</p>`
               : `<form method="post" action="/productie/${c.id}/trimite-depozit" class="inline-form" style="margin-top:12px">
                    <button class="btn" type="submit">Trimit marfa în depozit</button>
                  </form>
@@ -2058,6 +2090,7 @@ function register(router) {
   router.post("/productie/:id/actualizeaza", async (ctx) => {
     const b = ctx.body;
     const status = STATUSURI.some((s) => s[0] === b.status) ? b.status : "noua";
+    const inainte = await db.prepare("SELECT status FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
     const finalizare = ["finalizata", "facturata"].includes(status) ? azi() : null;
     await db
       .prepare(
@@ -2083,25 +2116,13 @@ function register(router) {
         ctx.params.id
       );
 
-    // Când producția marchează comanda finalizată, comanda de vânzare din
-    // spatele ei trece în „în stoc depozit" — momentul în care agentul poate
-    // apăsa Facturează. Fără pasul ăsta cineva ar trebui să-i dea telefon.
+    // Ce urmează în restul ERP-ului — comanda clientului, cererea depozitului,
+    // recepția de preluat — se face în lib/stadiu-comanda.js, la fel ca din
+    // listă. Până pe 05.11.2026 regula stătea aici, numai aici, și punea
+    // comanda clientului direct „în stoc depozit", înainte ca depozitul să fi
+    // văzut marfa; o comandă de producție anulată anula și comanda clientului.
     try {
-      const cp = await db.prepare("SELECT comanda_id, aprovizionare_id FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
-      if (cp && cp.comanda_id) {
-        const nouStatusVanzare =
-          status === "finalizata" ? "in_stoc_depozit" : status === "in_productie" ? "in_productie" : status === "anulata" ? "anulata" : null;
-        if (nouStatusVanzare) {
-          await db
-            .prepare("UPDATE comenzi SET status = ? WHERE id = ? AND status NOT IN ('facturata','livrata')")
-            .run(nouStatusVanzare, cp.comanda_id);
-        }
-      }
-      // Dacă a venit dintr-o cerere a depozitului, îi spunem depozitului că
-      // marfa e gata — el o bagă efectiv în stoc, cu rețeta lui.
-      if (cp && cp.aprovizionare_id && status === "finalizata") {
-        await db.prepare("UPDATE aprovizionari SET status = 'gata' WHERE id = ? AND status = 'confirmata'").run(cp.aprovizionare_id);
-      }
+      await STADIU.laSchimbareaProductiei(ctx.params.id, inainte ? inainte.status : null, status, { user: ctx.user });
     } catch (e) {
       console.error("[productie] nu am putut sincroniza comanda de vânzare:", e.message);
     }
@@ -2121,28 +2142,8 @@ function register(router) {
     // de doua ori pe stoc, pe doua documente, si nimeni n-ar sti care e bun.
     if (c.trimisa_depozit_la) return redirect(ctx.res, `/productie/${id}`);
 
-    const linii = await db
-      .prepare("SELECT * FROM comenzi_productie_linii WHERE comanda_id = ? ORDER BY ordine, id")
-      .all(id)
-      .catch(() => []);
-    const deTrimis = linii.length
-      ? linii.map((l) => ({ produs_id: l.produs_id || null, produs_text: l.denumire, cantitate: Number(l.cantitate) || 0, um: l.um }))
-      : [{ produs_id: c.produs_id || null, produs_text: c.tip_produs, cantitate: Number(c.cantitate) || 0, um: c.um }];
-
-    const receptieId = await require("./receptie").creeaza(
-      {
-        sursa: "productie",
-        comanda_productie_id: id,
-        comanda_id: c.comanda_id || null,
-        aprovizionare_id: c.aprovizionare_id || null,
-        anuntata_de: ctx.user.nume,
-        observatii: "Din comanda de producție " + (c.numar || "#" + id),
-      },
-      deTrimis
-    );
-    await db
-      .prepare("UPDATE comenzi_productie SET trimisa_depozit_la = ?, receptie_id = ? WHERE id = ?")
-      .run(azi(), receptieId, id);
+    // Aceeași funcție care deschide recepția singură la „Finalizată".
+    const receptieId = await STADIU.trimiteInDepozit(c, { user: ctx.user });
     redirect(ctx.res, `/depozit/receptie/${receptieId}`);
   });
 

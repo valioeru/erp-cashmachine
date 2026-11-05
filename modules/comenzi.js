@@ -1041,6 +1041,17 @@ function celulaDataConfirmata(c) {
   return '<span style="color:var(--text-muted)">—</span>';
 }
 
+// Cererea depozitului către producție sau furnizor, în cuvinte. În tabelul
+// comenzii scria „gata" sau „primita", adică numele coloanei din bază.
+const STARE_CERERE = {
+  ceruta: "cerută, așteaptă răspuns",
+  confirmata: "confirmată",
+  gata: "gata — de preluat în depozit",
+  primita: "intrată în stoc",
+  refuzata: "refuzată",
+  anulata: "anulată",
+};
+
 function register(router) {
   router.get("/comenzi", async (ctx) => {
     const per = perioadaDin(ctx.query, "tot");
@@ -1082,7 +1093,7 @@ function register(router) {
           esc(c.data),
           celulaDataCeruta(c),
           celulaDataConfirmata(c),
-          STATUS_LABEL[c.status] || esc(c.status),
+          stari.eticheta(c.status),
           money(c.total),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
         ])
@@ -1455,6 +1466,18 @@ function register(router) {
          WHERE a.comanda_id = ? ORDER BY a.id DESC`
       )
       .all(comanda.id);
+    // Comenzile de producție din spatele comenzii, cu recepția lor din depozit:
+    // agentul vede singur unde e marfa — în lucru, gata, de preluat, preluată.
+    const productie = await db
+      .prepare(
+        `SELECT cp.id, cp.numar, cp.tip_produs, cp.cantitate, cp.um, cp.status, cp.data_livrare, cp.data_finalizare,
+                r.id AS receptie_id, r.numar AS receptie_numar, r.stare AS receptie_stare
+           FROM comenzi_productie cp
+           LEFT JOIN receptii r ON r.id = cp.receptie_id
+          WHERE cp.comanda_id = ? ORDER BY cp.id`
+      )
+      .all(comanda.id)
+      .catch(() => []);
 
     // Fiecare mută bucata lui de drum: producția „în producție” și
     // „finalizat”, depozitul stările de stoc și livrarea, financiarul
@@ -1508,7 +1531,7 @@ function register(router) {
        </form>`;
 
     const body = `
-      ${baraStatus(comanda)}
+      ${baraStatus(comanda, { cuProductie: productie.length > 0 || aprovizionari.some((a) => a.sursa === "productie") })}
       ${
         intarziere
           ? `<div class="detail-box intarziere-plata" style="border-left:4px solid var(--danger,#b42318);max-width:820px;margin-bottom:12px">
@@ -1521,7 +1544,7 @@ function register(router) {
         <div class="detail-grid">
           <div><div class="k">Client</div>${esc(comanda.partener_nume)}</div>
           <div><div class="k">Data</div>${esc(comanda.data)}</div>
-          <div><div class="k">Status</div>${STATUS_LABEL[comanda.status] || esc(comanda.status)}</div>
+          <div><div class="k">Status</div>${stari.eticheta(comanda.status)}</div>
           <div><div class="k">Moneda</div>${esc(comanda.moneda || "RON")}</div>
           <div><div class="k">Livrare parțială</div>${livrare.eticheta(comanda)}${
             potiRaspundeLivrare && comanda.status !== "anulata" && !comanda.factura_id
@@ -1609,7 +1632,30 @@ function register(router) {
                  a.sursa === "productie" ? "producție" : "terț",
                  esc(a.termen_cerut || "—"),
                  esc(a.termen_confirmat || "—"),
-                 esc(a.status),
+                 esc(STARE_CERERE[a.status] || a.status),
+               ])
+             )}`
+          : ""
+      }
+      ${
+        productie.length
+          ? `<h2>În producție pentru comanda asta</h2>
+             ${table(
+               ["Comanda de producție", "Produs", "Cantitate", "Stare", "Depozit"],
+               productie.map((p) => [
+                 `<a href="/productie/${p.id}">${esc(p.numar || "#" + p.id)}</a>`,
+                 esc(p.tip_produs || "—"),
+                 esc([p.cantitate, p.um].filter(Boolean).join(" ")),
+                 stari.eticheta(p.status) + (p.data_finalizare ? `<br><span style="font-size:12px;color:var(--text-muted)">gata pe ${esc(p.data_finalizare)}</span>` : ""),
+                 p.receptie_id
+                   ? p.receptie_stare === "finalizata"
+                     ? '<span class="badge verde">preluată în depozit</span>'
+                     : p.receptie_stare === "anulata"
+                       ? '<span class="badge gri">recepție anulată</span>'
+                       : '<span class="badge galben">de preluat în depozit</span>'
+                   : ["finalizata", "facturata"].includes(p.status)
+                     ? '<span class="badge galben">la producție</span>'
+                     : "—",
                ])
              )}`
           : ""
@@ -2307,7 +2353,12 @@ function register(router) {
       .prepare("SELECT COALESCE(SUM(cantitate - COALESCE(cantitate_livrata, 0)), 0) AS r FROM comenzi_linii WHERE comanda_id = ?")
       .get(comanda.id);
     if (Number(rest.r || 0) <= 0.0001) {
-      await db.prepare("UPDATE comenzi SET status = 'facturata', factura_id = ? WHERE id = ?").run(facturaId, comanda.id);
+      // Factura se leagă oricum; starea doar dacă nu e deja mai departe pe
+      // drum (plecată sau livrată cu aviz, înaintea facturii).
+      await db.prepare("UPDATE comenzi SET factura_id = ? WHERE id = ?").run(facturaId, comanda.id);
+      await db
+        .prepare("UPDATE comenzi SET status = 'facturata' WHERE id = ? AND status NOT IN ('in_livrare', 'livrata', 'livrata_partial')")
+        .run(comanda.id);
     } else {
       await db.prepare("UPDATE comenzi SET decizie_agent = 'facturat_partial' WHERE id = ?").run(comanda.id);
     }

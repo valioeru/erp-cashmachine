@@ -26,6 +26,7 @@ const { send, redirect } = require("../lib/router");
 const T = require("../lib/termene");
 const livrare = require("../lib/livrare-partiala");
 const stari = require("../lib/comenzi-stari");
+const STADIU = require("../lib/stadiu-comanda");
 
 const REZERVARE_ORE = 24;
 
@@ -42,7 +43,9 @@ function azi() {
 const STATUS_APROV = {
   ceruta: '<span class="badge gri">cerută</span>',
   confirmata: '<span class="badge albastru">confirmată</span>',
-  gata: '<span class="badge albastru">gata la producție</span>',
+  // Producția a terminat; marfa e la ei și așteaptă depozitul. Galben, fiindcă
+  // acum e rândul nostru (vezi „De preluat din producție" pe /depozit).
+  gata: '<span class="badge galben">de preluat din producție</span>',
   refuzata: '<span class="badge rosu">refuzată</span>',
   primita: '<span class="badge verde">intrată în stoc</span>',
   anulata: '<span class="badge rosu">anulată</span>',
@@ -131,6 +134,89 @@ function poateDepozit(user) {
   return user && (user.rol === "admin" || user.rol === "depozit");
 }
 
+// Marfa pe care producția a terminat-o și pe care depozitul încă n-a preluat-o.
+//
+// Două surse, fiindcă există două drumuri: recepția „din producție" (deschisă
+// singură la „Finalizată", din 05.11.2026, sau cu „Trimit marfa în depozit")
+// și cererea depozitului ajunsă „gata" fără recepție — comenzile terminate
+// înainte de 05.11, sau unde deschiderea recepției a dat greș. Aceeași marfă
+// nu apare de două ori: o cerere cu recepție (deschisă sau finalizată) e
+// reprezentată de recepția ei.
+async function marfaDePreluat() {
+  const receptii = await db
+    .prepare(
+      `SELECT r.id AS receptie_id, r.numar AS receptie_numar, r.stare, r.data, r.anuntata_de, r.comanda_id,
+              r.comanda_productie_id, cp.numar AS productie_numar, co.numar AS comanda_numar, pa.nume AS client
+         FROM receptii r
+         LEFT JOIN comenzi_productie cp ON cp.id = r.comanda_productie_id
+         LEFT JOIN comenzi co ON co.id = r.comanda_id
+         LEFT JOIN parteneri pa ON pa.id = co.partener_id
+        WHERE r.sursa = 'productie' AND r.stare IN ('asteptata', 'in_lucru')
+        ORDER BY r.id`
+    )
+    .all()
+    .catch(() => []);
+  const linii = receptii.length
+    ? await db
+        .prepare(
+          `SELECT l.receptie_id, COALESCE(p.denumire, l.produs_text) AS produs, l.cantitate_asteptata, l.um
+             FROM receptii_linii l LEFT JOIN produse p ON p.id = l.produs_id
+            WHERE l.receptie_id IN (${receptii.map(() => "?").join(",")}) ORDER BY l.id`
+        )
+        .all(...receptii.map((r) => r.receptie_id))
+        .catch(() => [])
+    : [];
+  const ce = new Map();
+  for (const l of linii) {
+    const k = Number(l.receptie_id);
+    ce.set(k, (ce.get(k) ? ce.get(k) + "; " : "") + `${l.produs || "?"} — ${nr(l.cantitate_asteptata)} ${l.um || ""}`.trim());
+  }
+  const cereri = await db
+    .prepare(
+      `SELECT a.id AS aprovizionare_id, a.comanda_id, a.cantitate, a.termen_confirmat, p.denumire AS produs, p.unitate_masura,
+              cp.id AS comanda_productie_id, cp.numar AS productie_numar, co.numar AS comanda_numar, pa.nume AS client
+         FROM aprovizionari a
+         JOIN produse p ON p.id = a.produs_id
+         LEFT JOIN comenzi_productie cp ON cp.aprovizionare_id = a.id
+         LEFT JOIN comenzi co ON co.id = a.comanda_id
+         LEFT JOIN parteneri pa ON pa.id = co.partener_id
+        WHERE a.status = 'gata'
+          AND NOT EXISTS (SELECT 1 FROM receptii r WHERE r.aprovizionare_id = a.id AND r.stare <> 'anulata')
+        ORDER BY a.id`
+    )
+    .all()
+    .catch(() => []);
+  return receptii
+    .map((r) => ({ ...r, ce: ce.get(Number(r.receptie_id)) || "fără rânduri" }))
+    .concat(cereri.map((a) => ({ ...a, receptie_id: null, stare: "gata", ce: `${a.produs} — ${nr(a.cantitate)} ${a.unitate_masura || ""}`.trim() })));
+}
+
+function tabelDePreluat(lista, user) {
+  if (!lista.length) return "";
+  return `<h2 id="de-preluat" style="margin-top:6px">De preluat din producție</h2>
+    <p style="max-width:760px;color:var(--text-muted)">
+      Producția a terminat marfa de mai jos și te așteaptă s-o preiei. Deschide recepția, scrie cât a venit de fapt și
+      unde ai pus-o, apoi finalizeaz-o: marfa intră pe stoc, iar comanda clientului trece singură „în stoc depozit”.
+    </p>
+    ${table(
+      ["Din producție", "Pentru comanda", "Ce", "Anunțată", "Stare", ""],
+      lista.map((x) => [
+        x.comanda_productie_id ? `<a href="/productie/${x.comanda_productie_id}">${esc(x.productie_numar || "#" + x.comanda_productie_id)}</a>` : "—",
+        x.comanda_id
+          ? `<a href="/depozit/comanda/${x.comanda_id}">${esc(x.comanda_numar || "#" + x.comanda_id)}</a><br><span style="font-size:12px">${esc(x.client || "")}</span>`
+          : "pentru stoc",
+        esc(x.ce),
+        esc(String(x.data || x.termen_confirmat || "").slice(0, 10)) + (x.anuntata_de ? `<br><span style="font-size:12px;color:var(--text-muted)">${esc(x.anuntata_de)}</span>` : ""),
+        x.stare === "in_lucru" ? '<span class="badge galben">în lucru</span>' : '<span class="badge galben">de preluat</span>',
+        x.receptie_id
+          ? `<a class="btn small" href="/depozit/receptie/${x.receptie_id}">${x.stare === "in_lucru" ? "Continuă recepția" : "Preia în depozit"}</a>`
+          : poateDepozit(user)
+            ? `<a class="btn small secondary" href="/depozit/aprovizionare">Preia din De aprovizionat</a>`
+            : "",
+      ])
+    )}`;
+}
+
 function register(router) {
   // Adresele vechi, în engleză, duc la cele noi — cine avea un link salvat
   // nu se lovește de un 404 din cauza unei redenumiri.
@@ -147,7 +233,7 @@ function register(router) {
         `SELECT c.*, p.nume AS partener_nume,
                 COALESCE((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id), 0) AS total
          FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
-         WHERE c.status NOT IN ('facturata', 'livrata', 'anulata')
+         WHERE c.status NOT IN ('facturata', 'in_livrare', 'livrata', 'anulata')
          ORDER BY c.id DESC
          LIMIT 300`
       )
@@ -159,7 +245,7 @@ function register(router) {
       .prepare(
         `SELECT cl.comanda_id, cl.produs_id, cl.cantitate, cl.cantitate_livrata
          FROM comenzi_linii cl JOIN comenzi c ON c.id = cl.comanda_id
-         WHERE c.status NOT IN ('facturata', 'livrata', 'anulata')`
+         WHERE c.status NOT IN ('facturata', 'in_livrare', 'livrata', 'anulata')`
       )
       .all();
     const perComanda = new Map();
@@ -182,6 +268,8 @@ function register(router) {
       return `<span class="badge galben">parțial (${s.complete}/${s.linii})</span>`;
     }
 
+    const dePreluat = await marfaDePreluat();
+
     const nrAprov = await db.prepare("SELECT COUNT(*) AS n FROM aprovizionari WHERE status IN ('ceruta','confirmata')").get();
     const nrMaterii = await db.prepare("SELECT COUNT(*) AS n FROM cereri_materie_prima WHERE status = 'ceruta'").get();
     const nrRezervari = await db.prepare("SELECT COUNT(*) AS n FROM rezervari_stoc WHERE stare = 'activa'").get();
@@ -194,6 +282,8 @@ function register(router) {
         sau să ceri aprovizionare.
       </p>
       <div class="cards">
+        <div class="card"><div class="label">De preluat din producție</div><div class="value">${dePreluat.length}</div>
+          <div style="font-size:12px">${dePreluat.length ? '<a href="#de-preluat">vezi mai jos</a>' : "nimic de preluat"}</div></div>
         <div class="card"><div class="label">Comenzi deschise</div><div class="value">${comenzi.length}</div></div>
         <div class="card"><div class="label">Aprovizionări în lucru</div><div class="value">${Number(nrAprov.n || 0)}</div>
           <div style="font-size:12px"><a href="/depozit/aprovizionare">vezi lista</a></div></div>
@@ -201,6 +291,7 @@ function register(router) {
           <div style="font-size:12px"><a href="/depozit/aprovizionare#materii">de la producție</a></div></div>
         <div class="card"><div class="label">Rezervări active</div><div class="value">${Number(nrRezervari.n || 0)}</div></div>
       </div>
+      ${tabelDePreluat(dePreluat, ctx.user)}
       ${table(
         ["Nr.", "Client", "Cerut pe", "Status", "Acoperire stoc", "Livrare parțială", "Valoare", ""],
         comenzi.map((c) => [
@@ -239,6 +330,9 @@ function register(router) {
          WHERE a.comanda_id = ? ORDER BY a.id DESC`
       )
       .all(id);
+
+    // Marfă din producție pentru comanda asta, care încă stă la ei.
+    const dePreluatAici = (await marfaDePreluat()).filter((x) => Number(x.comanda_id) === id);
 
     const randuri = linii.map((l) => {
       const stareLinie =
@@ -280,8 +374,18 @@ function register(router) {
       ];
     });
 
+    // „Gata de livrare": depozitul a pregătit marfa (luată de pe raft,
+    // ambalată, etichetată). De aici comanda apare în Logistică ca gata de
+    // dus. Butonul e doar pe „în stoc depozit" — înainte n-ai ce pregăti.
+    const butonGata =
+      poateDepozit(ctx.user) && c.status === "in_stoc_depozit"
+        ? `<form method="post" action="/depozit/comanda/${id}/gata-livrare" class="inline-form">
+             <button class="btn" type="submit" title="Marfa e pregătită și poate pleca: comanda apare în Logistică, la „Gata de livrat”.">Gata de livrare</button>
+           </form>`
+        : "";
     const actiuni = poateDepozit(ctx.user)
       ? `<div class="toolbar" style="flex-wrap:wrap;gap:8px">
+           ${butonGata}
            <form method="post" action="/depozit/comanda/${id}/confirma" class="inline-form">
              <button class="btn" type="submit" title="${esc(
                statusDupa === "in_stoc_depozit"
@@ -326,7 +430,23 @@ function register(router) {
         Status: ${stari.eticheta(c.status)} ·
         cerută pe ${esc(c.data_livrare_ceruta || "fără termen")} ·
         ${c.verificata_depozit_la ? "verificată de depozit la " + esc(String(c.verificata_depozit_la).slice(0, 16)) : "neverificată încă"}
+        ${c.gata_livrare_la ? " · pregătită la " + esc(String(c.gata_livrare_la).slice(0, 16)) + (c.gata_livrare_de ? " de " + esc(c.gata_livrare_de) : "") : ""}
       </p>
+      ${
+        dePreluatAici.length
+          ? `<div class="detail-box" style="max-width:820px;border-left:4px solid var(--warn,#c07018)">
+               <strong>De preluat din producție:</strong>
+               ${dePreluatAici
+                 .map((x) =>
+                   x.receptie_id
+                     ? `<a href="/depozit/receptie/${x.receptie_id}">recepția ${esc(x.receptie_numar || "#" + x.receptie_id)}</a> (${esc(x.ce)})`
+                     : `<a href="/depozit/aprovizionare">${esc(x.ce)}</a> — din De aprovizionat`
+                 )
+                 .join(" · ")}
+               <div class="mic" style="color:var(--text-muted);margin-top:4px">Producția a terminat. Când o preiei, comanda trece singură „în stoc depozit”.</div>
+             </div>`
+          : ""
+      }
       <div class="detail-box" style="max-width:820px;border-left:4px solid ${
         acceptaPartial ? "var(--verde,#1a7f42)" : "var(--rosu,#b3261e)"
       }">
@@ -387,7 +507,13 @@ function register(router) {
     if (c.status === "anulata") return redirect(ctx.res, `/depozit/comanda/${id}`);
 
     const { acoperiteTot, acoperitePartial } = await potrivire(id);
-    const status = livrare.statusDupaVerificare({ acoperiteTot, acoperitePartial, comanda: c });
+    let status = livrare.statusDupaVerificare({ acoperiteTot, acoperitePartial, comanda: c });
+    // Verificarea nu dă comanda înapoi pe drum (05.11.2026). Una pregătită,
+    // plecată sau facturată rămâne unde e; una la care producția încă lucrează
+    // sau a terminat, dar marfa n-a fost preluată, nu cade pe „așteaptă marfă"
+    // — ar pierde exact informația că marfa vine din producție.
+    if (["gata_livrare", "in_livrare", "facturata", "livrata", "livrata_partial"].includes(c.status)) status = c.status;
+    else if (status === "asteapta_marfa" && ["in_productie", "productie_finalizata"].includes(c.status)) status = c.status;
 
     await db
       .prepare("UPDATE comenzi SET status = ?, verificata_depozit_la = ?, verificata_depozit_de = ? WHERE id = ?")
@@ -399,7 +525,9 @@ function register(router) {
     // primul: apasai „Confirmă", pagina se reincarca, si daca rezultatul era
     // „asteapta marfa" parea ca n-a facut nimic.
     const spune =
-      status === "in_stoc_depozit"
+      status !== "in_stoc_depozit" && status !== "asteapta_marfa"
+        ? `Comanda rămâne „${stari.TEXTE[status] || String(status).replace(/_/g, " ")}”.`
+        : status === "in_stoc_depozit"
         ? acoperiteTot
           ? "Toată marfa e pe stoc — comanda pleacă spre livrare."
           : "Marfa e doar parțial pe stoc, iar clientul acceptă livrare parțială — pleacă ce există."
@@ -421,6 +549,19 @@ function register(router) {
       ctx.res,
       `/depozit/comanda/${id}?ok=` +
         encodeURIComponent("Verificat de depozit. " + spune + " Agentul a fost anunțat în istoricul clientului.")
+    );
+  });
+
+  // Depozitul a pregătit comanda: e gata de livrare (lib/stadiu-comanda.js).
+  router.post("/depozit/comanda/:id/gata-livrare", async (ctx) => {
+    if (!poateDepozit(ctx.user)) return redirect(ctx.res, "/depozit");
+    const id = parseInt(ctx.params.id, 10);
+    const r = await STADIU.gataDeLivrare(id, { user: ctx.user });
+    if (!r.ok) return redirect(ctx.res, `/depozit/comanda/${id}?eroare=` + encodeURIComponent(r.motiv || "Nu s-a putut."));
+    redirect(
+      ctx.res,
+      `/depozit/comanda/${id}?ok=` +
+        encodeURIComponent("Gata de livrare. Comanda apare în Logistică, la „Gata de livrat”, iar agentul a fost anunțat în istoricul clientului.")
     );
   });
 
@@ -550,6 +691,14 @@ function register(router) {
       .all();
     const depozite = await db.prepare("SELECT id, denumire FROM depozite ORDER BY id").all();
     const optDep = depozite.map((d) => `<option value="${d.id}">${esc(d.denumire)}</option>`).join("");
+    const receptiiDeschise = new Map(
+      (
+        await db
+          .prepare("SELECT id, numar, aprovizionare_id FROM receptii WHERE aprovizionare_id IS NOT NULL AND stare IN ('asteptata', 'in_lucru')")
+          .all()
+          .catch(() => [])
+      ).map((r) => [Number(r.aprovizionare_id), r])
+    );
 
     const randuriA = aprov.map((a) => {
       // Pe fluxul catre FURNIZOR nu exista pana acum niciun pas de
@@ -572,8 +721,10 @@ function register(router) {
                </form>
              </details>`
           : "";
-      const actiuni =
-        poateDepozit(ctx.user) && ["ceruta", "confirmata", "gata"].includes(a.status)
+      const rec = receptiiDeschise.get(Number(a.id));
+      const actiuni = rec
+        ? `<a class="btn small" href="/depozit/receptie/${rec.id}">Preia pe recepția ${esc(rec.numar || "#" + rec.id)}</a>`
+        : poateDepozit(ctx.user) && ["ceruta", "confirmata", "gata"].includes(a.status)
           ? confirmaTert +
             `<form method="post" action="/depozit/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px;margin-top:6px">
                <select name="depozit_id" style="width:120px">${optDep}</select>
@@ -768,6 +919,20 @@ function register(router) {
     const id = parseInt(ctx.params.id, 10);
     const a = await db.prepare("SELECT * FROM aprovizionari WHERE id = ?").get(id);
     if (!a) return redirect(ctx.res, "/depozit/aprovizionare");
+    // Marfa cu recepție deschisă (din producție, de la 05.11.2026, se deschide
+    // singură) intră pe recepție, nu de aici: altfel intră de două ori pe stoc,
+    // pe două documente, și nimeni nu mai știe care e bun.
+    const deschisa = await db
+      .prepare("SELECT id, numar FROM receptii WHERE aprovizionare_id = ? AND stare IN ('asteptata', 'in_lucru') ORDER BY id LIMIT 1")
+      .get(id)
+      .catch(() => null);
+    if (deschisa) {
+      return redirect(
+        ctx.res,
+        "/depozit/aprovizionare?eroare=" +
+          encodeURIComponent(`Marfa asta are deja recepția ${deschisa.numar || "#" + deschisa.id} deschisă. Preia-o de acolo, altfel intră de două ori pe stoc.`)
+      );
+    }
     let depozitId = parseInt((ctx.body || {}).depozit_id, 10) || null;
     if (!depozitId) {
       const d = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
@@ -791,11 +956,16 @@ function register(router) {
         );
     }
     await db.prepare("UPDATE aprovizionari SET status = 'primita' WHERE id = ?").run(id);
+    // Comanda clientului, pe același drum ca la recepție (lib/stadiu-comanda.js).
     if (a.comanda_id) {
-      const c = await db.prepare("SELECT status FROM comenzi WHERE id = ?").get(a.comanda_id);
-      if (c && ["noua", "confirmata", "in_productie"].includes(c.status)) {
-        const { acoperiteTot } = await potrivire(a.comanda_id);
-        if (acoperiteTot) await db.prepare("UPDATE comenzi SET status = 'in_stoc_depozit' WHERE id = ?").run(a.comanda_id);
+      try {
+        await STADIU.dupaIntrareMarfa(a.comanda_id, {
+          user: ctx.user,
+          motiv: `Marfa ${a.sursa === "productie" ? "din producție" : "de la furnizor"} a intrat în stoc (${ctx.user.nume}).`,
+          potrivire,
+        });
+      } catch (e) {
+        console.error("[depozit] nu am putut muta comanda clientului:", e.message);
       }
     }
     redirect(ctx.res, "/depozit/aprovizionare");
@@ -864,4 +1034,4 @@ function porneste() {
   if (t.unref) t.unref();
 }
 
-module.exports = { register, porneste, potrivire, elibereazaExpirate, REZERVARE_ORE };
+module.exports = { register, porneste, potrivire, elibereazaExpirate, marfaDePreluat, REZERVARE_ORE };

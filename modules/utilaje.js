@@ -1626,8 +1626,16 @@ function register(router) {
         if (b[`resursa_${o.id}`]) await db.prepare("INSERT INTO alocari_resurse (alocare_id, resursa_id) VALUES (?, ?)").run(alocareId, o.id);
       }
     }
-    // O comandă alocată nu mai e „nouă" — cineva a pus-o pe o mașină.
-    await db.prepare("UPDATE comenzi_productie SET status = 'in_productie' WHERE id = ? AND status = 'noua'").run(ctx.params.id);
+    // O comandă alocată nu mai e „nouă" — cineva a pus-o pe o mașină. Și
+    // comanda clientului din spatele ei află asta (lib/stadiu-comanda.js).
+    const pornita = await db.prepare("UPDATE comenzi_productie SET status = 'in_productie' WHERE id = ? AND status = 'noua'").run(ctx.params.id);
+    if (pornita && pornita.changes) {
+      try {
+        await require("../lib/stadiu-comanda").laSchimbareaProductiei(ctx.params.id, "noua", "in_productie", { user: ctx.user });
+      } catch (e) {
+        console.error("[utilaje] nu am putut duce starea mai departe:", e.message);
+      }
+    }
     redirect(ctx.res, `/productie/planificare?de_la=${encodeURIComponent(data)}`);
   });
 
