@@ -144,5 +144,20 @@ let aCrapat = false;
 try { XLS.carte([]); } catch (e) { aCrapat = true; }
 bine("o carte fără nicio foaie e refuzată, nu scrisă goală", aCrapat);
 
+// ---- 7. Numere cu zecimale -------------------------------------------------
+// Cantitățile în kg și prețurile pe bucată au zecimale. Tipul „numar" e întreg
+// la afișare: 12,5 kg ar fi apărut 13, iar un plic de 0,0125 lei ar fi apărut 0.
+console.log("\nNumere cu zecimale");
+const zec = desfa(XLS.carte([{
+  nume: "Stoc",
+  coloane: [{ titlu: "Cantitate", cheie: "c", tip: "zecimal" }, { titlu: "Preț", cheie: "p", tip: "zecimal" }],
+  randuri: [{ c: 12.5, p: 0.0125 }, { c: 650, p: "" }, { c: "n/a", p: null }],
+}]))["xl/worksheets/sheet1.xml"];
+bine("12,5 rămâne număr, fără format de întreg", zec.includes('<c r="A2"><v>12.5</v></c>'), zec.match(/<c r="A2".*?<\/c>/));
+bine("0,0125 își păstrează zecimalele", zec.includes('<c r="B2"><v>0.0125</v></c>'));
+bine("un întreg rămâne întreg", zec.includes('<c r="A3"><v>650</v></c>'));
+bine("golul rămâne gol, nu zero", !zec.includes('r="B3"') && !zec.includes('r="B4"'));
+bine("un text într-o coloană de numere iese ca text, nu ca NaN", zec.includes('<c r="A4" t="inlineStr"><is><t>n/a</t></is></c>'));
+
 console.log(esecuri ? `\n${esecuri} verificări căzute.` : "\nToate verificările trec.");
 process.exit(esecuri ? 1 : 0);

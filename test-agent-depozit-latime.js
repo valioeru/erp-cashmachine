@@ -6,12 +6,17 @@
 //   2. „Agenții de vânzări au și ei acces la secțiunea depozit, dar văd doar
 //      stoc la zi și nu au activ butonul intrare marfă.”
 //
+// Și una din 05.11.2026: „să se poată exporta și în xls asta de către admini”
+// — exportul în Excel al stocului la zi, doar pentru administratori, cu
+// exact rândurile de pe ecran (și cu căutarea pusă).
+//
 // Al doilea e o regulă de acces, deci se verifică și ce NU se deschide: harta,
 // intrarea, paletul, „Tot depozitul”, plus o adresă care doar începe la fel
 // ca pagina de stoc. Și ce nu vede agentul pe pagina de stoc: furnizorul și
 // prețul de intrare (aceeași regulă ca la Cereri de preț).
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
 const Module = require("module");
 const { execFileSync } = require("child_process");
 
@@ -77,6 +82,25 @@ async function cer(cale, user, query) {
   const r = res();
   await rute.get[cale]({ user, params: {}, query: query || {}, body: {}, res: r, req: { url: cale } });
   return r;
+}
+
+// Arhiva .xlsx desfăcută înapoi, din directorul central (ca în test-export-xlsx.js).
+function desfa(buf) {
+  const sfarsit = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (sfarsit < 0) throw new Error("fără sfârșit de arhivă");
+  const n = buf.readUInt16LE(sfarsit + 10);
+  let p = buf.readUInt32LE(sfarsit + 16);
+  const out = {};
+  for (let i = 0; i < n; i++) {
+    const comprimat = buf.readUInt32LE(p + 20);
+    const ln = buf.readUInt16LE(p + 28), lx = buf.readUInt16LE(p + 30), lc = buf.readUInt16LE(p + 32);
+    const offset = buf.readUInt32LE(p + 42);
+    const nume = buf.slice(p + 46, p + 46 + ln).toString("utf8");
+    const nl = buf.readUInt16LE(offset + 26), xl = buf.readUInt16LE(offset + 28);
+    out[nume] = zlib.inflateRawSync(buf.slice(offset + 30 + nl + xl, offset + 30 + nl + xl + comprimat)).toString("utf8");
+    p += 46 + ln + lx + lc;
+  }
+  return out;
 }
 
 let esecuri = 0;
@@ -188,6 +212,61 @@ function curata() {
     bine("administratorul: căutarea pe furnizor merge ca înainte", cuFurnizor.corp.includes("TEST-AGENT Folie stretch"));
     const d = await cer("/stocuri/ct-park/stoc", DEPOZIT);
     bine("depozitul: vede tot, cu intrarea activă", d.corp.includes(FURNIZOR) && d.corp.includes('href="/stocuri/ct-park/intrare"'));
+  }
+
+  console.log("\n3b. Exportul în Excel al stocului la zi — doar administratorii");
+  {
+    const EXPORT = "/stocuri/ct-park/stoc/export.xlsx";
+    const admin = await cer("/stocuri/ct-park/stoc", ADMIN);
+    bine("administratorul are butonul „Export Excel”", /<a class="btn secondary" href="\/stocuri\/ct-park\/stoc\/export\.xlsx"[^>]*>Export Excel<\/a>/.test(admin.corp));
+    const cautat = await cer("/stocuri/ct-park/stoc", ADMIN, { q: "LOT-AG-7" });
+    bine("cu o căutare pusă, butonul exportă căutarea", cautat.corp.includes('href="/stocuri/ct-park/stoc/export.xlsx?q=LOT-AG-7"'));
+    for (const [cine, u] of [["agentul", AGENT], ["depozitul", DEPOZIT], ["financiarul", FINANCIAR]]) {
+      const p = await cer("/stocuri/ct-park/stoc", u);
+      bine(`${cine}: n-are butonul de export`, !/export\.xlsx/.test(p.corp));
+      const e = await cer(EXPORT, u);
+      bine(`${cine}: exportul îi e refuzat cu motiv (403), nu primește fișierul`,
+        e.cod === 403 && /rezervat administratorilor/.test(String(e.corp)) && !(e.antet && /spreadsheetml/.test(e.antet["Content-Type"] || "")), e.cod);
+    }
+
+    const r = await cer(EXPORT, ADMIN);
+    const buf = Buffer.isBuffer(r.corp) ? r.corp : Buffer.from(String(r.corp || ""));
+    bine("administratorul primește un fișier Excel", r.cod === 200 && /spreadsheetml\.sheet/.test((r.antet || {})["Content-Type"] || ""), r.cod);
+    bine("ca descărcare, cu numele și data", /^attachment; filename="stoc-la-zi-ct-park-\d{4}-\d{2}-\d{2}\.xlsx"$/.test((r.antet || {})["Content-Disposition"] || ""), (r.antet || {})["Content-Disposition"]);
+    let parti = {};
+    try { parti = desfa(buf); } catch (e) { parti = {}; }
+    const foaie = parti["xl/worksheets/sheet1.xml"] || "";
+    const rand = (foaie.match(/<row r="\d+">(?:(?!<\/row>).)*TEST-AGENT Folie stretch(?:(?!<\/row>).)*<\/row>/) || [])[0] || "";
+    bine("paletul de test e în fișier, pe un rând", Boolean(rand), foaie.slice(0, 200));
+    bine("cu categoria, codul produsului și codul paletului separat",
+      rand.includes(">materie primă<") && rand.includes(">TST-AGENT-A<") && rand.includes(">CTTEST-AG<"), rand.slice(0, 400));
+    bine("cantitatea e număr (250), nu text", /<c r="F\d+"><v>250<\/v><\/c>/.test(rand), rand.match(/<c r="F\d+".*?<\/c>/));
+    bine("furnizorul, lotul și locul", rand.includes(FURNIZOR) && rand.includes(">LOT-AG-7<") && rand.includes(`R${NUMAR}-01-1-1`));
+    bine("data intrării e dată Excel (30.10.2026)", rand.includes("<v>46325</v>"), rand.match(/<c r="I\d+".*?<\/c>/));
+    bine("prețul pe UM cu zecimale (12,34) și valoarea 3.085", /<c r="N\d+"><v>12\.34<\/v><\/c>/.test(rand) && /<c r="O\d+" s="2"><v>3085<\/v><\/c>/.test(rand),
+      [rand.match(/<c r="N\d+".*?<\/c>/), rand.match(/<c r="O\d+".*?<\/c>/)]);
+    const cat = parti["xl/worksheets/sheet2.xml"] || "";
+    bine("a doua foaie are totalurile pe categorii, cu TOTAL", cat.includes(">materie primă<") && cat.includes(">TOTAL<"));
+    const cum = parti["xl/worksheets/sheet3.xml"] || "";
+    bine("a treia foaie spune cine, când și cu ce căutare", cum.includes("Vali") && cum.includes("tot stocul"));
+
+    const f = await cer(EXPORT, ADMIN, { q: "LOT-AG-7" });
+    const pf = desfa(Buffer.isBuffer(f.corp) ? f.corp : Buffer.from(String(f.corp)));
+    const randuriF = ((pf["xl/worksheets/sheet1.xml"] || "").match(/<row r=/g) || []).length;
+    bine("exportul cu căutare scoate doar ce s-a găsit (antet + 1 rând)", randuriF === 2, randuriF);
+    bine("și spune ce căutare era pusă", (pf["xl/worksheets/sheet3.xml"] || "").includes("LOT-AG-7"));
+    const gol = desfa(Buffer.from((await cer(EXPORT, ADMIN, { q: "TEST-AGENT-nu-exista-xyz" })).corp));
+    bine("o căutare fără rezultat dă fișier cu antetul, nu eroare", ((gol["xl/worksheets/sheet1.xml"] || "").match(/<row r=/g) || []).length === 1);
+
+    // Un palet fără preț: celula de preț și cea de valoare rămân goale, nu
+    // zero — un zero s-ar aduna în Excel ca o valoare adevărată.
+    q(`INSERT INTO ct_paleti (cod, produs_id, cantitate, um, categorie, lot, data_intrare, observatii)
+       VALUES ('CTTEST-AG2', ${pa}, 7.5, 'kg', 'materie primă', 'LOT-AG-8', '2026-11-01', ${lit(MARCAJ)})`);
+    const fp = desfa(Buffer.from((await cer(EXPORT, ADMIN, { q: "LOT-AG-8" })).corp));
+    const randFp = ((fp["xl/worksheets/sheet1.xml"] || "").match(/<row r="2">.*?<\/row>/) || [])[0] || "";
+    bine("palet fără preț: cantitatea 7,5 cu zecimale", /<c r="F2"><v>7\.5<\/v><\/c>/.test(randFp), randFp.slice(0, 300));
+    bine("palet fără preț: prețul și valoarea goale, nu zero", randFp.includes(">CTTEST-AG2<") && !/r="N2"/.test(randFp) && !/r="O2"/.test(randFp), randFp.match(/<c r="[NO]2".*?<\/c>/g));
+    bine("și se numără la „paleți fără preț”", (fp["xl/worksheets/sheet3.xml"] || "").includes(">1 (valoarea lor nu intră în sumă)<"));
   }
   curata();
 
