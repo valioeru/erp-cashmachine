@@ -172,7 +172,11 @@
           urma.cereri++;
           try {
             const p = new URLSearchParams(b);
-            for (const [k, v] of Object.entries(filtru)) p.set(k, v);
+            // Filtrul poate fi și o funcție, pentru rapoartele care țin tot
+            // filtrul într-un singur JSON (sSearch) din care schimbăm doar
+            // câteva chei, nu tot.
+            if (typeof filtru === "function") filtru(p);
+            else for (const [k, v] of Object.entries(filtru)) p.set(k, v);
             b = p.toString();
           } catch (e) {
             /* raport cu alt format de corp: îl lăsăm cum e */
@@ -354,24 +358,53 @@
   };
 
   // ---- facturi de la furnizori ---------------------------------------------
-  // Raportul „Documente furnizori". ERP-ul îl citește după antet (ca pe
-  // Excelul din /import), deci aici doar se curăță celulele de HTML.
-  // `{ uscat: true }` întoarce antetul și primele rânduri, fără să trimită —
-  // pentru verificarea formatului înainte de prima sincronizare.
+  // Raportul „Documente furnizori" (/achizitii/raport/documente_furnizori/).
+  // Pagina își cere datele singură, prin POST la …/v2/ajax/, cu tot filtrul
+  // într-un JSON (sSearch: from/to „zz/ll/aaaa", documentType, page,
+  // resultsPerPage) și răspunde cu `documents` + `totalCount`. Din filtrul
+  // paginii schimbăm doar perioada, felurile de document (doar facturile și
+  // bonurile fiscale — proforma, avizul, carnetul nu sunt facturi) și pagina.
+  //
+  // ERP-ul citește rândurile după antet, ca pe Excelul din /import, deci aici
+  // doar se pun câmpurile într-un tabel cu antetul de mai jos. `{ uscat: true }`
+  // arată primele rânduri și cât s-a sărit, fără să trimită nimic.
+  const ANTET_FURNIZORI = ["Furnizor", "CIF", "Document", "Data", "Scadenta", "Valoare fara TVA", "TVA", "Total", "Moneda", "Total RON", "Status"];
+  const zzllaaaa = (iso) => { const [a, l, z] = String(iso).split("-"); return `${z}/${l}/${a}`; };
   S.furnizori = async function (zile, o) {
-    const j = await raport(
-      "/achizitii/raport/documente_furnizori/",
-      /\/achizitii\/raport\/documente_furnizori\/ajax/,
-      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "5000" },
-      reincarca(null)
-    );
-    const antet = j.__antet || [];
+    const de = zzllaaaa(acumMinus(zile)), pana = zzllaaaa(aziText());
     const firma = S.firma();
-    const curat = (v) => String(v == null ? "" : v).replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
-    const randuri = (j.aaData || []).map((r) => ({ antet, celule: (Array.isArray(r) ? r : Object.values(r)).map(curat), firma }));
-    if (o && o.uscat) return { antet, primele: randuri.slice(0, 3).map((x) => x.celule), total: randuri.length, total_raport: j.iTotalRecords };
+    const docs = [];
+    let total = null;
+    for (let pagina = 1; pagina <= 40; pagina++) {
+      const j = await raport(
+        "/achizitii/raport/documente_furnizori/",
+        /\/achizitii\/raport\/documente_furnizori\/v2\/ajax/,
+        (p) => {
+          let f = {};
+          try { f = JSON.parse(p.get("sSearch") || "{}"); } catch (e) { f = {}; }
+          Object.assign(f, { from: de, to: pana, documentType: "Factura,Bon fiscal", page: pagina, resultsPerPage: 500 });
+          p.set("sSearch", JSON.stringify(f));
+        },
+        reincarca(null)
+      );
+      const ale = Array.isArray(j.documents) ? j.documents : [];
+      total = Number(j.totalCount) || 0;
+      docs.push(...ale);
+      if (!ale.length || docs.length >= total) break;
+    }
+    const nr = (v) => (v == null || v === "" ? "" : String(v));
+    const anulat = (d) => d.sdIsAnulled === true || /anulat/i.test(String(d.status || ""));
+    const bune = docs.filter((d) => !anulat(d) && /factur|bon/i.test(String(d.docType || "")));
+    const randuri = bune.map((d) => ({
+      antet: ANTET_FURNIZORI,
+      celule: [d.supplierName, d.supplierCif, d.docTypeAndSerieAndNo || d.nrDoc, d.docDate, d.dueDate,
+               nr(d.totalWithoutVat), nr(d.totalVat), nr(d.totalWithVat), d.currency || "RON", nr(d.totalWithVatRon), d.status || ""].map((x) => (x == null ? "" : String(x))),
+      firma,
+    }));
+    const rezumat = { firma, de, pana, in_raport: total, aduse: docs.length, de_trimis: randuri.length, sarite: docs.length - randuri.length };
+    if (o && o.uscat) return Object.assign(rezumat, { primele: randuri.slice(0, 3).map((x) => x.celule) });
     await trimite("facturi_furnizori", randuri, `sincronizare ${firma} — facturi furnizori ${zile} zile`);
-    return randuri.length;
+    return rezumat;
   };
 
   // ---- costuri de achiziție, din balanța stocului -------------------------
