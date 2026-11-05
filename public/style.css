@@ -660,8 +660,11 @@ button.chip { font-family: inherit; cursor: pointer; }
 .sel-stare.stare-ciorna,
 .sel-stare.stare-asteapta_marfa { background: #fbf0da; border-color: #e8d9a5; }
 .sel-stare.stare-finalizata,
+.sel-stare.stare-productie_finalizata,
 .sel-stare.stare-in_stoc_depozit,
+.sel-stare.stare-gata_livrare,
 .sel-stare.stare-facturata { background: #e7f4ec; border-color: #b7dfc4; }
+.sel-stare.stare-in_livrare,
 .sel-stare.stare-livrata,
 .sel-stare.stare-livrata_partial { background: #22262b; border-color: #22262b; color: #ffffff; }
 .sel-stare.stare-anulata { background: #eef0f3; border-color: #dfe3e8; }
