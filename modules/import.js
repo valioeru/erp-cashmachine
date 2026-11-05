@@ -252,6 +252,366 @@ function paginaRezultat(titlu, rezumat, erori) {
   return layout({ title: titlu, active: "/import", body });
 }
 
+// Importul facturilor dintr-un tabel (primul rând cu antet, apoi documentele):
+// din Excelul SmartBill (/import/facturi) sau, la achiziții, din raportul
+// „Documente furnizori” adus de punte (modules/punte.js → facturi_furnizori).
+// Același cod pentru amândouă, ca regulile de dedup (seria + numărul + data
+// la furnizori), partenerii și firma să nu ajungă să difere.
+const rezultatImport = (titlu, date, erori) => ({ titlu, date, erori: erori || [], create: Number((date || {})["Facturi importate"]) || 0 });
+async function importaFacturi(rows, { directie, firmaId }) {
+
+    const randHeader = gasesteRandHeader(rows, ALIASE);
+    const header = randHeader === -1 ? [] : rows[randHeader].map(normalizeHeader);
+    const idx = randHeader === -1 ? {} : mapColoane(header, ALIASE);
+    if (randHeader === -1 || idx.client === -1 || (idx.serie === -1 && idx.numar === -1 && idx.serieNumar === -1)) {
+      return rezultatImport(
+          "Import facturi — coloane nerecunoscute",
+          {
+            "Primele rânduri din fișier": rows
+              .slice(0, 6)
+              .map((r, i) => `${i + 1}: ${r.join(" | ")}`)
+              .join("\n") || "(gol)",
+          },
+          ["Nu am putut identifica sigur coloanele de client și serie/număr document. Verifică denumirile coloanelor sau spune-mi exact ce coloane are fișierul."]
+        );
+    }
+
+    const val = (row, cheie) => (idx[cheie] !== undefined && idx[cheie] !== -1 ? String(row[idx[cheie]] ?? "").trim() : "");
+
+    // ---- Pasul 1: citim tot fișierul în memorie și pregătim datele -------
+    const erori = [];
+    let sarite = 0;
+    const inregistrari = [];
+    const parteneriNoiDupaCheie = new Map();
+
+    for (let r = randHeader + 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
+
+      const numeClient = val(row, "client");
+      const documentText = idx.serieNumar !== -1 ? val(row, "serieNumar") : "";
+      const numarText = idx.numar !== -1 ? val(row, "numar") : "";
+
+      // Rândurile de total de la finalul exportului nu au nici client, nici
+      // document — le sărim fără să le numărăm ca erori.
+      if (!numeClient && !documentText && !numarText) {
+        sarite++;
+        continue;
+      }
+      if (!numeClient) {
+        erori.push(`Rând ${r + 1}: lipsește numele clientului/furnizorului.`);
+        continue;
+      }
+
+      let serie, numar;
+      // "Fact GT2620629", "Bon fiscal 27", "Proforma 12" — tipul documentului
+      // nu e serie; îl scoatem din față (rămâne în document_extern complet).
+      const documentCurat = documentText.replace(/^(factura|fact|bon\s*fiscal|bon|proforma|aviz)\s+/i, "");
+      if (idx.serie !== -1 && idx.numar !== -1) {
+        serie = val(row, "serie") || "IMP";
+        numar = parseInt(numarText.replace(/[^0-9]/g, ""), 10);
+      } else {
+        const m = documentCurat.match(/^([A-Za-z][A-Za-z\-_ ]*?)[\s\-\/]*([0-9]+)\s*$/);
+        if (m) {
+          serie = m[1].trim();
+          numar = parseInt(m[2], 10);
+        } else {
+          // Documente de furnizor cu formate arbitrare ("FF 2026/00123",
+          // "ABC-12/345"): seria = prefixul fără cifre (sau IMP), numărul =
+          // ULTIMUL grup de cifre. Identitatea reală a documentului rămâne
+          // oricum textul complet (document_extern), pe care se face dedupul.
+          const prefix = (documentCurat.match(/^[^0-9]+/) || [""])[0].replace(/[\s\-\/]+$/, "").trim();
+          const grupuri = documentCurat.match(/[0-9]+/g) || [];
+          serie = prefix || "IMP";
+          numar = parseInt(grupuri[grupuri.length - 1] || "", 10);
+        }
+      }
+      if (!numar || isNaN(numar)) {
+        // Documente fără niciun număr (unii furnizori externi emit așa).
+        // Le dăm un număr derivat din data documentului ca să nu piardă
+        // factura — identitatea rămâne documentul + furnizorul + data.
+        const dataFallback = idx.dataEmiterii !== -1 ? parseData(row[idx.dataEmiterii]) : null;
+        if (directie === "achizitie" && dataFallback) {
+          serie = "FARA-NR";
+          numar = Number(dataFallback.replace(/-/g, ""));
+        } else {
+          erori.push(`Rând ${r + 1}: nu am găsit un număr de document valid (${documentText || numarText || "gol"}).`);
+          continue;
+        }
+      }
+      // Unele documente de furnizor au numere uriașe (coduri de 15-20 de
+      // cifre) care depășesc INTEGER-ul bazei de date. Păstrăm ultimele 9
+      // cifre — identitatea reală a documentului e oricum textul complet
+      // (document_extern), pe care se face și dedupul.
+      if (numar > 2000000000) numar = Number(String(numar).slice(-9));
+
+      const moneda = (val(row, "moneda") || "RON").toUpperCase();
+      let faraTva = idx.faraTva !== -1 ? parseNumar(row[idx.faraTva]) : 0;
+      let tva = idx.tva !== -1 ? parseNumar(row[idx.tva]) : 0;
+      let total = idx.total !== -1 ? parseNumar(row[idx.total]) : faraTva + tva;
+      const totalValuta = total;
+      // Factură în valută: aducem totul în RON, folosind cursul implicit din
+      // raport (raportul dintre coloana în RON și coloana în valută).
+      const totalRon = idx.totalRon !== -1 ? parseNumar(row[idx.totalRon]) : 0;
+      let notaCurs = "";
+      if (moneda !== "RON" && totalRon && total) {
+        const curs = totalRon / total;
+        faraTva *= curs;
+        tva *= curs;
+        total = totalRon;
+      } else if (moneda !== "RON" && total && CURS_ESTIMATIV[moneda]) {
+        // raportul nu dă echivalentul RON — folosim curs estimativ, marcat
+        const curs = CURS_ESTIMATIV[moneda];
+        faraTva *= curs;
+        tva *= curs;
+        total *= curs;
+        notaCurs = ` · convertit cu curs estimativ ${curs} RON/${moneda}`;
+      }
+      const categoria = val(row, "categoria");
+
+      inregistrari.push({
+        rand: r + 1,
+        serie,
+        numar,
+        numeClient,
+        cui: cuiValid(val(row, "cui")),
+        adresa: val(row, "adresa"),
+        email: val(row, "email"),
+        telefon: val(row, "telefon"),
+        dataEmiterii: idx.dataEmiterii !== -1 ? parseData(row[idx.dataEmiterii]) : null,
+        dataScadenta: idx.dataScadenta !== -1 ? parseData(row[idx.dataScadenta]) : null,
+        faraTva,
+        tva,
+        total,
+        moneda,
+        totalValuta: moneda !== "RON" ? totalValuta : null,
+        documentExtern: documentText || `${serie}${numar}`,
+        indexSpv: val(row, "indexSpv"),
+        observatiiFisier: [val(row, "observatii"), categoria ? `Categoria: ${categoria}` : "", notaCurs.trim()].filter(Boolean).join(" · "),
+        agentDinObservatii: aratANumeDePersoana(val(row, "observatii")) ? val(row, "observatii") : null,
+        status: statusDinText(val(row, "status")),
+      });
+    }
+
+    if (!inregistrari.length) {
+      return rezultatImport("Import facturi — niciun rând valid", { "Rânduri sărite (totaluri/goale)": sarite }, erori);
+    }
+
+    // ---- Pasul 2: parteneri (o singură citire + inserare în lot) ---------
+    const tipDorit = directie === "achizitie" ? "furnizor" : "client";
+    const dupaCui = new Map();
+    const dupaNume = new Map();
+    for (const p of await db.prepare("SELECT id, nume, cui, tip FROM parteneri").all()) {
+      if (p.cui) dupaCui.set(String(p.cui).toLowerCase().trim(), p);
+      dupaNume.set(numeFirma.cheieNume(p.nume), p);
+    }
+
+    // Partenerii ignorați nu se nasc și nu se folosesc: rândurile lor cad
+    // înainte de orice. Altfel BSI și Rovenma s-ar întoarce la fiecare import,
+    // oricât i-am scoate din listă.
+    const ignorati = await ignorare.set();
+    let sariteIgnorate = 0;
+    const deCreat = new Map();
+    for (const inr of inregistrari) {
+      if (ignorare.esteIgnorat(ignorati, inr.numeClient, inr.cui)) {
+        inr.ignorat = true;
+        sariteIgnorate++;
+        continue;
+      }
+      const cheieCui = inr.cui.toLowerCase();
+      // Potrivirea pe nume trece printr-o cheie care ignora prefixul „SC".
+      // In baza numele e scris acum fara el, dar facturile vin in continuare
+      // cu „SC AQUILA SRL" — fara pasul asta s-ar crea un partener nou la
+      // fiecare import, adica exact duplicatul pe care il evitam.
+      const cheieNume = numeFirma.cheieNume(inr.numeClient);
+      const gasit = (cheieCui && dupaCui.get(cheieCui)) || dupaNume.get(cheieNume);
+      if (gasit) {
+        inr.partenerId = gasit.id;
+        if (gasit.tip !== tipDorit && gasit.tip !== "ambele") gasit.tip = "ambele", (inr.deMarcatAmbele = gasit.id);
+      } else {
+        const cheie = cheieCui || cheieNume;
+        if (!deCreat.has(cheie)) deCreat.set(cheie, inr);
+        inr.cheiePartenerNou = cheie;
+      }
+    }
+
+    const parteneriNoi = [...deCreat.values()];
+    for (let i = 0; i < parteneriNoi.length; i += 200) {
+      const lot = parteneriNoi.slice(i, i + 200);
+      const placeholders = lot.map(() => "(?, ?, ?, ?, ?, ?, 'import_smartbill')").join(", ");
+      const args = [];
+      for (const p of lot) args.push(tipDorit, p.numeClient, p.cui || null, p.email || null, p.telefon || null, p.adresa || null);
+      const inserate = await db
+        .prepare(`INSERT INTO parteneri (tip, nume, cui, email, telefon, adresa, sursa) VALUES ${placeholders} RETURNING id, nume, cui`)
+        .all(...args);
+      for (const nou of inserate) {
+        if (nou.cui) dupaCui.set(String(nou.cui).toLowerCase().trim(), nou);
+        dupaNume.set(numeFirma.cheieNume(nou.nume), nou);
+      }
+    }
+    for (const inr of inregistrari) {
+      if (inr.ignorat) continue;
+      if (inr.partenerId) continue;
+      const gasit = (inr.cui && dupaCui.get(inr.cui.toLowerCase())) || dupaNume.get(inr.numeClient.toLowerCase());
+      if (gasit) inr.partenerId = gasit.id;
+    }
+
+    // --- agenți: numele din Observații → agentul clientului --------------
+    // Rândurile vin cu factura cea mai nouă prima, deci prima mențiune
+    // câștigă (= cea mai recentă factură decide agentul curent al clientului).
+    const cacheAgenti = new Map();
+    const agentPerPartener = new Map();
+    let agentiAlocati = 0;
+    if (directie === "vanzare") {
+      for (const inr of inregistrari) {
+        if (!inr.partenerId || !inr.agentDinObservatii) continue;
+        if (agentPerPartener.has(inr.partenerId)) continue;
+        agentPerPartener.set(inr.partenerId, await gasesteSauCreeazaAgent(inr.agentDinObservatii, cacheAgenti));
+      }
+      for (const [partenerId, agentId] of agentPerPartener) {
+        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agentId, partenerId);
+        agentiAlocati++;
+      }
+      // Clienții rămași fără agent merg la administrator.
+      const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
+      if (admin) {
+        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE agent_id IS NULL AND tip IN ('client','ambele')").run(admin.id);
+      }
+    }
+
+    const deMarcat = [...new Set(inregistrari.map((i) => i.deMarcatAmbele).filter(Boolean))];
+    if (deMarcat.length) {
+      await db.prepare(`UPDATE parteneri SET tip = 'ambele' WHERE id IN (${deMarcat.map(() => "?").join(",")})`).run(...deMarcat);
+    }
+
+    // ---- Pasul 3: sărim facturile deja existente ------------------------
+    // Dedup pe DOUĂ chei: (serie, număr, partener) și (documentul original
+    // normalizat, partener). A doua contează la facturile de furnizor, unde
+    // "FF 2026/00123" și "FF2026-00123" sunt același document scris diferit —
+    // normalizarea (majuscule, fără spații/punctuație) le face egale, deci
+    // reimportul aceluiași fișier sau al unui export refăcut nu creează dubluri.
+    // Și aici numărul se normalizează: „0052" din fișier și 52 din bază sunt
+    // același număr. Fără asta, seriile cu zerouri în față (CSHMUPA) nu se
+    // recunosc niciodată ca fiind deja intrate — vezi lib/documente.js, unde
+    // stă și povestea celor 315.159 lei de vânzări fantomă.
+    const normDoc = (d) => cheiaDocumentExtern(d);
+    // La achiziții, cheile de dedup includ și DATA: numerele de bon fiscal și
+    // numerotarea furnizorilor mici se RECICLEAZĂ (același "Bon fiscal 27" de
+    // la METROREX apare în luni diferite = documente diferite, nu dubluri).
+    // La vânzări (numerotarea noastră, unică) data nu intră în cheie.
+    const cuData = directie === "achizitie";
+    const existenteRanduri = await db
+      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = ? AND firma_id = ?")
+      .all(directie, firmaId);
+    const existente = new Set();
+    const cheiPentru = (serie, numar, partenerId, docExtern, data) => {
+      const sufix = cuData ? `|${String(data || "").slice(0, 10)}` : "";
+      return [cheiaFacturii(serie, numar, partenerId) + sufix, `DOC|${normDoc(docExtern)}|${partenerId}${sufix}`];
+    };
+    for (const f of existenteRanduri) {
+      const [c1, c2] = cheiPentru(f.serie, f.numar, f.partener_id, f.document_extern, f.data_emiterii);
+      existente.add(c1);
+      if (f.document_extern) existente.add(c2);
+    }
+    const deInserat = [];
+    for (const inr of inregistrari) {
+      if (!inr.partenerId) {
+        erori.push(`Rând ${inr.rand}: nu am putut crea/găsi partenerul „${inr.numeClient}”.`);
+        continue;
+      }
+      const [cheie, cheieDoc] = cheiPentru(inr.serie, inr.numar, inr.partenerId, inr.documentExtern, inr.dataEmiterii);
+      if (existente.has(cheie) || existente.has(cheieDoc)) {
+        sarite++;
+        continue;
+      }
+      existente.add(cheie); // și în interiorul aceluiași fișier
+      existente.add(cheieDoc);
+      deInserat.push(inr);
+    }
+
+    // ---- Pasul 4: facturi + linii + plăți, în loturi ---------------------
+    let create = 0;
+    const azi = new Date().toISOString().slice(0, 10);
+    for (let i = 0; i < deInserat.length; i += 200) {
+      const lot = deInserat.slice(i, i + 200);
+      const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, 'smartbill', ?, ?, ?, ?, ?)").join(", ");
+      const args = [];
+      for (const f of lot) {
+        args.push(
+          f.serie,
+          f.numar,
+          f.partenerId,
+          directie,
+          f.dataEmiterii || azi,
+          f.dataScadenta || "",
+          f.status,
+          `Import SmartBill · document ${f.documentExtern}${f.observatiiFisier ? " · " + f.observatiiFisier : ""}`,
+          f.moneda,
+          f.totalValuta,
+          f.documentExtern,
+          f.indexSpv || null,
+          firmaId
+        );
+      }
+      const inserate = await db
+        .prepare(
+          `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, observatii, sursa_import, moneda, total_valuta, document_extern, index_spv, firma_id) VALUES ${ph} RETURNING id, serie, numar, partener_id`
+        )
+        .all(...args);
+
+      const dupaCheie = new Map(inserate.map((f) => [`${f.serie}|${f.numar}|${f.partener_id}`, f.id]));
+      const liniiArgs = [];
+      const liniiPh = [];
+      const platiArgs = [];
+      const platiPh = [];
+      for (const f of lot) {
+        const facturaId = dupaCheie.get(`${f.serie}|${f.numar}|${f.partenerId}`);
+        if (!facturaId) continue;
+        // Cota de TVA se reconstituie din raportul TVA/net, NU rotunjită la
+        // întreg: exportul e la nivel de document, iar o factură cu linii pe
+        // cote diferite (19% + 5%, sau 19% + scutit) dă un raport intermediar
+        // (ex. 18,73%). Rotunjit la întreg, totalul reconstituit n-ar mai da
+        // exact suma din SmartBill. Păstrăm 4 zecimale → totalul iese la ban.
+        const cotaTva = f.faraTva !== 0 ? Math.round((f.tva / f.faraTva) * 1000000) / 10000 : 0;
+        const pretLinie = f.faraTva !== 0 ? f.faraTva : f.total;
+        liniiPh.push("(?, ?, ?, ?, ?)");
+        liniiArgs.push(facturaId, `Conform document ${f.documentExtern} (import SmartBill, fără detaliu pe produse)`, 1, pretLinie, cotaTva);
+        // ATENȚIE: aici NU se mai naște nicio plată din statusul facturii.
+        // Se făcea până acum: dacă exportul zicea „platită", se scria o plată
+        // cu suma întreagă, pusă pe DATA FACTURII — o dată inventată, fiindcă
+        // exportul de facturi nu spune când s-a plătit. Din asta au ieșit două
+        // pagube: încasările cădeau în luna greșită (și comisioanele odată cu
+        // ele), iar când sosea și încasarea adevărată din raportul de încasări
+        // același ban se număra de două ori.
+        // Statusul „platita" se păstrează pe factură — informația nu se pierde
+        // — dar banii intră doar din raportul de încasări, cu data lor reală.
+        create++;
+      }
+      if (liniiPh.length) {
+        await db.prepare(`INSERT INTO facturi_linii (factura_id, denumire, cantitate, pret_unitar, cota_tva) VALUES ${liniiPh.join(", ")}`).run(...liniiArgs);
+      }
+      if (platiPh.length) {
+        await db.prepare(`INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES ${platiPh.join(", ")}`).run(...platiArgs);
+      }
+    }
+
+    const marcaje = await grup.marcheazaIntercompany();
+
+    return rezultatImport(
+        `Import facturi ${directie === "achizitie" ? "achiziție" : "vânzare"} — rezultat`,
+        {
+          "Facturi importate": create,
+          "Sărite (deja existau sau rânduri de total)": sarite,
+          "Sărite (parteneri ignorați)": sariteIgnorate,
+          "Parteneri noi creați": parteneriNoi.length,
+          "Clienți alocați pe agenți (din Observații)": directie === "vanzare" ? agentiAlocati : "—",
+          "Rânduri cu erori": erori.length,
+          "Facturi în interiorul grupului (eliminate din rapoarte)": marcaje.facturiMarcate,
+        },
+        erori
+      );
+}
+
 function register(router) {
   router.get("/import", async (ctx) => {
     const firmeGrup = await grup.listaFirmeOperationale();
@@ -502,364 +862,8 @@ function register(router) {
     }
     if (!rows.length) return send(ctx.res, 200, paginaRezultat("Import facturi", { Eroare: "Fișierul pare gol." }, []));
 
-    const randHeader = gasesteRandHeader(rows, ALIASE);
-    const header = randHeader === -1 ? [] : rows[randHeader].map(normalizeHeader);
-    const idx = randHeader === -1 ? {} : mapColoane(header, ALIASE);
-    if (randHeader === -1 || idx.client === -1 || (idx.serie === -1 && idx.numar === -1 && idx.serieNumar === -1)) {
-      return send(
-        ctx.res,
-        200,
-        paginaRezultat(
-          "Import facturi — coloane nerecunoscute",
-          {
-            "Primele rânduri din fișier": rows
-              .slice(0, 6)
-              .map((r, i) => `${i + 1}: ${r.join(" | ")}`)
-              .join("\n") || "(gol)",
-          },
-          ["Nu am putut identifica sigur coloanele de client și serie/număr document. Verifică denumirile coloanelor sau spune-mi exact ce coloane are fișierul."]
-        )
-      );
-    }
-
-    const val = (row, cheie) => (idx[cheie] !== undefined && idx[cheie] !== -1 ? String(row[idx[cheie]] ?? "").trim() : "");
-
-    // ---- Pasul 1: citim tot fișierul în memorie și pregătim datele -------
-    const erori = [];
-    let sarite = 0;
-    const inregistrari = [];
-    const parteneriNoiDupaCheie = new Map();
-
-    for (let r = randHeader + 1; r < rows.length; r++) {
-      const row = rows[r];
-      if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
-
-      const numeClient = val(row, "client");
-      const documentText = idx.serieNumar !== -1 ? val(row, "serieNumar") : "";
-      const numarText = idx.numar !== -1 ? val(row, "numar") : "";
-
-      // Rândurile de total de la finalul exportului nu au nici client, nici
-      // document — le sărim fără să le numărăm ca erori.
-      if (!numeClient && !documentText && !numarText) {
-        sarite++;
-        continue;
-      }
-      if (!numeClient) {
-        erori.push(`Rând ${r + 1}: lipsește numele clientului/furnizorului.`);
-        continue;
-      }
-
-      let serie, numar;
-      // "Fact GT2620629", "Bon fiscal 27", "Proforma 12" — tipul documentului
-      // nu e serie; îl scoatem din față (rămâne în document_extern complet).
-      const documentCurat = documentText.replace(/^(factura|fact|bon\s*fiscal|bon|proforma|aviz)\s+/i, "");
-      if (idx.serie !== -1 && idx.numar !== -1) {
-        serie = val(row, "serie") || "IMP";
-        numar = parseInt(numarText.replace(/[^0-9]/g, ""), 10);
-      } else {
-        const m = documentCurat.match(/^([A-Za-z][A-Za-z\-_ ]*?)[\s\-\/]*([0-9]+)\s*$/);
-        if (m) {
-          serie = m[1].trim();
-          numar = parseInt(m[2], 10);
-        } else {
-          // Documente de furnizor cu formate arbitrare ("FF 2026/00123",
-          // "ABC-12/345"): seria = prefixul fără cifre (sau IMP), numărul =
-          // ULTIMUL grup de cifre. Identitatea reală a documentului rămâne
-          // oricum textul complet (document_extern), pe care se face dedupul.
-          const prefix = (documentCurat.match(/^[^0-9]+/) || [""])[0].replace(/[\s\-\/]+$/, "").trim();
-          const grupuri = documentCurat.match(/[0-9]+/g) || [];
-          serie = prefix || "IMP";
-          numar = parseInt(grupuri[grupuri.length - 1] || "", 10);
-        }
-      }
-      if (!numar || isNaN(numar)) {
-        // Documente fără niciun număr (unii furnizori externi emit așa).
-        // Le dăm un număr derivat din data documentului ca să nu piardă
-        // factura — identitatea rămâne documentul + furnizorul + data.
-        const dataFallback = idx.dataEmiterii !== -1 ? parseData(row[idx.dataEmiterii]) : null;
-        if (directie === "achizitie" && dataFallback) {
-          serie = "FARA-NR";
-          numar = Number(dataFallback.replace(/-/g, ""));
-        } else {
-          erori.push(`Rând ${r + 1}: nu am găsit un număr de document valid (${documentText || numarText || "gol"}).`);
-          continue;
-        }
-      }
-      // Unele documente de furnizor au numere uriașe (coduri de 15-20 de
-      // cifre) care depășesc INTEGER-ul bazei de date. Păstrăm ultimele 9
-      // cifre — identitatea reală a documentului e oricum textul complet
-      // (document_extern), pe care se face și dedupul.
-      if (numar > 2000000000) numar = Number(String(numar).slice(-9));
-
-      const moneda = (val(row, "moneda") || "RON").toUpperCase();
-      let faraTva = idx.faraTva !== -1 ? parseNumar(row[idx.faraTva]) : 0;
-      let tva = idx.tva !== -1 ? parseNumar(row[idx.tva]) : 0;
-      let total = idx.total !== -1 ? parseNumar(row[idx.total]) : faraTva + tva;
-      const totalValuta = total;
-      // Factură în valută: aducem totul în RON, folosind cursul implicit din
-      // raport (raportul dintre coloana în RON și coloana în valută).
-      const totalRon = idx.totalRon !== -1 ? parseNumar(row[idx.totalRon]) : 0;
-      let notaCurs = "";
-      if (moneda !== "RON" && totalRon && total) {
-        const curs = totalRon / total;
-        faraTva *= curs;
-        tva *= curs;
-        total = totalRon;
-      } else if (moneda !== "RON" && total && CURS_ESTIMATIV[moneda]) {
-        // raportul nu dă echivalentul RON — folosim curs estimativ, marcat
-        const curs = CURS_ESTIMATIV[moneda];
-        faraTva *= curs;
-        tva *= curs;
-        total *= curs;
-        notaCurs = ` · convertit cu curs estimativ ${curs} RON/${moneda}`;
-      }
-      const categoria = val(row, "categoria");
-
-      inregistrari.push({
-        rand: r + 1,
-        serie,
-        numar,
-        numeClient,
-        cui: cuiValid(val(row, "cui")),
-        adresa: val(row, "adresa"),
-        email: val(row, "email"),
-        telefon: val(row, "telefon"),
-        dataEmiterii: idx.dataEmiterii !== -1 ? parseData(row[idx.dataEmiterii]) : null,
-        dataScadenta: idx.dataScadenta !== -1 ? parseData(row[idx.dataScadenta]) : null,
-        faraTva,
-        tva,
-        total,
-        moneda,
-        totalValuta: moneda !== "RON" ? totalValuta : null,
-        documentExtern: documentText || `${serie}${numar}`,
-        indexSpv: val(row, "indexSpv"),
-        observatiiFisier: [val(row, "observatii"), categoria ? `Categoria: ${categoria}` : "", notaCurs.trim()].filter(Boolean).join(" · "),
-        agentDinObservatii: aratANumeDePersoana(val(row, "observatii")) ? val(row, "observatii") : null,
-        status: statusDinText(val(row, "status")),
-      });
-    }
-
-    if (!inregistrari.length) {
-      return send(ctx.res, 200, paginaRezultat("Import facturi — niciun rând valid", { "Rânduri sărite (totaluri/goale)": sarite }, erori));
-    }
-
-    // ---- Pasul 2: parteneri (o singură citire + inserare în lot) ---------
-    const tipDorit = directie === "achizitie" ? "furnizor" : "client";
-    const dupaCui = new Map();
-    const dupaNume = new Map();
-    for (const p of await db.prepare("SELECT id, nume, cui, tip FROM parteneri").all()) {
-      if (p.cui) dupaCui.set(String(p.cui).toLowerCase().trim(), p);
-      dupaNume.set(numeFirma.cheieNume(p.nume), p);
-    }
-
-    // Partenerii ignorați nu se nasc și nu se folosesc: rândurile lor cad
-    // înainte de orice. Altfel BSI și Rovenma s-ar întoarce la fiecare import,
-    // oricât i-am scoate din listă.
-    const ignorati = await ignorare.set();
-    let sariteIgnorate = 0;
-    const deCreat = new Map();
-    for (const inr of inregistrari) {
-      if (ignorare.esteIgnorat(ignorati, inr.numeClient, inr.cui)) {
-        inr.ignorat = true;
-        sariteIgnorate++;
-        continue;
-      }
-      const cheieCui = inr.cui.toLowerCase();
-      // Potrivirea pe nume trece printr-o cheie care ignora prefixul „SC".
-      // In baza numele e scris acum fara el, dar facturile vin in continuare
-      // cu „SC AQUILA SRL" — fara pasul asta s-ar crea un partener nou la
-      // fiecare import, adica exact duplicatul pe care il evitam.
-      const cheieNume = numeFirma.cheieNume(inr.numeClient);
-      const gasit = (cheieCui && dupaCui.get(cheieCui)) || dupaNume.get(cheieNume);
-      if (gasit) {
-        inr.partenerId = gasit.id;
-        if (gasit.tip !== tipDorit && gasit.tip !== "ambele") gasit.tip = "ambele", (inr.deMarcatAmbele = gasit.id);
-      } else {
-        const cheie = cheieCui || cheieNume;
-        if (!deCreat.has(cheie)) deCreat.set(cheie, inr);
-        inr.cheiePartenerNou = cheie;
-      }
-    }
-
-    const parteneriNoi = [...deCreat.values()];
-    for (let i = 0; i < parteneriNoi.length; i += 200) {
-      const lot = parteneriNoi.slice(i, i + 200);
-      const placeholders = lot.map(() => "(?, ?, ?, ?, ?, ?, 'import_smartbill')").join(", ");
-      const args = [];
-      for (const p of lot) args.push(tipDorit, p.numeClient, p.cui || null, p.email || null, p.telefon || null, p.adresa || null);
-      const inserate = await db
-        .prepare(`INSERT INTO parteneri (tip, nume, cui, email, telefon, adresa, sursa) VALUES ${placeholders} RETURNING id, nume, cui`)
-        .all(...args);
-      for (const nou of inserate) {
-        if (nou.cui) dupaCui.set(String(nou.cui).toLowerCase().trim(), nou);
-        dupaNume.set(numeFirma.cheieNume(nou.nume), nou);
-      }
-    }
-    for (const inr of inregistrari) {
-      if (inr.ignorat) continue;
-      if (inr.partenerId) continue;
-      const gasit = (inr.cui && dupaCui.get(inr.cui.toLowerCase())) || dupaNume.get(inr.numeClient.toLowerCase());
-      if (gasit) inr.partenerId = gasit.id;
-    }
-
-    // --- agenți: numele din Observații → agentul clientului --------------
-    // Rândurile vin cu factura cea mai nouă prima, deci prima mențiune
-    // câștigă (= cea mai recentă factură decide agentul curent al clientului).
-    const cacheAgenti = new Map();
-    const agentPerPartener = new Map();
-    let agentiAlocati = 0;
-    if (directie === "vanzare") {
-      for (const inr of inregistrari) {
-        if (!inr.partenerId || !inr.agentDinObservatii) continue;
-        if (agentPerPartener.has(inr.partenerId)) continue;
-        agentPerPartener.set(inr.partenerId, await gasesteSauCreeazaAgent(inr.agentDinObservatii, cacheAgenti));
-      }
-      for (const [partenerId, agentId] of agentPerPartener) {
-        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE id = ?").run(agentId, partenerId);
-        agentiAlocati++;
-      }
-      // Clienții rămași fără agent merg la administrator.
-      const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
-      if (admin) {
-        await db.prepare("UPDATE parteneri SET agent_id = ? WHERE agent_id IS NULL AND tip IN ('client','ambele')").run(admin.id);
-      }
-    }
-
-    const deMarcat = [...new Set(inregistrari.map((i) => i.deMarcatAmbele).filter(Boolean))];
-    if (deMarcat.length) {
-      await db.prepare(`UPDATE parteneri SET tip = 'ambele' WHERE id IN (${deMarcat.map(() => "?").join(",")})`).run(...deMarcat);
-    }
-
-    // ---- Pasul 3: sărim facturile deja existente ------------------------
-    // Dedup pe DOUĂ chei: (serie, număr, partener) și (documentul original
-    // normalizat, partener). A doua contează la facturile de furnizor, unde
-    // "FF 2026/00123" și "FF2026-00123" sunt același document scris diferit —
-    // normalizarea (majuscule, fără spații/punctuație) le face egale, deci
-    // reimportul aceluiași fișier sau al unui export refăcut nu creează dubluri.
-    // Și aici numărul se normalizează: „0052" din fișier și 52 din bază sunt
-    // același număr. Fără asta, seriile cu zerouri în față (CSHMUPA) nu se
-    // recunosc niciodată ca fiind deja intrate — vezi lib/documente.js, unde
-    // stă și povestea celor 315.159 lei de vânzări fantomă.
-    const normDoc = (d) => cheiaDocumentExtern(d);
-    // La achiziții, cheile de dedup includ și DATA: numerele de bon fiscal și
-    // numerotarea furnizorilor mici se RECICLEAZĂ (același "Bon fiscal 27" de
-    // la METROREX apare în luni diferite = documente diferite, nu dubluri).
-    // La vânzări (numerotarea noastră, unică) data nu intră în cheie.
-    const cuData = directie === "achizitie";
-    const existenteRanduri = await db
-      .prepare("SELECT serie, numar, partener_id, document_extern, data_emiterii FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = ? AND firma_id = ?")
-      .all(directie, firmaId);
-    const existente = new Set();
-    const cheiPentru = (serie, numar, partenerId, docExtern, data) => {
-      const sufix = cuData ? `|${String(data || "").slice(0, 10)}` : "";
-      return [cheiaFacturii(serie, numar, partenerId) + sufix, `DOC|${normDoc(docExtern)}|${partenerId}${sufix}`];
-    };
-    for (const f of existenteRanduri) {
-      const [c1, c2] = cheiPentru(f.serie, f.numar, f.partener_id, f.document_extern, f.data_emiterii);
-      existente.add(c1);
-      if (f.document_extern) existente.add(c2);
-    }
-    const deInserat = [];
-    for (const inr of inregistrari) {
-      if (!inr.partenerId) {
-        erori.push(`Rând ${inr.rand}: nu am putut crea/găsi partenerul „${inr.numeClient}”.`);
-        continue;
-      }
-      const [cheie, cheieDoc] = cheiPentru(inr.serie, inr.numar, inr.partenerId, inr.documentExtern, inr.dataEmiterii);
-      if (existente.has(cheie) || existente.has(cheieDoc)) {
-        sarite++;
-        continue;
-      }
-      existente.add(cheie); // și în interiorul aceluiași fișier
-      existente.add(cheieDoc);
-      deInserat.push(inr);
-    }
-
-    // ---- Pasul 4: facturi + linii + plăți, în loturi ---------------------
-    let create = 0;
-    const azi = new Date().toISOString().slice(0, 10);
-    for (let i = 0; i < deInserat.length; i += 200) {
-      const lot = deInserat.slice(i, i + 200);
-      const ph = lot.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, 'smartbill', ?, ?, ?, ?, ?)").join(", ");
-      const args = [];
-      for (const f of lot) {
-        args.push(
-          f.serie,
-          f.numar,
-          f.partenerId,
-          directie,
-          f.dataEmiterii || azi,
-          f.dataScadenta || "",
-          f.status,
-          `Import SmartBill · document ${f.documentExtern}${f.observatiiFisier ? " · " + f.observatiiFisier : ""}`,
-          f.moneda,
-          f.totalValuta,
-          f.documentExtern,
-          f.indexSpv || null,
-          firmaId
-        );
-      }
-      const inserate = await db
-        .prepare(
-          `INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, observatii, sursa_import, moneda, total_valuta, document_extern, index_spv, firma_id) VALUES ${ph} RETURNING id, serie, numar, partener_id`
-        )
-        .all(...args);
-
-      const dupaCheie = new Map(inserate.map((f) => [`${f.serie}|${f.numar}|${f.partener_id}`, f.id]));
-      const liniiArgs = [];
-      const liniiPh = [];
-      const platiArgs = [];
-      const platiPh = [];
-      for (const f of lot) {
-        const facturaId = dupaCheie.get(`${f.serie}|${f.numar}|${f.partenerId}`);
-        if (!facturaId) continue;
-        // Cota de TVA se reconstituie din raportul TVA/net, NU rotunjită la
-        // întreg: exportul e la nivel de document, iar o factură cu linii pe
-        // cote diferite (19% + 5%, sau 19% + scutit) dă un raport intermediar
-        // (ex. 18,73%). Rotunjit la întreg, totalul reconstituit n-ar mai da
-        // exact suma din SmartBill. Păstrăm 4 zecimale → totalul iese la ban.
-        const cotaTva = f.faraTva !== 0 ? Math.round((f.tva / f.faraTva) * 1000000) / 10000 : 0;
-        const pretLinie = f.faraTva !== 0 ? f.faraTva : f.total;
-        liniiPh.push("(?, ?, ?, ?, ?)");
-        liniiArgs.push(facturaId, `Conform document ${f.documentExtern} (import SmartBill, fără detaliu pe produse)`, 1, pretLinie, cotaTva);
-        // ATENȚIE: aici NU se mai naște nicio plată din statusul facturii.
-        // Se făcea până acum: dacă exportul zicea „platită", se scria o plată
-        // cu suma întreagă, pusă pe DATA FACTURII — o dată inventată, fiindcă
-        // exportul de facturi nu spune când s-a plătit. Din asta au ieșit două
-        // pagube: încasările cădeau în luna greșită (și comisioanele odată cu
-        // ele), iar când sosea și încasarea adevărată din raportul de încasări
-        // același ban se număra de două ori.
-        // Statusul „platita" se păstrează pe factură — informația nu se pierde
-        // — dar banii intră doar din raportul de încasări, cu data lor reală.
-        create++;
-      }
-      if (liniiPh.length) {
-        await db.prepare(`INSERT INTO facturi_linii (factura_id, denumire, cantitate, pret_unitar, cota_tva) VALUES ${liniiPh.join(", ")}`).run(...liniiArgs);
-      }
-      if (platiPh.length) {
-        await db.prepare(`INSERT INTO plati (factura_id, suma, data, metoda, observatii) VALUES ${platiPh.join(", ")}`).run(...platiArgs);
-      }
-    }
-
-    const marcaje = await grup.marcheazaIntercompany();
-
-    send(
-      ctx.res,
-      200,
-      paginaRezultat(
-        `Import facturi ${directie === "achizitie" ? "achiziție" : "vânzare"} — rezultat`,
-        {
-          "Facturi importate": create,
-          "Sărite (deja existau sau rânduri de total)": sarite,
-          "Sărite (parteneri ignorați)": sariteIgnorate,
-          "Parteneri noi creați": parteneriNoi.length,
-          "Clienți alocați pe agenți (din Observații)": directie === "vanzare" ? agentiAlocati : "—",
-          "Rânduri cu erori": erori.length,
-          "Facturi în interiorul grupului (eliminate din rapoarte)": marcaje.facturiMarcate,
-        },
-        erori
-      )
-    );
+    const rez = await importaFacturi(rows, { directie, firmaId });
+    send(ctx.res, 200, paginaRezultat(rez.titlu, rez.date, rez.erori));
   });
   // ---- 2. Parteneri (import dedicat) ------------------------------------
   router.post("/import/parteneri", async (ctx) => {
@@ -1821,4 +1825,4 @@ function register(router) {
   });
 }
 
-module.exports = { register };
+module.exports = { register, importaFacturi };

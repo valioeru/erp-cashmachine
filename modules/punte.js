@@ -1466,6 +1466,40 @@ function cifreCui(x) {
   return String(x || "").replace(/\D/g, "");
 }
 
+// Facturile de la furnizori, din raportul SmartBill „Documente furnizori"
+// (punte/sincronizare.js → S.furnizori). Vali, 05.11.2026: „mai fă update pe
+// … facturi furnizori" — în ERP erau doar până pe 16.09, din Excel.
+//
+// Rândurile vin cum le arată tabelul raportului: { antet, celule, firma }.
+// Se refac într-un tabel (antetul, apoi documentele) și trec prin ACELAȘI
+// import ca Excelul din /import, pe direcția „achiziție": aceleași reguli de
+// dedup (seria + numărul + data, fiindcă furnizorii mici își reciclează
+// numerele), aceiași parteneri, aceeași firmă. Nu e un al doilea import care
+// să ajungă să numere altfel.
+async function ingestFacturiFurnizori(randuri) {
+  const toate = Array.isArray(randuri) ? randuri : [];
+  const prim = toate.find((r) => r && Array.isArray(r.antet) && r.antet.length);
+  if (!prim) return { create: 0, sarite: toate.length, erori: ["Lotul n-are antetul raportului: nu știu ce coloană ce e."] };
+  const celula = (c) => String(c == null ? "" : c).trim();
+  const tabel = [prim.antet.map(celula)];
+  for (const r of toate) if (r && Array.isArray(r.celule)) tabel.push(r.celule.map(celula));
+  const firme = await db.prepare("SELECT id, nume FROM firme").all().catch(() => []);
+  // Fără diacritice, punctuație și majuscule: „CASH MACHINE S.R.L." = „Cash
+  // Machine SRL", iar „NOASTRĂ" = „Noastra" (ă-ul nu se pierde din cheie).
+  const cheie = (v) => String(v || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const f = firme.find((x) => cheie(x.nume) && cheie(x.nume) === cheie(prim.firma));
+  const firmaId = f ? Number(f.id) : ((await require("../lib/grup").firmaImplicita()) || {}).id || null;
+  const rez = await require("./import").importaFacturi(tabel, { directie: "achizitie", firmaId });
+  return {
+    create: rez.create,
+    sarite: Number((rez.date || {})["Sărite (deja existau sau rânduri de total)"]) || 0,
+    titlu: rez.titlu,
+    firma_id: firmaId,
+    detalii: rez.date,
+    erori: (rez.erori || []).slice(0, 50),
+  };
+}
+
 async function ingestParteneri(randuri) {
   // Tipul vine pe FIECARE rând, pus de scriptul din browser („ești pe lista de
   // clienți sau pe cea de furnizori?"), nu ca parametru al lotului: așa un
@@ -1541,6 +1575,7 @@ const HANDLERE = {
   categorii_produse: ingestCategoriiProduse,
   facturi: ingestFacturi,
   facturi_linii: ingestFacturiLinii,
+  facturi_furnizori: ingestFacturiFurnizori,
   balante: ingestBalante,
   plati_furnizori: ingestPlatiFurnizori,
   angajati: ingestAngajati,
