@@ -149,6 +149,7 @@ egal("prefix scris mic și cu spațiu → tot străin", L.limbaImplicita("de 123
 egal("numere englezești", [L.scrieNumar(84672, "en", 0, 3), L.scrieNumar(0.23, "en", 2, 4), L.scrieNumar(22649.76, "en", 2, 2)], ["84,672", "0.23", "22,649.76"]);
 egal("numere românești", [L.scrieNumar(84672, "ro", 0, 3), L.scrieNumar(0.23, "ro", 2, 4)], ["84.672", "0,23"]);
 egal("unitățile românești în engleză", ["rola", "rolă", "buc", "palet", "ml", "mp", "tonă"].map((u) => L.umInLimba(u, "en")), ["roll", "roll", "pcs", "pallet", "lin. m", "m²", "t"]);
+egal("cutia și baxul NU sunt același lucru", ["cutie", "bax", "baxuri", "sac", "pachet"].map((u) => L.umInLimba(u, "en")), ["box", "case", "cases", "bag", "pack"]);
 egal("unitățile care nu sunt românești rămân", ["PALLET", "kg", "set", ""].map((u) => L.umInLimba(u, "en")), ["PALLET", "kg", "set", ""]);
 egal("în română unitatea rămâne cum a fost scrisă", L.umInLimba("rola", "ro"), "rola");
 egal("orarul de descărcare, în ambele limbi", [L.orarDescarcare("ro"), L.orarDescarcare("en")],
