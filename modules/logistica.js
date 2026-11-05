@@ -16,6 +16,15 @@ const db = require("../lib/db");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const T = require("../lib/transport-cost");
+const MOD = require("../lib/livrare-modalitate");
+
+// Agenții de vânzări care pot duce marfa (modalitatea „agent").
+async function agentiVanzari() {
+  return db
+    .prepare("SELECT id, nume FROM utilizatori WHERE activ = 1 AND rol = 'vanzari' ORDER BY nume")
+    .all()
+    .catch(() => []);
+}
 
 function azi() {
   return new Date().toISOString().slice(0, 10);
@@ -135,10 +144,11 @@ function register(router) {
     const args = filtru === "toate" || filtru === "deschise" ? [] : [filtru];
     const curse = await db
       .prepare(
-        `SELECT c.*, t.nume AS transportator, t.fel AS transportator_fel, co.numar AS comanda_numar
+        `SELECT c.*, t.nume AS transportator, t.fel AS transportator_fel, co.numar AS comanda_numar, ag.nume AS agent_nume
            FROM transport_curse c
            LEFT JOIN transportatori t ON t.id = c.transportator_id
            LEFT JOIN comenzi co ON co.id = c.comanda_id
+           LEFT JOIN utilizatori ag ON ag.id = c.agent_id
            ${unde}
            ORDER BY CASE c.stare WHEN 'de_alocat' THEN 0 WHEN 'alocata' THEN 1 WHEN 'in_curs' THEN 2 ELSE 3 END,
                     c.data_livrare_ceruta NULLS LAST, c.id DESC
@@ -162,7 +172,9 @@ function register(router) {
             : ""),
         c.transportator
           ? esc(c.transportator) + (c.transportator_fel === "intern" ? ' <span class="badge gri" style="font-size:10px">mașina noastră</span>' : "")
-          : "—",
+          : MOD.eticheta(c, c.agent_nume)
+            ? esc(MOD.eticheta(c, c.agent_nume))
+            : "—",
         c.cost_estimat == null ? "—" : lei(c.cost_estimat),
         stareEticheta(c.stare),
       ];
@@ -299,10 +311,12 @@ function register(router) {
     const id = parseInt(ctx.params.id, 10);
     const c = await db
       .prepare(
-        `SELECT c.*, t.nume AS transportator, t.fel AS transportator_fel, co.numar AS comanda_numar
+        `SELECT c.*, t.nume AS transportator, t.fel AS transportator_fel, co.numar AS comanda_numar,
+                co.agent_id AS comanda_agent_id, ag.nume AS agent_nume
            FROM transport_curse c
            LEFT JOIN transportatori t ON t.id = c.transportator_id
            LEFT JOIN comenzi co ON co.id = c.comanda_id
+           LEFT JOIN utilizatori ag ON ag.id = c.agent_id
           WHERE c.id = ?`
       )
       .get(id);
@@ -322,6 +336,10 @@ function register(router) {
     const r = T.clasament(optiuni, exp, { azi: ziua, retur_cu_marfa: adevarat(c.retur_cu_marfa) });
 
     const alocata = c.stare !== "de_alocat" && c.transportator_id;
+    // Dusă altfel decât cu un transportator din clasament (client, agent,
+    // camionul sau duba noastră, altă modalitate).
+    const altfel = c.stare !== "de_alocat" && !c.transportator_id && MOD.ETICHETE[c.modalitate];
+    const agenti = await agentiVanzari();
 
     const randuri = r.variante.map((v, i) => {
       const recomandat = r.recomandat && r.recomandat.transportator_id === v.transportator_id && r.recomandat.fel === v.fel;
@@ -425,19 +443,67 @@ function register(router) {
           ? `<div class="toolbar" style="margin-top:14px;gap:8px;flex-wrap:wrap">
                ${
                  c.stare === "alocata"
-                   ? `<form method="post" action="/logistica/cursa/${c.id}/pe-drum" class="inline-form">
-                        <button class="btn" type="submit">Pe drum — a plecat mașina</button>
-                      </form>`
+                   ? MOD.arePeDrum(c)
+                     ? `<form method="post" action="/logistica/cursa/${c.id}/pe-drum" class="inline-form">
+                          <button class="btn" type="submit">Pe drum — a plecat mașina</button>
+                        </form>`
+                     : ""
                    : `<span class="badge albastru">pe drum din ${esc(String(c.pornita_la || "").slice(0, 16))}</span>`
                }
                <form method="post" action="/logistica/cursa/${c.id}/livrata" class="inline-form" style="gap:6px">
                  <input type="date" name="data" value="${esc(ziua)}" title="Ziua în care a ajuns la client">
-                 <button class="btn ${c.stare === "alocata" ? "secondary" : ""}" type="submit">Livrată — a ajuns la client</button>
+                 <button class="btn ${c.stare === "alocata" && MOD.arePeDrum(c) ? "secondary" : ""}" type="submit">${
+                   MOD.arePeDrum(c) ? "Livrată — a ajuns la client" : "Ridicată — clientul a luat marfa"
+                 }</button>
                </form>
                ${c.comanda_id ? '<span style="font-size:12px;color:var(--text-muted)">Comanda clientului trece singură „în livrare”, apoi „livrată”.</span>' : ""}
              </div>`
           : c.stare === "livrata"
             ? `<p style="margin-top:14px"><span class="badge verde">livrată</span> pe ${esc(c.data_livrare_reala || "")}${c.livrata_de ? " · marcată de " + esc(c.livrata_de) : ""}</p>`
+            : ""
+      }
+
+      ${
+        altfel
+          ? `<p style="margin-top:14px">
+               Livrare: <strong>${esc(MOD.eticheta(c, c.agent_nume))}</strong>, aleasă pe ${esc(c.alocata_la || "")} de ${esc(c.alocata_de || "")}${
+                 c.cost_estimat != null ? `, cost estimat ${lei(c.cost_estimat)}` : ""
+               }.
+             </p>
+             <form method="post" action="/logistica/cursa/${c.id}/dezaloca" class="inline-form">
+               <button class="link-btn danger" type="submit">Schimbă modalitatea</button>
+             </form>`
+          : c.stare === "de_alocat"
+            ? `<details class="card" style="margin-top:16px;max-width:820px"${ctx.query.modalitate ? " open" : ""}>
+                 <summary style="cursor:pointer;font-weight:600">Altfel decât cu un transportator: ridicată de client, agent, camion propriu, dubă…</summary>
+                 <form method="post" action="/logistica/cursa/${c.id}/modalitate" class="form" style="margin-top:10px">
+                   <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+                     <label class="field" style="flex:1 1 230px;margin:0"><span>Cum ajunge marfa</span>
+                       <select name="modalitate" required onchange="var v=this.value;this.form.querySelectorAll('[data-pentru]').forEach(function(e){e.style.display=e.getAttribute('data-pentru').split(' ').indexOf(v)>=0?'':'none'})">
+                         <option value="">— alege —</option>
+                         ${MOD.MODALITATI.map(([v, et]) => `<option value="${v}">${esc(et)}</option>`).join("")}
+                       </select>
+                     </label>
+                     <label class="field" data-pentru="agent" style="flex:1 1 200px;margin:0;display:none"><span>Agentul</span>
+                       <select name="agent_id">
+                         <option value="">— alege —</option>
+                         ${agenti.map((a) => `<option value="${a.id}"${Number(a.id) === Number(c.comanda_agent_id) ? " selected" : ""}>${esc(a.nume)}</option>`).join("")}
+                       </select>
+                     </label>
+                     <label class="field" data-pentru="alta" style="flex:1 1 260px;margin:0;display:none"><span>Care e (scrie liber)</span>
+                       <input name="modalitate_text" maxlength="200" placeholder="ex. curier rapid, transportul furnizorului">
+                     </label>
+                     <label class="field" data-pentru="camion duba agent alta" style="flex:0 1 170px;margin:0;display:none"><span>Mașina / șoferul (opțional)</span>
+                       <input name="vehicul" maxlength="80" placeholder="B 123 ABC">
+                     </label>
+                     <label class="field" data-pentru="camion duba agent alta" style="flex:0 1 130px;margin:0;display:none"><span>Cost estimat (lei)</span>
+                       <input name="cost" inputmode="decimal" placeholder="opțional">
+                     </label>
+                     <button class="btn" type="submit">Salvează</button>
+                   </div>
+                   <p class="mic" style="color:var(--text-muted);margin:8px 0 0">Cursa trece pe „alocată”. Apoi o închizi cu „Livrată” (sau „Ridicată”, când o ia clientul), iar comanda clientului merge mai departe singură.</p>
+                 </form>
+               </details>`
             : ""
       }
 
@@ -616,6 +682,30 @@ function register(router) {
     redirect(ctx.res, `/logistica/cursa/${id}`);
   });
 
+  // Altfel decât cu un transportator din clasament. Cursa trece pe „alocată",
+  // ca să se poată închide cu „Livrată" — și comanda clientului odată cu ea.
+  router.post("/logistica/cursa/:id/modalitate", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/logistica");
+    const id = parseInt(ctx.params.id, 10);
+    const c = await db.prepare("SELECT id, stare FROM transport_curse WHERE id = ?").get(id);
+    if (!c) return redirect(ctx.res, "/logistica");
+    if (c.stare !== "de_alocat") {
+      return redirect(ctx.res, `/logistica/cursa/${id}?eroare=` + encodeURIComponent("Cursa e deja alocată. Schimbă întâi transportatorul sau modalitatea."));
+    }
+    const m = MOD.citeste(ctx.body, await agentiVanzari());
+    if (!m.ok) return redirect(ctx.res, `/logistica/cursa/${id}?modalitate=1&eroare=` + encodeURIComponent(m.eroare));
+    await db.prepare("UPDATE transport_rezervari SET stare = 'anulata' WHERE cursa_id = ?").run(id);
+    await db
+      .prepare(
+        `UPDATE transport_curse SET modalitate = ?, modalitate_text = ?, agent_id = ?, vehicul = ?, cost_estimat = ?,
+                                    transportator_id = NULL, oferta_id = NULL, tarif_id = NULL, motiv_alegere = NULL,
+                                    data_livrare_estimata = NULL, stare = 'alocata', alocata_de = ?, alocata_la = ?
+          WHERE id = ? AND stare = 'de_alocat'`
+      )
+      .run(m.modalitate, m.modalitate_text, m.agent_id, m.vehicul, m.cost, ctx.user ? ctx.user.nume : null, azi(), id);
+    redirect(ctx.res, `/logistica/cursa/${id}`);
+  });
+
   router.post("/logistica/cursa/:id/dezaloca", async (ctx) => {
     if (!poate(ctx.user)) return redirect(ctx.res, "/logistica");
     const id = parseInt(ctx.params.id, 10);
@@ -626,7 +716,8 @@ function register(router) {
       .prepare(
         `UPDATE transport_curse SET transportator_id = NULL, oferta_id = NULL, tarif_id = NULL, cost_estimat = NULL,
                                     data_livrare_estimata = NULL, motiv_alegere = NULL, stare = 'de_alocat',
-                                    alocata_de = NULL, alocata_la = NULL
+                                    alocata_de = NULL, alocata_la = NULL,
+                                    modalitate = NULL, modalitate_text = NULL, agent_id = NULL, vehicul = NULL
           WHERE id = ?`
       )
       .run(id);
