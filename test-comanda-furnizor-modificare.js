@@ -244,7 +244,7 @@ const liniiDe = (id) => q("SELECT * FROM comenzi_furnizor_linii WHERE comanda_id
   are(lista.corp, "1.590,35 EUR", "euro: 1.500 + 90,35 (460 / 5,0912)");
 
   console.log("\nPDF:");
-  const pdf = await cer("/procurement/comenzi/:id/pdf", { params: { id: String(id1) }, query: {} });
+  const pdf = await cer("/procurement/comenzi/:id/pdf", { params: { id: String(id1) }, query: { limba: "ro" } });
   egal("PDF-ul răspunde 200", pdf.cod, 200);
   are(pdf.corp, "COMANDĂ DE ACHIZIȚIE");
   are(pdf.corp, "CF-2098-0001");
@@ -252,9 +252,19 @@ const liniiDe = (id) => q("SELECT * FROM comenzi_furnizor_linii WHERE comanda_id
   are(pdf.corp, "Industriestr. 1, Greven", "adresa furnizorului");
   are(pdf.corp, "Mirella", "cine a întocmit-o");
   are(pdf.corp, "Echivalent în lei: 20.683,00 lei");
+  are(pdf.corp, "Orar de descărcare:", "orarul de descărcare pe PDF");
   const pdfEn = await cer("/procurement/comenzi/:id/pdf", { params: { id: String(id1) }, query: { limba: "en", tipar: "1" } });
   are(pdfEn.corp, "PURCHASE ORDER");
   are(pdfEn.corp, "window.print()", "cu tipar=1 se deschide fereastra de tipar");
+  const pdfImplicit = await cer("/procurement/comenzi/:id/pdf", { params: { id: String(id1) }, query: {} });
+  are(pdfImplicit.corp, "PURCHASE ORDER", "furnizor cu CIF DE…: fără limbă cerută, PDF-ul e în engleză");
+  const pdfRoImplicit = await cer("/procurement/comenzi/:id/pdf", { params: { id: String(id2) }, query: {} });
+  are(pdfRoImplicit.corp, "COMANDĂ DE ACHIZIȚIE", "furnizor cu CIF RO…: PDF-ul e în română");
+  are(p1.corp, "/pdf?limba=en&amp;tipar=1", "pe comanda furnizorului german, „Export PDF” e în engleză");
+  are(p1.corp, "Export PDF (engleză)");
+  are(p1.corp, "PDF în română", "varianta în română rămâne la un click");
+  are(p2.corp, "/pdf?limba=ro&amp;tipar=1", "la furnizorul românesc, „Export PDF” e în română");
+  are(p2.corp, "PDF în engleză");
 
   // ------------------------------------------------- modificarea
   console.log("\nCine poate modifica:");
@@ -461,7 +471,13 @@ const liniiDe = (id) => q("SELECT * FROM comenzi_furnizor_linii WHERE comanda_id
   if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(comanda(idA).trimisa_la)) ok("ora trimiterii e scrisă întreagă: " + comanda(idA).trimisa_la);
   else rau("ora trimiterii arată ciudat", comanda(idA).trimisa_la);
   // Formularul de trimitere apare doar unde furnizorul are email: comanda 1.
-  const pEn = await cer("/procurement/comenzi/:id", { params: { id: String(id1) }, query: { limba: "en" } });
+  // Furnizorul ei are CIF german, deci mesajul pornește în engleză singur.
+  const pEn = await cer("/procurement/comenzi/:id", { params: { id: String(id1) }, query: {} });
+  are(pEn.corp, "furnizor din afară — pornește în engleză");
+  are(pEn.corp, "Unloading hours: Monday to Friday, 09:00 – 17:30", "orarul în emailul în engleză");
+  const pRo = await cer("/procurement/comenzi/:id", { params: { id: String(id1) }, query: { limba: "ro" } });
+  are(pRo.corp, "Bună ziua, CFMTEST WBV GMBH", "cu limba=ro, mesajul e în română");
+  are(pRo.corp, "Orar de descărcare: luni – vineri, 09:00 – 17:30", "orarul în emailul în română");
   are(pEn.corp, "Purchase order CF-2098-", "subiectul în engleză");
   are(pEn.corp, "Please find below our purchase order", "mesajul în engleză");
 

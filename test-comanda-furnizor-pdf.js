@@ -61,6 +61,8 @@ are(ro, "Echivalent în lei: 114.042,88 lei, la cursul de 5,0912 lei/EUR (inform
 nuAre(ro, "Echivalent în euro", "fără „echivalent în euro” la o comandă în euro");
 are(ro, "Warehouse B2", "observațiile (adresa de livrare)");
 are(ro, "Mirella", "cine a întocmit-o");
+are(ro, "<strong>Orar de descărcare:</strong> luni&nbsp;–&nbsp;vineri, 09:00&nbsp;–&nbsp;17:30", "orarul de descărcare, fără să se rupă pe două rânduri");
+are(ro, "Jud. Ilfov", "adresa în română rămâne cum e");
 are(ro, "<title>Comanda CF-2026-0001 - WBV WESTDEUTSCHER", "titlul = numele fișierului PDF");
 are(ro, 'href="/procurement/comenzi/7/pdf?limba=en"', "legătura spre varianta în engleză");
 are(ro, "@media print", "bara de butoane nu se tipărește");
@@ -73,9 +75,18 @@ else ok("poziția fără preț nu are niciun 0,00");
 
 console.log("\nÎn engleză:");
 const en = P.pagina({ comanda: COMANDA, linii: LINII, limba: "en", emitent: { nume: "Mirella" }, tipar: true });
-for (const ce of ["PURCHASE ORDER", "Supplier", "Unit price", "to be confirmed", "Total of the items with a price", "1 item without a price", "Equivalent in RON: 114.042,88 RON, at the rate of 5,0912 RON/EUR (for reference)", "Please confirm receipt of this order", "Prepared by", '<html lang="en">', "Purchase order CF-2026-0001"]) are(en, ce);
+for (const ce of ["PURCHASE ORDER", "Supplier", "Unit price", "to be confirmed", "Total of the items with a price", "1 item without a price", "Equivalent in RON: 114,042.88 RON, at the rate of 5.0912 RON/EUR (for reference)", "22,400.00", "Please confirm receipt of this order", "Prepared by", '<html lang="en">', "Purchase order CF-2026-0001", "<strong>Unloading hours:</strong> Monday to Friday, 09:00&nbsp;–&nbsp;17:30", "Voluntari, Ilfov, Romania"]) are(en, ce);
+nuAre(en, "Jud.", "fără „Jud.” în adresa din engleză");
+nuAre(en, "22.400,00", "fără numere scrise românește în engleză");
 for (const ro_ of ["COMANDĂ", "Furnizor", "de confirmat", "Vă rugăm", "Întocmit", "Echivalent în", "informativ"]) nuAre(en, ro_, "nicio română: „" + ro_ + "”");
 are(en, "window.print()", "cu tipar=1 se deschide singură fereastra din care se salvează PDF-ul");
+
+console.log("\nUnitățile românești se traduc în engleză:");
+const role = { comanda: COMANDA, linii: [{ denumire: "Packtape", cantitate: 84672, um: "rola", pret_unitar: 0.23 }] };
+are(P.pagina(Object.assign({ limba: "en" }, role)), '<td class="um">roll</td>', "rola → roll");
+are(P.pagina(Object.assign({ limba: "en" }, role)), "84,672", "84.672 role → 84,672 în engleză");
+are(P.pagina(role), '<td class="um">rola</td>', "în română rămâne rola");
+are(P.pagina(role), "84.672", "în română 84.672");
 
 console.log("\nComandă în lei — echivalentul e în euro:");
 const lei = P.pagina({ comanda: Object.assign({}, COMANDA, { moneda: "RON", curs: null, curs_eur: 5 }), linii: [{ denumire: "Granulă", cantitate: 1000, um: "kg", pret_unitar: 7.5 }] });

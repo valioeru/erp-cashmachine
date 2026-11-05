@@ -124,7 +124,7 @@ const corpEn = L.corpEmail({
   furnizor: "WBV",
   limba: "en",
 });
-for (const ce of ["Dear WBV", "purchase order CF-2026-0004", "price to be confirmed", "812,50 EUR/PALLET", "Requested delivery date: 2026-11-20", "Please confirm receipt", "Best regards"]) {
+for (const ce of ["Dear WBV", "purchase order CF-2026-0004", "price to be confirmed", "812.50 EUR/PALLET", "Requested delivery date: 2026-11-20", "Unloading hours: Monday to Friday, 09:00 – 17:30", "Please confirm receipt", "Best regards"]) {
   if (corpEn.includes(ce)) ok("în engleză scrie „" + ce + "”");
   else rau("lipsește din emailul în engleză", ce);
 }
@@ -132,9 +132,27 @@ if (/Vă |Bună ziua|preț de confirmat|Cu stimă/.test(corpEn)) rau("a rămas r
 else ok("nicio frază în română în emailul în engleză");
 if (/Order total/.test(corpEn)) rau("„Order total” deși o poziție n-are preț");
 else ok("în engleză, totalul spune și el că lipsește un preț");
+are("Orar de descărcare: luni – vineri, 09:00 – 17:30");
+const corpRole = L.corpEmail({ comanda: { numar: "CF-1", moneda: "EUR" }, linii: [{ denumire: "Packtape", cantitate: 84672, um: "rola", pret_unitar: 0.23 }], limba: "en" });
+if (corpRole.includes("84,672 roll — 0.23 EUR/roll") && corpRole.includes("Order total: 19,474.56 EUR")) ok("în engleză: 84,672 roll, 0.23 EUR, total 19,474.56 — numere și unități englezești");
+else rau("numerele sau unitățile nu sunt englezești", corpRole.split("\n").slice(3, 7).join(" / "));
 egal("fără `limba`, rămâne în română ca înainte",
   L.corpEmail({ comanda: { numar: "X", moneda: "RON" }, linii: [{ denumire: "a", cantitate: 1, pret_unitar: 1 }] }).startsWith("Bună ziua"),
   true);
+
+console.log("\nLimba documentelor pentru furnizor:");
+egal("CIF german → engleză", L.limbaImplicita("DE123927422"), "en");
+egal("CIF românesc cu RO → română", L.limbaImplicita("RO27244210"), "ro");
+egal("CIF românesc doar cifre → română", L.limbaImplicita("27244210"), "ro");
+egal("fără CIF → română", L.limbaImplicita(null), "ro");
+egal("prefix scris mic și cu spațiu → tot străin", L.limbaImplicita("de 123 927"), "en");
+egal("numere englezești", [L.scrieNumar(84672, "en", 0, 3), L.scrieNumar(0.23, "en", 2, 4), L.scrieNumar(22649.76, "en", 2, 2)], ["84,672", "0.23", "22,649.76"]);
+egal("numere românești", [L.scrieNumar(84672, "ro", 0, 3), L.scrieNumar(0.23, "ro", 2, 4)], ["84.672", "0,23"]);
+egal("unitățile românești în engleză", ["rola", "rolă", "buc", "palet", "ml", "mp", "tonă"].map((u) => L.umInLimba(u, "en")), ["roll", "roll", "pcs", "pallet", "lin. m", "m²", "t"]);
+egal("unitățile care nu sunt românești rămân", ["PALLET", "kg", "set", ""].map((u) => L.umInLimba(u, "en")), ["PALLET", "kg", "set", ""]);
+egal("în română unitatea rămâne cum a fost scrisă", L.umInLimba("rola", "ro"), "rola");
+egal("orarul de descărcare, în ambele limbi", [L.orarDescarcare("ro"), L.orarDescarcare("en")],
+  ["Orar de descărcare: luni – vineri, 09:00 – 17:30", "Unloading hours: Monday to Friday, 09:00 – 17:30"]);
 
 console.log("\nNumărul tastat în câmp (cantitate, preț):");
 egal("virgulă", L.numarDinCamp("1,51", 4), { ok: true, valoare: 1.51 });
