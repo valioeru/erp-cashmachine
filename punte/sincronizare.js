@@ -235,7 +235,20 @@
         );
       }
       log(`${cale}: cules`, { ms: Date.now() - t0, cereri: urma.cereri, petecLaMs: urma.petecLaMs });
-      return JSON.parse(raspuns);
+      // Titlurile coloanelor, din tabelul pornit (și cele ascunse, aliniate cu
+      // aaData) — pentru rapoartele pe care ERP-ul le citește după antet.
+      let antet = null;
+      try {
+        const w = cadru.contentWindow;
+        const toate = (w.jQuery && w.jQuery.fn && w.jQuery.fn.dataTableSettings) || [];
+        const s = toate.find((x) => x && x.sAjaxSource && x.aoColumns) || null;
+        if (s) antet = s.aoColumns.map((c) => String(c.sTitle || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+      } catch (e) {
+        antet = null;
+      }
+      const j = JSON.parse(raspuns);
+      if (antet && j && typeof j === "object") Object.defineProperty(j, "__antet", { value: antet, enumerable: false });
+      return j;
     } finally {
       cadru.remove();
     }
@@ -337,6 +350,27 @@
       randuri.push({ factura: facturi.join(", "), data: doarZi(r[5]), suma: r[6], moneda: r[7], metoda: r[1], client: r[3] });
     }
     await trimite("incasari", randuri, `sincronizare ${firma} — încasări ${zile} zile`);
+    return randuri.length;
+  };
+
+  // ---- facturi de la furnizori ---------------------------------------------
+  // Raportul „Documente furnizori". ERP-ul îl citește după antet (ca pe
+  // Excelul din /import), deci aici doar se curăță celulele de HTML.
+  // `{ uscat: true }` întoarce antetul și primele rânduri, fără să trimită —
+  // pentru verificarea formatului înainte de prima sincronizare.
+  S.furnizori = async function (zile, o) {
+    const j = await raport(
+      "/achizitii/raport/documente_furnizori/",
+      /\/achizitii\/raport\/documente_furnizori\/ajax/,
+      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "5000" },
+      reincarca(null)
+    );
+    const antet = j.__antet || [];
+    const firma = S.firma();
+    const curat = (v) => String(v == null ? "" : v).replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+    const randuri = (j.aaData || []).map((r) => ({ antet, celule: (Array.isArray(r) ? r : Object.values(r)).map(curat), firma }));
+    if (o && o.uscat) return { antet, primele: randuri.slice(0, 3).map((x) => x.celule), total: randuri.length, total_raport: j.iTotalRecords };
+    await trimite("facturi_furnizori", randuri, `sincronizare ${firma} — facturi furnizori ${zile} zile`);
     return randuri.length;
   };
 
