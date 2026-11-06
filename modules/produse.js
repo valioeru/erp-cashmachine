@@ -5,6 +5,57 @@ const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const fuziune = require("../lib/produse-fuziune");
 const produsRapid = require("../lib/produs-rapid");
+const codbare = require("../lib/codbare");
+const SCAN = require("../lib/scan");
+const { poateAccesa } = require("../lib/auth");
+
+// Stocul unui produs, cum e el de fapt: un singur depozit, CT-Park, plus
+// gestiunea separată din fulfillment. Vali, 05.11.2026: „E doar CT-Park, un
+// singur depozit, și o gestiune separată în fulfillment. Niciun alt depozit
+// separat." Tabela veche „depozite" (miscari_stoc) nu mai e stocul nimănui.
+//
+// CT-Park: liniile paleților încă în depozit, fiecare palet cu locurile lui —
+// un palet lat stă pe două-trei locuri, de-aia locurile se lipesc în JS, nu
+// prin JOIN (ar înmulți cantitatea). Fulfillment: suma mișcărilor, fără cele
+// de probă.
+async function stocProdus(produsId) {
+  const paleti = await db
+    .prepare(
+      `SELECT p.id, p.cod, p.data_intrare, pl.lot, pl.um, SUM(pl.cantitate) AS cantitate
+         FROM ct_palet_linii pl JOIN ct_paleti p ON p.id = pl.palet_id
+        WHERE pl.produs_id = ? AND p.data_iesire IS NULL AND pl.cantitate > 0
+        GROUP BY p.id, p.cod, p.data_intrare, pl.lot, pl.um
+        ORDER BY p.data_intrare, p.id`
+    )
+    .all(produsId)
+    .catch(() => []);
+  const ids = [...new Set(paleti.map((p) => Number(p.id)))];
+  const locuri = new Map();
+  if (ids.length) {
+    const r = await db
+      .prepare(
+        `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id
+          WHERE o.palet_id IN (${ids.map(() => "?").join(",")}) ORDER BY l.camp, l.pozitie`
+      )
+      .all(...ids)
+      .catch(() => []);
+    for (const x of r) {
+      const k = Number(x.palet_id);
+      if (!locuri.has(k)) locuri.set(k, []);
+      locuri.get(k).push(x.adresa);
+    }
+  }
+  const ff = await db
+    .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ff_miscari WHERE produs_id = ? AND COALESCE(test, 0) = 0")
+    .get(produsId)
+    .catch(() => null);
+  const ctPark = paleti.reduce((s, p) => s + Number(p.cantitate || 0), 0);
+  return {
+    paleti: paleti.map((p) => Object.assign({}, p, { adrese: locuri.get(Number(p.id)) || [] })),
+    ctPark: Math.round(ctPark * 1000) / 1000,
+    fulfillment: Math.round(Number((ff && ff.c) || 0) * 1000) / 1000,
+  };
+}
 
 // Cine scoate un produs din provizorat. Achizițiile (rolul „depozit") și
 // adminul — adică exact cine are de unde să-i ia codul și prețul de achiziție.
@@ -530,15 +581,14 @@ function register(router) {
     const produs = await db.prepare("SELECT * FROM produse WHERE id = ?").get(ctx.params.id);
     if (!produs) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/produse", body: "<p>Produs inexistent.</p>" }));
 
-    const stocPeDepozite = await db
-      .prepare(
-        `SELECT d.denumire AS depozit,
-                COALESCE(SUM(CASE WHEN m.tip='intrare' THEN m.cantitate ELSE -m.cantitate END), 0) AS stoc
-         FROM miscari_stoc m JOIN depozite d ON d.id = m.depozit_id
-         WHERE m.produs_id = ? GROUP BY d.id, d.denumire ORDER BY d.denumire`
-      )
-      .all(produs.id);
-    const stocTotal = stocPeDepozite.reduce((s, r) => s + Number(r.stoc || 0), 0);
+    const stoc = await stocProdus(produs.id);
+    const um = produs.unitate_masura || "";
+    const cantStoc = (v) => `${Number(v || 0).toLocaleString("ro-RO", { maximumFractionDigits: 3 })} ${esc(um)}`;
+    // Codul de pe bare: cel din nomenclator, iar fără el, cel generat; un produs
+    // fără niciun cod se scanează ca „P-<id>" (lib/scan.js).
+    const codAfisat = String(produs.cod || "").trim() || String(produs.cod_generat || "").trim();
+    const codScan = SCAN.codProdus(codAfisat, produs.id);
+    const vedePaleti = poateAccesa(ctx.user, "/stocuri/ct-park");
 
     const fluxuriProdus = await db.prepare("SELECT id, cod, denumire FROM fluxuri WHERE activ = 1 ORDER BY cod").all();
 
@@ -564,21 +614,33 @@ function register(router) {
     const body = `
       <div class="detail-box">
         <div class="detail-grid">
-          <div><div class="k">Cod</div>${esc(produs.cod) || "—"}</div>
+          <div><div class="k">Cod</div>${esc(codAfisat) || "—"}</div>
           <div><div class="k">Preț vânzare</div>${money(produs.pret_vanzare)}</div>
           <div><div class="k">Preț achiziție</div>${money(produs.pret_achizitie)}</div>
           <div><div class="k">TVA</div>${esc(produs.cota_tva)}%</div>
           <div><div class="k">Stoc minim</div>${esc(produs.stoc_minim)} ${esc(produs.unitate_masura)}</div>
-          <div><div class="k">Stoc total curent</div>${esc(stocTotal)} ${esc(produs.unitate_masura)}</div>
+          <div><div class="k">Stoc CT-Park</div>${cantStoc(stoc.ctPark)}</div>
+          <div><div class="k">Stoc fulfillment</div>${cantStoc(stoc.fulfillment)}</div>
           ${furnizor ? `<div><div class="k">Furnizor</div><a href="/parteneri/${Number(furnizor.id)}">${esc(furnizor.nume)}</a></div>` : ""}
         </div>
-        <div class="toolbar" style="margin-top:10px"><a href="/produse/${produs.id}/editare" class="btn secondary small">Editează datele</a></div>
+        <div class="cod-produs-bare" style="margin-top:12px">${codbare.svg(codScan, { inalt: 11, modul: 0.33, latimeMax: 90 })}</div>
+        <div class="toolbar" style="margin-top:10px">
+          <a href="/produse/${produs.id}/editare" class="btn secondary small">Editează datele</a>
+          <a href="/produse/${produs.id}/eticheta" class="btn secondary small" target="_blank">Etichetă cu cod de bare</a>
+        </div>
       </div>
 
-      <h2>Stoc pe depozite / gestiuni</h2>
+      <h2>Stoc în CT-Park</h2>
+      <p style="color:var(--text-muted);font-size:13px">Un singur depozit, CT-Park: paleții pe care e produsul acum, cu locul lor. Fulfillment-ul e gestiune separată — ${cantStoc(stoc.fulfillment)} acolo.</p>
       ${table(
-        ["Depozit", "Cantitate"],
-        stocPeDepozite.map((r) => [esc(r.depozit), r.stoc])
+        ["Palet", "Unde stă", "Cantitate", "Lot", "Intrat"],
+        stoc.paleti.map((p) => [
+          vedePaleti ? `<a href="/stocuri/ct-park/palet/${Number(p.id)}">${esc(p.cod)}</a>` : esc(p.cod),
+          p.adrese.length ? esc(p.adrese.join(", ")) : '<span style="color:var(--text-muted)">fără loc</span>',
+          `${Number(p.cantitate || 0).toLocaleString("ro-RO", { maximumFractionDigits: 3 })} ${esc(p.um || um)}`,
+          esc(p.lot || "—"),
+          esc(String(p.data_intrare || "").slice(0, 10)),
+        ])
       )}
 
       <h2>Rețetă de fabricație (componente)</h2>
@@ -650,6 +712,43 @@ function register(router) {
       }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Produs: ${produs.denumire}`, active: "/produse", body }));
+  });
+
+  // Eticheta produsului: 100 × 150 mm, ca etichetele de palet și AWB-urile
+  // din depozit — iese pe aceeași Zebra. Denumirea mare și codul de bare,
+  // pentru cutii, rafturi, mostre: scanată, deschide produsul (05.11.2026,
+  // „cod de bare pe orice etichetă, să poți scana produsul").
+  router.get("/produse/:id/eticheta", async (ctx) => {
+    const produs = await db.prepare("SELECT id, cod, cod_generat, denumire, unitate_masura FROM produse WHERE id = ?").get(ctx.params.id);
+    if (!produs) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/produse", body: "<p>Produs inexistent.</p>" }));
+    const cod = String(produs.cod || "").trim() || String(produs.cod_generat || "").trim();
+    const codScan = SCAN.codProdus(cod, produs.id);
+    const lung = String(produs.denumire || "").length;
+    const marime = lung > 90 ? 15 : lung > 55 ? 19 : 24;
+    const html = `<!doctype html><html lang="ro"><head><meta charset="utf-8">
+      <title>Etichetă ${esc(codScan)}</title>
+      <style>
+        @page { size: 100mm 150mm; margin: 0; }
+        * { box-sizing: border-box; }
+        body { margin:0; font-family: system-ui, "Segoe UI", Arial, sans-serif; background:#eceff3; }
+        .et { width:100mm; height:150mm; padding:7mm; background:#fff; margin:0 auto; border:1px solid #ccc; display:flex; flex-direction:column; overflow:hidden; }
+        .sus { display:flex; justify-content:space-between; font-size:9pt; letter-spacing:.04em; border-bottom:1.5pt solid #000; padding-bottom:2mm; font-weight:700; }
+        .den { font-size:${marime}pt; font-weight:700; line-height:1.15; margin-top:8mm; overflow-wrap:anywhere; }
+        .um { font-size:12pt; color:#444; margin-top:3mm; }
+        .jos { margin-top:auto; text-align:center; border-top:1.5pt solid #000; padding-top:4mm; line-height:0; }
+        .jos .cod-bare { display:inline-block; max-width:100%; height:auto; }
+        .bara { text-align:center; padding:10px; background:#fff; border-bottom:1px solid #ccc; }
+        @media print { .bara { display:none; } .et { border:0; } body { background:#fff; } }
+      </style></head><body>
+      <div class="bara"><button onclick="window.print()">Tipărește</button> <a href="/produse/${produs.id}">înapoi la produs</a></div>
+      <div class="et">
+        <div class="sus"><span>CASH MACHINE</span><span>PRODUS</span></div>
+        <div class="den">${esc(produs.denumire)}</div>
+        <div class="um">UM: ${esc(produs.unitate_masura || "buc")}</div>
+        <div class="jos">${codbare.svg(codScan, { inalt: 24, modul: 0.45, latimeMax: 86 })}</div>
+      </div>
+      </body></html>`;
+    send(ctx.res, 200, html);
   });
 
   // Fluxul tehnologic al produsului. De aici il mostenesc comenzile, si de la

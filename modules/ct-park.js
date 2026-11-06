@@ -18,6 +18,7 @@ const XLS = require("../lib/export-xlsx");
 const CI = require("../lib/ct-intrare");
 const CPL = require("../lib/ct-palet-linii");
 const codbare = require("../lib/codbare");
+const SCAN = require("../lib/scan");
 const CTM = require("../lib/ct-mutare");
 
 // Planul halei. Erau constante scrise în sursă — acum sunt DATE: se pot
@@ -4213,9 +4214,11 @@ function register(router) {
       .filter(Boolean);
     if (!ids.length) return redirect(ctx.res, "/stocuri/ct-park/paleti");
 
+    // Codul produsului: cel din nomenclator, iar unde lipsește, cel generat —
+    // e cel care ajunge în codul de bare și pe care îl găsește scanarea.
     const paleti = await db
       .prepare(
-        `SELECT p.*, pr.denumire AS produs, pr.cod AS produs_cod
+        `SELECT p.*, pr.denumire AS produs, COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
            FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
           WHERE p.id IN (${ids.map(() => "?").join(",")}) ORDER BY p.id`
       )
@@ -4243,6 +4246,18 @@ function register(router) {
     const hi = new Map();
     for (const i of iesiri || []) if (!hi.has(Number(i.palet_id))) hi.set(Number(i.palet_id), i);
 
+    // Avizul emis la ieșire, ca eticheta să-i poarte codul de bare: scanat de
+    // pe palet, deschide avizul.
+    const idAvize = [...new Set([...hi.values()].map((i) => nr(i.aviz_id)).filter(Boolean))];
+    const avizeIesiri = new Map();
+    if (idAvize.length) {
+      const randuri = await db
+        .prepare(`SELECT id, serie, numar FROM avize WHERE id IN (${idAvize.map(() => "?").join(",")})`)
+        .all(...idAvize)
+        .catch(() => []);
+      for (const a of randuri || []) avizeIesiri.set(Number(a.id), a);
+    }
+
     // Eticheta de IEȘIRE e A4, cu cod de bare și cu denumirea întreagă a
     // fiecărui produs care a plecat (Vali, 03.11.2026: „Eticheta de aici să
     // fie A4 și să conțină și cod de bare … și denumire produs completă”).
@@ -4265,7 +4280,8 @@ function register(router) {
       const idsIes = iesitiIds.map((id) => Number(hi.get(id).id));
       const dinIesiri = await db
         .prepare(
-          `SELECT il.iesire_id, COALESCE(pr.denumire, NULLIF(il.produs_text, '')) AS produs, pr.cod AS produs_cod, il.cantitate, il.um
+          `SELECT il.iesire_id, il.produs_id, COALESCE(pr.denumire, NULLIF(il.produs_text, '')) AS produs,
+                  COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod, il.cantitate, il.um
              FROM ct_iesiri_linii il LEFT JOIN produse pr ON pr.id = il.produs_id
             WHERE il.iesire_id IN (${idsIes.map(() => "?").join(",")}) AND il.cantitate > 0 ORDER BY il.id`
         )
@@ -4273,7 +4289,8 @@ function register(router) {
         .catch(() => []);
       const dinPaleti = await db
         .prepare(
-          `SELECT pl.palet_id, COALESCE(pr.denumire, NULLIF(pl.produs_text, '')) AS produs, pr.cod AS produs_cod, pl.cantitate, pl.um, pl.lot
+          `SELECT pl.palet_id, pl.produs_id, COALESCE(pr.denumire, NULLIF(pl.produs_text, '')) AS produs,
+                  COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod, pl.cantitate, pl.um, pl.lot
              FROM ct_palet_linii pl LEFT JOIN produse pr ON pr.id = pl.produs_id
             WHERE pl.palet_id IN (${semne}) AND pl.cantitate > 0 ORDER BY pl.id`
         )
@@ -4297,7 +4314,15 @@ function register(router) {
           const gasite = liniiIesire.get(Number(p.id)) || [];
           const linii = gasite.length
             ? gasite
-            : [{ produs: p.produs || p.produs_text, produs_cod: p.produs_cod, cantitate: p.cantitate, um: p.um }];
+            : [{ produs: p.produs || p.produs_text, produs_id: p.produs_id, produs_cod: p.produs_cod, cantitate: p.cantitate, um: p.um }];
+          // Codurile documentelor de pe palet: comanda pe care pleacă și avizul
+          // care o însoțește. Scanate de pe etichetă, le deschid în ERP.
+          const codCom = peComanda ? SCAN.codComanda(ies.comanda_id) : "";
+          const avz = avizeIesiri.get(nr(ies.aviz_id));
+          const codAvz = avz ? SCAN.codAviz(avz.serie, avz.numar) : "";
+          const blocDoc = (titlu, cod) =>
+            cod ? `<div class="et-cod-doc"><div class="et-cod-titlu">${esc(titlu)}</div>${codbare.svg(cod, { inalt: 9, modul: 0.33, latimeMax: 62 })}</div>` : "";
+          const coduriDoc = codCom || codAvz ? `${blocDoc("Cod comandă", codCom)}${blocDoc(`Aviz ${avz ? `${avz.serie} ${avz.numar}` : ""}`, codAvz)}` : "";
           // Cu multe produse pe un palet, literele se micșorează ca totul să
           // încapă pe foaie — dar denumirea nu se taie niciodată.
           const marime = linii.length <= 1 ? "" : linii.length <= 3 ? " et-marfa-cateva" : " et-marfa-multe";
@@ -4315,19 +4340,20 @@ function register(router) {
             }
             <div class="et-marfa${marime}">
               ${linii
-                .map(
-                  (l) => `<div class="et-linie">
+                .map((l) => {
+                  const codP = SCAN.codProdus(l.produs_cod, l.produs_id);
+                  return `<div class="et-linie">
                     <div class="et-produs">${esc(l.produs || "—")}</div>
                     <div class="et-linie-jos">
                       <div class="et-cant">${esc(cantText(l.cantitate, l.um))}</div>
                       ${
-                        l.produs_cod
-                          ? `<div class="et-cod-produs"><div class="et-cod-titlu">Cod produs</div>${codbare.svg(l.produs_cod, { inalt: 13, modul: 0.33 })}</div>`
+                        codP
+                          ? `<div class="et-cod-produs"><div class="et-cod-titlu">Cod produs</div>${codbare.svg(codP, { inalt: 13, modul: 0.33 })}</div>`
                           : ""
                       }
                     </div>
-                  </div>`
-                )
+                  </div>`;
+                })
                 .join("")}
             </div>
             <table class="et-tab">
@@ -4338,9 +4364,17 @@ function register(router) {
             </table>
             ${ies.observatii ? `<div class="et-obs">${esc(ies.observatii)}</div>` : ""}
             <div class="et-jos et-jos-cod">
-              <div class="et-cod-titlu">Cod palet</div>
-              ${codbare.svg(p.cod, { inalt: 22, modul: 0.5, subtitlu: false })}
-              <div class="et-cod-palet">${esc(p.cod)}</div>
+              ${/* Codurile comenzii și avizului stau jos, lângă codul paletului, nu
+                   pe un rând al lor: o denumire de trei rânduri umple deja foaia, iar
+                   un rând în plus scotea eticheta pe a doua foaie A4. */ ""}
+              <div class="et-jos-rand">
+                <div class="et-jos-stanga">
+                  <div class="et-cod-titlu">Cod palet</div>
+                  ${codbare.svg(p.cod, { inalt: 22, modul: 0.5, subtitlu: false })}
+                  <div class="et-cod-palet">${esc(p.cod)}</div>
+                </div>
+                ${coduriDoc ? `<div class="et-jos-doc">${coduriDoc}</div>` : ""}
+              </div>
             </div>
           </div>`;
         }
@@ -4352,14 +4386,19 @@ function register(router) {
           <div class="et-adresa">${esc(adr[0] || "—")}</div>
           ${adr.length > 1 ? `<div class="et-adrese-plus">+ ${adr.slice(1).map((a) => esc(a)).join(" + ")}</div>` : ""}
           <div class="et-produs">${esc(p.produs || p.produs_text || "—")}</div>
-          <div class="et-cod">${esc(p.produs_cod || "")}</div>
+          ${
+            // Codul produsului, scanabil: textul lui e chiar sub bare.
+            SCAN.codProdus(p.produs_cod, p.produs_id)
+              ? `<div class="et-cod-mic">${codbare.svg(SCAN.codProdus(p.produs_cod, p.produs_id), { inalt: 9, modul: 0.33, latimeMax: 86 })}</div>`
+              : `<div class="et-cod">${esc(p.produs_cod || "")}</div>`
+          }
           <table class="et-tab">
             <tr><td>Cantitate</td><td><strong>${nr(p.cantitate) ? nr(p.cantitate).toLocaleString("ro-RO") + " " + esc(p.um || "") : "—"}</strong></td></tr>
             <tr><td>Lot</td><td>${esc(p.lot || "—")}</td></tr>
             <tr><td>Categorie</td><td>${esc(p.categorie || "—")}</td></tr>
             <tr><td>Locuri</td><td>${adr.length}</td></tr>
           </table>
-          <div class="et-jos">${esc(p.cod)}</div>
+          <div class="et-jos et-jos-palet">${codbare.svg(p.cod, { inalt: 13, modul: 0.4, subtitlu: false, latimeMax: 86 })}<div>${esc(p.cod)}</div></div>
         </div>`;
       })
       .join("");
@@ -4419,6 +4458,16 @@ function register(router) {
            înaintea fiecărui SVG de tip block — o etichetă ieșea pe trei foi A4. */
         .et-cod-produs .cod-bare, .et-jos-cod .cod-bare { display:inline-block; vertical-align:bottom; }
         .et-cod-titlu { font-size:9pt; color:#555; letter-spacing:.08em; text-transform:uppercase; font-family:system-ui,"Segoe UI",Arial,sans-serif; font-weight:600; margin-bottom:1mm; }
+        /* Codurile de bare de pe eticheta de depozit și cele ale comenzii și
+           avizului de pe eticheta de ieșire. Tot inline-block, din același
+           motiv ca mai sus. */
+        .et-cod-mic { margin-top:2mm; line-height:0; }
+        .et-cod-mic .cod-bare, .et-jos-palet .cod-bare, .et-cod-doc .cod-bare { display:inline-block; vertical-align:bottom; max-width:100%; height:auto; }
+        .et-jos-palet { padding-top:2.5mm; letter-spacing:.06em; }
+        .et-jos-palet div { margin-top:1mm; }
+        .et-jos-rand { display:flex; justify-content:center; align-items:flex-end; flex-wrap:wrap; gap:4mm 8mm; }
+        .et-jos-doc { display:flex; flex-direction:column; gap:3mm; }
+        .et-cod-doc { text-align:center; }
         .et-marfa-cateva .et-produs { font-size:20pt; }
         .et-marfa-cateva .et-cant { font-size:22pt; }
         .et-marfa-multe .et-linie { padding:2.5mm 0; }

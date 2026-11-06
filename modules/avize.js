@@ -127,6 +127,33 @@ async function citeste(id) {
   return { aviz, linii };
 }
 
+// AWB-ul transportului care duce marfa de pe aviz, ca să intre pe aviz cu
+// codul lui de bare. Întâi cursa născută din ieșirea care a emis avizul — aia
+// e sigur a lui. Altfel, cursa comenzii, dar numai dacă e una singură cu AWB:
+// la o comandă livrată în tranșe, fiecare tranșă are avizul și AWB-ul ei, și
+// a le pune pe toate pe fiecare aviz ar însemna să greșim pe toate.
+async function awbAviz(aviz) {
+  if (!aviz) return [];
+  const prinIesire = await db
+    .prepare(
+      `SELECT DISTINCT TRIM(tc.awb) AS awb FROM transport_curse tc
+         JOIN ct_iesiri i ON i.id = tc.iesire_id
+        WHERE i.aviz_id = ? AND COALESCE(TRIM(tc.awb), '') <> '' AND tc.stare <> 'anulata'`
+    )
+    .all(aviz.id)
+    .catch(() => []);
+  if (prinIesire.length) return prinIesire.map((r) => r.awb);
+  if (!nr(aviz.comanda_id)) return [];
+  const prinComanda = await db
+    .prepare(
+      `SELECT DISTINCT TRIM(awb) AS awb FROM transport_curse
+        WHERE comanda_id = ? AND COALESCE(TRIM(awb), '') <> '' AND stare <> 'anulata'`
+    )
+    .all(nr(aviz.comanda_id))
+    .catch(() => []);
+  return prinComanda.length === 1 ? [prinComanda[0].awb] : [];
+}
+
 // Subnavigația potrivită omului: Financiar pentru cine îl are, altfel
 // Depozit. Cine are doar bifa „Avize” vede pagina fără subnavigație.
 function subnav(user, activ) {
@@ -405,7 +432,7 @@ function register(router) {
     ]
       .filter(Boolean)
       .join(" ");
-    send(ctx.res, 200, AV.pagina(aviz, linii, { bara }));
+    send(ctx.res, 200, AV.pagina(aviz, linii, { bara, awb: await awbAviz(aviz) }));
   }
   router.get("/avize/:id", async (ctx) => {
     await foaie(ctx, { href: "/avize", text: "toate avizele", anulare: true });
@@ -429,4 +456,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, emite, citeste, contor, aziRo };
+module.exports = { register, emite, citeste, contor, aziRo, awbAviz };
