@@ -112,6 +112,8 @@ require("./modules/comision").register(router);
 require("./modules/ghid").register(router);
 require("./modules/noutati").register(router);
 require("./modules/curs").register(router);
+// Scanarea codurilor de bare: /scan deschide ce poartă codul (modules/scan.js).
+require("./modules/scan").register(router);
 
 router.get("/healthz", (ctx) => {
   ctx.res.writeHead(200, { "Content-Type": "text/plain" });
