@@ -1120,7 +1120,10 @@ function register(router) {
           stari.eticheta(c.status),
           money(c.total),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
-        ])
+        ]),
+        // Filtre ca în Excel pe fiecare coloană (Vali, 06.11.2026: „Filtre te
+        // rog pe datele din capul de tabel"). Vezi lib/filtre-tabel.js.
+        { filtre: "comenzi" }
       )}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comenzi", active: "/comenzi", body }));
