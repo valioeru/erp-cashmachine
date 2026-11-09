@@ -1768,7 +1768,7 @@ function register(router) {
       ? await db.prepare("SELECT id, numar, stare, finalizata_la, primita_de FROM receptii WHERE id = ?").get(c.receptie_id).catch(() => null)
       : null;
     const vanzarea = c.comanda_id
-      ? await db.prepare("SELECT id, numar, status FROM comenzi WHERE id = ?").get(c.comanda_id).catch(() => null)
+      ? await db.prepare("SELECT id, numar, status, branding FROM comenzi WHERE id = ?").get(c.comanda_id).catch(() => null)
       : null;
 
     // Costul comenzii, din rețeta produsului. Registrul de comenzi n-are
@@ -1955,6 +1955,11 @@ function register(router) {
           }</div>
           <div><div class="k">Livrare promisă</div>${esc(c.data_livrare || c.data_solicitata || "—")}</div>
           <div><div class="k">Finalizată la</div>${esc(c.data_finalizare || "—")}</div>
+          ${
+            // Brandingul cerut pe comanda clientului (Vali, 09.11.2026): producția
+            // știe de aici dacă imprimă Cash Machine sau face produsul nepersonalizat.
+            vanzarea ? `<div><div class="k">Branding</div>${require("../lib/branding").eticheta(vanzarea)}</div>` : ""
+          }
         </div>
         ${
           ["finalizata", "facturata"].includes(c.status)

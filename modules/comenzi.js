@@ -16,6 +16,25 @@ const K = require("../lib/comanda-config");
 // Modificarea unei comenzi și urma pe care o lasă. Regula de comparație și cea
 // de „cine are voie” sunt în lib/comanda-istoric.js, cu testul lor.
 const IST = require("../lib/comanda-istoric");
+const BR = require("../lib/branding");
+
+// Brandingul comenzii (Vali, 09.11.2026): obligatoriu, ca livrarea parțială.
+// Același câmp pe comanda nouă și la modificare.
+function campBranding(v) {
+  const ales = BR.valid(v && v.branding);
+  return `<fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
+        <legend style="font-size:13px;padding:0 4px">Produsele comenzii sunt:</legend>
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-right:18px">
+          <input type="radio" name="branding" value="cash_machine" required${ales === "cash_machine" ? " checked" : ""}>
+          <span>Cu branding Cash Machine</span>
+        </label>
+        <label style="display:inline-flex;align-items:center;gap:6px">
+          <input type="radio" name="branding" value="nepersonalizat" required${ales === "nepersonalizat" ? " checked" : ""}>
+          <span>Nepersonalizate</span>
+        </label>
+        <div class="mic" style="color:var(--text-muted);margin-top:6px">Producția și depozitul văd alegerea pe comanda lor.</div>
+      </fieldset>`;
+}
 
 // Furnizorul de pe linie: obligatoriu doar când produsul e pe stoc, ales
 // dintre furnizorii paleților (Vali, 06.11.2026). Regula în
@@ -382,16 +401,42 @@ function blocLinii(produse, linii, { vechi } = {}) {
       <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>`;
 }
 
-function lineRowsScript(produse, familii, eAdmin) {
-  const date = (produse || []).map((p) => [
-    p.id,
-    String(p.cod || ""),
-    String(p.denumire || ""),
-    Number(p.pret_vanzare || 0),
-    String(p.categorie || "").trim(),
-    "", // locul cheii de căutare, umplută mai jos
-    String(p.unitate_masura || "").trim(),
-  ]);
+// Stocul de sub fiecare produs, în căutarea de pe comandă. Vali, 09.11.2026,
+// cu poza listei: „aici vreau să fie mic jos și stocul pe produsul respectiv".
+// Aceleași cifre ca „Stoc la zi" (lib/stoc-produse.js): stocul din CT-Park și
+// cât e liber după comenzi și rezervări. Dacă nu se poate citi, căutarea merge
+// mai departe fără el — o comandă nu se oprește pentru un rând de informație.
+async function stocPentruCautare() {
+  try {
+    const SP = require("../lib/stoc-produse");
+    await require("../lib/rezervari-agenti").actualizeaza();
+    const m = new Map();
+    for (const r of await SP.citeste({ vedeTot: false })) if (r.produs_id) m.set(Number(r.produs_id), SP.textScurt(r));
+    return m;
+  } catch (e) {
+    console.error("[comenzi] stocul pentru căutare:", e.message);
+    return new Map();
+  }
+}
+
+function lineRowsScript(produse, familii, eAdmin, stocuri) {
+  const date = (produse || []).map((p) => {
+    // Produsul fără nimic în CT-Park nu primește text: „fără stoc" îl scrie
+    // pagina, ca lista de patru mii de produse să nu care același text de
+    // patru mii de ori.
+    const st = stocuri && typeof stocuri.get === "function" ? stocuri.get(Number(p.id)) : null;
+    return [
+      p.id,
+      String(p.cod || ""),
+      String(p.denumire || ""),
+      Number(p.pret_vanzare || 0),
+      String(p.categorie || "").trim(),
+      "", // locul cheii de căutare, umplută mai jos
+      String(p.unitate_masura || "").trim(),
+      st && st.fel !== "gol" ? st.text : "",
+      st && st.fel !== "gol" ? st.fel : "",
+    ];
+  });
   return `<script>
     var COMENZI_PRODUSE = ${JSON.stringify(date).replace(/</g, "\\u003c")};
     var COMENZI_MAX = ${MAX_REZULTATE};
@@ -501,8 +546,11 @@ function lineRowsScript(produse, familii, eAdmin) {
       cutie.innerHTML = gasite.map(function (p) {
         var cod = p[1] ? '<span class="rezultat-cod">' + p[1] + '</span> ' : '';
         var catTxt = p[4] ? '<span class="rezultat-cat">' + p[4] + '</span>' : '';
+        // Stocul, mic, sub produs (Stoc la zi: CT-Park, cât e liber).
+        var stocTxt = '<span class="rezultat-stoc rezultat-stoc-' + (p[8] || 'gol') + '">' +
+                      comenziEscHtml(p[7] || 'fără stoc în CT-Park') + '</span>';
         return '<button type="button" class="rezultat-produs" data-id="' + p[0] + '" data-pret="' + p[3] +
-               '" onclick="comenziAlege(this)">' + cod + p[2] + ' ' + catTxt + '</button>';
+               '" onclick="comenziAlege(this)">' + cod + p[2] + ' ' + catTxt + stocTxt + '</button>';
       }).join('') + comenziButonNou(input.value);
       cutie.hidden = false;
       comenziAseaza(cutie, input);
@@ -1023,6 +1071,10 @@ function lineRowsScript(produse, familii, eAdmin) {
     .rezultat-produs:hover { background:var(--accent-slab,#e8f0fe); }
     .rezultat-cod { color:var(--text-muted); font-variant-numeric:tabular-nums; }
     .rezultat-cat { color:var(--text-muted); font-size:11px; }
+    .rezultat-stoc { display:block; font-size:11px; color:var(--text-muted); margin-top:1px; }
+    .rezultat-stoc-liber { color:var(--success,#15803d); }
+    .rezultat-stoc-ocupat { color:var(--warn,#b45309); }
+    .rezultat-stoc-vine { color:var(--primary,#2f5d9c); }
     .rezultat-gol { padding:8px 10px; color:var(--text-muted); font-size:13px; }
     /* Se desparte de rezultate printr-o linie: e o actiune, nu inca un produs
        din lista peste care treci din greseala. */
@@ -1349,6 +1401,7 @@ function register(router) {
           Întreabă clientul acum, nu peste trei zile. Depozitul nu are voie să trimită jumătate de comandă fără răspunsul ăsta.
         </div>
       </fieldset>
+      ${campBranding(v)}
 
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
@@ -1362,7 +1415,7 @@ function register(router) {
     </form>
     <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
     ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
-    ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"))}`;
+    ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
 
@@ -1482,6 +1535,7 @@ function register(router) {
       observatii,
       data_livrare_ceruta: ctx.body.data_livrare_ceruta,
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
+      branding: BR.valid(ctx.body.branding),
       moneda,
       linii: produsIds.map((id, i) => ({
         produs_id: id,
@@ -1549,6 +1603,12 @@ function register(router) {
         valori,
       });
     }
+    if (!valori.branding) {
+      return await formularComandaNoua(ctx, {
+        eroare: "Alege dacă produsele sunt cu branding Cash Machine sau nepersonalizate.",
+        valori,
+      });
+    }
 
     // Clientul cu facturi întârziate NU mai e blocat aici. Până pe 03.11.2026
     // un client roșu primea „Comandă blocată”; Vali: „Nu mai bloca comenzile
@@ -1564,8 +1624,8 @@ function register(router) {
     const cursAzi = moneda === "RON" ? null : await require("./curs").laZiua(moneda, new Date().toISOString().slice(0, 10));
     const info = await db
       .prepare(
-        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, moneda, curs_bnr, curs_bnr_data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, branding, moneda, curs_bnr, curs_bnr_data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         partener_id,
@@ -1574,6 +1634,7 @@ function register(router) {
         ctx.user ? ctx.user.id : null,
         String(ctx.body.data_livrare_ceruta || "") || null,
         valori.livrare_partiala,
+        valori.branding,
         moneda,
         cursAzi && cursAzi.valoare > 0 ? cursAzi.valoare : null,
         cursAzi && cursAzi.data ? cursAzi.data : null
@@ -1752,6 +1813,7 @@ function register(router) {
               ? formLivrare(livrare.raspuns(comanda) ? "Schimbă" : "Răspunde")
               : ""
           }</div>
+          <div><div class="k">Branding</div>${BR.eticheta(comanda)}</div>
           <div><div class="k">Observații</div>${esc(comanda.observatii) || "—"}</div>
         </div>
       </div>
@@ -2029,6 +2091,7 @@ function register(router) {
       numar: comanda.numar,
       data_livrare_ceruta: comanda.data_livrare_ceruta,
       livrare_partiala: livrare.raspuns(comanda),
+      branding: BR.valid(comanda.branding),
       moneda: comanda.moneda,
       observatii: comanda.observatii,
       // Prețul din bază merge și într-un câmp ascuns, neatins de rotunjire:
@@ -2087,6 +2150,7 @@ function register(router) {
             <span>Nu — doar comanda completă</span>
           </label>
         </fieldset>
+        ${campBranding(v)}
         <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
         <h2>Produse comandate</h2>
@@ -2103,7 +2167,7 @@ function register(router) {
       </form>
       <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
-      ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"))}`;
+      ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(
       ctx.res,
       200,
@@ -2178,6 +2242,7 @@ function register(router) {
       numar: b.numar,
       data_livrare_ceruta: b.data_livrare_ceruta,
       livrare_partiala: livrare.valid(b.livrare_partiala),
+      branding: BR.valid(b.branding),
       moneda,
       observatii: b.observatii,
       linii: produsIds.map((id, i) => ({
@@ -2206,6 +2271,7 @@ function register(router) {
     const preturiRele = liniiCuPretRau(produsIds, cantitati, preturiCitite);
     if (preturiRele) return await opreste(preturiRele);
     if (!valori.livrare_partiala) return await opreste("Spune dacă clientul acceptă livrare parțială.");
+    if (!valori.branding) return await opreste("Alege dacă produsele sunt cu branding Cash Machine sau nepersonalizate.");
 
     // Cum arăta ÎNAINTE. Se citește acum, nu din formular: formularul poate fi
     // vechi de zece minute, timp în care altcineva a schimbat altceva, iar
@@ -2215,6 +2281,8 @@ function register(router) {
       numar: comanda.numar,
       data_livrare_ceruta: comanda.data_livrare_ceruta,
       livrare_partiala: livrare.raspuns(comanda),
+      // În istoric se scrie textul, nu codul: „nespecificat → cu branding Cash Machine".
+      branding: BR.text(comanda),
       moneda: comanda.moneda,
       observatii: comanda.observatii,
     };
@@ -2260,6 +2328,7 @@ function register(router) {
       numar: b.numar || "",
       data_livrare_ceruta: String(b.data_livrare_ceruta || "") || null,
       livrare_partiala: valori.livrare_partiala,
+      branding: BR.text({ branding: valori.branding }),
       moneda,
       observatii: b.observatii || "",
     };
@@ -2316,9 +2385,9 @@ function register(router) {
     await db
       .prepare(
         `UPDATE comenzi SET partener_id = ?, numar = ?, observatii = ?, data_livrare_ceruta = ?,
-           livrare_partiala = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ? WHERE id = ?`
+           livrare_partiala = ?, branding = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ? WHERE id = ?`
       )
-      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, dupa.moneda, curs, cursData, comanda.id);
+      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, comanda.id);
 
     // Liniile se rescriu, dar `cantitate_livrata` NU se pierde: depozitul a
     // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să

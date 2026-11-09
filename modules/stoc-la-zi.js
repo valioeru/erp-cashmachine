@@ -108,7 +108,9 @@ function celule(r, ctx, inapoi, poateRez) {
 
   const inStoc =
     r.stoc > SP.EPS
-      ? `${cu(r.stoc, r.um)}${mic(`${r.paleti} ${r.paleti === 1 ? "palet" : "paleți"}${r.ultima_intrare ? " · ultima intrare " + dataRo(r.ultima_intrare) : ""}`)}`
+      ? `${cu(r.stoc, r.um)}${mic(`${r.paleti} ${r.paleti === 1 ? "palet" : "paleți"}${r.ultima_intrare ? " · ultima intrare " + dataRo(r.ultima_intrare) : ""}`)}${
+          r.dePus > SP.EPS ? mic(`din care ${cu(r.dePus, r.um)} recepționat, încă de pus pe raft`) : ""
+        }`
       : `0${r.um ? " " + esc(r.um) : ""}`;
   const alte = r.alteUm.length ? mic("și " + r.alteUm.map((a) => cu(a.cantitate, a.um)).join(", ") + " (altă unitate, separat)") : "";
 

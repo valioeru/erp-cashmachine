@@ -61,17 +61,69 @@ async function elibereazaExpirate() {
   return r && r.changes ? r.changes : 0;
 }
 
+// Stocul fizic e CT-Park, singurul depozit (Vali, 05.11.2026): liniile
+// paleților încă în depozit (paletul vechi, fără linii, cu coloanele lui), plus
+// marfa dintr-o recepție finalizată care n-a ajuns încă pe un palet — e în
+// depozit, doar că n-are încă raft. Ce s-a pus pe raft sau a plecat direct la
+// livrare are palet legat de rândul recepției și nu se mai numără a doua oară.
+//
+// Până pe 09.11.2026 se citea tabela veche miscari_stoc (stocul adus din
+// SmartBill și recepțiile vechi), iar comanda spunea „lipsă" la marfă care
+// stătea pe raft în CT-Park. Vali, cu poza comenzii #70: „scrie că are stoc,
+// dar apare cu lipsă stoc pe produsul ăla — probabil nu caută în depozitul
+// CT-Park, unde e singurul stoc."
 async function stocPeProduse() {
   const randuri = await db
     .prepare(
-      `SELECT produs_id, COALESCE(SUM(CASE WHEN tip = 'intrare' THEN cantitate ELSE -cantitate END), 0) AS stoc
-       FROM miscari_stoc GROUP BY produs_id`
+      `SELECT produs_id, SUM(cantitate) AS stoc FROM (
+         SELECT pl.produs_id, pl.cantitate
+           FROM ct_palet_linii pl JOIN ct_paleti p ON p.id = pl.palet_id
+          WHERE p.data_iesire IS NULL AND pl.cantitate > 0
+         UNION ALL
+         SELECT p.produs_id, p.cantitate
+           FROM ct_paleti p
+          WHERE p.data_iesire IS NULL AND p.cantitate > 0
+            AND NOT EXISTS (SELECT 1 FROM ct_palet_linii x WHERE x.palet_id = p.id)
+         UNION ALL
+         SELECT rl.produs_id,
+                COALESCE(rl.cantitate_primita, 0) - COALESCE((SELECT SUM(pp.cantitate) FROM ct_paleti pp WHERE pp.receptie_linie_id = rl.id), 0)
+           FROM receptii_linii rl JOIN receptii r ON r.id = rl.receptie_id
+          WHERE r.stare = 'finalizata' AND rl.stare = 'primita' AND COALESCE(rl.conditie, 'bun') = 'bun'
+       ) t
+       WHERE produs_id IS NOT NULL AND cantitate > 0
+       GROUP BY produs_id`
     )
     .all();
   const m = new Map();
   for (const r of randuri) m.set(Number(r.produs_id), Number(r.stoc) || 0);
   return m;
 }
+
+// Rezervările agenților din „Stoc la zi" (lib/rezervari-agenti.js) țin marfa
+// pentru un anume client: comanda altui client n-o poate lua. Rezervarea
+// clientului comenzii e chiar pentru ea, deci nu o oprește.
+//   total — produs → tot ce e rezervat; pe — „produs:client" → al clientului
+async function rezervariAgenti() {
+  try {
+    await require("../lib/rezervari-agenti").actualizeaza();
+  } catch (e) {
+    // Fără tabelă (baza încă nemigrată) sau altă problemă: nu oprește potrivirea.
+  }
+  const randuri = await db
+    .prepare("SELECT produs_id, partener_id, COALESCE(SUM(cantitate), 0) AS cant FROM rezervari_agenti WHERE stare = 'activa' GROUP BY produs_id, partener_id")
+    .all()
+    .catch(() => []);
+  const total = new Map();
+  const pe = new Map();
+  for (const r of randuri) {
+    const q = Number(r.cant) || 0;
+    total.set(Number(r.produs_id), (total.get(Number(r.produs_id)) || 0) + q);
+    pe.set(Number(r.produs_id) + ":" + Number(r.partener_id), q);
+  }
+  return { total, pe };
+}
+const rezervatPentruAltii = (ra, produsId, partenerId) =>
+  Math.max(0, (ra.total.get(Number(produsId)) || 0) - (ra.pe.get(Number(produsId) + ":" + Number(partenerId)) || 0));
 
 async function rezervatPeProduse(exceptComandaId) {
   const randuri = await db
@@ -104,6 +156,9 @@ async function potrivire(comandaId) {
     .all(comandaId);
   const stoc = await stocPeProduse();
   const rez = await rezervatPeProduse(comandaId);
+  const ra = await rezervariAgenti();
+  const cmd = await db.prepare("SELECT partener_id FROM comenzi WHERE id = ?").get(comandaId).catch(() => null);
+  const clientul = cmd ? Number(cmd.partener_id) : 0;
   let acoperiteTot = true;
   let acoperitePartial = false;
   const rezervariProprii = await db
@@ -117,7 +172,8 @@ async function potrivire(comandaId) {
     const livrat = Number(l.cantitate_livrata) || 0;
     const ramas = Math.max(0, cerut - livrat);
     const fizic = stoc.get(Number(l.produs_id)) || 0;
-    const blocat = rez.get(Number(l.produs_id)) || 0;
+    // Blocat = rezervat de alte comenzi + rezervat de agenți pentru alți clienți.
+    const blocat = (rez.get(Number(l.produs_id)) || 0) + rezervatPentruAltii(ra, l.produs_id, clientul);
     const disponibil = fizic - blocat;
     const acoperit = Math.max(0, Math.min(ramas, disponibil));
     const lipsa = Math.max(0, ramas - acoperit);
@@ -244,9 +300,10 @@ function register(router) {
 
     const stoc = await stocPeProduse();
     const rez = await rezervatPeProduse(null);
+    const ra = await rezervariAgenti();
     const liniiTot = await db
       .prepare(
-        `SELECT cl.comanda_id, cl.produs_id, cl.cantitate, cl.cantitate_livrata
+        `SELECT cl.comanda_id, cl.produs_id, cl.cantitate, cl.cantitate_livrata, c.partener_id
          FROM comenzi_linii cl JOIN comenzi c ON c.id = cl.comanda_id
          WHERE c.status NOT IN ('facturata', 'in_livrare', 'livrata', 'anulata')`
       )
@@ -255,7 +312,7 @@ function register(router) {
     for (const l of liniiTot) {
       const k = Number(l.comanda_id);
       const ramas = Math.max(0, (Number(l.cantitate) || 0) - (Number(l.cantitate_livrata) || 0));
-      const disp = (stoc.get(Number(l.produs_id)) || 0) - (rez.get(Number(l.produs_id)) || 0);
+      const disp = (stoc.get(Number(l.produs_id)) || 0) - (rez.get(Number(l.produs_id)) || 0) - rezervatPentruAltii(ra, l.produs_id, l.partener_id);
       const cur = perComanda.get(k) || { linii: 0, complete: 0, partiale: 0 };
       cur.linii++;
       if (disp >= ramas - 0.0001) cur.complete++;
@@ -478,6 +535,7 @@ function register(router) {
       <div class="detail-box" style="max-width:820px;border-left:4px solid ${
         acceptaPartial ? "var(--verde,#1a7f42)" : "var(--rosu,#b3261e)"
       }">
+        <div style="margin-bottom:6px"><strong>Branding:</strong> ${require("../lib/branding").eticheta(c)}</div>
         <strong>Livrare parțială:</strong> ${livrare.eticheta(c)}
         <div class="mic" style="color:var(--text-muted);margin-top:4px">
           ${
@@ -1074,4 +1132,4 @@ function porneste() {
   if (t.unref) t.unref();
 }
 
-module.exports = { register, porneste, potrivire, elibereazaExpirate, marfaDePreluat, REZERVARE_ORE };
+module.exports = { register, porneste, potrivire, stocPeProduse, elibereazaExpirate, marfaDePreluat, REZERVARE_ORE };
