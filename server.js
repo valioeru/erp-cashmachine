@@ -31,6 +31,9 @@ require("./modules/avize").register(router);
 // stau sub /stocuri/ct-park/stoc/…; pagina însăși o desenează ct-park, care
 // trimite aici tot ce nu e vederea pe paleți.
 require("./modules/stoc-la-zi").register(router);
+// Marfa gata din producție, de alocat în CT-Park (09.11.2026): butoanele listei
+// din Intrare marfă, sub /stocuri/ct-park/gata/….
+require("./modules/gata-productie").register(router);
 require("./modules/ct-park").register(router);
 require("./modules/verificari").register(router);
 require("./modules/comenzi").register(router);
