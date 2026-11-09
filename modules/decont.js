@@ -39,6 +39,13 @@ const cost = require("../lib/cost");
 const { esc, money, layout, table, subnavFinanciar } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const costuri = require("./costuri");
+// Regula propusă pe 09.11.2026, pusă doar alături de cea de acum.
+const CC = require("../lib/comision-comparativ");
+
+// Comparativul e doar al lui Vali — „dă-mi mie doar comparativ". Se cer și
+// rolul, și contul lui: un alt admin nu-l vede până nu hotărăște el.
+const DOAR_VALI = "valentin.oeru@cashmachine.ro";
+const eVali = (u) => Boolean(u && u.rol === "admin" && String(u.email || "").trim().toLowerCase() === DOAR_VALI);
 
 // Parametrii regulii. Se pot schimba din pagină — nu sunt bătuți în cod,
 // fiindcă un prag și un procent se schimbă mai des decât o aplicație.
@@ -181,6 +188,54 @@ async function incasariPeAgent(luna) {
   return peAgent;
 }
 
+// Ce a FACTURAT agentul în lună, fără TVA, cu costul mărfii de pe facturi —
+// baza regulii propuse pe 09.11.2026 (lib/comision-comparativ.js). Agentul e
+// cel al clientului, ca în tot decontul. `pana` = ziua până la care se ia,
+// pentru „la zi".
+async function facturatCuMarja(luna, pana) {
+  const COST_LINIE = cost.costLinie(await cost.rataFirma());
+  const randuri = await db
+    .prepare(
+      `SELECT p.agent_id AS agent_id, f.id AS factura_id, f.serie, f.numar, f.data_emiterii AS emisa,
+              p.nume AS client,
+              COALESCE(n.net, 0) AS net,
+              COALESCE(c.cost, 0) AS cost_marfa,
+              COALESCE(c.venit_cu_cost, 0) AS venit_cu_cost
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+         JOIN parteneri p ON p.id = f.partener_id
+         LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n
+              ON n.factura_id = f.id
+         LEFT JOIN (SELECT fl.factura_id, SUM(${COST_LINIE}) AS cost,
+                            SUM(${cost.VENIT_CU_COST_REAL}) AS venit_cu_cost
+                      FROM facturi_linii fl LEFT JOIN produse pr ON pr.id = fl.produs_id
+                     GROUP BY fl.factura_id) c
+              ON c.factura_id = f.id
+        WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND COALESCE(f.intercompany,0) = 0
+          AND p.agent_id IS NOT NULL AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+        ORDER BY f.data_emiterii, f.id`
+    )
+    .all(`${luna}-01`, pana || sfarsitLuna(luna));
+  const peAgent = new Map();
+  for (const r of randuri) {
+    const k = Number(r.agent_id);
+    const a = peAgent.get(k) || { net: 0, cost: 0, fara_cost: 0, facturi: [] };
+    const net = Number(r.net) || 0;
+    a.net += net;
+    a.cost += Number(r.cost_marfa) || 0;
+    a.fara_cost += Math.max(0, net - Math.min(net, Number(r.venit_cu_cost) || 0));
+    a.facturi.push({
+      id: Number(r.factura_id),
+      document: [r.serie, r.numar].filter(Boolean).join(" ") || "#" + r.factura_id,
+      emisa: String(r.emisa || "").slice(0, 10),
+      client: r.client,
+      net,
+      cost: Number(r.cost_marfa) || 0,
+    });
+    peAgent.set(k, a);
+  }
+  return peAgent;
+}
+
 // Câte luni au trecut între emitere și încasare.
 function luniIntre12(emisa, platita) {
   const a = new Date(emisa + "T00:00:00Z");
@@ -320,6 +375,7 @@ function register(router) {
           </label>
         </form>
         <a class="btn secondary" href="/costuri">Cost company</a>
+        ${eVali(ctx.user) ? `<a class="btn secondary" href="/costuri/decont/comparativ">Comparativ: regula nouă (${money(CC.PRAG)} facturat)</a>` : ""}
       </div>
 
       <p style="max-width:820px;color:var(--text-muted)">
@@ -413,6 +469,87 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: `Decont agenți — ${luna}`, active: "/costuri", body }));
   });
 
+  // ---- Comparativul: regula propusă lângă cea de acum, luna în curs ---------
+  //
+  // Se calculează la fiecare deschidere din facturile și încasările din ERP,
+  // deci se mișcă singur cum intră facturile; pagina se mai reîncarcă singură
+  // la 5 minute, ca să poată sta deschisă.
+  router.get("/costuri/decont/comparativ", async (ctx) => {
+    if (!eVali(ctx.user)) return redirect(ctx.res, "/costuri/decont");
+    const azi = new Date().toISOString().slice(0, 10);
+    const luna = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : lunaCurenta();
+    const pana = luna === azi.slice(0, 7) ? azi : sfarsitLuna(luna);
+    const { reguli, ultima } = await calculeaza(luna);
+    const facturat = await facturatCuMarja(luna, pana);
+    const agenti = await db.prepare("SELECT id, nume, rol FROM utilizatori ORDER BY nume").all();
+    const rs = CC.randuri(agenti, facturat, ultima.randuri);
+    const t = CC.totaluri(rs);
+    let ultimaFactura = null;
+    for (const f of facturat.values()) for (const x of f.facturi) if (!ultimaFactura || x.emisa > ultimaFactura.emisa || (x.emisa === ultimaFactura.emisa && x.id > ultimaFactura.id)) ultimaFactura = x;
+    const semn = (v) => `<span style="color:${v > 0.005 ? "var(--success)" : v < -0.005 ? "var(--danger)" : "inherit"}">${v > 0.005 ? "+" : ""}${money(v)}</span>`;
+    const mic = (s) => `<br><span style="font-size:12px;color:var(--text-muted)">${s}</span>`;
+    const ora = new Date().toLocaleTimeString("ro-RO", { timeZone: "Europe/Bucharest", hour: "2-digit", minute: "2-digit" });
+
+    const body = `
+      ${subnavFinanciar("/costuri", ctx.user)}
+      <div class="toolbar" style="gap:10px;flex-wrap:wrap">
+        <form method="get" action="/costuri/decont/comparativ" class="inline-form">
+          <label class="field" style="margin:0"><span style="font-size:12px">Luna</span>
+            <input type="month" name="luna" value="${esc(luna)}" onchange="this.form.submit()">
+          </label>
+        </form>
+        <a class="btn secondary" href="/costuri/decont?luna=${esc(luna)}">Decontul pe regula de acum</a>
+      </div>
+      <h1 style="margin:6px 0 4px">Comision: regula nouă lângă cea de acum — ${esc(luna)}${pana < sfarsitLuna(luna) ? `, la zi (${esc(pana)})` : ""}</h1>
+      <p style="max-width:900px;color:var(--text-muted);margin:0 0 6px">
+        Doar pentru tine. Nu schimbă nimic din comisionul calculat: decontul merge pe regula de acum.
+        Actualizat la ${esc(ora)}${ultimaFactura ? `, ultima factură inclusă: ${esc(ultimaFactura.document)} din ${esc(ultimaFactura.emisa)}` : ""};
+        pagina se reîncarcă singură la 5 minute.
+      </p>
+      <p style="max-width:900px;color:var(--text-muted);font-size:13px">
+        <strong>Regula nouă:</strong> dacă tot ce a facturat agentul în lună, fără TVA, e sub ${money(CC.PRAG)},
+        comisionul e ${CC.PCT_MARJA}% din marja facturilor lunii (venit fără TVA minus costul mărfii de pe ele).
+        La ${money(CC.PRAG)} și peste rămâne regula de acum. Marja negativă se reportează întreagă, ca acum.<br>
+        <strong>Regula de acum:</strong> din ce s-a încasat în lună — peste ${money(reguli.prag)} încasați,
+        cel mai mare dintre ${reguli.pctMarja}% din marjă și ${reguli.pctVanzari}% din încasări; sub prag, ${reguli.pctMarja}% din marjă.
+      </p>
+      <div class="cards">
+        <div class="card"><div class="label">Facturat în lună (fără TVA)</div><div class="value">${money(t.facturat)}</div></div>
+        <div class="card"><div class="label">Comision, regula nouă</div><div class="value">${money(t.nou)}</div></div>
+        <div class="card"><div class="label">Comision, regula de acum</div><div class="value">${money(t.actual)}</div></div>
+        <div class="card"><div class="label">Diferența</div><div class="value">${semn(t.diferenta)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">regula nouă minus cea de acum</div></div>
+      </div>
+      ${table(
+        ["Agent", "Facturat (fără TVA)", `Până la ${money(CC.PRAG)}`, "Marjă pe facturat", "Regula nouă", "Încasat (fără TVA)", "Marjă pe încasat", "Regula de acum", "Diferența"],
+        rs.map((r) => [
+          `${esc(r.agent.nume)}${mic(`${r.nr_facturi} ${r.nr_facturi === 1 ? "factură" : "facturi"}`)}${
+            r.facturi.length
+              ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">facturile</summary>
+                   <div style="font-size:12px;line-height:1.5">${r.facturi
+                     .map((f) => `<a href="/facturi/${f.id}">${esc(f.document)}</a> · ${esc(f.emisa)} · ${esc(f.client || "")} · ${money(f.net)} · marjă ${money(f.net - f.cost)}`)
+                     .join("<br>")}</div></details>`
+              : ""
+          }`,
+          `<strong>${money(r.facturat)}</strong>`,
+          r.sub_prag ? money(r.pana_la_prag) : '<span class="badge verde">peste prag</span>',
+          `${money(r.marja_facturata)}${r.acoperire !== null && r.acoperire < 95 ? mic(`cost măsurat pe ${r.acoperire.toFixed(0)}%, restul estimat`) : ""}`,
+          `<strong>${money(r.nou)}</strong>${mic(esc(r.dupa_nou))}`,
+          money(r.incasat),
+          money(r.marja_incasata),
+          `<strong>${money(r.actual)}</strong>${r.dupa_actual ? mic(esc(r.dupa_actual)) : ""}`,
+          `<strong>${semn(r.diferenta)}</strong>`,
+        ])
+      )}
+      <p style="max-width:900px;color:var(--text-muted);font-size:13px">
+        Agentul e cel al clientului de pe factură, ca în decont. Facturile anulate, ciornele și cele între firmele
+        grupului nu intră. Costul mărfii se ia ca peste tot în ERP: rata din contabilitate, rețeta sau prețul de
+        achiziție; unde lipsesc, se estimează cu rata firmei și scrie sub marjă cât e măsurat.
+      </p>
+      <script>setTimeout(function () { location.reload(); }, 5 * 60 * 1000);</script>`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Comision comparativ — ${luna}`, active: "/costuri", body }));
+  });
+
   router.post("/costuri/decont/reguli", async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/costuri/decont");
     const b = ctx.body || {};
@@ -425,4 +562,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, calculeaza, comisionLunar };
+module.exports = { register, calculeaza, comisionLunar, facturatCuMarja, eVali };
