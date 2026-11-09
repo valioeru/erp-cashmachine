@@ -157,7 +157,10 @@ function curata() {
     bine("rolul dat ca text merge la fel (apelurile vechi)", auth.poateAccesa("vanzari", STOC) && !auth.poateAccesa("vanzari", "/stocuri/ct-park/intrare"));
     bine("depozitul vede tot ca până acum", [STOC].concat(OPRITE).every((p) => auth.poateAccesa(DEPOZIT, p)));
     bine("administratorul vede tot", [STOC].concat(OPRITE).every((p) => auth.poateAccesa(ADMIN, p)));
-    bine("financiarul n-a primit nimic în plus", !auth.poateAccesa(FINANCIAR, STOC));
+    // De pe 09.11.2026 „Stoc la zi" e a tuturor (Vali: „userii să aibă acces la
+    // această pagină, nu la tot depozitul").
+    bine("financiarul primește și el „Stoc la zi”", auth.poateAccesa(FINANCIAR, STOC));
+    bine("…dar nimic altceva din Depozit", !OPRITE.some((p) => auth.poateAccesa(FINANCIAR, p)), OPRITE.filter((p) => auth.poateAccesa(FINANCIAR, p)).join(", "));
   }
 
   console.log("\n2. Butonul „Depozit” din bara de sus");
@@ -167,7 +170,7 @@ function curata() {
     bine("la fel agentul fără bife", dep(AGENT_FARA_BIFE) && dep(AGENT_FARA_BIFE).href === "/stocuri/ct-park/stoc");
     bine("depozitul intră tot pe hartă", dep(DEPOZIT) && dep(DEPOZIT).href === "/stocuri/ct-park");
     bine("administratorul intră tot pe hartă", dep(ADMIN) && dep(ADMIN).href === "/stocuri/ct-park");
-    bine("financiarul nu are butonul", !dep(FINANCIAR));
+    bine("financiarul are butonul, spre „Stoc la zi”", dep(FINANCIAR) && dep(FINANCIAR).href === "/stocuri/ct-park/stoc", JSON.stringify(dep(FINANCIAR)));
     bine("NAV-ul în sine nu s-a schimbat (copia, nu originalul)", render.NAV.find((x) => x.label === "Depozit").href === "/stocuri/ct-park");
     const cuNavVechi = render.NAV.filter((i) => auth.poateAccesa(DEPOZIT, i.zona || i.href)).map((i) => i.label).join("|");
     bine("pentru cine are toată zona, bara e exact cea de dinainte", render.navPentru(DEPOZIT).map((i) => i.label).join("|") === cuNavVechi);
@@ -186,25 +189,32 @@ function curata() {
   q(`INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (${pal}, ${loc})`);
 
   {
-    const r = await cer("/stocuri/ct-park/stoc", AGENT);
-    bine("agentul: pagina se deschide", r.cod === 200, r.cod);
+    // „Stoc la zi" se deschide pe produse (09.11.2026); locul paletului e în
+    // vederea pe paleți, aceeași pagină cu ?vedere=paleti.
+    const pe = await cer("/stocuri/ct-park/stoc", AGENT);
+    bine("agentul: pagina pe produse se deschide, cu marfa și cantitatea", pe.cod === 200 && pe.corp.includes("TEST-AGENT Folie stretch") && pe.corp.includes("250 kg") && pe.corp.includes("LOT-AG-7"), pe.cod);
+    bine("agentul: nici pe produse nu vede furnizorul", !pe.corp.includes(FURNIZOR));
+    const r = await cer("/stocuri/ct-park/stoc", AGENT, { vedere: "paleti" });
+    bine("agentul: pagina pe paleți se deschide", r.cod === 200, r.cod);
     bine("agentul: vede marfa, cantitatea, lotul și locul", r.corp.includes("TEST-AGENT Folie stretch") && r.corp.includes("250 kg") && r.corp.includes("LOT-AG-7") && r.corp.includes(`R${NUMAR}-01-1-1`));
     const taburi = (r.corp.match(/<div class="subnav"[^>]*>([\s\S]*?)<\/div>/) || [])[1] || "";
     const etichete = [...taburi.matchAll(/>([^<]+)<\/a>/g)].map((m) => m[1]);
-    bine("agentul: în submeniu are doar „Stoc la zi”", etichete.length === 1 && etichete[0] === "Stoc la zi", etichete.join(", "));
+    bine("agentul: în submeniu are doar „Stoc la zi” și „Rezervări”", etichete.join("|") === "Stoc la zi|Rezervări", etichete.join(", "));
     bine("agentul: „Intrare marfă” e la vedere, dar inactiv", /<button type="button" class="btn secondary" disabled[^>]*>\+ Intrare marfă<\/button>/.test(r.corp));
     bine("agentul: niciun link spre intrare, hartă sau palet", !/href="\/stocuri\/ct-park(\/intrare[^"]*|\/palet\/\d+|\/tot)?"/.test(r.corp), (r.corp.match(/href="\/stocuri\/ct-park(\/intrare[^"]*|\/palet\/\d+|\/tot)?"/) || [])[0]);
     bine("agentul: butonul Depozit din bară e aprins și duce la stoc", /<a href="\/stocuri\/ct-park\/stoc" class="navlink active">Depozit<\/a>/.test(r.corp));
     bine("agentul: nu vede furnizorul", !r.corp.includes(FURNIZOR) && !/<th[^>]*>Furnizor/.test(r.corp));
     bine("agentul: nu vede prețul de intrare și valoarea", !/12,34/.test(r.corp) && !/3\.085,00/.test(r.corp) && !/Valoare la preț de intrare/.test(r.corp) && !/<th[^>]*>Valoare/.test(r.corp));
-    const cuFurnizor = await cer("/stocuri/ct-park/stoc", AGENT, { q: "Furnizorul Secret" });
-    bine("agentul: căutarea nu merge pe furnizor (nu-l poate afla căutând)", !cuFurnizor.corp.includes("TEST-AGENT Folie stretch"));
-    const cuNume = await cer("/stocuri/ct-park/stoc", AGENT, { q: "LOT-AG-7" });
-    bine("agentul: căutarea după lot merge", cuNume.corp.includes("TEST-AGENT Folie stretch"));
+    for (const vedere of ["", "paleti"]) {
+      const cuFurnizor = await cer("/stocuri/ct-park/stoc", AGENT, { q: "Furnizorul Secret", vedere });
+      bine(`agentul${vedere ? " (pe paleți)" : ""}: căutarea nu merge pe furnizor (nu-l poate afla căutând)`, !cuFurnizor.corp.includes("TEST-AGENT Folie stretch"));
+      const cuNume = await cer("/stocuri/ct-park/stoc", AGENT, { q: "LOT-AG-7", vedere });
+      bine(`agentul${vedere ? " (pe paleți)" : ""}: căutarea după lot merge`, cuNume.corp.includes("TEST-AGENT Folie stretch"));
+    }
   }
   {
-    const r = await cer("/stocuri/ct-park/stoc", ADMIN);
-    bine("administratorul: vede furnizorul, prețul și valoarea, ca înainte", r.corp.includes(FURNIZOR) && /12,34/.test(r.corp) && /3\.085,00/.test(r.corp) && /Valoare la preț de intrare/.test(r.corp));
+    const r = await cer("/stocuri/ct-park/stoc", ADMIN, { vedere: "paleti" });
+    bine("administratorul: pe paleți vede furnizorul, prețul și valoarea, ca înainte", r.corp.includes(FURNIZOR) && /12,34/.test(r.corp) && /3\.085,00/.test(r.corp) && /Valoare la preț de intrare/.test(r.corp));
     bine("administratorul: „+ Intrare marfă” e link activ", r.corp.includes('<a class="btn secondary" href="/stocuri/ct-park/intrare">+ Intrare marfă</a>'));
     const taburi = (r.corp.match(/<div class="subnav"[^>]*>([\s\S]*?)<\/div>/) || [])[1] || "";
     bine("administratorul: are tot submeniul", ["Harta depozitului", "Tot depozitul", "Intrare marfă", "Stoc la zi", "Configurare rânduri"].every((t) => taburi.includes(">" + t + "<")));

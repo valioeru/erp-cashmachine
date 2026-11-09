@@ -143,7 +143,9 @@ function verifica(eticheta, corp, cerute) {
   ]);
 
   // --- stoc la zi --------------------------------------------------------
-  r = await cer("/stocuri/ct-park/stoc");
+  // Vederea pe paleți: de pe 09.11.2026 pagina se deschide pe produse
+  // (modules/stoc-la-zi.js, testată în test-stoc-rezervari.js).
+  r = await cer("/stocuri/ct-park/stoc", { query: { vedere: "paleti" } });
   rele += verifica("stoc la zi", r.corp, [
     "Stoc la zi", "materie primă", "produse finite",
     "Granulă LLDPE natur", "TERAPLAST RECYCLING SA",
@@ -152,11 +154,11 @@ function verifica(eticheta, corp, cerute) {
     "14.08.2026", "fără preț",   // layout() rescrie datele ISO în format românesc
   ]);
 
-  r = await cer("/stocuri/ct-park/stoc", { query: { q: "R5-01" } });
+  r = await cer("/stocuri/ct-park/stoc", { query: { q: "R5-01", vedere: "paleti" } });
   rele += verifica("stoc la zi · căutare după adresă", r.corp, ["Cutie carton", "din 3 în total"]);
   if (r.corp.includes("Granulă LLDPE natur")) { console.log("  PROBLEMĂ căutarea nu filtrează"); rele++; }
 
-  r = await cer("/stocuri/ct-park/stoc", { query: { q: "teraplast" } });
+  r = await cer("/stocuri/ct-park/stoc", { query: { q: "teraplast", vedere: "paleti" } });
   rele += verifica("stoc la zi · căutare după furnizor", r.corp, ["Granulă LLDPE natur"]);
 
   // --- fața rândului, cu niveluri inegale --------------------------------

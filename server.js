@@ -27,6 +27,10 @@ require("./modules/stocuri").register(router);
 require("./modules/inventar").register(router);
 // Înaintea lui ct-park: foaia avizului stă și la /stocuri/ct-park/aviz/:id.
 require("./modules/avize").register(router);
+// Stocul la zi pe produse și rezervările agenților (09.11.2026). Rutele lui
+// stau sub /stocuri/ct-park/stoc/…; pagina însăși o desenează ct-park, care
+// trimite aici tot ce nu e vederea pe paleți.
+require("./modules/stoc-la-zi").register(router);
 require("./modules/ct-park").register(router);
 require("./modules/verificari").register(router);
 require("./modules/comenzi").register(router);

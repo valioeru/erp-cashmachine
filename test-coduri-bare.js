@@ -333,7 +333,9 @@ function curata() {
   r = await scan("NUEXISTA-TSTSCN-404", VALI);
   bine("codul necunoscut: spus, cu codul citit sub ochi", r.cod === 200 && r.corp.includes("Nu am găsit nimic") && r.corp.includes("NUEXISTA-TSTSCN-404"));
   r = await scan("TSTSCN-01", STRAIN);
-  bine("produsul, pentru cine n-are nici fișa, nici stocul: află că există, nu intră", r.cod === 200 && r.corp.includes("n-ai acces") && !r.antet.Location, r.corp.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(-300));
+  // De pe 09.11.2026 „Stoc la zi" e a tuturor celor logați (lib/auth,
+  // PAGINI_AGENT): cine n-are fișa produsului ajunge la stocul lui.
+  bine("produsul, pentru cine n-are fișa: stocul la zi, căutat după cod", r.cod === 302 && loc(r) === "/stocuri/ct-park/stoc?q=TSTSCN-01", r.cod + " " + loc(r));
   r = await scan("TSTSCN0000001", STRAIN);
   bine("AWB-ul, pentru cine n-are fulfillment sau raportul: nu intră", r.cod === 200 && r.corp.includes("n-ai acces"));
   r = await cer("/scan", VALI, {}, {});

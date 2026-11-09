@@ -484,6 +484,8 @@ async function plaseaza(linii) {
   const STIL = fs.readFileSync(path.join(RAD, "public", "style.css"), "utf8");
   const browser = await chromium.launch();
   const erori = [];
+  // Cât e pus, verificarea stocului de sub produs pică (rețea, server căzut).
+  let picaVerificarea = false;
   try {
     const servire = async (pagina, html) => {
       await pagina.route("http://erp.test/**", async (rt) => {
@@ -491,6 +493,7 @@ async function plaseaza(linii) {
         const u = new URL(req.url());
         if (u.pathname.endsWith("/style.css")) return rt.fulfill({ status: 200, contentType: "text/css", body: STIL });
         if (u.pathname === "/comenzi/furnizori-stoc") {
+          if (picaVerificarea) return rt.abort();
           const r = await cer("get", "/comenzi/furnizori-stoc", { query: Object.fromEntries(u.searchParams) });
           return rt.fulfill({ status: r.cod, contentType: "application/json", body: r.corp });
         }
@@ -529,6 +532,14 @@ async function plaseaza(linii) {
     egal("…obligatorie și goală la început", await r1.$eval(".furnizor-select", (s) => [s.required, s.validity.valueMissing]), [true, true]);
     await r1.$eval(".furnizor-select", (s, v) => { s.value = v; s.dispatchEvent(new Event("change")); }, "p:" + S2);
     egal("alegerea ajunge în câmpul care pleacă", await r1.$eval('input[name="furnizor_ales[]"]', (i) => i.value), "p:" + S2);
+    // Produsul se schimbă, iar verificarea stocului pică: furnizorul ales
+    // pentru produsul de dinainte nu are voie să plece cu cel nou.
+    picaVerificarea = true;
+    await alege(r1, "TFC Folie fără stoc", P_FARA);
+    await asteaptaFurnizor(r1);
+    egal("verificarea pică: alegerea de la produsul vechi nu rămâne pe cel nou",
+      await r1.$eval(".furnizor-linie", (g) => [/Nu am putut verifica stocul/.test(g.textContent), g.parentNode.querySelector('input[name="furnizor_ales[]"]').value]), [true, ""]);
+    picaVerificarea = false;
     await alege(r1, "TFC Bandă", P_BANDA);
     await asteaptaFurnizor(r1);
     egal("alt produs, fără Furnizor: lista dispare, alegerea se golește", await r1.$eval(".furnizor-linie", (g) => [g.innerHTML, g.parentNode.querySelector('input[name="furnizor_ales[]"]').value]), ["", ""]);

@@ -55,7 +55,7 @@ const res = () => { const x = { cod: 0, corp: "" }; x.writeHead = (c) => { x.cod
 (async () => {
   const r = res();
   try {
-    await rute.get["/stocuri/ct-park/stoc"]({ user: { rol: "admin", nume: "V", id: 1 }, params: {}, query: {}, body: {}, res: r, req: {} });
+    await rute.get["/stocuri/ct-park/stoc"]({ user: { rol: "admin", nume: "V", id: 1 }, params: {}, query: { vedere: "paleti" }, body: {}, res: r, req: {} });
   } catch (e) {
     console.log("  PROBLEMĂ stoc la zi CADE pe baza nemigrată: " + String(e.message).split("\n")[0]);
     process.exit(1);
