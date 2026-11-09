@@ -19,6 +19,9 @@ const db = require("../lib/db");
 const cost = require("../lib/cost");
 const { esc, money, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+// Furnizorul materialului se alege aici, la alocarea materialului — aceeași
+// casetă ca pe pagina comenzii de producție (lib/furnizor-comanda.js).
+const FC = require("../lib/furnizor-comanda");
 
 const nr = (v) => {
   const n = Number(String(v == null ? "" : v).replace(",", "."));
@@ -450,6 +453,10 @@ function register(router) {
         ${c.partener_nume || c.client_text ? ` · pentru ${esc(c.partener_nume || c.client_text)}` : ""}
       </p>`;
 
+    const caseta = await FC.casetaProductie(c, {
+      inapoi: `/productie/${c.id}/necesar`,
+      poateScrie: Boolean(ctx.user && ["admin", "productie", "depozit"].includes(ctx.user.rol)),
+    });
     const gol = (mesaj) =>
       send(
         ctx.res,
@@ -458,7 +465,7 @@ function register(router) {
           user: ctx.user,
           title: `Necesar comanda ${c.numar || c.id}`,
           active: "/productie",
-          body: `${capTabel}<div class="card"><p style="margin:0">${mesaj}</p></div>`,
+          body: `${capTabel}<div class="card"><p style="margin:0">${mesaj}</p></div>${caseta}`,
         })
       );
 
@@ -489,8 +496,10 @@ function register(router) {
       ? await db
           .prepare(
             `SELECT p.id, p.produs_id, p.cantitate, p.um, p.data_intrare, p.pret_unitar,
-                    COALESCE(pr.denumire, p.produs_text) AS marfa
+                    COALESCE(pr.denumire, p.produs_text) AS marfa,
+                    COALESCE(f.nume, NULLIF(TRIM(p.furnizor_text), '')) AS furnizor
                FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
+               LEFT JOIN parteneri f ON f.id = p.furnizor_id
               WHERE p.data_iesire IS NULL AND p.produs_id IN (${compIds.map(() => "?").join(",")})
               ORDER BY p.produs_id, p.data_intrare ASC, p.id ASC`
           )
@@ -533,7 +542,7 @@ function register(router) {
           ? `<span class="badge rosu">lipsesc ${nrf(lipsa)} ${esc(l.um || "")}</span>`
           : `<span class="badge verde">acoperit</span>`,
         luate.length
-          ? `${luate.map((p) => `<a href="/stocuri/ct-park/paleti?q=${p.id}">#${p.id}</a><span class="mic"> · ${nrf(Number(p.cantitate) || 0)} · ${esc(String(p.data_intrare || "").slice(0, 10))}</span>`).join("<br>")}
+          ? `${luate.map((p) => `<a href="/stocuri/ct-park/paleti?q=${p.id}">#${p.id}</a><span class="mic"> · ${nrf(Number(p.cantitate) || 0)} · ${esc(String(p.data_intrare || "").slice(0, 10))}${p.furnizor ? " · " + esc(p.furnizor) : ""}</span>`).join("<br>")}
              ${strans > nevoie ? `<br><span class="mic">rămân ${nrf(strans - nevoie)} ${esc(l.um || "")}</span>` : ""}`
           : '<span class="mic">nimic în depozit</span>',
         Number(l.cost_unitar) > 0 ? money(nevoie * Number(l.cost_unitar)) : '<span class="mic">fără cost</span>',
@@ -563,6 +572,7 @@ function register(router) {
         ["Componentă", "Pe bucată", "Necesar", "În depozit", "Acoperire", "Paleți de luat, FIFO", "Cost"],
         randuri
       )}
+      ${caseta}
       <p class="explic">
         Lista asta <b>nu scoate nimic</b> din depozit — doar spune ce trebuie luat. Scoaterea se face din
         <a href="/stocuri/ct-park/iesire">Depozit → Ieșire marfă</a>, cu destinația <b>producție</b>, bifând paleții de mai sus.

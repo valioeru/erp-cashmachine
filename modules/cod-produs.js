@@ -1245,7 +1245,7 @@ async function scrieProdusul(r, familieId, extra = {}) {
 // avem. De-aia căutarea duplicatului (din `genereaza`) și scrierea stau
 // lipite aici, nu lăsate pe seama fiecărui ecran în parte.
 async function produsulAlegerilor(alegeri, familieId, extra = {}) {
-  const r = await genereaza(alegeri, familieId);
+  const r = await genereaza(alegeri, familieId, { faraFurnizor: Boolean(extra && extra.faraFurnizor) });
   // Un produs pe jumătate configurat n-are voie să intre în nomenclator: ar
   // rămâne acolo cu un cod scurt care se lovește de al altuia.
   //
@@ -1352,8 +1352,22 @@ async function produsulExistent(r, familieId) {
 // (semnătura), iar codul unui produs nou primește primul număr de ordine
 // liber: WBVFOL01, WBVFOL02… Numărul arătat în previzualizare e cel de acum;
 // la salvare se ia din nou, ca să nu-l prindă două ferestre deodată.
-async function genereaza(alegeri, familieId) {
-  const car = await citesteCaracteristici(false, familieId);
+//
+// `faraFurnizor` (comanda agentului, din 06.11.2026): caracteristica
+// „Furnizor" aleasă dintr-o listă nu face parte din produsul comandat.
+// Produsul e cel descris de restul caracteristicilor — cel care stă pe raft —,
+// iar furnizorul se alege pe linia comenzii, din paleții de pe stoc, sau îl
+// alege producția. Furnizorul scris ca text liber rămâne: acolo e chiar
+// produsul (WBVFOL01). Regula, în lib/furnizor-linie.js. În nomenclator
+// caracteristica rămâne cum e configurată.
+async function genereaza(alegeri, familieId, opt = {}) {
+  let car = await citesteCaracteristici(false, familieId);
+  if (opt && opt.faraFurnizor) {
+    const FL = require("../lib/furnizor-linie");
+    const scoase = new Set(car.filter((c) => FL.eFurnizorDeLinie(c)).map((c) => String(c.id)));
+    car = car.map((c) => (scoase.has(String(c.id)) ? { ...c, obligatoriu: 0 } : c));
+    alegeri = Object.fromEntries(Object.entries(alegeri || {}).filter(([k]) => !scoase.has(String(k))));
+  }
   const r = C.genereazaCod(car, alegeri || {});
   let exista = null;
   if (r.contor) {

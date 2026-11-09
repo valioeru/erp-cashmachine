@@ -25,6 +25,10 @@ const STARI = require("../lib/comenzi-stari");
 // folosită de listă, de fișă și de alocarea pe utilaje.
 const STADIU = require("../lib/stadiu-comanda");
 const COST = require("../lib/cost");
+// Furnizorul materialului, ales la alocarea materialului (06.11.2026).
+const FC = require("../lib/furnizor-comanda");
+// Cine alege furnizorul: cine alocă materialul — producția, depozitul, adminul.
+const poateAlegeFurnizor = (u) => Boolean(u && ["admin", "productie", "depozit"].includes(u.rol));
 // Prețuri pe bucată cu până la 4 zecimale: un plic de 0,0125 lei afișat
 // „0,01 lei" ar face raportul „de 2.595 ori" să pară greșit.
 const pret4 = (v) => Number(v || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + " lei";
@@ -2028,6 +2032,8 @@ function register(router) {
         ${alegeProdus}
       </div>
 
+      ${await FC.casetaProductie(c, { inapoi: `/productie/${c.id}`, poateScrie: poateAlegeFurnizor(ctx.user) })}
+
       <h2 style="margin-bottom:4px">Pe ce se lucrează</h2>
       <div class="toolbar" style="margin-top:0"><a class="btn" href="/productie/aloca/${c.id}">+ Alocă pe un utilaj</a>
         <a class="btn secondary" href="/productie/planificare">Vezi planificarea</a></div>
@@ -2166,6 +2172,23 @@ function register(router) {
   // Productia a terminat si trimite marfa in depozit. Nu scrie stoc: scrie o
   // RECEPTIE, pe care depozitul o face rand cu rand. Pana atunci marfa nu e
   // pe stoc, si asta e corect — n-a vazut-o inca nimeni de acolo.
+  // Furnizorul materialului, ales când se alocă materialul (Vali, 06.11.2026:
+  // „furnizorul se alocă când se alocă materialul în producție"). Ajunge pe
+  // liniile comenzii clientului care n-aveau furnizor și, la recepție, pe
+  // paleții care ies din producția asta. Vezi lib/furnizor-comanda.js.
+  router.post("/productie/:id/furnizor", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const b = ctx.body || {};
+    const cerut = String(b.inapoi || "");
+    // Doar înapoi pe pagina comenzii sau pe necesarul ei — nu oriunde scrie formularul.
+    const inapoi = cerut === `/productie/${id}/necesar` ? cerut : `/productie/${id}`;
+    if (!poateAlegeFurnizor(ctx.user)) return redirect(ctx.res, inapoi);
+    const ales = await FC.rezolvaFurnizor(b);
+    const r = await FC.seteazaLaProductie(id, ales, ctx.user);
+    if (!r.gasita) return redirect(ctx.res, "/productie");
+    redirect(ctx.res, inapoi);
+  });
+
   router.post("/productie/:id/trimite-depozit", async (ctx) => {
     if (!ctx.user || !["admin", "productie", "depozit"].includes(ctx.user.rol)) return redirect(ctx.res, "/productie");
     const id = parseInt(ctx.params.id, 10);

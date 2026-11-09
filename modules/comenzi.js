@@ -17,6 +17,12 @@ const K = require("../lib/comanda-config");
 // de „cine are voie” sunt în lib/comanda-istoric.js, cu testul lor.
 const IST = require("../lib/comanda-istoric");
 
+// Furnizorul de pe linie: obligatoriu doar când produsul e pe stoc, ales
+// dintre furnizorii paleților (Vali, 06.11.2026). Regula în
+// lib/furnizor-linie.js, citirile din bază în lib/furnizor-comanda.js.
+const FL = require("../lib/furnizor-linie");
+const FC = require("../lib/furnizor-comanda");
+
 // Scrie în istoric ce s-a schimbat.
 //
 // Numele omului se copiază în rând, nu se lasă doar legătura: peste doi ani
@@ -269,8 +275,11 @@ const MAX_REZULTATE = 40;
 // în urmă la prima schimbare — exact cum s-a întâmplat cu alte formulare din
 // ERP — iar agentul ar fi avut panoul de produs configurat la plasare și nu și
 // la corectură.
-function blocLinii(produse, linii) {
-  const categorii = [...new Set(produse.map((p) => String(p.categorie || "").trim()).filter(Boolean))].sort((a, b) =>
+// `vechi` (la modificare): furnizorul scris deja pe fiecare produs al comenzii,
+// ca Map produs_id → { cheie, eticheta }. Linia veche nu e oprită pentru un
+// furnizor pe care nu i l-a cerut nimeni la plasare, iar ce avea rămâne.
+function blocLinii(produse, linii, { vechi } = {}) {
+  const categorii =[...new Set(produse.map((p) => String(p.categorie || "").trim()).filter(Boolean))].sort((a, b) =>
     a.localeCompare(b, "ro")
   );
   const faraCategorie = produse.some((p) => !String(p.categorie || "").trim());
@@ -328,6 +337,18 @@ function blocLinii(produse, linii) {
             <input type="hidden" name="pret_exact[]" value="${esc(exact)}">${nota}`;
   };
 
+  // Furnizorul liniei: câmpul ascuns pleacă mereu, câte unul pe rând, ca
+  // listele din formular să rămână aliniate; lista de furnizori o desenează
+  // JS-ul (comenziFurnizor), după ce află ce e pe stoc din produsul ales.
+  const campFurnizor = (l) => {
+    const v = vechi && l.produs_id ? vechi.get(Number(l.produs_id)) : null;
+    const ales = l.furnizor_ales !== undefined && l.furnizor_ales !== null ? String(l.furnizor_ales) : v ? v.cheie : "";
+    return `<input type="hidden" name="furnizor_ales[]" value="${esc(ales)}">
+            <div class="furnizor-linie"${
+              v ? ` data-produs-vechi="${esc(String(l.produs_id))}" data-furnizor-vechi="${esc(v.cheie)}" data-furnizor-vechi-nume="${esc(v.eticheta)}"` : ""
+            }></div>`;
+  };
+
   const randLinie = (l) => `<tr>
           <td data-eticheta="Categorie" style="min-width:130px">
             <select class="cat-produs" onchange="comenziFiltreaza(this)">${optiuniCategorie(categoriaProdusului(l.produs_id))}</select>
@@ -343,6 +364,7 @@ function blocLinii(produse, linii) {
             <button type="button" class="link-btn configureaza-linie" onclick="comenziDeschideConfig(this)">
               sau configurează un produs nou (cod generat)
             </button>
+            ${campFurnizor(l)}
           </td>
           <td data-eticheta="Cantitate"><input type="number" step="any" inputmode="decimal" name="cantitate[]" value="${esc(l.cantitate || "")}"></td>
           <td data-eticheta="UM"><input class="um-linie" name="um[]" list="comenzi-unitati" style="width:84px" placeholder="UM"
@@ -449,7 +471,7 @@ function lineRowsScript(produse, familii, eAdmin) {
       if (ascuns && ascuns.value) {
         var ales = COMENZI_PRODUSE.find(function (p) { return String(p[0]) === String(ascuns.value); });
         var cat = select.value === '\\u0000' ? '' : select.value;
-        if (ales && select.value && ales[4] !== cat) { ascuns.value = ''; cautare.value = ''; }
+        if (ales && select.value && ales[4] !== cat) { ascuns.value = ''; cautare.value = ''; comenziFurnizor(rand); }
       }
       cautare.focus();
       comenziCauta(cautare);
@@ -583,6 +605,16 @@ function lineRowsScript(produse, familii, eAdmin) {
       gazda.innerHTML = '';
       if (!f) { comenziPreview(panou); return; }
       f.campuri.forEach(function (c) {
+        // Furnizorul nu e o caracteristică a produsului comandat: îl alegi pe
+        // linie, dacă produsul e pe stoc, altfel îl alege producția.
+        if (c.furnizor) {
+          var nota = document.createElement('div');
+          nota.className = 'config-camp config-furnizor-nota';
+          nota.innerHTML = '<span>' + comenziEscHtml(c.nume) + '</span>' +
+            '<span class="ajutor-greutate">nu se alege aici: pe linie, dacă produsul e pe stoc, altfel în producție</span>';
+          gazda.appendChild(nota);
+          return;
+        }
         var w = document.createElement('label');
         w.className = 'config-camp' + (c.obligatoriu ? ' obligatoriu' : '');
         var eticheta = comenziEscHtml(c.nume) + (c.um ? ' (' + comenziEscHtml(c.um) + ')' : '') +
@@ -751,6 +783,7 @@ function lineRowsScript(produse, familii, eAdmin) {
           rand.querySelector('.cauta-produs').value = (d.cod ? d.cod + ' — ' : '') + d.denumire;
           if (umInput && d.um && (d.umFix || !umInput.value)) umInput.value = d.um;
           trConfig.remove();
+          comenziFurnizor(rand);
           var cant = rand.querySelector('input[name="cantitate[]"]');
           if (cant && !cant.value) cant.focus();
         })
@@ -804,6 +837,7 @@ function lineRowsScript(produse, familii, eAdmin) {
           }
           rand.querySelector('input[name="produs_id[]"]').value = d.id;
           cautare.value = d.denumire;
+          comenziFurnizor(rand);
           if (umInput && !umInput.value && d.um) umInput.value = d.um;
           var pretInput = rand.querySelector('input[name="pret_unitar[]"]');
           if (pretInput && !pretInput.value && Number(d.pret) > 0) comenziPunePret(pretInput, d.pret);
@@ -829,9 +863,90 @@ function lineRowsScript(produse, familii, eAdmin) {
       // bucăți). Ce a scris omul nu se rescrie.
       var umInput = rand.querySelector('.um-linie');
       if (umInput && !umInput.value && p && p[6]) umInput.value = p[6];
+      comenziFurnizor(rand);
       var cant = rand.querySelector('input[name="cantitate[]"]');
       if (cant && !cant.value) cant.focus();
     }
+
+    // ---- Furnizorul liniei ----------------------------------------------
+    //
+    // Vali, 06.11.2026: „furnizor obligatoriu doar dacă găsește produsul în
+    // stoc, altfel să fie pusă fără, și furnizorul se alocă când se alocă
+    // materialul în producție". După ce se alege produsul, serverul spune ce
+    // furnizori are pe paleții din CT-Park; dacă are, lista e obligatorie.
+    // Altfel rămâne doar o notă și linia pleacă fără furnizor.
+    //
+    // „pastreaza": la încărcarea paginii alegerea scrisă deja rămâne; la
+    // schimbarea produsului se golește — era a altui produs.
+    function comenziFurnizor(rand, pastreaza) {
+      var gazda = rand.querySelector('.furnizor-linie');
+      var ascuns = rand.querySelector('input[name="furnizor_ales[]"]');
+      var produs = rand.querySelector('input[name="produs_id[]"]');
+      if (!gazda || !ascuns || !produs) return;
+      var id = String(produs.value || '');
+      if (!pastreaza) ascuns.value = '';
+      gazda.setAttribute('data-produs', id);
+      if (!id) { gazda.innerHTML = ''; ascuns.value = ''; return; }
+      gazda.innerHTML = '<span class="furnizor-nota">se verifică stocul…</span>';
+      fetch('/comenzi/furnizori-stoc?produs=' + encodeURIComponent(id), { headers: { Accept: 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (s) {
+          // Între timp s-a ales alt produs pe rând: răspunsul ăsta nu mai e al lui.
+          if (gazda.getAttribute('data-produs') !== id) return;
+          comenziDeseneazaFurnizor(rand, s);
+        })
+        .catch(function () {
+          if (gazda.getAttribute('data-produs') !== id) return;
+          gazda.innerHTML = '<span class="furnizor-nota">Nu am putut verifica stocul. Dacă e pe stoc, salvarea îți cere furnizorul.</span>';
+        });
+    }
+
+    function comenziDeseneazaFurnizor(rand, s) {
+      var gazda = rand.querySelector('.furnizor-linie');
+      var ascuns = rand.querySelector('input[name="furnizor_ales[]"]');
+      var produs = rand.querySelector('input[name="produs_id[]"]').value;
+      var vechi = gazda.getAttribute('data-furnizor-vechi') || '';
+      var vechiNume = gazda.getAttribute('data-furnizor-vechi-nume') || '';
+      // Linia care era deja pe comandă, cu același produs (la modificare).
+      var eVeche = String(gazda.getAttribute('data-produs-vechi') || '') === String(produs);
+      if (!s || !s.relevant) { gazda.innerHTML = ''; ascuns.value = eVeche ? vechi : ''; return; }
+      var notaVeche = eVeche && vechi
+        ? '<span class="furnizor-nota">Pe linie: <b>' + comenziEscHtml(vechiNume) + '</b></span>'
+        : '';
+      if (!s.cere) {
+        ascuns.value = eVeche ? vechi : '';
+        gazda.innerHTML = notaVeche + '<span class="furnizor-nota">' + comenziEscHtml(s.mesaj || '') + '</span>';
+        return;
+      }
+      var ales = ascuns.value || (eVeche ? vechi : '');
+      var cant = function (o) {
+        return Number(o.cantitate).toLocaleString('ro-RO', { maximumFractionDigits: 3 }) + (o.um ? ' ' + o.um : '');
+      };
+      var optiuni = s.optiuni.slice();
+      // Furnizorul scris deja pe linie, chiar dacă paleții lui au plecat între
+      // timp: rămâne de ales, ca o modificare de cantitate să nu-l piardă.
+      if (eVeche && vechi && !optiuni.some(function (o) { return o.cheie === vechi; })) {
+        optiuni.unshift({ cheie: vechi, nume: vechiNume + ' (ales înainte)', cantitate: null });
+      }
+      var html = '<option value="">— alege furnizorul —</option>' + optiuni.map(function (o) {
+        return '<option value="' + comenziEscHtml(o.cheie) + '"' + (o.cheie === ales ? ' selected' : '') + '>' +
+          comenziEscHtml(o.nume) + (o.cantitate === null ? '' : ' — ' + comenziEscHtml(cant(o)) + ' pe stoc') + '</option>';
+      }).join('');
+      gazda.innerHTML =
+        '<label class="furnizor-camp"><span>Furnizor <span class="steluta">*</span></span>' +
+          '<select class="furnizor-select"' + (eVeche ? '' : ' required') + '>' + html + '</select></label>' +
+        '<span class="furnizor-nota">' + comenziEscHtml(s.mesaj || '') + '</span>';
+      var sel = gazda.querySelector('select');
+      ascuns.value = sel.value;
+      sel.addEventListener('change', function () { ascuns.value = sel.value; });
+    }
+
+    // La deschiderea paginii: rândurile cu produs (comanda modificată, sau
+    // formularul întors cu o eroare) își află furnizorii de pe stoc.
+    document.querySelectorAll('#linii-body tr:not(.rand-config)').forEach(function (rand) {
+      var p = rand.querySelector('input[name="produs_id[]"]');
+      if (p && p.value) comenziFurnizor(rand, true);
+    });
 
     // Click în afară: lista se închide, dar produsul ales rămâne. Dacă omul a
     // scris ceva și n-a apăsat pe nimic, textul se șterge — altfel ar rămâne
@@ -859,6 +974,11 @@ function lineRowsScript(produse, familii, eAdmin) {
       if (cutie) { cutie.innerHTML = ''; cutie.hidden = true; }
       // Nota „în bază: ..." e a liniei copiate, nu a celei noi.
       clone.querySelectorAll('.pret-exact').forEach(function (el) { el.remove(); });
+      // La fel furnizorul: lista, nota și ce era scris pe linia veche.
+      clone.querySelectorAll('.furnizor-linie').forEach(function (el) {
+        el.innerHTML = '';
+        ['data-produs', 'data-produs-vechi', 'data-furnizor-vechi', 'data-furnizor-vechi-nume'].forEach(function (a) { el.removeAttribute(a); });
+      });
       tbody.appendChild(clone);
       clone.querySelector('.cat-produs').focus();
     }
@@ -916,6 +1036,14 @@ function lineRowsScript(produse, familii, eAdmin) {
        lista de rezultate, unde statea sub patruzeci de produse. */
     .configureaza-linie { display:block; margin-top:4px; padding:0; font-size:12px;
       color:var(--primary,#2f5d9c); font-weight:600; text-align:left; }
+    /* Furnizorul liniei, sub produs: lista apare doar când produsul e pe stoc. */
+    .furnizor-linie:empty { display:none; }
+    .furnizor-linie { margin-top:6px; display:flex; flex-direction:column; gap:3px; }
+    .furnizor-camp { display:flex; flex-direction:column; gap:2px; font-size:12px; color:var(--text,#111); font-weight:600; margin:0; }
+    .furnizor-camp .steluta { color:var(--danger,#b42318); }
+    .furnizor-camp select { width:100%; font-weight:400; }
+    .furnizor-nota { font-size:11px; color:var(--text-muted); line-height:1.35; }
+    .config-furnizor-nota > span:first-child { font-weight:600; }
     .rezultat-eroare { padding:6px 10px; color:var(--danger,#b42318); font-size:12px; }
 
     /* Panoul de configurare: stă sub linia lui, în același tabel, ca agentul
@@ -1259,7 +1387,8 @@ function register(router) {
     const familieId = Number(corp.familie) || 0;
     if (!familieId) return trimiteJson(ctx, 200, { cod: "", denumire: "", rezumat: "", sePoate: false });
     const alegeri = K.alegeriDin(corp);
-    const r = await CP.genereaza(alegeri, familieId);
+    // Fără furnizor: pe comandă el nu face parte din produs (lib/furnizor-linie.js).
+    const r = await CP.genereaza(alegeri, familieId, { faraFurnizor: true });
     return trimiteJson(ctx, 200, {
       cod: r.cod || "",
       denumire: r.denumire || "",
@@ -1282,7 +1411,7 @@ function register(router) {
     // Aceeași funcție ca la „Produs nou” din nomenclator: găsește produsul
     // dacă există, îl scrie dacă nu. Un produs incomplet nu se scrie niciodată
     // — verificarea e înăuntru, nu aici, ca să nu existe o a doua părere.
-    const { r, id } = await CP.produsulAlegerilor(alegeri, familieId, { um: corp.um });
+    const { r, id } = await CP.produsulAlegerilor(alegeri, familieId, { um: corp.um, faraFurnizor: true });
     if (!id) return trimiteJson(ctx, 400, { eroare: K.motivRefuz(r, fam.nume, nimic) });
 
     const p = await db
@@ -1305,6 +1434,21 @@ function register(router) {
     });
   });
 
+  // Furnizorii produsului de pe stoc, pentru linia comenzii: cere furnizor,
+  // dintre care și cu cât. Ruta stă ÎNAINTEA lui /comenzi/:id, din același
+  // motiv ca cele de mai sus.
+  router.get("/comenzi/furnizori-stoc", async (ctx) => {
+    if (!ctx.user) return trimiteJson(ctx, 403, { eroare: "Nu ești autentificat." });
+    const s = await FC.pentruProdus(parseInt(ctx.query.produs, 10) || 0);
+    return trimiteJson(ctx, 200, {
+      relevant: s.relevant,
+      cere: s.cere,
+      total: s.total,
+      mesaj: s.mesaj,
+      optiuni: s.optiuni.map((o) => ({ cheie: o.cheie, nume: o.nume, cantitate: o.cantitate, um: o.um, paleti: o.paleti })),
+    });
+  });
+
   router.post("/comenzi", async (ctx) => {
     const { partener_id, numar, observatii } = ctx.body;
     const produsIds = asArray(ctx.body["produs_id[]"]);
@@ -1315,6 +1459,7 @@ function register(router) {
     // 0,16 lei — nu 16, cum ieșea din câmpul „number" pe un browser în engleză.
     const preturiCitite = preturi.map((p) => PC.pretDinCamp(p));
     const unitati = asArray(ctx.body["um[]"]);
+    const alegeriFurnizor = asArray(ctx.body["furnizor_ales[]"]);
     // Ce vine prin HTTP nu se crede pe cuvânt: o monedă necunoscută ar ajunge
     // scrisă pe comandă și pe factura de după ea.
     const moneda = MONEDE.includes(String(ctx.body.moneda || "")) ? String(ctx.body.moneda) : "RON";
@@ -1338,7 +1483,13 @@ function register(router) {
       data_livrare_ceruta: ctx.body.data_livrare_ceruta,
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
       moneda,
-      linii: produsIds.map((id, i) => ({ produs_id: id, cantitate: cantitati[i], pret_unitar: preturi[i], um: unitati[i] })),
+      linii: produsIds.map((id, i) => ({
+        produs_id: id,
+        cantitate: cantitati[i],
+        pret_unitar: preturi[i],
+        um: unitati[i],
+        furnizor_ales: alegeriFurnizor[i] || "",
+      })),
     };
     const idClient = parseInt(partener_id, 10);
     if (!idClient) {
@@ -1379,6 +1530,14 @@ function register(router) {
 
     const preturiRele = liniiCuPretRau(produsIds, cantitati, preturiCitite);
     if (preturiRele) return await formularComandaNoua(ctx, { eroare: preturiRele, valori });
+
+    // Furnizorul: obligatoriu doar pe liniile al căror produs e pe stoc cu
+    // furnizor știut, și doar dintre furnizorii de pe paleți. Lista din
+    // formular are `required`, dar ce vine prin HTTP nu se crede pe cuvânt.
+    const furnizori = await FC.verificaLinii(
+      produsIds.map((id, i) => ({ produs_id: parseInt(id, 10), cantitate: Number(cantitati[i] || 0), alegere: alegeriFurnizor[i] }))
+    );
+    if (furnizori.eroare) return await formularComandaNoua(ctx, { eroare: furnizori.eroare, valori });
 
     // Livrarea parțială se întreabă acum, nu după ce depozitul descoperă că
     // lipsește marfă. Radio-urile din formular au `required`, dar ce vine prin
@@ -1422,18 +1581,24 @@ function register(router) {
     const comandaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
-      "INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?, ?, ?, ?, ?)"
+      `INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um, furnizor_id, furnizor_text, furnizor_sursa)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (let i = 0; i < produsIds.length; i++) {
       const cant = Number(cantitati[i] || 0);
       const produsId = parseInt(produsIds[i], 10);
       if (cant > 0 && produsId) {
+        const f = furnizori.deScris[i];
+        const ales = f && !f.pastreaza ? f : null;
         await insertLinie.run(
           comandaId,
           produsId,
           cant,
           preturiCitite[i] && preturiCitite[i].ok ? preturiCitite[i].valoare : 0,
-          String(unitati[i] || "").trim() || null
+          String(unitati[i] || "").trim() || null,
+          ales ? ales.furnizor_id || null : null,
+          ales ? ales.furnizor_text || null : null,
+          ales ? "stoc" : null
         );
       }
     }
@@ -1464,10 +1629,19 @@ function register(router) {
       .get(ctx.params.id);
     if (!comanda) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/comenzi", body: "<p>Comandă inexistentă.</p>" }));
 
+    // `cere_furnizor`: produsul e dintr-o familie cu „Furnizor" ales dintr-o
+    // listă (lib/furnizor-comanda.js) — acolo se spune și când furnizorul n-a
+    // fost ales încă.
     const linii = await db
       .prepare(
-        `SELECT cl.*, p.denumire, p.unitate_masura, COALESCE(NULLIF(TRIM(p.cod), ''), p.cod_generat) AS cod_produs
-         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ?`
+        `SELECT cl.*, p.denumire, p.unitate_masura, COALESCE(NULLIF(TRIM(p.cod), ''), p.cod_generat) AS cod_produs,
+                f.nume AS furnizor_nume,
+                CASE WHEN EXISTS (SELECT 1 FROM cod_caracteristici cc
+                                   WHERE cc.familie_id = p.cod_familie_id AND ${FC.conditieFurnizor("cc")})
+                     THEN 1 ELSE 0 END AS cere_furnizor
+         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id
+         LEFT JOIN parteneri f ON f.id = cl.furnizor_id
+         WHERE cl.comanda_id = ?`
       )
       .all(comanda.id);
     const total = linii.reduce((s, l) => s + l.cantitate * l.pret_unitar, 0);
@@ -1608,7 +1782,8 @@ function register(router) {
             // produsul în producție și în depozit, iar denumirea e ce
             // recunoaște clientul la telefon.
             esc(l.denumire) +
-              (l.cod_produs ? `<br><span class="mic" style="color:var(--text-muted)">${esc(l.cod_produs)}</span>` : ""),
+              (l.cod_produs ? `<br><span class="mic" style="color:var(--text-muted)">${esc(l.cod_produs)}</span>` : "") +
+              FC.randFurnizor(l),
             l.cantitate,
             // Unitatea scrisă pe linie bate pe cea din nomenclator: acolo e
             // unitatea în care ținem produsul, aici cea în care s-a comandat.
@@ -1839,10 +2014,16 @@ function register(router) {
 
     const liniiBaza = await db
       .prepare(
-        `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um FROM comenzi_linii cl
-         WHERE cl.comanda_id = ? ORDER BY cl.id`
+        `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um, cl.furnizor_id, cl.furnizor_text, f.nume AS furnizor_nume
+           FROM comenzi_linii cl LEFT JOIN parteneri f ON f.id = cl.furnizor_id
+          WHERE cl.comanda_id = ? ORDER BY cl.id`
       )
       .all(comanda.id);
+    // Furnizorul scris deja pe fiecare produs al comenzii — și după o eroare
+    // de salvare, când liniile vin din formular, nu din bază.
+    const furnizorVechi = new Map(
+      liniiBaza.map((l) => [Number(l.produs_id), { cheie: FL.cheiaLiniei(l), eticheta: FL.eticheta(l, l.furnizor_nume) }])
+    );
     const v = valori || {
       partener_id: comanda.partener_id,
       numar: comanda.numar,
@@ -1909,7 +2090,7 @@ function register(router) {
         <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
         <h2>Produse comandate</h2>
-        ${blocLinii(produse, v.linii)}
+        ${blocLinii(produse, v.linii, { vechi: furnizorVechi })}
 
         <label class="field" style="margin-top:12px"><span>De ce modifici? (intră în istoric)</span>
           <input type="text" name="motiv" maxlength="200" placeholder="ex. clientul a mărit cantitatea la telefon">
@@ -1975,13 +2156,16 @@ function register(router) {
     const preturi = asArray(b["pret_unitar[]"]);
     const exacte = asArray(b["pret_exact[]"]);
     const unitati = asArray(b["um[]"]);
+    const alegeriFurnizor = asArray(b["furnizor_ales[]"]);
     const moneda = MONEDE.includes(String(b.moneda || "")) ? String(b.moneda) : "RON";
 
     // Prețul neatins rămâne exact cel din bază; cel tastat se citește cu
     // virgulă sau punct și se rotunjește la 4 zecimale (lib/pret-camp.js).
     const preturiCitite = produsIds.map((id, i) => PC.pretDeScris(preturi[i], exacte[i]));
+    // `i` = rândul din formular: după el se găsește furnizorul verificat mai jos.
     const noi = produsIds
       .map((id, i) => ({
+        i,
         produs_id: parseInt(id, 10),
         cantitate: Number(cantitati[i] || 0),
         pret_unitar: preturiCitite[i].ok ? preturiCitite[i].valoare : 0,
@@ -2002,6 +2186,7 @@ function register(router) {
         pret_unitar: preturi[i],
         pret_exact: exacte[i],
         um: unitati[i],
+        furnizor_ales: alegeriFurnizor[i] || "",
       })),
     };
     const opreste = (mesaj) => formularEditare(ctx, comanda, { eroare: mesaj, valori });
@@ -2035,10 +2220,35 @@ function register(router) {
     };
     const liniiInainte = await db
       .prepare(
-        `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um, p.denumire
-         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ? ORDER BY cl.id`
+        `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um, p.denumire,
+                cl.furnizor_id, cl.furnizor_text, f.nume AS furnizor_nume
+         FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id
+         LEFT JOIN parteneri f ON f.id = cl.furnizor_id
+         WHERE cl.comanda_id = ? ORDER BY cl.id`
       )
       .all(comanda.id);
+
+    // Furnizorul fiecărei linii. Produsul care era deja pe comandă nu e oprit
+    // pentru un furnizor necerut la plasare, iar ce avea scris rămâne.
+    const inaintePeProdus = new Map(liniiInainte.map((l) => [Number(l.produs_id), l]));
+    const furnizori = await FC.verificaLinii(
+      produsIds.map((id, i) => {
+        const v = inaintePeProdus.get(parseInt(id, 10));
+        return {
+          produs_id: parseInt(id, 10),
+          cantitate: Number(cantitati[i] || 0),
+          alegere: alegeriFurnizor[i],
+          existenta: Boolean(v),
+          vechi: v ? FL.cheiaLiniei(v) : "",
+        };
+      })
+    );
+    if (furnizori.eroare) return await opreste(furnizori.eroare);
+    for (const l of noi) {
+      const f = furnizori.deScris[l.i];
+      l.furnizor = f && !f.pastreaza ? f : null;
+    }
+
     const numeProduselor = new Map(liniiInainte.map((l) => [Number(l.produs_id), l.denumire]));
     for (const l of noi) {
       if (numeProduselor.has(l.produs_id)) continue;
@@ -2061,6 +2271,14 @@ function register(router) {
         noi.map((l) => ({ ...l, denumire: numeProduselor.get(l.produs_id) }))
       ),
     ];
+    // Furnizorul ales din stoc intră în istoric ca orice altă schimbare de pe linie.
+    for (const l of noi) {
+      if (!l.furnizor) continue;
+      const v = inaintePeProdus.get(l.produs_id);
+      const vechi = v ? FL.eticheta(v, v.furnizor_nume) : "";
+      if (vechi === l.furnizor.nume && (!v || Number(v.furnizor_id || 0) === Number(l.furnizor.furnizor_id || 0))) continue;
+      schimbari.push({ ce: "Furnizor · " + numeProduselor.get(l.produs_id), vechi, nou: l.furnizor.nume });
+    }
     // Clientul schimbat se scrie cu numele, nu cu id-ul: „7 → 12” nu spune
     // nimic peste trei luni.
     for (const s of schimbari) {
@@ -2120,10 +2338,29 @@ function register(router) {
         await db
           .prepare("UPDATE comenzi_linii SET cantitate = ?, pret_unitar = ?, um = ? WHERE id = ?")
           .run(l.cantitate, l.pret_unitar, l.um, idVechi);
+        // Furnizorul se rescrie doar când s-a ales altul; altfel rămâne ce
+        // era — inclusiv cel pus de producție.
+        if (l.furnizor) {
+          await db
+            .prepare("UPDATE comenzi_linii SET furnizor_id = ?, furnizor_text = ?, furnizor_sursa = 'stoc' WHERE id = ?")
+            .run(l.furnizor.furnizor_id || null, l.furnizor.furnizor_text || null, idVechi);
+        }
       } else {
         await db
-          .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?,?,?,?,?)")
-          .run(comanda.id, l.produs_id, l.cantitate, l.pret_unitar, l.um);
+          .prepare(
+            `INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um, furnizor_id, furnizor_text, furnizor_sursa)
+             VALUES (?,?,?,?,?,?,?,?)`
+          )
+          .run(
+            comanda.id,
+            l.produs_id,
+            l.cantitate,
+            l.pret_unitar,
+            l.um,
+            l.furnizor ? l.furnizor.furnizor_id || null : null,
+            l.furnizor ? l.furnizor.furnizor_text || null : null,
+            l.furnizor ? "stoc" : null
+          );
       }
     }
     for (const [, idVechi] of vechiPeProdus) {

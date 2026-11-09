@@ -92,10 +92,13 @@ async function rezervatPeProduse(exceptComandaId) {
 // disponibil și cât lipsește.
 async function potrivire(comandaId) {
   await elibereazaExpirate();
+  // Furnizorul liniei (06.11.2026): dacă agentul l-a ales din stoc, depozitul
+  // știe de pe ce paleți scoate marfa.
   const linii = await db
     .prepare(
-      `SELECT cl.*, p.denumire, p.unitate_masura
+      `SELECT cl.*, p.denumire, p.unitate_masura, f.nume AS furnizor_nume
        FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id
+       LEFT JOIN parteneri f ON f.id = cl.furnizor_id
        WHERE cl.comanda_id = ? ORDER BY cl.id`
     )
     .all(comandaId);
@@ -387,7 +390,7 @@ function register(router) {
              </form>${notaCerute}`
           : notaCerute;
       return [
-        esc(l.denumire),
+        esc(l.denumire) + require("../lib/furnizor-comanda").randFurnizor(l),
         `${nr(l.cerut)} ${esc(l.unitate_masura || "")}`,
         nr(l.livrat),
         nr(l.fizic),
@@ -688,6 +691,18 @@ function register(router) {
         ctx.user ? ctx.user.nume : null,
         acum()
       );
+    // Marfa comandată la un furnizor anume: linia clientului află de la cine
+    // vine, dacă nu avea deja un furnizor (ales din stoc sau de producție).
+    const furnizorTert = sursa === "tert" ? parseInt(b.furnizor_id, 10) || null : null;
+    if (furnizorTert) {
+      await db
+        .prepare(
+          `UPDATE comenzi_linii SET furnizor_id = ?, furnizor_text = NULL, furnizor_sursa = 'aprovizionare'
+            WHERE id = ? AND furnizor_id IS NULL AND COALESCE(TRIM(furnizor_text), '') = ''`
+        )
+        .run(furnizorTert, linieId)
+        .catch((e) => console.error("[depozit] furnizorul liniei:", e.message));
+    }
     redirect(ctx.res, `/depozit/comanda/${id}`);
   });
 

@@ -676,6 +676,9 @@ function register(router) {
     const ramas = Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000;
     if (!(ramas > R.EPS)) return inapoi("Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat.");
     const CT = require("./ct-park");
+    // De la cine e marfa: furnizorul recepției sau, la marfa din producție,
+    // furnizorul ales acolo pentru material (lib/furnizor-comanda.js).
+    const fz = await require("../lib/furnizor-comanda").furnizorReceptiei(r);
     const ids = await CT.puneMarfa(
       ctx,
       {
@@ -684,7 +687,8 @@ function register(router) {
         um: l.um || l.unitate_masura || "",
         lot: l.lot || "",
         pret_unitar: l.pret_unitar == null ? "" : String(l.pret_unitar),
-        furnizor_id: r.sursa === "furnizor" ? r.partener_id || "" : "",
+        furnizor_id: fz.furnizor_id || "",
+        furnizor_text: fz.furnizor_id ? "" : fz.furnizor_text || "",
         observatii: `Direct la livrare din recepția ${r.numar || "#" + r.id}`,
         receptie_id: r.id,
         receptie_linie_id: lid,

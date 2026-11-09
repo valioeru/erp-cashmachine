@@ -1046,8 +1046,8 @@ async function dinReceptie(lid) {
   if (!lid) return null;
   const l = await db
     .prepare(
-      `SELECT l.*, r.id AS rid, r.numar AS receptie_numar, r.partener_id, pa.tip AS partener_tip,
-              p.denumire, p.unitate_masura
+      `SELECT l.*, r.id AS rid, r.numar AS receptie_numar, r.partener_id, r.sursa, r.comanda_productie_id,
+              pa.tip AS partener_tip, p.denumire, p.unitate_masura
          FROM receptii_linii l
          JOIN receptii r ON r.id = l.receptie_id
          LEFT JOIN produse p ON p.id = l.produs_id
@@ -1057,6 +1057,12 @@ async function dinReceptie(lid) {
     .get(lid)
     .catch(() => null);
   if (!l) return null;
+  // Marfa venită din producție poartă furnizorul ales acolo pentru material
+  // (lib/furnizor-comanda.js): paletul știe de la cine e folia din el.
+  const dinProductie =
+    !["furnizor", "ambele"].includes(String(l.partener_tip || "")) && nr(l.comanda_productie_id)
+      ? await require("../lib/furnizor-comanda").furnizorReceptiei({ sursa: l.sursa, comanda_productie_id: l.comanda_productie_id })
+      : { furnizor_id: null, furnizor_text: null, nume: "" };
   const pus = await db
     .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
     .get(lid)
@@ -1072,7 +1078,9 @@ async function dinReceptie(lid) {
     um: l.um || l.unitate_masura || "",
     lot: l.lot || "",
     pret: l.pret_unitar == null ? "" : String(l.pret_unitar).replace(".", ","),
-    furnizor_id: ["furnizor", "ambele"].includes(String(l.partener_tip || "")) ? Number(l.partener_id) : null,
+    furnizor_id: ["furnizor", "ambele"].includes(String(l.partener_tip || "")) ? Number(l.partener_id) : dinProductie.furnizor_id,
+    furnizor_text: dinProductie.furnizor_text || "",
+    furnizor_nume: dinProductie.nume || "",
     primit,
     pus: nr(pus && pus.c),
     ramas: Math.max(0, Math.round((primit - nr(pus && pus.c)) * 1000) / 1000),
@@ -3983,10 +3991,18 @@ function register(router) {
           <label class="field">Furnizor
             <select name="furnizor_id">
               <option value="">— nu știu acum —</option>
+              ${
+                // Furnizorul ales în producție poate fi o firmă trecută „ambele"
+                // (client și furnizor), care nu e în lista de mai jos: îl punem
+                // în față, ales, ca paletul să nu-l piardă.
+                pre && pre.furnizor_id && !(furnizori || []).some((f) => Number(f.id) === Number(pre.furnizor_id))
+                  ? `<option value="${esc(String(pre.furnizor_id))}" selected>${esc(pre.furnizor_nume || "furnizor #" + pre.furnizor_id)}</option>`
+                  : ""
+              }
               ${(furnizori || []).map((f) => `<option value="${f.id}"${pre && pre.furnizor_id === Number(f.id) ? " selected" : ""}>${esc(f.nume)}</option>`).join("")}
             </select>
           </label>
-          <label class="field">…sau scris liber<input name="furnizor_text" placeholder="dacă nu e în listă"></label>
+          <label class="field">…sau scris liber<input name="furnizor_text" placeholder="dacă nu e în listă" value="${esc(pre ? pre.furnizor_text || "" : "")}"></label>
           <label class="field">Lot<input name="lot" value="${esc(pre ? pre.lot : "")}"></label>
           <label class="field">Categorie
             <select name="categorie">
