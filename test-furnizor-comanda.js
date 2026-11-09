@@ -199,7 +199,7 @@ function corpComanda(linii, extra) {
   return Object.assign(
     {
       partener_id: String(CLIENT), client_cautat: "TFC Client SRL", numar: "TFC", observatii: "", data_livrare_ceruta: "2099-12-01",
-      livrare_partiala: "da", moneda: "RON",
+      livrare_partiala: "da", branding: "cash_machine", moneda: "RON",
       "produs_id[]": linii.map((l) => String(l[0] || "")),
       "cantitate[]": linii.map((l) => String(l[1] == null ? "" : l[1])),
       "pret_unitar[]": linii.map(() => "10"),
@@ -351,6 +351,7 @@ async function plaseaza(linii) {
   bine("arată paleții fără furnizor, aleși din stoc", pgB.includes("furnizor: <b>paleții fără furnizor scris</b>") && pgB.includes("· ales din stoc"));
   bine("la produsul fără stoc spune că-l alege producția", pgB.includes("furnizor: încă neales — se alege în producție"));
   egal("la produsul fără Furnizor în familie nu scrie nimic", (pgB.match(/furnizor-pe-linie/g) || []).length, 2);
+  bine("pagina comenzii arată brandingul ales", pgB.includes('<div class="k">Branding</div><span class="badge verde">cu branding Cash Machine</span>'));
   const pgA = (await cer("get", "/comenzi/:id", { params: { id: String(A) } })).corp;
   bine("furnizorul din Parteneri, cu numele", pgA.includes("furnizor: <b>TFC Furnizor Doi SRL</b>"));
 
@@ -399,6 +400,7 @@ async function plaseaza(linii) {
   egal("linia care avea furnizor nu se rescrie", [liniile(B).find((l) => l.id === lM.id).furnizor_text, liniile(B).find((l) => l.id === lM.id).furnizor_id], [FL.NESCRIS, null]);
   const dep = (await cer("get", "/depozit/comanda/:id", { params: { id: String(B) } })).corp;
   bine("pagina depozitului arată furnizorul liniei", dep.includes("furnizor: <b>TFC Furnizor Doi SRL</b>") && dep.includes("comandat de depozit"));
+  bine("…și brandingul comenzii", dep.includes('<strong>Branding:</strong> <span class="badge verde">cu branding Cash Machine</span>'));
 
   // ---------------------------------------------------------------------------
   console.log("\n9. Producția alege furnizorul la alocarea materialului");
@@ -413,6 +415,7 @@ async function plaseaza(linii) {
   egal("agentul nu alege furnizorul producției", [rp.antet.Location, cpRand().furnizor_id, fz(P_FARA).furnizor_id], [`/productie/${cp}`, null, null]);
   const cas0 = (await cer("get", "/productie/:id", { params: { id: String(cp) } })).corp;
   bine("caseta spune că furnizorul e încă neales", cas0.includes("Furnizorul materialului") && cas0.includes("Încă neales"));
+  bine("producția vede brandingul comenzii clientului", cas0.includes('<div class="k">Branding</div><span class="badge verde">cu branding Cash Machine</span>'));
   bine("…și ce linie a clientului îl așteaptă", cas0.includes("Comanda clientului așteaptă furnizorul pe „TFC Folie fără stoc\""));
   bine("…cu furnizorii de pe stocul materialelor din rețetă întâi", /furnizor-sugestii[\s\S]*TFC Furnizor Unu SRL/.test(cas0) && cas0.includes(`name="furnizor_id" value="${S1}"`));
   bine("…și căutare în toți furnizorii", cas0.includes(`list="furnizori-productie-${cp}"`) && cas0.includes('<option value="TFC Furnizor Doi SRL">'));
@@ -468,6 +471,9 @@ async function plaseaza(linii) {
   // Paletul ăsta ar pune folia „fără stoc” pe stoc: îl scoatem, ca restul să rămână cum e gândit.
   q(`DELETE FROM ct_palet_linii WHERE palet_id IN (SELECT id FROM ct_paleti WHERE receptie_id = ${REC})`);
   q(`DELETE FROM ct_paleti WHERE receptie_id = ${REC}`);
+  // …și rândul recepției: fără paletul lui, marfa ar părea recepționată și
+  // încă nepusă pe raft, deci tot pe stoc (lib/stoc-produse.js, 09.11.2026).
+  q(`DELETE FROM receptii_linii WHERE receptie_id = ${REC}`);
 
   const nec = (await cer("get", "/productie/:id/necesar", { params: { id: String(cp) } })).corp;
   bine("necesarul arată furnizorul fiecărui palet", nec.includes("#98858") && /#98858<\/a><span class="mic"> · 9 · 01\.11\.2026 · TFC Furnizor Unu SRL/.test(nec), (nec.match(/#98858[^\n]{0,160}/) || [""])[0]);
@@ -519,6 +525,13 @@ async function plaseaza(linii) {
     };
     const asteaptaFurnizor = (rand) => pg.waitForFunction((r) => { const g = r.querySelector(".furnizor-linie"); return g && !/se verifică/.test(g.textContent); }, rand);
     let [r1] = await randuri();
+    // Stocul, mic, sub fiecare produs din căutare (Vali, 09.11.2026: „aici
+    // vreau să fie mic jos și stocul pe produsul respectiv").
+    await (await r1.$(".cauta-produs")).fill("TFC Folie");
+    await pg.waitForSelector(`.rezultat-produs[data-id="${P_M}"]`, { state: "visible" });
+    const stocuri = await pg.$$eval(".rezultat-produs", (bs) => Object.fromEntries(bs.map((b) => [b.getAttribute("data-id"), (b.querySelector(".rezultat-stoc") || {}).textContent || ""])));
+    bine("căutarea arată stocul din CT-Park sub produs", /^stoc 24 rola\b/.test(stocuri[String(P_M)]), stocuri[String(P_M)]);
+    bine("…și „fără stoc” unde nu e nimic", /^fără stoc/.test(stocuri[String(P_FARA)]), stocuri[String(P_FARA)]);
     await alege(r1, "TFC Folie M", P_M);
     await pg.waitForSelector("#linii-body .furnizor-select");
     const opt = await r1.$$eval(".furnizor-select option", (os) => os.map((o) => o.value + "|" + o.textContent));

@@ -93,7 +93,7 @@ async function test(nume, f) {
 
   const BAZA = {
     comenzi: [{ id: 30, partener_id: 2, numar: "CMD-30", status: "noua", agent_id: 5, moneda: "RON",
-      livrare_partiala: "nu", data_livrare_ceruta: "2026-10-26", observatii: "", curs_bnr: null, curs_bnr_data: null }],
+      livrare_partiala: "nu", branding: "cash_machine", data_livrare_ceruta: "2026-10-26", observatii: "", curs_bnr: null, curs_bnr_data: null }],
     parteneri: [{ id: 2, nume: "DELIVERY SOLUTIONS SA", cui: "RO2", agent_id: 5, tip: "client" }],
     linii: [
       { id: 90, comanda_id: 30, produs_id: 2, cantitate: 150000, pret_unitar: 0.16005859375, um: "buc", cantitate_livrata: 0 },
@@ -160,7 +160,7 @@ async function test(nume, f) {
     return r;
   };
   const formularDe = (linii) => ({
-    partener_id: "2", numar: "CMD-30", data_livrare_ceruta: "2026-10-26", livrare_partiala: "nu", moneda: "RON", observatii: "",
+    partener_id: "2", numar: "CMD-30", data_livrare_ceruta: "2026-10-26", livrare_partiala: "nu", branding: "cash_machine", moneda: "RON", observatii: "",
     "produs_id[]": linii.map((l) => String(l.produs_id)),
     "cantitate[]": linii.map((l) => String(l.cantitate)),
     "pret_unitar[]": linii.map((l) => l.pret),

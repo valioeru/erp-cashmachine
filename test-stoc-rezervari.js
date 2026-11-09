@@ -129,6 +129,7 @@ const CF1 = 98931, CF2 = 98932;
 const CP1 = 98941, CP2 = 98942, CP3 = 98943, CP4 = 98944, CP5 = 98945;
 const R1 = 98951, R2 = 98952, R3 = 98953;
 const P_G = 98907, CP6 = 98946;
+const P_H = 98908, R4 = 98954;
 const FURNIZOR_SECRET = "TSR Furnizorul Secret SRL";
 
 function curata() {
@@ -142,7 +143,9 @@ function curata() {
     q(`DELETE FROM ct_paleti WHERE id IN (${l})`);
   }
   q("DELETE FROM rezervari_agenti WHERE produs_id BETWEEN 98901 AND 98909 OR partener_id BETWEEN 98911 AND 98919");
+  q("DELETE FROM receptii_linii WHERE receptie_id BETWEEN 98951 AND 98959");
   q("DELETE FROM receptii WHERE id BETWEEN 98951 AND 98959");
+  q("DELETE FROM miscari_stoc WHERE produs_id BETWEEN 98901 AND 98909");
   q("DELETE FROM comenzi_productie_linii WHERE comanda_id BETWEEN 98941 AND 98949");
   q("DELETE FROM comenzi_productie WHERE id BETWEEN 98941 AND 98949");
   q("DELETE FROM comenzi_istoric WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id BETWEEN 98911 AND 98919)");
@@ -154,6 +157,7 @@ function curata() {
   q("DELETE FROM facturi WHERE partener_id BETWEEN 98911 AND 98919");
   q("DELETE FROM interactiuni WHERE partener_id BETWEEN 98911 AND 98919");
   q("DELETE FROM produse WHERE id BETWEEN 98901 AND 98909");
+  q("DELETE FROM alias_parteneri WHERE partener_id BETWEEN 98911 AND 98919");
   q("DELETE FROM parteneri WHERE id BETWEEN 98911 AND 98919");
 }
 
@@ -256,6 +260,29 @@ function pregateste() {
       VALUES (${CP6}, 'CP-TSR-6', 'finalizata', ${P_G}, '120', 'buc', ${C_ALT}, ${OG}, '2026-11-06', ${R3})`);
   palet({ produs: P_G, cant: 20, um: "buc", categorie: "produse finite", receptie: R3 });
 
+  // P_H: recepție finalizată de 12 buc, din care 5 puse pe un palet; 7 încă
+  // n-au raft, dar sunt în depozit.
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura, activ) VALUES (${P_H}, 'TSR-H', 'TSR Receptionat H', 'buc', 1)`);
+  q(`INSERT INTO receptii (id, numar, sursa, partener_id, stare, finalizata_la) VALUES (${R4}, 'REC-TSR-4', 'furnizor', ${F_1}, 'finalizata', '2026-11-08 10:00:00')`);
+  const rl = Number(q(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, cantitate_primita, um, stare, conditie)
+      VALUES (${R4}, ${P_H}, 12, 12, 'buc', 'primita', 'bun') RETURNING id`)[0].id);
+  const pH = palet({ produs: P_H, cant: 5, um: "buc", categorie: "produse finite", receptie: R4 });
+  q(`UPDATE ct_paleti SET receptie_linie_id = ${rl} WHERE id = ${pH}`);
+  // Producția scrisă „de gură" pentru C_X se scade din comanda lui: o dată după
+  // nume („S.C. … S.R.L."), o dată după aliasul pus de om. Un nume pe care îl
+  // poartă doi parteneri nu se leagă de niciunul.
+  q(`INSERT INTO parteneri (id, tip, nume) VALUES (98916, 'client', 'TSR Dublu SRL'), (98917, 'client', 'TSR Dublu S.A.')`);
+  q(`INSERT INTO alias_parteneri (alias, partener_id) VALUES ('TSR Poreclă', ${C_X})`);
+  comanda(C_X, "noua", [[P_H, 10, "buc"]]);
+  comanda(98916, "noua", [[P_H, 2, "buc"]]);
+  q(`INSERT INTO comenzi_productie (id, numar, status, produs_id, cantitate, um, client_text) VALUES
+      (98947, 'CP-TSR-7', 'noua', ${P_H}, '4', 'buc', 'S.C. TSR Client Productie S.R.L.'),
+      (98948, 'CP-TSR-8', 'noua', ${P_H}, '3', 'buc', 'TSR Porecla'),
+      (98949, 'CP-TSR-9', 'noua', ${P_H}, '2', 'buc', 'TSR Dublu')`);
+  // Un rând respins nu intră în stoc.
+  q(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, cantitate_primita, um, stare, conditie)
+      VALUES (${R4}, ${P_H}, 3, 3, 'buc', 'primita', 'deteriorat')`);
+
   // P_C: în producție pentru stoc (fără client), cu linii; 1.250,5 kg.
   q(`INSERT INTO comenzi_productie (id, numar, status, data_propusa) VALUES (${CP3}, 'CP-TSR-3', 'noua', '2026-11-25')`);
   q(`INSERT INTO comenzi_productie_linii (comanda_id, produs_id, denumire, cantitate, um) VALUES (${CP3}, ${P_C}, 'TSR Granule C', '1.250,5', 'kg')`);
@@ -322,6 +349,12 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     egal("doar în drum: „Urmează să intre”, fără furnizor pentru cine nu-l vede", [rand(vine, 2).stare, rand(vine, 2).inDrum, rand(vine, 2).intrari[0].furnizor], ["Urmează să intre", 6, ""]);
     const vineTot = SP.construieste({ vedeTot: true, produse, furnizor: [{ cf_id: 3, numar: "CF3", produs_id: 2, cantitate: 10, cantitate_primita: 4, um: "buc", furnizor: "F" }] });
     egal("…iar cine are Depozitul vede furnizorul", rand(vineTot, 2).intrari[0].furnizor, "F");
+    egal("textul scurt din căutarea de pe comandă", [
+      SP.textScurt({ stoc: 1200, disponibil: 1050, um: "buc" }).text, SP.textScurt({ stoc: 7, disponibil: 7, um: "rola" }).text,
+      SP.textScurt({ stoc: 50, disponibil: 0, um: "buc" }).text, SP.textScurt({ stoc: 0, inDrum: 300, um: "kg", sosireLiber: "2026-11-18" }).text,
+      SP.textScurt({ stoc: 0, inDrum: 0 }).text,
+    ], ["stoc 1.200 buc · liber 1.050", "stoc 7 rola", "stoc 50 buc · tot promis sau rezervat", "fără stoc · vin 300 kg pe 18.11", "fără stoc în CT-Park"]);
+    egal("numele de firmă, curățat ca la alocări", ["S.C. TSR Client S.R.L.", "Delivery Solutions SA", "TSR Poreclă"].map(SP.normNume), ["tsrclient", "deliverysolutions", "tsrporecla"]);
   }
 
   // ------------------------------------------------------------------------
@@ -371,6 +404,12 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     const e = rand(toate, P_E);
     egal("P_E: unitatea scrisă greșit stă deoparte; paletul vechi, fără linii, intră", [e.stoc, e.um, e.alteUm, e.paleti, e.prima_intrare], [10, "rola", [{ um: "kg", cantitate: 2 }], 3, "2026-10-01"]);
     bine("produsul doar cerut pe o comandă nu apare", !rand(toate, 98906));
+    const hh = rand(toate, P_H);
+    egal("P_H: recepționat și încă fără raft intră în stoc (deteriorat nu)", [hh.stoc, hh.dePus, hh.paleti], [12, 7, 1]);
+    // C_X: 10 comandate − 4 (după nume) − 3 (după alias) = 3; TSR Dublu SRL: 2,
+    // fără scădere (numele „TSR Dublu" e al a doi parteneri).
+    egal("P_H: producția „de gură” se leagă de client după nume și alias", [hh.promis, hh.disponibil, hh.promisPe.map((x) => [x.client, x.cantitate])],
+      [5, 7, [["TSR Client Productie SRL", 3], ["TSR Dublu SRL", 2]]]);
     const g = rand(toate, P_G);
     egal("P_G: ce a rămas din producția unei comenzi livrate e liber, nu „făcut pentru client”", [g.stoc, g.promis, g.disponibil, g.stare], [20, 0, 20, "Disponibil"]);
     const admin = await SP.citeste({ vedeTot: true });
@@ -546,6 +585,46 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     bine("„Fructificate” arată comanda", fr.includes(`href="/comenzi/${buna}"`) && fr.includes("fructificată"));
     const act = fara((await cer("get", "/stocuri/ct-park/stoc/rezervari", AG1)).corp);
     bine("implicit: active (niciuna acum)", /class="subnav-link activ">Active/.test(act) && act.includes("Niciun rând încă."));
+  }
+
+  // ------------------------------------------------------------------------
+  console.log("\n7b. Comanda vede stocul din CT-Park (Vali, comanda #70: „scrie că are stoc, dar apare cu lipsă”)");
+  {
+    const W = require(path.join(RAD, "modules", "warehouse.js"));
+    // Tabela veche nu mai e stocul nimănui: 1000 buc scrise acolo nu contează.
+    q(`INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate) VALUES (${P_B}, (SELECT MIN(id) FROM depozite), 'intrare', 1000)`);
+    const st = await W.stocPeProduse();
+    egal("stocul comenzii = CT-Park (+ recepționat fără raft), fără paleții ieșiți", [st.get(P_B), st.get(P_H), st.get(P_C) || 0, st.get(P_A)], [100, 12, 0, 200]);
+    q(`DELETE FROM rezervari_agenti WHERE produs_id BETWEEN 98901 AND 98909 AND stare = 'activa'`);
+    let x = await rezerva(AG1, { produs_id: P_B, partener_id: C_OK, cantitate: "20" });
+    bine("rezervarea agentului pentru C_OK", /ok=Rezervat 20 buc/.test(x.loc), x.loc);
+    const oAlt = comanda(C_ALT, "noua", [[P_B, 90, "buc"], [P_H, 12, "buc"]]);
+    const pa = await W.potrivire(oAlt);
+    const lb = pa.linii.find((l) => Number(l.produs_id) === P_B);
+    const lh = pa.linii.find((l) => Number(l.produs_id) === P_H);
+    egal("comanda altui client: rezervarea lui C_OK e blocată, restul acoperit", [lb.fizic, lb.blocat, lb.acoperit, lb.lipsa, lh.acoperit, pa.acoperiteTot], [100, 20, 80, 10, 12, false]);
+    const oOk = comanda(C_OK, "noua", [[P_B, 90, "buc"]]);
+    const po = await W.potrivire(oOk);
+    egal("comanda clientului cu rezervarea: rezervarea lui nu-l oprește", [po.linii[0].blocat, po.linii[0].acoperit, po.acoperiteTot], [0, 90, true]);
+    egal("…iar comanda lui fructifică rezervarea", unul(`SELECT stare FROM rezervari_agenti WHERE produs_id = ${P_B} AND partener_id = ${C_OK} ORDER BY id DESC LIMIT 1`), "fructificata");
+    // O rezervare a clientului rămasă activă (o ciornă nu o fructifică) nu-i
+    // oprește nici ciorna, nici altă comandă a lui.
+    q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${oAlt}, ${oOk})`);
+    q(`DELETE FROM comenzi WHERE id IN (${oAlt}, ${oOk})`);
+    x = await rezerva(AG1, { produs_id: P_B, partener_id: C_OK, cantitate: "20" });
+    bine("încă o rezervare pentru C_OK", /ok=Rezervat 20 buc/.test(x.loc), x.loc);
+    const oCiorna = comanda(C_OK, "ciorna", [[P_B, 90, "buc"]]);
+    const pc = await W.potrivire(oCiorna);
+    egal("rezervarea proprie nu blochează (rămâne activă)", [pc.linii[0].blocat, pc.linii[0].acoperit, unul(`SELECT stare FROM rezervari_agenti WHERE produs_id = ${P_B} AND partener_id = ${C_OK} ORDER BY id DESC LIMIT 1`)], [0, 90, "activa"]);
+    q(`DELETE FROM comenzi_linii WHERE comanda_id = ${oCiorna}`);
+    q(`DELETE FROM comenzi WHERE id = ${oCiorna}`);
+    q(`DELETE FROM rezervari_agenti WHERE produs_id = ${P_B} AND stare = 'activa'`);
+    egal("căutarea de pe comandă: textul scurt de sub produs", [SP.textScurt(rand(await SP.citeste({}), P_B)).text, SP.textScurt(rand(await SP.citeste({}), P_C)).text, SP.textScurt(null).text],
+      [rand(await SP.citeste({}), P_B).disponibil > 0 ? `stoc 100 buc · liber ${rand(await SP.citeste({}), P_B).disponibil.toLocaleString("ro-RO")}` : "stoc 100 buc · tot promis sau rezervat", "fără stoc · vin 1.550,5 kg pe 18.11", "fără stoc în CT-Park"]);
+    q(`DELETE FROM miscari_stoc WHERE produs_id = ${P_B}`);
+    // Comenzile de aici pleacă: partea din browser se uită la același produs.
+    q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${oAlt}, ${oOk})`);
+    q(`DELETE FROM comenzi WHERE id IN (${oAlt}, ${oOk})`);
   }
 
   // ------------------------------------------------------------------------

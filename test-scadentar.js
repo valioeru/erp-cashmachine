@@ -107,6 +107,14 @@ const plus = (n) => new Date(Date.UTC(+azi.slice(0, 4), +azi.slice(5, 7) - 1, +a
 function fixture() {
   const S = [
     "TRUNCATE plati, facturi_linii, facturi, inchideri_istoric RESTART IDENTITY CASCADE",
+    // Ce au lipit alte module de clientul de test între două rulări (CRM-ul își
+    // face singur leaduri din parteneri): altfel ștergerea partenerului pică pe
+    // cheile străine și testul cade înainte să înceapă.
+    "DELETE FROM leaduri WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM mk_contacte WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM interactiuni WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM taskuri WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM oportunitati WHERE partener_id IN (90001, 90002)",
     "DELETE FROM parteneri WHERE cui IN ('RO-TEST-C','RO-TEST-F')",
     "INSERT INTO parteneri (id, nume, cui, tip) VALUES (90001,'CLIENT DE TEST SRL','RO-TEST-C','client'), (90002,'FURNIZOR DE TEST SRL','RO-TEST-F','furnizor') ON CONFLICT (id) DO NOTHING",
     "INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol) VALUES (1,'Vali','vali@test.ro','x','y','admin') ON CONFLICT (id) DO NOTHING",
@@ -247,6 +255,14 @@ function fixture() {
   // facturile, iar o plată rămasă aici i-ar bloca ștergerea prin cheia străină.
   for (const s of [
     "TRUNCATE plati, facturi_linii, facturi, inchideri_istoric RESTART IDENTITY CASCADE",
+    // Ce au lipit alte module de clientul de test între două rulări (CRM-ul își
+    // face singur leaduri din parteneri): altfel ștergerea partenerului pică pe
+    // cheile străine și testul cade înainte să înceapă.
+    "DELETE FROM leaduri WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM mk_contacte WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM interactiuni WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM taskuri WHERE partener_id IN (90001, 90002)",
+    "DELETE FROM oportunitati WHERE partener_id IN (90001, 90002)",
     "DELETE FROM parteneri WHERE cui IN ('RO-TEST-C','RO-TEST-F')",
   ]) execFileSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", s], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
 
@@ -305,5 +321,20 @@ function fixture() {
 
   console.log("\n" + interogari + " interogări SQL reale.");
   console.log(rele ? rele + " probleme." : "Totul curat.");
+  curataDupa();
   process.exit(rele ? 1 : 0);
-})().catch((e) => { console.error("A crăpat:", e.message); process.exit(1); });
+})().catch((e) => { console.error("A crăpat:", e.message); curataDupa(); process.exit(1); });
+
+// Facturile de test nu rămân în bază nici la final: lăsate acolo, le numărau
+// alte teste (clienții cheie le vedeau în februarie), iar plata facturii
+// 90104 bloca fixtura depozitului, care șterge facturile.
+function curataDupa() {
+  for (const s of [
+    "DELETE FROM notificari_facturi WHERE factura_id BETWEEN 90101 AND 90199",
+    "DELETE FROM plati WHERE factura_id BETWEEN 90101 AND 90199",
+    "DELETE FROM facturi_linii WHERE factura_id BETWEEN 90101 AND 90199",
+    "DELETE FROM facturi WHERE id BETWEEN 90101 AND 90199",
+  ]) {
+    try { execFileSync("psql", ["-X", "-q", "-c", s], { env: ENV, stdio: ["ignore", "ignore", "ignore"] }); } catch (e) { /* curățenia nu schimbă rezultatul testului */ }
+  }
+}

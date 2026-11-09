@@ -35,7 +35,7 @@ function bine(d, cond, det) {
 const BAZA = {
   comenzi: [
     { id: 5, partener_id: 3, numar: "CMD-5", data: "2026-10-20", status: "noua", observatii: "urgent",
-      agent_id: 11, moneda: "RON", livrare_partiala: "da", data_livrare_ceruta: "2026-11-02", factura_id: null },
+      agent_id: 11, moneda: "RON", livrare_partiala: "da", branding: "nepersonalizat", data_livrare_ceruta: "2026-11-02", factura_id: null },
   ],
   parteneri: [
     { id: 3, nume: "Sameday Courier SRL", cui: "RO1", agent_id: 22, tip: "client" },
@@ -102,7 +102,7 @@ function fals(sql) {
         if (!c) throw new Error("UPDATE pe o comanda inexistenta: " + JSON.stringify(a));
         Object.assign(c, {
           partener_id: a[0], numar: a[1], observatii: a[2], data_livrare_ceruta: a[3],
-          livrare_partiala: a[4], moneda: a[5], curs_bnr: a[6], curs_bnr_data: a[7],
+          livrare_partiala: a[4], branding: a[5], moneda: a[6], curs_bnr: a[7], curs_bnr_data: a[8],
         });
         return {};
       }
@@ -158,7 +158,7 @@ const DEPOZIT = { id: 78, nume: "Depozit", rol: "depozit" };
 
 const formular = (linii, extra) => ({
   partener_id: "3", numar: "CMD-5", data_livrare_ceruta: "2026-11-02",
-  livrare_partiala: "da", moneda: "RON", observatii: "urgent",
+  livrare_partiala: "da", branding: "nepersonalizat", moneda: "RON", observatii: "urgent",
   "produs_id[]": linii.map((l) => String(l[0])),
   "cantitate[]": linii.map((l) => String(l[1])),
   "pret_unitar[]": linii.map((l) => String(l[2])),
@@ -198,6 +198,23 @@ const CA_ACUM = [[1, 20000, 0.42], [2, 100, 7.1]];
     const r = await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular(CA_ACUM), OWNER_CLIENT);
     bine("trece, dar nu scrie nimic în istoric", BAZA.istoric.length === 0, BAZA.istoric);
     bine("și spune că n-a fost nimic de schimbat", String(r.unde || "").indexOf("ok=nimic") !== -1, r.unde);
+  }
+
+  console.log("\nBrandingul (Vali, 09.11.2026): obligatoriu și la modificare");
+  {
+    const lung = BAZA.istoric.length;
+    let r = await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular(CA_ACUM, { branding: "" }), OWNER_CLIENT);
+    bine("fără branding ales nu se salvează", BAZA.comenzi[0].branding === "nepersonalizat" && BAZA.istoric.length === lung, BAZA.comenzi[0].branding);
+    bine("…și spune ce lipsește", /branding Cash Machine sau nepersonalizate/.test(String(r.text || "")));
+    r = await cheama("GET", "/comenzi/:id/editare", { id: "5" }, {}, OWNER_CLIENT);
+    bine("formularul arată alegerea de acum", /name="branding" value="nepersonalizat" required checked/.test(String(r.text || "")));
+    r = await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular(CA_ACUM, { branding: "cash_machine", motiv: "client nou cu logo" }), OWNER_CLIENT);
+    const h = BAZA.istoric.slice(lung).find((x) => x.ce === "Branding");
+    bine("schimbarea se scrie pe comandă și în istoric, cu textul, nu cu codul",
+      BAZA.comenzi[0].branding === "cash_machine" && h && h.vechi === "nepersonalizate" && h.nou === "cu branding Cash Machine", JSON.stringify(h));
+    // Înapoi cum era, ca restul testului să plece de la aceeași comandă.
+    await cheama("POST", "/comenzi/:id/editare", { id: "5" }, formular(CA_ACUM), OWNER_CLIENT);
+    BAZA.istoric.length = lung;
   }
 
   console.log("\nOwnerul clientului chiar modifică");

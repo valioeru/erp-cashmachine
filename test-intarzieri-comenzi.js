@@ -218,7 +218,7 @@ const comenziPe = (p) => q("SELECT id FROM comenzi WHERE partener_id = ? ORDER B
   // --- agentul plasează comanda pe clientul roșu -----------------------------
   r = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: String(ROSU), numar: "CMD-INT-1", livrare_partiala: "da",
+    body: { partener_id: String(ROSU), numar: "CMD-INT-1", livrare_partiala: "da", branding: "nepersonalizat",
             "produs_id[]": ["97401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
   });
   contine("nu mai apare „Comandă blocată”", faraScript(r.corp), [], ["Comandă blocată", "Comenzile se deblochează"]);
@@ -238,7 +238,7 @@ const comenziPe = (p) => q("SELECT id FROM comenzi WHERE partener_id = ? ORDER B
   // Clientul la zi: comanda trece și pagina ei nu spune nimic de întârzieri.
   r = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: String(VERDE), numar: "CMD-INT-2", livrare_partiala: "nu",
+    body: { partener_id: String(VERDE), numar: "CMD-INT-2", livrare_partiala: "nu", branding: "nepersonalizat",
             "produs_id[]": ["97401"], "cantitate[]": ["2"], "pret_unitar[]": ["12"] },
   });
   egal("comanda clientului la zi s-a salvat", comenziPe(VERDE).length, 1);

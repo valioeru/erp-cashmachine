@@ -133,6 +133,8 @@ function curata() {
     "DELETE FROM emailuri WHERE partener_id = 96501",
     "DELETE FROM comenzi WHERE partener_id = 96501",
     "DELETE FROM miscari_stoc WHERE produs_id BETWEEN 96601 AND 96699",
+    "DELETE FROM ct_palet_linii WHERE palet_id IN (SELECT id FROM ct_paleti WHERE cod = 'LP-PALET-A')",
+    "DELETE FROM ct_paleti WHERE cod = 'LP-PALET-A'",
     "DELETE FROM produse WHERE id BETWEEN 96601 AND 96699",
     "DELETE FROM parteneri WHERE id = 96501",
     "DELETE FROM depozite WHERE id = 96801",
@@ -152,6 +154,7 @@ async function plaseaza(raspuns, linii) {
     "pret_unitar[]": linii.map(() => "10"),
   };
   if (raspuns !== undefined) body.livrare_partiala = raspuns;
+  body.branding = "cash_machine";
   const r = await cer("/comenzi", { metoda: "post", body });
   // Confirmarea de salvare (27.10.2026) a adăugat „?ok=plasata" la redirect.
   // Testul cerea adresa curată și cădea cu „comanda nu s-a salvat", deși se
@@ -172,8 +175,10 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
     `INSERT INTO produse (id, cod, denumire, unitate_masura, pret_vanzare) VALUES (${PROD_A},'LP-A','Produs pe stoc','buc',10)`,
     `INSERT INTO produse (id, cod, denumire, unitate_masura, pret_vanzare) VALUES (${PROD_B},'LP-B','Produs lipsă','buc',10)`,
     "INSERT INTO depozite (id, denumire, locatie) VALUES (96801, 'Depozit de test LP', 'test')",
-    // 10 bucăți din A intră în depozit; din B nimic.
-    `INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate) VALUES (${PROD_A}, 96801, 'intrare', 10)`,
+    // 10 bucăți din A stau în CT-Park, singurul depozit (de pe 09.11.2026
+    // comanda citește stocul de acolo, nu din tabela veche); din B nimic.
+    `INSERT INTO ct_paleti (cod, produs_id, cantitate, um, data_intrare) VALUES ('LP-PALET-A', ${PROD_A}, 10, 'buc', '2026-11-01')`,
+    `INSERT INTO ct_palet_linii (palet_id, produs_id, cantitate, um) SELECT id, ${PROD_A}, 10, 'buc' FROM ct_paleti WHERE cod = 'LP-PALET-A'`,
   ]) exec(s);
 
   // ---------------------------------------------------------------- regula pură

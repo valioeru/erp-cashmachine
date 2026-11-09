@@ -190,18 +190,40 @@ const cateComenzi = () => Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE part
 
   r = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: "96302", numar: "CMD-FP2", livrare_partiala: "poate",
+    body: { partener_id: "96302", numar: "CMD-FP2", livrare_partiala: "poate", branding: "cash_machine",
             "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
   });
   egal("un răspuns inventat nu trece drept „da”", cateComenzi(), 0);
 
+  // Brandingul (Vali, 09.11.2026): „cu branding Cash Machine sau nepersonalizate",
+  // obligatoriu, ca livrarea parțială.
+  const formNou = (await cer("/comenzi/nou")).corp;
+  if (!/name="branding" value="cash_machine" required/.test(formNou) || !/name="branding" value="nepersonalizat" required/.test(formNou))
+    rau("formularul nu întreabă de branding");
+  else ok("formularul întreabă de branding, obligatoriu");
+  for (const br of [undefined, "", "altceva"]) {
+    r = await cer("/comenzi", {
+      metoda: "post",
+      body: { partener_id: "96302", numar: "CMD-BR", livrare_partiala: "nu", branding: br,
+              "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
+    });
+    egal(`fără branding ales (${JSON.stringify(br)}) nu se salvează`, cateComenzi(), 0);
+  }
+  if (!r.corp.includes("branding Cash Machine sau nepersonalizate")) rau("nu spune că lipsește brandingul");
+  else ok("spune limpede că lipsește brandingul");
+  if (!/name="branding" value="nepersonalizat" required>/.test(r.corp) || !/name="livrare_partiala" value="nu" required checked/.test(r.corp))
+    rau("formularul întors nu păstrează ce era ales");
+  else ok("formularul întors păstrează livrarea aleasă, cu brandingul de ales");
+
   // --- comanda bună trece ------------------------------------------------------
   r = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: "96302", numar: "CMD-2", livrare_partiala: "nu",
+    body: { partener_id: "96302", numar: "CMD-2", livrare_partiala: "nu", branding: "Cash_Machine",
             "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
   });
   egal("comanda bună se salvează", cateComenzi(), 1);
+  egal("brandingul se scrie în bază",
+    q("SELECT branding FROM comenzi WHERE partener_id = 96302").map((x) => x.branding), ["cash_machine"]);
   egal("răspunsul despre livrarea parțială se scrie în bază",
     q("SELECT livrare_partiala FROM comenzi WHERE partener_id = 96302").map((x) => x.livrare_partiala),
     ["nu"]);
