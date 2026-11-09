@@ -1160,6 +1160,14 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
     if (nr(b.aprovizionare_id)) {
       await db.prepare("UPDATE ct_paleti SET aprovizionare_id = ? WHERE id = ?").run(nr(b.aprovizionare_id), id).catch(() => null);
     }
+    // Paletul făcut pentru o ieșire directă (fără raft): unde pleacă. Până
+    // pleacă, stă în „Pregătite pentru ieșire" (modules/gata-productie.js).
+    if (["comanda", "fulfillment", "productie"].includes(String(b.iesire_plan || ""))) {
+      await db
+        .prepare("UPDATE ct_paleti SET iesire_plan = ?, iesire_comanda_id = ? WHERE id = ?")
+        .run(String(b.iesire_plan), nr(b.iesire_comanda_id) || null, id)
+        .catch(() => null);
+    }
     for (const locId of locuri) await db.prepare("INSERT INTO ct_ocupari (palet_id, loc_id) VALUES (?, ?)").run(id, locId);
     // Linia paletului (lib/ct-palet-linii.js): conținutul lui, de unde se vor
     // face ieșirile parțiale. Migrarea de la pornire o scrie oricum pentru
@@ -3924,10 +3932,13 @@ function register(router) {
       </tr>`;
     let randuriTabel = grupuriHarta.length ? grupuriHarta.map(randDinHarta).join("") : randScris(ctx.query.rand);
     // Cât mai e de pus din recepție intră pe primul palet; restul îl împarte omul.
-    if (pre && pre.ramas > 0) {
+    // Venit din alocarea pe cantități („Gata din producție"): doar partea
+    // aleasă pentru raft, restul rămâne în listă.
+    const deRaft = pre && nr(ctx.query.cantitate) > 0 ? Math.min(nr(ctx.query.cantitate), pre.ramas) : pre ? pre.ramas : 0;
+    if (pre && deRaft > 0) {
       randuriTabel = randuriTabel.replace(
         'name="loc_cantitate[]" placeholder="cât"',
-        `name="loc_cantitate[]" value="${esc(String(pre.ramas).replace(".", ","))}" placeholder="cât"`
+        `name="loc_cantitate[]" value="${esc(String(deRaft).replace(".", ","))}" placeholder="cât"`
       );
     }
 
@@ -3940,7 +3951,7 @@ function register(router) {
           ? `<div class="detail-box" style="border-left:4px solid var(--success,#1a7f37);margin-bottom:14px">
                Din ${esc(pre.numar)} (${pre.sursa === "productie" ? "gata din producție" : "de la furnizor"}):
                <strong>${esc(pre.denumire || "marfă")}</strong> — ${esc(String(pre.primit))} ${esc(pre.um)},
-               ${pre.pus ? `alocate deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.
+               ${pre.pus ? `alocate deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.${deRaft > 0 && deRaft < pre.ramas - 0.0005 ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>; restul rămâne în „Gata din producție”.` : ""}
                ${pre.ramas > 0 ? "" : '<br><span class="badge galben">Tot ce era pe cererea asta are deja palet. Ce adaugi acum intră în plus.</span>'}
                <p style="margin:6px 0 0;font-size:12px;color:var(--text-muted)">Spune unde se pune (sau nimic, și ERP-ul propune locuri libere). Paletul rămâne legat de cerere, iar comanda clientului merge mai departe singură.</p>
              </div>`
@@ -3951,7 +3962,7 @@ function register(router) {
           ? `<div class="detail-box" style="border-left:4px solid var(--success,#1a7f37);margin-bottom:14px">
                Din recepția <a href="/depozit/receptie/${pre.receptie_id}">${esc(pre.numar)}</a>:
                <strong>${esc(pre.denumire || "marfă")}</strong> — au venit ${esc(String(pre.primit))} ${esc(pre.um)},
-               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.
+               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.${deRaft > 0 && deRaft < pre.ramas - 0.0005 ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>; restul rămâne în „Gata din producție”.` : ""}
                ${pre.ramas > 0 ? "" : '<br><span class="badge galben">Tot ce a venit pe rândul ăsta e deja pus. Ce adaugi acum intră în plus.</span>'}
                <p style="margin:6px 0 0;font-size:12px;color:var(--text-muted)">Spune unde se pune: rândul, nivelul, câmpul și poziția (sau doar rândul, ori nimic, și ERP-ul propune locuri libere). Paletul rămâne legat de recepție.</p>
              </div>`

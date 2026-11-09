@@ -154,8 +154,13 @@ async function sectiuneCtPark(r, linii) {
           )
           .join("<br>")
       : '<span style="color:var(--text-muted)">încă nimic</span>';
-    const actiuni =
-      ramas > R.EPS
+    // Scos din „Gata din producție" de depozit: nu mai e de pus (lib/gata-productie.js).
+    const inchis = l.ct_inchis_la
+      ? `<span class="badge gri">scos din listă${l.ct_inchis_de ? " de " + esc(l.ct_inchis_de) : ""}: ${esc(l.ct_motiv || "")}</span>`
+      : "";
+    const actiuni = inchis
+      ? inchis
+      : ramas > R.EPS
         ? `<a class="btn small" href="/stocuri/ct-park/intrare?receptie_linie=${l.id}">Pune în CT-Park →</a>
            <form method="post" action="/depozit/receptie/${r.id}/linie/${l.id}/livrare" class="inline-form" style="gap:6px;flex-wrap:wrap;margin-top:6px">
              <select name="destinatie" required aria-label="Unde pleacă">
@@ -177,7 +182,7 @@ async function sectiuneCtPark(r, linii) {
       esc(l.produs_denumire || l.produs_text || "—") + (l.lot ? `<br><span class="mic">lot ${esc(l.lot)}</span>` : ""),
       `${fmt(nr(l.cantitate_primita))} ${um}`,
       unde,
-      ramas > R.EPS ? `<strong>${fmt(ramas)} ${um}</strong>` : "—",
+      ramas > R.EPS && !inchis ? `<strong>${fmt(ramas)} ${um}</strong>` : "—",
       actiuni,
     ];
   });
@@ -865,7 +870,10 @@ async function primesteTot(id) {
 
 // Direct la livrare, ca funcție: o folosește și lista „Gata din producție"
 // din Intrare marfă. Întoarce adresa ieșirii din CT-Park, cu paletul bifat.
-async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta) {
+// Fără cantitate pleacă tot ce a rămas; cu cantitate, doar atât — restul
+// rămâne de alocat (Vali, 09.11.2026: „o parte la client, o parte în depozit
+// și alta în fulfillment… orice combinație").
+async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, cantitateCeruta) {
   const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
   if (!r) return { eroare: "Recepția nu există.", faraReceptie: true };
   if (r.stare !== "finalizata") return { eroare: "Întâi finalizează recepția: atunci marfa e pe stoc și poate pleca." };
@@ -879,6 +887,14 @@ async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta) {
     .catch(() => ({ c: 0 }));
   const ramas = Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000;
   if (!(ramas > R.EPS)) return { eroare: "Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat." };
+  const ceruta = cantitateCeruta == null || cantitateCeruta === "" ? null : Number(String(cantitateCeruta).replace(",", "."));
+  if (ceruta != null && !(ceruta > R.EPS)) return { eroare: "Scrie o cantitate mai mare decât zero." };
+  if (ceruta != null && ceruta > ramas + R.EPS) {
+    const um = l.um || l.unitate_masura || "";
+    return { eroare: `Mai sunt doar ${ramas.toLocaleString("ro-RO", { maximumFractionDigits: 3 })}${um ? " " + um : ""} de alocat pe rândul ăsta.` };
+  }
+  const cantitate = ceruta == null ? ramas : Math.round(ceruta * 1000) / 1000;
+  const cidPlan = destinatie === "comanda" ? parseInt(comandaCeruta, 10) || r.comanda_id || null : null;
   const CT = require("./ct-park");
   // De la cine e marfa: furnizorul recepției sau, la marfa din producție,
   // furnizorul ales acolo pentru material (lib/furnizor-comanda.js).
@@ -896,19 +912,21 @@ async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta) {
       observatii: `Direct la livrare din recepția ${r.numar || "#" + r.id}`,
       receptie_id: r.id,
       receptie_linie_id: l.id,
+      iesire_plan: destinatie,
+      iesire_comanda_id: cidPlan || "",
     },
     [[]],
-    ramas
+    cantitate
   );
   if (!ids.length) return { eroare: "Paletul pentru livrare nu s-a putut face." };
-  const cid = destinatie === "comanda" ? parseInt(comandaCeruta, 10) || r.comanda_id || "" : "";
+  const cid = cidPlan || "";
   const q = new URLSearchParams({
     palet: String(ids[0]),
     destinatie,
     ...(cid ? { comanda_id: String(cid) } : {}),
     motiv: `livrare directă din recepția ${r.numar || "#" + r.id}`,
   });
-  return { ok: true, url: "/stocuri/ct-park/iesire?" + q.toString(), palet: Number(ids[0]) };
+  return { ok: true, url: "/stocuri/ct-park/iesire?" + q.toString(), palet: Number(ids[0]), cantitate };
 }
 
 module.exports = { register, creeaza, liniile, finalizeaza, primesteTot, livrareDirecta };
