@@ -27,7 +27,6 @@ const PLAN = require("../lib/plan-lunar");
 const drive = require("../lib/drive");
 const SCH = require("../lib/schimburi");
 const PROG = require("./program");
-const { fluxulComenzii, utilajeleFluxului } = require("../lib/flux-comanda");
 
 const nr = (v) => Number(v || 0);
 
@@ -1295,27 +1294,22 @@ function register(router) {
     const caps = await capacitati();
     const variante = estimeaza([c], caps).get(Number(c.id)) || [];
 
-    // UTILAJELE PE CARE SE POATE ALOCA, NU TOATE CELE DIN HALĂ.
+    // TOATE UTILAJELE DIN HALĂ, FĂRĂ SUGESTII.
     //
-    // O comandă de folie n-are ce căuta pe mașina de cartoane, iar lista
-    // completă de 14 utilaje invita exact la greșeala asta — se alege din
-    // derulantă ce sună bine, iar lotul pleacă pe un drum pe care nimeni nu
-    // l-a gândit. Fluxul tehnologic al produsului spune prin ce trece, deci
-    // de acolo vine lista.
+    // Vali, 09.11.2026, cu poza alocării unei comenzi de folie manuală:
+    // „Aici nu sugera utilaje, lasă-le pe toate, să aleagă operatorul."
     //
-    // Când comanda n-are flux, lista rămâne întreagă: o derulantă goală ar
-    // bloca producția pentru o scăpare de configurare. Dar se SPUNE pe pagină
-    // că nu există flux, cu linkul unde se pune.
-    const liniiFlux = await db
-      .prepare("SELECT produs_id, denumire FROM comenzi_productie_linii WHERE comanda_id = ?")
-      .all(c.id)
-      .catch(() => []);
-    const fx = await fluxulComenzii(c, liniiFlux);
-    const dinFlux = fx.flux ? await utilajeleFluxului(fx.pasi) : [];
-    const toateUtilajele = await db.prepare("SELECT * FROM utilaje WHERE activ = 1 ORDER BY denumire").all();
-    const utilaje = dinFlux.length
-      ? dinFlux.map((u) => Object.assign({}, toateUtilajele.find((x) => Number(x.id) === u.id) || u, { operatie: u.operatie }))
-      : toateUtilajele;
+    // Lista era tăiată după fluxul tehnologic al comenzii. Când fluxul nu e
+    // ales pe comandă sau pe produs, el se ghicește după denumire — iar pentru
+    // „Folie manuală" ghicitul a dat „Folie debitată" și a lăsat în derulantă
+    // doar Extruderul și Slitterul, adică tocmai mașinile pe care comanda nu
+    // merge. Omul care alocă știe pe ce se face produsul: vede toate utilajele
+    // active, nimic preselectat, și alegerea lui nu mai e refuzată (POST-ul de
+    // mai jos). Fluxul rămâne doar pe fișa de lot.
+    //
+    // Estimarea de ore rămâne lângă utilajele cu capacitate scrisă — e o
+    // informație, nu o alegere făcută în locul omului.
+    const utilaje = await db.prepare("SELECT * FROM utilaje WHERE activ = 1 ORDER BY denumire").all();
     const oameni = await db
       .prepare(
         `SELECT r.*, (SELECT string_agg(CAST(rc.utilaj_id AS TEXT), ',') FROM resurse_competente rc WHERE rc.resursa_id = r.id) AS utilaje
@@ -1344,7 +1338,9 @@ function register(router) {
       )
       .all(c.id);
 
-    const oreImplicit = variante.length && variante[0].ore ? Math.round(variante[0].ore * 10) / 10 : 8;
+    // Fără utilaj ales, orele pornesc de la un schimb. Estimarea unui utilaj
+    // intră abia când omul îl alege pe el (scriptul de mai jos).
+    const ORE_IMPLICIT = 8;
     const dataImplicit = c.data_livrare && c.data_livrare > azi() ? ziPlus(c.data_livrare, -1) : azi();
 
     // Programul de lucru, pentru fereastra în care se poate aloca. Fără el
@@ -1375,54 +1371,37 @@ function register(router) {
         </div>
       </div>
 
-      ${
-        variante.length
-          ? `<div class="detail-box"><strong>Utilajele care pot face comanda:</strong>
-              <ul style="margin:8px 0 0;padding-left:18px">
-                ${variante
-                  .map(
-                    (v) =>
-                      `<li>${esc(v.utilaj)} — ${v.estimat ? `<strong>${ore(v.ore)} h</strong> (${cant(v.cantitate_ora)}/h)` : "capacitate scrisă, dar cantitatea comenzii nu se poate citi ca număr"}, ${v.operatori_necesari} operator${v.operatori_necesari === 1 ? "" : "i"}</li>`
-                  )
-                  .join("")}
-              </ul></div>`
-          : `<div class="detail-box" style="border-left:4px solid var(--danger)">
-              Niciun utilaj nu are capacitate scrisă pentru „${esc(c.tip_produs || "—")}". Poți aloca oricum, dar orele le pui de mână.
-              Ca să apară estimarea, scrie cantitatea pe oră în <a href="/productie/utilaje">Utilaje</a>.</div>`
-      }
-
       <form class="form" method="post" action="/productie/aloca/${c.id}" style="max-width:900px">
-        ${
-          dinFlux.length
-            ? `<p style="font-size:12.5px;color:var(--text-muted);margin:0 0 10px">
-                 Utilajele de mai jos sunt cele din fluxul <strong>${esc(fx.flux.cod)} · ${esc(fx.flux.denumire || "")}</strong>${fx.cum ? ` (${esc(fx.cum)})` : ""},
-                 în ordinea operațiilor. Restul mașinilor din hală nu apar: n-au ce căuta pe comanda asta.
-                 Fluxul se schimbă <a href="/productie/${c.id}">pe comandă</a>, pașii lui în <a href="/fluxuri">Fluxuri</a>.
-               </p>`
-            : `<p style="font-size:12.5px;border-left:3px solid var(--warn,#e0a14a);padding:6px 10px;margin:0 0 10px">
-                 <strong>Comanda n-are flux tehnologic</strong>, așa că apar toate utilajele — inclusiv unele pe care produsul
-                 ăsta n-are ce căuta. Alege fluxul <a href="/productie/${c.id}">pe comandă</a> și lista se strânge singură.
-               </p>`
-        }
+        <p style="font-size:12.5px;color:var(--text-muted);margin:0 0 10px">
+          Apar toate utilajele active din hală — alegi tu pe ce se face comanda.
+          ${
+            variante.some((v) => v.estimat)
+              ? "Lângă utilajele care au capacitatea scrisă pentru produs apar orele estimate; se completează singure când alegi utilajul."
+              : `Niciun utilaj n-are capacitatea scrisă pentru „${esc(c.tip_produs || "—")}”, așa că orele le pui de mână
+                 (cantitatea pe oră se scrie în <a href="/productie/utilaje">Utilaje</a>).`
+          }
+        </p>
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:14px">
           <label class="field">Utilaj
             <select name="utilaj_id" id="alocUtilaj" required>
-              <option value="">— alege —</option>
+              <option value="" selected>— alege —</option>
               ${utilaje
                 .map((u) => {
                   const v = variante.find((x) => Number(x.utilaj_id) === Number(u.id));
-                  // Preselectat e doar utilajul cel mai rapid — „selected" pe
-                  // mai multe optiuni inseamna, in HTML, ultima, adica una la
-                  // intamplare.
-                  const celMaiBun = variante.length && Number(variante[0].utilaj_id) === Number(u.id);
-                  return `<option value="${u.id}" data-ore="${v && v.ore ? Math.round(v.ore * 10) / 10 : ""}"${celMaiBun ? " selected" : ""}>${esc(u.denumire)}${u.operatie ? ` — ${esc(u.operatie)}` : ""}${v && v.estimat ? ` · ~${ore(v.ore)} h` : ""}</option>`;
+                  const oreEstimate = v && v.estimat ? Math.round(v.ore * 10) / 10 : "";
+                  const eticheta =
+                    esc(u.denumire) +
+                    (u.cod ? ` (${esc(u.cod)})` : "") +
+                    (String(u.status_date || "").toUpperCase() === "STANDBY" ? " — în standby" : "") +
+                    (oreEstimate ? ` · ~${ore(v.ore)} h` : "");
+                  return `<option value="${u.id}" data-ore="${oreEstimate}">${eticheta}</option>`;
                 })
                 .join("")}
             </select>
           </label>
           <label class="field">Data<input type="date" name="data" value="${esc(dataImplicit)}" required></label>
           <label class="field">Ora start<input type="number" name="ora_start" min="0" max="23" step="1" value="8"></label>
-          <label class="field">Ore<input type="number" name="ore" id="alocOre" min="0" step="0.5" value="${oreImplicit}" required></label>
+          <label class="field">Ore<input type="number" name="ore" id="alocOre" min="0" step="0.5" value="${ORE_IMPLICIT}" required></label>
           <label class="field">Cantitate<input type="number" name="cantitate" min="0" step="0.01" value="${cantitateDin(c.cantitate) || ""}"></label>
         </div>
 
@@ -1532,10 +1511,21 @@ function register(router) {
             faraTuraCine.textContent = "Sunt " + calificati + " oameni trecuți pe utilajul ăsta, dar niciunul nu e planificat atunci.";
           }
           if (grid) grid.style.display = id && cati ? "grid" : "none";
-          var opt = sel.options[sel.selectedIndex];
-          if (opt && opt.dataset.ore) oreInput.value = opt.dataset.ore;
         }
+        // Orele: estimarea utilajului ales, dacă are una. Trecut pe un utilaj
+        // fără estimare, câmpul revine la un schimb — altfel ar rămâne orele
+        // utilajului de dinainte, ca și cum ar fi fost calculate pentru ăsta.
+        // Ce a scris omul de mână nu se atinge.
+        var ORE_IMPLICIT = "${ORE_IMPLICIT}";
+        var orePuseDePagina = true;
+        function orePentruUtilaj() {
+          var opt = sel.options[sel.selectedIndex];
+          if (opt && opt.dataset.ore) { oreInput.value = opt.dataset.ore; orePuseDePagina = true; }
+          else if (orePuseDePagina) oreInput.value = ORE_IMPLICIT;
+        }
+        if (oreInput) oreInput.addEventListener("input", function () { orePuseDePagina = false; });
         if (sel) {
+          sel.addEventListener("change", orePentruUtilaj);
           sel.addEventListener("change", filtreaza);
           if (dataInput) dataInput.addEventListener("change", filtreaza);
           if (oraInput) { oraInput.addEventListener("change", filtreaza); oraInput.addEventListener("input", filtreaza); }
@@ -1552,43 +1542,29 @@ function register(router) {
     const utilajId = nr(b.utilaj_id) || null;
     const data = String(b.data || "").slice(0, 10) || azi();
 
-    // Utilajul trebuie să fie din fluxul comenzii. Derulanta îl ascunde deja
-    // pe cel străin, dar ascunderea nu e o regulă: o fereastră lăsată deschisă
-    // de ieri, sau fluxul schimbat între timp, ar trimite lotul pe o mașină
-    // care n-are ce căuta acolo — iar asta se vede abia când nu iese produsul.
+    // Orice utilaj activ e bun — pe ce se face comanda alege omul (Vali,
+    // 09.11.2026: „nu sugera utilaje, lasă-le pe toate"). Fluxul comenzii nu
+    // mai refuză alegerea. Se oprește doar un utilaj scos din uz între timp
+    // (pagină lăsată deschisă de ieri): pe el nu mai lucrează nimeni.
     if (utilajId) {
-      const cmd = await db.prepare("SELECT * FROM comenzi_productie WHERE id = ?").get(ctx.params.id);
-      const liniiCmd = await db
-        .prepare("SELECT produs_id, denumire FROM comenzi_productie_linii WHERE comanda_id = ?")
-        .all(ctx.params.id)
-        .catch(() => []);
-      const fx = cmd ? await fluxulComenzii(cmd, liniiCmd) : { flux: null, pasi: [] };
-      if (fx.flux) {
-        const permise = await utilajeleFluxului(fx.pasi);
-        if (permise.length && !permise.some((u) => Number(u.id) === Number(utilajId))) {
-          const u = await db.prepare("SELECT cod, denumire FROM utilaje WHERE id = ?").get(utilajId);
-          return send(
-            ctx.res,
-            400,
-            layout({
-              user: ctx.user,
-              title: "Alocare refuzată",
-              active: "/productie",
-              body: `<div class="detail-box" style="border-left:4px solid var(--danger)">
-                <h1 style="margin-top:0">Utilajul nu e în fluxul comenzii</h1>
-                <p><strong>${esc(u ? [u.cod, u.denumire].filter(Boolean).join(" · ") : String(utilajId))}</strong>
-                   nu face parte din fluxul <strong>${esc(fx.flux.cod)} · ${esc(fx.flux.denumire || "")}</strong>,
-                   pe care merge comanda asta.</p>
-                <p style="color:var(--text-muted);max-width:640px">Fluxul trece prin:
-                   ${esc(permise.map((x) => [x.cod, x.denumire].filter(Boolean).join(" ")).join(", "))}.
-                   Dacă produsul chiar trebuie făcut pe utilajul ăsta, adaugă pasul în
-                   <a href="/fluxuri">Fluxuri</a> sau schimbă fluxul comenzii.</p>
-                <p><a class="btn" href="/productie/aloca/${esc(String(ctx.params.id))}">Înapoi la alocare</a>
-                   <a class="btn secondary" href="/productie/${esc(String(ctx.params.id))}">Comanda</a></p>
-              </div>`,
-            })
-          );
-        }
+      const u = await db.prepare("SELECT id, cod, denumire, activ FROM utilaje WHERE id = ?").get(utilajId);
+      if (!u || Number(u.activ) !== 1) {
+        return send(
+          ctx.res,
+          400,
+          layout({
+            user: ctx.user,
+            title: "Alocare refuzată",
+            active: "/productie",
+            body: `<div class="detail-box" style="border-left:4px solid var(--danger)">
+              <h1 style="margin-top:0">Utilajul nu mai e activ</h1>
+              <p><strong>${esc(u ? [u.cod, u.denumire].filter(Boolean).join(" · ") : String(utilajId))}</strong>
+                 ${u ? "a fost scos din uz" : "nu mai există"}. Alege alt utilaj.</p>
+              <p><a class="btn" href="/productie/aloca/${esc(String(ctx.params.id))}">Înapoi la alocare</a>
+                 <a class="btn secondary" href="/productie/${esc(String(ctx.params.id))}">Comanda</a></p>
+            </div>`,
+          })
+        );
       }
     }
     const r = await db
