@@ -36,8 +36,8 @@ const CALE = "/rapoarte/comenzi-la-zi";
 // Cine poate urca o zi (comenzile aprobate sau AWB-urile): administratorul și
 // oricine are acces la raportul ăsta. Vali, 05.11.2026: Gabi Tecuceanu are doar
 // raportul Sameday, ca să urce ea comenzile zilnice — fără restul rapoartelor.
-// Prețurile, aliasurile și legăturile la nomenclator rămân ale administratorului.
-// Costurile scrise de mână le poate salva oricine are raportul (09.11.2026 —
+// Legăturile la nomenclator rămân ale administratorului. Prețurile, aliasurile
+// și costurile scrise de mână le poate salva oricine are raportul (09.11.2026 —
 // vezi formularCosturi).
 function poateUrca(user) {
   if (!user) return false;
@@ -1502,35 +1502,30 @@ function formularZi(produse, zi, cantitati) {
   </form>`;
 }
 
-// Cine schimbă ce, în „Prețuri, aliasuri și costuri manuale":
-//   • costul scris de mână (și nota lui) — oricine are raportul Sameday.
-//     Vali, 09.11.2026: „nu salvează costurile noi la anumite produse" —
-//     Gabi (Achiziții, cu raportul Sameday) a completat costurile la cutii și
-//     la plicurile antișoc, iar salvarea era doar a administratorului și se
-//     întorcea pe pagină fără niciun cuvânt. Costul de achiziție e chiar
-//     treaba ei.
-//   • prețul de vânzare și aliasurile — administratorul. Prețul intră în
-//     comanda zilei facturată clientului, iar aliasul decide ce produs e o
-//     etichetă AWB. La ceilalți se văd, dar nu ca și casete de scris.
-function formularCosturi(produse, { admin = false } = {}) {
+// Cine schimbă ce, în „Prețuri, aliasuri și costuri manuale": oricine are
+// raportul Sameday — prețul de vânzare, costul scris de mână, nota lui și
+// aliasurile.
+//   Vali, 09.11.2026: „nu salvează costurile noi la anumite produse" — Gabi
+//   (Achiziții, cu raportul Sameday) a completat costurile la cutii și la
+//   plicurile antișoc, iar salvarea era doar a administratorului și se
+//   întorcea pe pagină fără niciun cuvânt. Apoi, întrebat de prețuri: „da, să
+//   poată schimba, după regula de acum: se modifică doar de la ziua salvării
+//   înainte." Regula de acum: zilele deja scrise își păstrează prețul și
+//   costul înghețate pe rânduri (vezi POST /costuri).
+//   Legarea la nomenclator rămâne a administratorului (POST /legare).
+function formularCosturi(produse) {
   const randuri = produse.map((p) => {
     const legat = !!p.produs_id;
     return [
       esc(p.denumire),
-      admin
-        ? `<input name="p_${p.id}" type="number" step="any" min="0" value="${nr(p.pret) || ""}" style="width:110px">`
-        : nr(p.pret)
-          ? money(p.pret)
-          : "—",
+      `<input name="p_${p.id}" type="number" step="any" min="0" value="${nr(p.pret) || ""}" style="width:110px">`,
       legat
         ? `<span title="${esc(p.cost_sursa || "")}">${p.cost == null ? "—" : money(p.cost)}</span>`
         : `<input name="k_${p.id}" type="number" step="any" min="0" value="${p.cost == null ? "" : nr(p.cost)}" style="width:110px" placeholder="necunoscut">`,
       legat
         ? `<span style="font-size:12px;color:var(--text-muted)">${esc(p.cost_sursa || "nomenclator")}</span>`
         : `<input name="n_${p.id}" value="${esc(p.nota_cost || "")}" placeholder="de unde vine costul" style="width:100%">`,
-      admin
-        ? `<input name="a_${p.id}" value="${esc(p.aliasuri || "")}" placeholder="alt nume de pe etichetă" style="width:100%">`
-        : `<span style="font-size:12px">${esc(p.aliasuri || "—")}</span>`,
+      `<input name="a_${p.id}" value="${esc(p.aliasuri || "")}" placeholder="alt nume de pe etichetă" style="width:100%">`,
     ];
   });
   return `<form method="post" action="${CALE}/costuri" class="form">
@@ -1538,9 +1533,8 @@ function formularCosturi(produse, { admin = false } = {}) {
     <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0">
       Costul produselor legate la nomenclator nu se mai scrie de mână — se ia singur, din rețetă sau din
       ultima intrare de marfă. Caseta de cost rămâne editabilă numai la produsele nelegate.
-      ${admin ? "" : "Prețul de vânzare și aliasurile le schimbă un administrator."}
     </p>
-    <button class="btn" type="submit" style="margin-top:10px">${admin ? "Salvează prețurile, costurile manuale și aliasurile" : "Salvează costurile"}</button>
+    <button class="btn" type="submit" style="margin-top:10px">Salvează prețurile, costurile manuale și aliasurile</button>
   </form>`;
 }
 
@@ -1895,7 +1889,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         Pentru plicul AWB C5 ai calculatorul la <a href="/calculator/awb">/calculator/awb</a>, pentru pungi la
         <a href="/calculator/pungi">/calculator/pungi</a>, pentru cutii la <a href="/calculator/cutii">/calculator/cutii</a>.
       </p>
-      ${formularCosturi(produse, { admin: Boolean(ctx.user && ctx.user.rol === "admin") })}
+      ${formularCosturi(produse)}
     `;
     send(ctx.res, 200, rapoarte.pagina(ctx, "Comenzi consumabile la zi", CALE, corp));
   });
@@ -1935,13 +1929,12 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
   });
 
   router.post(`${CALE}/costuri`, async (ctx) => {
-    // Costul îl scrie oricine are raportul; prețul și aliasurile, doar
-    // administratorul (vezi formularCosturi). Cine n-are voie află asta pe
-    // pagină — până pe 09.11.2026 se întorcea acolo fără niciun cuvânt.
+    // Prețurile, costurile și aliasurile le scrie oricine are raportul (vezi
+    // formularCosturi). Cine n-are voie află asta pe pagină — până pe
+    // 09.11.2026 se întorcea acolo fără niciun cuvânt.
     if (!poateUrca(ctx.user)) {
-      return redirect(ctx.res, `${CALE}?costuri_eroare=${encodeURIComponent("N-ai drept să schimbi costurile din raportul Sameday.")}#preturi`);
+      return redirect(ctx.res, `${CALE}?costuri_eroare=${encodeURIComponent("N-ai drept să schimbi prețurile și costurile din raportul Sameday.")}#preturi`);
     }
-    const admin = ctx.user.rol === "admin";
     const b = ctx.body || {};
     const are = (k) => Object.prototype.hasOwnProperty.call(b, k);
     const acum = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Bucharest" }).slice(0, 19);
@@ -1955,7 +1948,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       // nu apar pe pagină, iar un câmp care lipsește nu înseamnă „golește-l":
       // până pe 09.11.2026 orice salvare le punea prețul pe 0 și le ștergea
       // aliasurile și costul.
-      if (admin && are(`p_${p.id}`)) {
+      if (are(`p_${p.id}`)) {
         const pretScris = numarScris(b[`p_${p.id}`]);
         const pret = pretScris != null && Number.isFinite(pretScris) && pretScris >= 0 ? pretScris : 0;
         const aliasuri = are(`a_${p.id}`) ? String(b[`a_${p.id}`] || "").slice(0, 500).trim() || null : p.aliasuri || null;
