@@ -81,6 +81,7 @@ require("./modules/calculator").register(router);
 require("./modules/awb").register(router);
 require("./modules/pungi").register(router);
 require("./modules/cutii").register(router);
+require("./modules/calculator-stretch").register(router);
 require("./modules/dezvoltare").register(router);
 require("./modules/procurement").register(router);
 // Comenzile către furnizor stau sub /procurement, dar în modulul lor. Se
