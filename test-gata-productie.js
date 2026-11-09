@@ -136,14 +136,14 @@ const egal = (d, a, b) => bine(d + " = " + JSON.stringify(b), JSON.stringify(a) 
 // ---- datele de test ------------------------------------------------------
 const P1 = 97701, P2 = 97702, P3 = 97703;
 const CLIENT = 97711, FURNIZOR = 97712;
-const CMD = 97721, CMD_LIVRATA = 97722;
-const CP_NOU = 97731, CP_VECHI = 97732;
+const CMD = 97721, CMD_LIVRATA = 97722, CMD_SPLIT = 97723;
+const CP_NOU = 97731, CP_VECHI = 97732, CP_SPLIT = 97733;
 // Cererea gata are id-ul cel mai mare: lista o pune totuși înaintea celor vechi.
 const A_GATA = 97749, A_VECHE = 97742, A_VECHE2 = 97743, A_INCHISA = 97744, A_PUSA = 97745, A_TERT = 97746, A_CU_RECEPTIE = 97748, A_LIVRATA = 97747;
 const PREFIX = "TGP";
 
 function curata() {
-  const cp = [CP_NOU, CP_VECHI].join(",");
+  const cp = [CP_NOU, CP_VECHI, CP_SPLIT].join(",");
   const aprov = [A_GATA, A_VECHE, A_VECHE2, A_INCHISA, A_PUSA, A_TERT, A_CU_RECEPTIE, A_LIVRATA].join(",");
   const rec = q(`SELECT id FROM receptii WHERE comanda_productie_id IN (${cp}) OR aprovizionare_id IN (${aprov}) OR numar LIKE 'TGP-%'`).map((x) => Number(x.id));
   const r = rec.join(",") || "0";
@@ -163,9 +163,9 @@ function curata() {
   q(`DELETE FROM comenzi_productie WHERE id IN (${cp})`);
   q(`DELETE FROM aprovizionari WHERE id IN (${aprov}) OR produs_id IN (${P1}, ${P2}, ${P3})`);
   q(`DELETE FROM rezervari_stoc WHERE produs_id IN (${P1}, ${P2}, ${P3})`);
-  try { q(`DELETE FROM comenzi_istoric WHERE comanda_id IN (${CMD}, ${CMD_LIVRATA})`); } catch (_) { /* tabela poate lipsi */ }
-  q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${CMD}, ${CMD_LIVRATA})`);
-  q(`DELETE FROM comenzi WHERE id IN (${CMD}, ${CMD_LIVRATA})`);
+  try { q(`DELETE FROM comenzi_istoric WHERE comanda_id IN (${CMD}, ${CMD_LIVRATA}, ${CMD_SPLIT})`); } catch (_) { /* tabela poate lipsi */ }
+  q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${CMD}, ${CMD_LIVRATA}, ${CMD_SPLIT})`);
+  q(`DELETE FROM comenzi WHERE id IN (${CMD}, ${CMD_LIVRATA}, ${CMD_SPLIT})`);
   q(`DELETE FROM produse WHERE id IN (${P1}, ${P2}, ${P3})`);
   q(`DELETE FROM interactiuni WHERE partener_id IN (${CLIENT}, ${FURNIZOR})`);
   q(`DELETE FROM parteneri WHERE id IN (${CLIENT}, ${FURNIZOR})`);
@@ -194,6 +194,13 @@ const ziPlus = (n) => new Date(Date.parse(azi() + "T00:00:00Z") + n * 86400000).
   q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD}, ${CLIENT}, '${PREFIX}-1', '${azi()}', 'productie_finalizata')`);
   q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${CMD}, ${P2}, 20, 1)`);
   q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD_LIVRATA}, ${CLIENT}, '${PREFIX}-2', '2026-10-01', 'livrata')`);
+  q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD_SPLIT}, ${CLIENT}, '${PREFIX}-3', '${azi()}', 'in_productie')`);
+  q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${CMD_SPLIT}, ${P1}, 30, 1)`);
+  q(`INSERT INTO comenzi_productie (id, numar, produs_id, tip_produs, cantitate, um, status, data_initiere, client_text) VALUES
+       (${CP_SPLIT}, '${PREFIX}-CP-3', ${P1}, '${PREFIX} Folie manuala 12my', '100', 'buc', 'in_productie', '${ziPlus(-2)}', 'TGP Client SRL')`);
+  // O recepție din producție numărată, a unei comenzi deja livrate: marfa a plecat.
+  const rLivrata = Number(unul(`INSERT INTO receptii (numar, sursa, comanda_id, data, stare) VALUES ('TGP-REC-LIVRATA', 'productie', ${CMD_LIVRATA}, '${azi()}', 'finalizata') RETURNING id`));
+  q(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, cantitate_primita, um, stare, conditie) VALUES (${rLivrata}, ${P3}, 7, 7, 'buc', 'primita', 'bun')`);
   // Producție scrisă direct în registru, fără comandă de client: una nouă și
   // una veche (din registrul adus din Excel).
   q(`INSERT INTO comenzi_productie (id, numar, produs_id, tip_produs, cantitate, um, status, data_initiere, client_text) VALUES
@@ -247,9 +254,10 @@ const ziPlus = (n) => new Date(Date.parse(azi() + "T00:00:00Z") + n * 86400000).
   egal("rândul recepției: 50 buc, gata în producție, producția TGP-CP-1, pentru Sameday", [xr.ramas, xr.stare, xr.productie_numar, xr.client], [50, "gata în producție", "TGP-CP-1", "SAMEDAY COURIER"]);
   let pag = await cer("get", "/stocuri/ct-park/intrare", DEP);
   bine("pagina Intrare marfă are secțiunea, cu numărul de rânduri", /id="gata-productie"/.test(pag.corp) && /Gata din producție — de alocat <span class="badge galben">\d+<\/span>/.test(pag.corp), pag.cod);
-  bine("…cu butoanele rândului de recepție", pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lid}/raft"`) && pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lid}/livrare"`));
+  bine("…cu butoanele rândului de recepție", pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lid}/raft"`) && pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lid}/aloca"`));
   bine("…„Nu mai e de alocat” doar la cererile vechi", pag.corp.includes(`action="/stocuri/ct-park/gata/cerere/${A_VECHE}/inchide"`) && !pag.corp.includes(`action="/stocuri/ct-park/gata/cerere/${A_GATA}/inchide"`));
-  bine("…iar la cererea legată de comandă, „livrare pe comanda clientului” e aleasă", new RegExp(`gata/cerere/${A_GATA}/livrare"[\\s\\S]{0,400}<option value="comanda" selected>`).test(pag.corp));
+  const formG = (() => { const i = pag.corp.indexOf(`action="/stocuri/ct-park/gata/cerere/${A_GATA}/aloca"`); return i < 0 ? "" : pag.corp.slice(i, pag.corp.indexOf("</form>", i)); })();
+  bine("…iar la cererea legată de comandă, comanda clientului e deja aleasă", formG.includes(`<option value="${CMD}" selected>`), formG.slice(0, 200));
 
   // ------------------------------------------------------------------------
   console.log("\n3. Pune pe raft, din recepția din producție");
@@ -337,6 +345,95 @@ const ziPlus = (n) => new Date(Date.parse(azi() + "T00:00:00Z") + n * 86400000).
   pag = await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { aprovizionare: String(A_TERT) } });
   bine("marfa de la terț: furnizorul cererii e ales, categoria n-o impunem",
     pag.corp.includes(`<option value="${FURNIZOR}" selected>`) && pag.corp.includes(`Din cererea #${A_TERT} (de la furnizor)`) && !pag.corp.includes('<option value="produse finite" selected>'), pag.cod);
+
+  // ------------------------------------------------------------------------
+  console.log("\n9. Marfa comenzii livrate și rândul scos din listă nu mai sunt de pus");
+  const W = require(path.join(RAD, "modules", "warehouse.js"));
+  lista = await GP.lista();
+  bine("recepția comenzii livrate nu e în listă", !lista.some((x) => x.fel === "receptie" && x.receptie_id === rLivrata));
+  const stocP3 = async () => (await W.stocPeProduse()).get(P3) || 0;
+  const stocP2 = async () => (await W.stocPeProduse()).get(P2) || 0;
+  egal("…și nici în stocul CT-Park (cei 7 buc au plecat cu comanda)", await stocP3(), 30 + 8);
+  const SP = require(path.join(RAD, "lib", "stoc-produse.js"));
+  const stocSP = async (pid) => ((await SP.citeste({ vedeTot: true })).find((x) => Number(x.produs_id) === pid) || {}).stoc;
+  egal("…nici în „Stoc la zi”", await stocSP(P3), 38);
+  const lBun = Number(unul(`SELECT id FROM receptii_linii WHERE receptie_id = ${rStricat} AND produs_id = ${P2}`));
+  const inaintePuse = await stocP2();
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP);
+  bine("rândul numărat are „Nu mai e de alocat”", pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lBun}/inchide"`));
+  r = await cer("post", `/stocuri/ct-park/gata/receptie/${lBun}/inchide`, DEP, { body: { motiv: "x" } });
+  bine("fără motiv: refuzat", /Scrie de ce/.test(parametri(r).gata_eroare || ""), unde(r));
+  r = await cer("post", `/stocuri/ct-park/gata/receptie/${lBun}/inchide`, DEP, { body: { motiv: "e pe raft, pus de mână" } });
+  bine("cu motiv: iese din listă", /a ieșit din listă/.test(parametri(r).gata_ok || "") && !(await GP.lista()).some((x) => x.fel === "receptie" && x.id === lBun), unde(r));
+  egal("…și cei 4 buc nu mai sunt „de pus” în stoc", inaintePuse - (await stocP2()), 4);
+  egal("…nici în „Stoc la zi”", await stocSP(P2), await stocP2());
+  const pagR = await cer("get", "/depozit/receptie/:id".replace(":id", String(rStricat)), DEP);
+  bine("recepția arată că rândul a fost scos, fără butoane", /scos din listă de Om Depozit: e pe raft, pus de mână/.test(pagR.corp) && !pagR.corp.includes(`receptie_linie=${lBun}"`), pagR.cod);
+
+  // ------------------------------------------------------------------------
+  console.log("\n10. Alocare pe cantități: o parte la client, o parte în fulfillment, o parte pe raft");
+  await STADIU.laSchimbareaProductiei(CP_SPLIT, "in_productie", "finalizata", { user: MIHAI });
+  const rSplit = Number(unul(`SELECT receptie_id FROM comenzi_productie WHERE id = ${CP_SPLIT}`));
+  const lS = Number(unul(`SELECT id FROM receptii_linii WHERE receptie_id = ${rSplit}`));
+  const ramasS = async () => ((await GP.lista()).find((x) => x.fel === "receptie" && x.id === lS) || {}).ramas;
+  egal("în listă: 100 buc", await ramasS(), 100);
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP);
+  const formA = (() => { const i = pag.corp.indexOf(`action="/stocuri/ct-park/gata/receptie/${lS}/aloca"`); return i < 0 ? "" : pag.corp.slice(i, pag.corp.indexOf("</form>", i)); })();
+  bine("rândul are „Alocă pe cantități”, cu client (și comanda), fulfillment și raft", ["name=\"q_client\"", "name=\"comanda_id\"", "name=\"q_fulfillment\"", "name=\"q_raft\"", "Din 100 buc de alocat"].every((t) => formA.includes(t)), formA.slice(0, 300));
+  const aloca = (body) => cer("post", `/stocuri/ct-park/gata/receptie/${lS}/aloca`, DEP, { body });
+  r = await aloca({});
+  bine("fără nicio cantitate: mesaj", /Scrie cât pleacă/.test(parametri(r).gata_eroare || ""), unde(r));
+  r = await aloca({ q_client: "10" });
+  bine("la client fără comandă: mesaj", /Alege comanda clientului/.test(parametri(r).gata_eroare || ""), unde(r));
+  r = await aloca({ q_client: "60", comanda_id: String(CMD_SPLIT), q_fulfillment: "50" });
+  bine("mai mult decât e: mesaj, nimic făcut", /Ai împărțit 110 buc, dar sunt de alocat doar 100 buc/.test(parametri(r).gata_eroare || "") && Number(unul(`SELECT COUNT(*) FROM ct_paleti WHERE receptie_linie_id = ${lS}`)) === 0, unde(r));
+  r = await aloca({ q_client: "-3" });
+  bine("cantitate negativă: mesaj", /de la zero în sus/.test(parametri(r).gata_eroare || ""), unde(r));
+  r = await aloca({ q_client: "30", comanda_id: String(CMD_SPLIT), q_fulfillment: "25,5", q_raft: "20" });
+  egal("partea de raft deschide Intrarea cu cantitatea ei", unde(r), `/stocuri/ct-park/intrare?receptie_linie=${lS}&cantitate=20`);
+  egal("paleții pentru ieșire: 30 la client (comanda), 25,5 în fulfillment, fără loc",
+    q(`SELECT cantitate, iesire_plan, iesire_comanda_id, (SELECT COUNT(*) FROM ct_ocupari o WHERE o.palet_id = p.id) AS locuri FROM ct_paleti p WHERE receptie_linie_id = ${lS} ORDER BY id`)
+      .map((x) => [Number(x.cantitate), x.iesire_plan, x.iesire_comanda_id == null ? null : Number(x.iesire_comanda_id), Number(x.locuri)]),
+    [[30, "comanda", CMD_SPLIT, 0], [25.5, "fulfillment", null, 0]]);
+  egal("în listă rămân 44,5 (partea de raft încă nepusă)", await ramasS(), 44.5);
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(lS), cantitate: "20" } });
+  bine("Intrarea pune pe primul palet doar partea de raft și o spune", pag.corp.includes('name="loc_cantitate[]" value="20"') && /Pe raft pui acum <strong>20 buc<\/strong>; restul rămâne în „Gata din producție”/.test(pag.corp));
+  const loc3 = locLiber([loc1.id, loc2.id]);
+  r = await cer("post", "/stocuri/ct-park/intrare", DEP, {
+    body: { produs_id: String(P1), um: "buc", receptie_id: String(rSplit), receptie_linie_id: String(lS),
+      "loc_ids[]": String(loc3.id), "loc_rand[]": String(loc3.rand_id), "loc_latime[]": "1", "loc_paleti[]": "1", "loc_cantitate[]": "20" },
+  });
+  egal("după raft: rămân 24,5 de alocat", await ramasS(), 24.5);
+  const gata = await GP.pregatite();
+  bine("în „Pregătite” sunt doar paleții cu ieșirea aleasă (nu și cei fără loc, de alt fel)",
+    gata.length > 0 && gata.every((g) => ["comanda", "fulfillment", "productie"].includes(g.destinatie)) && !gata.some((g) => g.cod === "TGP-PUS-1"), JSON.stringify(gata.map((g) => [g.cod, g.destinatie])));
+  const gC = gata.find((g) => g.destinatie === "comanda" && g.comanda_id === CMD_SPLIT && g.cantitate === 30) || {};
+  const gF = gata.find((g) => g.destinatie === "fulfillment" && g.cantitate === 25.5) || {};
+  const qC = Object.fromEntries(new URL(gC.iesire || "/", "http://erp.test").searchParams);
+  bine("„Pregătite pentru ieșire”: la client, cu ieșirea completată", qC.palet === String(gC.id) && qC.destinatie === "comanda" && qC.comanda_id === String(CMD_SPLIT) && /livrare directă din recepția/.test(qC.motiv || ""), gC.iesire);
+  bine("…și cel pentru fulfillment", /destinatie=fulfillment/.test(gF.iesire || ""), gF.iesire);
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP);
+  bine("pe pagină: secțiunea cu butoanele de ieșire și „Renunță”", pag.corp.includes('id="pregatite"') && pag.corp.includes("Scoate la client →") && pag.corp.includes("Scoate în fulfillment →") && pag.corp.includes(`action="/stocuri/ct-park/gata/palet/${gF.id}/renunta"`));
+  r = await cer("post", `/stocuri/ct-park/gata/palet/${gF.id}/renunta`, DEP);
+  bine("„Renunță” desface paletul de fulfillment", /s-a desfăcut/.test(parametri(r).gata_ok || "") && !unul(`SELECT id FROM ct_paleti WHERE id = ${gF.id}`), unde(r));
+  egal("…iar cantitatea lui e din nou de alocat", await ramasS(), 50);
+  const palRaft = Number(unul(`SELECT id FROM ct_paleti WHERE receptie_linie_id = ${lS} AND iesire_plan IS NULL`));
+  r = await cer("post", `/stocuri/ct-park/gata/palet/${palRaft}/renunta`, DEP);
+  bine("paletul pus pe raft nu se desface de aici", /nu e unul pregătit/.test(parametri(r).gata_eroare || ""), unde(r));
+  r = await aloca({ q_fulfillment: "50" });
+  bine("o singură ieșire: se deschide direct ieșirea", unde(r).startsWith("/stocuri/ct-park/iesire?") && /destinatie=fulfillment/.test(unde(r)), unde(r));
+  egal("totul alocat: rândul iese din listă", await ramasS(), undefined);
+
+  // ------------------------------------------------------------------------
+  console.log("\n11. Alocare pe cantități dintr-o cerere");
+  q(`INSERT INTO aprovizionari (id, comanda_id, produs_id, cantitate, sursa, status, creata_la) VALUES (97750, ${CMD_SPLIT}, ${P2}, 40, 'productie', 'gata', '${azi()}')`);
+  r = await cer("post", "/stocuri/ct-park/gata/cerere/97750/aloca", DEP, { body: { q_client: "15", comanda_id: String(CMD_SPLIT), q_fulfillment: "5" } });
+  bine("două ieșiri: înapoi la listă, cu mesaj", /Pregătit: 15 buc la client, 5 buc în fulfillment/.test(parametri(r).gata_ok || "") && /#pregatite$/.test(unde(r)), unde(r));
+  egal("paleții legați de cerere", q(`SELECT cantitate, iesire_plan FROM ct_paleti WHERE aprovizionare_id = 97750 ORDER BY id`).map((x) => [Number(x.cantitate), x.iesire_plan]), [[15, "comanda"], [5, "fulfillment"]]);
+  egal("în listă rămân 20 din cerere", ((await GP.lista()).find((x) => x.fel === "cerere" && x.id === 97750) || {}).ramas, 20);
+  q(`DELETE FROM ct_palet_linii WHERE palet_id IN (SELECT id FROM ct_paleti WHERE aprovizionare_id = 97750)`);
+  q(`DELETE FROM ct_paleti WHERE aprovizionare_id = 97750`);
+  q(`DELETE FROM aprovizionari WHERE id = 97750`);
 
   curata();
   console.log(esecuri ? `\n${esecuri} EȘECURI` : "\nTOATE BUNE");
