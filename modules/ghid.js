@@ -279,7 +279,8 @@ const GHID = [
 "t":"Intrare marfă",
 "p":[
 "Când vine marfă în depozit, o înregistrezi aici. Spui ce e, câtă e, din ce lot, și câte locuri de palet ocupă. Sistemul îți dă adresa liberă și îți tipărește eticheta.",
-"Eticheta se lipește pe palet. Pe ea scrie mare adresa — după aia nu mai cauți marfa, o găsești."
+"Eticheta se lipește pe palet. Pe ea scrie mare adresa — după aia nu mai cauți marfa, o găsești.",
+"Sus, în <b>Gata din producție — de alocat</b>, stă marfa terminată în producție și cererile marcate „intrată în stoc” care n-au încă palet. De la fiecare rând o pui pe raft (Intrarea se completează singură) sau o trimiți direct în fulfillment ori la livrare pe comanda clientului."
 ],
 "pasi":[
 "Apeși „+ Intrare marfă”.",

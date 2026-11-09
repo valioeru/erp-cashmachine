@@ -825,8 +825,7 @@ function register(router) {
         : poateDepozit(ctx.user) && ["ceruta", "confirmata", "gata"].includes(a.status)
           ? confirmaTert +
             `<form method="post" action="/depozit/aprovizionare/${a.id}/primita" class="inline-form" style="gap:6px;margin-top:6px">
-               <select name="depozit_id" style="width:120px">${optDep}</select>
-               <button class="btn small ${a.status === "ceruta" && a.sursa === "tert" ? "secondary" : ""}" type="submit">Intră în stoc</button>
+               <button class="btn small ${a.status === "ceruta" && a.sursa === "tert" ? "secondary" : ""}" type="submit" title="Deschide Intrarea marfă în CT-Park, completată cu produsul și cantitatea">Intră în stoc →</button>
              </form>
              <form method="post" action="/depozit/aprovizionare/${a.id}/anuleaza" class="inline-form">
                <button class="link-btn danger" type="submit">Anulează</button>
@@ -1031,42 +1030,14 @@ function register(router) {
           encodeURIComponent(`Marfa asta are deja recepția ${deschisa.numar || "#" + deschisa.id} deschisă. Preia-o de acolo, altfel intră de două ori pe stoc.`)
       );
     }
-    let depozitId = parseInt((ctx.body || {}).depozit_id, 10) || null;
-    if (!depozitId) {
-      const d = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
-      depozitId = d ? d.id : null;
-    }
-    if (depozitId) {
-      const pret = await db.prepare("SELECT pret_achizitie FROM produse WHERE id = ?").get(a.produs_id);
-      await db
-        .prepare(
-          `INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, data, observatii)
-           VALUES (?, ?, 'intrare', ?, ?, ?, ?, ?)`
-        )
-        .run(
-          a.produs_id,
-          depozitId,
-          Number(a.cantitate) || 0,
-          pret ? Number(pret.pret_achizitie) || 0 : 0,
-          `aprovizionare #${id}`,
-          acum(),
-          a.sursa === "productie" ? "intrare din producție" : "intrare de la furnizor"
-        );
-    }
-    await db.prepare("UPDATE aprovizionari SET status = 'primita' WHERE id = ?").run(id);
-    // Comanda clientului, pe același drum ca la recepție (lib/stadiu-comanda.js).
-    if (a.comanda_id) {
-      try {
-        await STADIU.dupaIntrareMarfa(a.comanda_id, {
-          user: ctx.user,
-          motiv: `Marfa ${a.sursa === "productie" ? "din producție" : "de la furnizor"} a intrat în stoc (${ctx.user.nume}).`,
-          potrivire,
-        });
-      } catch (e) {
-        console.error("[depozit] nu am putut muta comanda clientului:", e.message);
-      }
-    }
-    redirect(ctx.res, "/depozit/aprovizionare");
+    // „Intră în stoc" = marfa primește loc în CT-Park, singurul depozit. Până pe
+    // 09.11.2026 butonul scria doar în tabela veche (miscari_stoc), iar marfa
+    // rămânea „intrată în stoc" fără palet și fără raft. Vali: „astea intrate
+    // în stoc e stoc CT-Park și ar trebui alocate pe rafturi". Acum butonul
+    // deschide Intrarea marfă completată; cererea devine „intrată în stoc" și
+    // comanda clientului merge mai departe când paletul chiar există
+    // (lib/gata-productie.js, dupaPunere).
+    return redirect(ctx.res, `/stocuri/ct-park/intrare?aprovizionare=${id}`);
   });
 
   router.post("/depozit/aprovizionare/:id/anuleaza", async (ctx) => {

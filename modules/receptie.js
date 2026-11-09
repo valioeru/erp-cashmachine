@@ -538,118 +538,14 @@ function register(router) {
   router.post("/depozit/receptie/:id/finalizeaza", async (ctx) => {
     if (!poate(ctx.user)) return redirect(ctx.res, "/depozit/receptie");
     const id = parseInt(ctx.params.id, 10);
-    const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
+    const r = await db.prepare("SELECT id FROM receptii WHERE id = ?").get(id);
     if (!r) return redirect(ctx.res, "/depozit/receptie");
-
-    const linii = await liniile(id);
-    const v = R.validareFinalizare(r, linii);
-    if (v.eroare) {
-      return redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(v.eroare.slice(0, 220)));
-    }
-
-    let depozitId = r.depozit_id || null;
-    if (!depozitId) {
-      const d = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
-      depozitId = d ? d.id : null;
-    }
-
-    // Starea se muta PRIMA. Daca scrierea miscarilor pica la jumatate, a doua
-    // apasare e refuzata si nu dubleaza ce a apucat sa intre — mai bine o
-    // receptie de reparat manual decat stoc fantoma.
-    await db
-      .prepare("UPDATE receptii SET stare = 'finalizata', primita_de = COALESCE(primita_de, ?), finalizata_la = ? WHERE id = ?")
-      .run(ctx.user.nume, acum(), id);
-
-    let scrise = 0;
-    for (const l of v.deIntrat) {
-      if (!l.produs_id || !depozitId) continue;
-      // Marfa stricata nu intra in stocul din care se vinde. Intra pe
-      // document, se vede pe receptie, dar nu se poate vinde din greseala.
-      if (l.conditie && l.conditie !== "bun") continue;
-      await db
-        .prepare(
-          `INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, data, observatii)
-           VALUES (?, ?, 'intrare', ?, ?, ?, ?, ?)`
-        )
-        .run(
-          l.produs_id,
-          depozitId,
-          nr(l.cantitate_primita),
-          l.pret_unitar == null ? null : nr(l.pret_unitar),
-          r.numar || "REC-" + id,
-          acum(),
-          [l.loc_cod ? "loc " + l.loc_cod : null, l.lot ? "lot " + l.lot : null, l.motiv].filter(Boolean).join(" · ") || null
-        );
-      scrise++;
-
-      // Si pe hartă: pana acum singura urma a locului era coloana de pe
-      // randul de receptie, deci se stia unde A INTRAT marfa, nu unde ESTE.
-      // Un palet lat ocupa mai multe locuri: cantitatea se imparte intre
-      // ele, ca harta sa nu arate acelasi palet de trei ori.
-      const locuriLinie = await db
-        .prepare("SELECT loc_id FROM receptii_linii_locuri WHERE linie_id = ?")
-        .all(l.id)
-        .catch(() => []);
-      const peCare = locuriLinie.length ? locuriLinie.map((x) => Number(x.loc_id)) : l.loc_id ? [Number(l.loc_id)] : [];
-      if (peCare.length) {
-        const bucata = Math.round((nr(l.cantitate_primita) / peCare.length) * 1000) / 1000;
-        for (const locId of peCare) {
-          await db
-            .prepare(
-              `INSERT INTO stoc_locuri (loc_id, produs_id, produs_text, cantitate, um, lot, receptie_id, receptie_linie_id, intrat_la)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            )
-            .run(locId, l.produs_id || null, l.produs_text || l.produs_denumire || null, bucata,
-                 l.um || null, l.lot || null, r.id, l.id, azi())
-            .catch(() => {});
-        }
-      }
-    }
-
-    // Daca receptia a venit dintr-o aprovizionare, aceasta se inchide odata
-    // cu ea — altfel ar ramane in lista „de aprovizionat" cu marfa deja in
-    // depozit, si ar comanda cineva a doua oara.
-    if (r.aprovizionare_id) {
-      await db
-        .prepare("UPDATE aprovizionari SET status = 'primita' WHERE id = ? AND status <> 'primita'")
-        .run(r.aprovizionare_id)
-        .catch(() => {});
-    }
-
-    // Și comanda clientului pentru care a venit marfa: dacă acum stocul o
-    // acoperă, trece „în stoc depozit" și agentul o poate factura. Până pe
-    // 05.11.2026 recepția scria stocul, dar comanda rămânea unde era — „Intră
-    // în stoc" din De aprovizionat o muta, recepția nu.
-    let spuneComanda = "";
-    if (r.comanda_id) {
-      try {
-        const m = await require("../lib/stadiu-comanda").dupaIntrareMarfa(r.comanda_id, {
-          user: ctx.user,
-          motiv: `Recepția ${r.numar || "#" + r.id}${r.sursa === "productie" ? " (din producție)" : ""} a fost finalizată de ${ctx.user.nume}.`,
-          potrivire: require("./warehouse").potrivire,
-        });
-        if (m.schimbat) spuneComanda = `Comanda clientului e acum „${require("../lib/comenzi-stari").TEXTE[m.status] || m.status}”.`;
-      } catch (e) {
-        console.error("[receptie] nu am putut muta comanda clientului:", e.message);
-      }
-    }
-
-    const parti = [];
-    parti.push(scrise + (scrise === 1 ? " rând a intrat pe stoc" : " rânduri au intrat pe stoc"));
-    if (v.nevandabile.length) {
-      parti.push(
-        v.nevandabile.length + (v.nevandabile.length === 1 ? " rând cu marfă stricată NU a intrat pe stocul vandabil" : " rânduri cu marfă stricată NU au intrat pe stocul vandabil")
-      );
-    }
-    if (v.lipsuri.length) parti.push(v.lipsuri.length + " cu lipsă față de cât s-a anunțat");
-    if (v.respinse.length) parti.push(v.respinse.length + " respins" + (v.respinse.length === 1 ? "" : "e"));
+    const f = await finalizeaza(id, ctx.user);
+    if (f.eroare) return redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(f.eroare.slice(0, 220)));
     redirect(
       ctx.res,
       `/depozit/receptie/${id}?ok=` +
-        encodeURIComponent(
-          "Recepție finalizată: " + parti.join(" · ") + "." + (spuneComanda ? " " + spuneComanda : "") +
-            (scrise ? " Acum spune, mai jos, unde pui marfa în CT-Park — sau trimite-o direct la livrare." : "")
-        )
+        encodeURIComponent(f.mesaj + (f.scrise ? " Acum spune, mai jos, unde pui marfa în CT-Park — sau trimite-o direct la livrare." : ""))
     );
   });
 
@@ -660,51 +556,12 @@ function register(router) {
     if (!poate(ctx.user)) return redirect(ctx.res, "/depozit/receptie");
     const id = parseInt(ctx.params.id, 10);
     const lid = parseInt(ctx.params.lid, 10);
-    const inapoi = (m) => redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(m));
-    const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
-    if (!r) return redirect(ctx.res, "/depozit/receptie");
-    if (r.stare !== "finalizata") return inapoi("Întâi finalizează recepția: atunci marfa e pe stoc și poate pleca.");
-    const l = (await liniile(id)).find((x) => Number(x.id) === lid);
-    if (!l || l.stare !== "primita" || (l.conditie && l.conditie !== "bun")) return inapoi("Pleacă la livrare doar marfa primită în stare bună.");
     const b = ctx.body || {};
-    const destinatie = ["comanda", "fulfillment", "productie"].includes(String(b.destinatie || "")) ? String(b.destinatie) : "";
-    if (!destinatie) return inapoi("Alege unde pleacă marfa: comanda unui client, fulfillment sau producție.");
-    const pus = await db
-      .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
-      .get(lid)
-      .catch(() => ({ c: 0 }));
-    const ramas = Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000;
-    if (!(ramas > R.EPS)) return inapoi("Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat.");
-    const CT = require("./ct-park");
-    // De la cine e marfa: furnizorul recepției sau, la marfa din producție,
-    // furnizorul ales acolo pentru material (lib/furnizor-comanda.js).
-    const fz = await require("../lib/furnizor-comanda").furnizorReceptiei(r);
-    const ids = await CT.puneMarfa(
-      ctx,
-      {
-        produs_id: l.produs_id || "",
-        produs_text: l.produs_id ? "" : l.produs_text || "",
-        um: l.um || l.unitate_masura || "",
-        lot: l.lot || "",
-        pret_unitar: l.pret_unitar == null ? "" : String(l.pret_unitar),
-        furnizor_id: fz.furnizor_id || "",
-        furnizor_text: fz.furnizor_id ? "" : fz.furnizor_text || "",
-        observatii: `Direct la livrare din recepția ${r.numar || "#" + r.id}`,
-        receptie_id: r.id,
-        receptie_linie_id: lid,
-      },
-      [[]],
-      ramas
-    );
-    if (!ids.length) return inapoi("Paletul pentru livrare nu s-a putut face.");
-    const cid = destinatie === "comanda" ? parseInt(b.comanda_id, 10) || r.comanda_id || "" : "";
-    const q = new URLSearchParams({
-      palet: String(ids[0]),
-      destinatie,
-      ...(cid ? { comanda_id: String(cid) } : {}),
-      motiv: `livrare directă din recepția ${r.numar || "#" + r.id}`,
-    });
-    redirect(ctx.res, "/stocuri/ct-park/iesire?" + q.toString());
+    const x = await livrareDirecta(ctx.user, id, lid, b.destinatie, b.comanda_id);
+    if (x.eroare) {
+      return redirect(ctx.res, x.faraReceptie ? "/depozit/receptie" : `/depozit/receptie/${id}?eroare=` + encodeURIComponent(x.eroare));
+    }
+    redirect(ctx.res, x.url);
   });
 
   router.post("/depozit/receptie/:id/anuleaza", async (ctx) => {
@@ -880,4 +737,178 @@ function register(router) {
   });
 }
 
-module.exports = { register, creeaza, liniile };
+// ---- Finalizarea: aici se scrie stocul ---------------------------------
+// Funcție, nu doar rută: o cheamă și lista „Gata din producție" din Intrare
+// marfă (modules/gata-productie.js), unde depozitul alocă marfa direct.
+async function finalizeaza(id, user) {
+  const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
+  if (!r) return { eroare: "Recepția nu există." };
+  const linii = await liniile(id);
+  const v = R.validareFinalizare(r, linii);
+  if (v.eroare) return { eroare: v.eroare };
+
+  let depozitId = r.depozit_id || null;
+  if (!depozitId) {
+    const d = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
+    depozitId = d ? d.id : null;
+  }
+
+  // Starea se muta PRIMA. Daca scrierea miscarilor pica la jumatate, a doua
+  // apasare e refuzata si nu dubleaza ce a apucat sa intre — mai bine o
+  // receptie de reparat manual decat stoc fantoma.
+  await db
+    .prepare("UPDATE receptii SET stare = 'finalizata', primita_de = COALESCE(primita_de, ?), finalizata_la = ? WHERE id = ?")
+    .run(user.nume, acum(), id);
+
+  let scrise = 0;
+  for (const l of v.deIntrat) {
+    if (!l.produs_id || !depozitId) continue;
+    // Marfa stricata nu intra in stocul din care se vinde. Intra pe
+    // document, se vede pe receptie, dar nu se poate vinde din greseala.
+    if (l.conditie && l.conditie !== "bun") continue;
+    await db
+      .prepare(
+        `INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, data, observatii)
+         VALUES (?, ?, 'intrare', ?, ?, ?, ?, ?)`
+      )
+      .run(
+        l.produs_id,
+        depozitId,
+        nr(l.cantitate_primita),
+        l.pret_unitar == null ? null : nr(l.pret_unitar),
+        r.numar || "REC-" + id,
+        acum(),
+        [l.loc_cod ? "loc " + l.loc_cod : null, l.lot ? "lot " + l.lot : null, l.motiv].filter(Boolean).join(" · ") || null
+      );
+    scrise++;
+
+    // Si pe hartă: pana acum singura urma a locului era coloana de pe
+    // randul de receptie, deci se stia unde A INTRAT marfa, nu unde ESTE.
+    // Un palet lat ocupa mai multe locuri: cantitatea se imparte intre
+    // ele, ca harta sa nu arate acelasi palet de trei ori.
+    const locuriLinie = await db
+      .prepare("SELECT loc_id FROM receptii_linii_locuri WHERE linie_id = ?")
+      .all(l.id)
+      .catch(() => []);
+    const peCare = locuriLinie.length ? locuriLinie.map((x) => Number(x.loc_id)) : l.loc_id ? [Number(l.loc_id)] : [];
+    if (peCare.length) {
+      const bucata = Math.round((nr(l.cantitate_primita) / peCare.length) * 1000) / 1000;
+      for (const locId of peCare) {
+        await db
+          .prepare(
+            `INSERT INTO stoc_locuri (loc_id, produs_id, produs_text, cantitate, um, lot, receptie_id, receptie_linie_id, intrat_la)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(locId, l.produs_id || null, l.produs_text || l.produs_denumire || null, bucata,
+               l.um || null, l.lot || null, r.id, l.id, azi())
+          .catch(() => {});
+      }
+    }
+  }
+
+  // Daca receptia a venit dintr-o aprovizionare, aceasta se inchide odata
+  // cu ea — altfel ar ramane in lista „de aprovizionat" cu marfa deja in
+  // depozit, si ar comanda cineva a doua oara.
+  if (r.aprovizionare_id) {
+    await db
+      .prepare("UPDATE aprovizionari SET status = 'primita' WHERE id = ? AND status <> 'primita'")
+      .run(r.aprovizionare_id)
+      .catch(() => {});
+  }
+
+  // Și comanda clientului pentru care a venit marfa: dacă acum stocul o
+  // acoperă, trece „în stoc depozit" și agentul o poate factura. Până pe
+  // 05.11.2026 recepția scria stocul, dar comanda rămânea unde era — „Intră
+  // în stoc" din De aprovizionat o muta, recepția nu.
+  let spuneComanda = "";
+  if (r.comanda_id) {
+    try {
+      const m = await require("../lib/stadiu-comanda").dupaIntrareMarfa(r.comanda_id, {
+        user,
+        motiv: `Recepția ${r.numar || "#" + r.id}${r.sursa === "productie" ? " (din producție)" : ""} a fost finalizată de ${user.nume}.`,
+        potrivire: require("./warehouse").potrivire,
+      });
+      if (m.schimbat) spuneComanda = `Comanda clientului e acum „${require("../lib/comenzi-stari").TEXTE[m.status] || m.status}”.`;
+    } catch (e) {
+      console.error("[receptie] nu am putut muta comanda clientului:", e.message);
+    }
+  }
+
+  const parti = [];
+  parti.push(scrise + (scrise === 1 ? " rând a intrat pe stoc" : " rânduri au intrat pe stoc"));
+  if (v.nevandabile.length) {
+    parti.push(
+      v.nevandabile.length + (v.nevandabile.length === 1 ? " rând cu marfă stricată NU a intrat pe stocul vandabil" : " rânduri cu marfă stricată NU au intrat pe stocul vandabil")
+    );
+  }
+  if (v.lipsuri.length) parti.push(v.lipsuri.length + " cu lipsă față de cât s-a anunțat");
+  if (v.respinse.length) parti.push(v.respinse.length + " respins" + (v.respinse.length === 1 ? "" : "e"));
+  return {
+    ok: true,
+    scrise,
+    mesaj: "Recepție finalizată: " + parti.join(" · ") + "." + (spuneComanda ? " " + spuneComanda : ""),
+  };
+}
+
+// Recepția din producție luată „cum a fost anunțată": fiecare rând încă
+// neatins primește cantitatea anunțată, în stare bună. O folosește alocarea
+// directă din Intrare marfă — cine vrea să numere altceva deschide recepția.
+async function primesteTot(id) {
+  await db
+    .prepare(
+      `UPDATE receptii_linii
+          SET stare = 'primita', cantitate_primita = COALESCE(cantitate_primita, cantitate_asteptata), conditie = COALESCE(conditie, 'bun')
+        WHERE receptie_id = ? AND COALESCE(stare, 'de_primit') = 'de_primit'`
+    )
+    .run(id);
+}
+
+// Direct la livrare, ca funcție: o folosește și lista „Gata din producție"
+// din Intrare marfă. Întoarce adresa ieșirii din CT-Park, cu paletul bifat.
+async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta) {
+  const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
+  if (!r) return { eroare: "Recepția nu există.", faraReceptie: true };
+  if (r.stare !== "finalizata") return { eroare: "Întâi finalizează recepția: atunci marfa e pe stoc și poate pleca." };
+  const l = (await liniile(id)).find((x) => Number(x.id) === Number(lid));
+  if (!l || l.stare !== "primita" || (l.conditie && l.conditie !== "bun")) return { eroare: "Pleacă la livrare doar marfa primită în stare bună." };
+  const destinatie = ["comanda", "fulfillment", "productie"].includes(String(destinatieCeruta || "")) ? String(destinatieCeruta) : "";
+  if (!destinatie) return { eroare: "Alege unde pleacă marfa: comanda unui client, fulfillment sau producție." };
+  const pus = await db
+    .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
+    .get(l.id)
+    .catch(() => ({ c: 0 }));
+  const ramas = Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000;
+  if (!(ramas > R.EPS)) return { eroare: "Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat." };
+  const CT = require("./ct-park");
+  // De la cine e marfa: furnizorul recepției sau, la marfa din producție,
+  // furnizorul ales acolo pentru material (lib/furnizor-comanda.js).
+  const fz = await require("../lib/furnizor-comanda").furnizorReceptiei(r);
+  const ids = await CT.puneMarfa(
+    { user },
+    {
+      produs_id: l.produs_id || "",
+      produs_text: l.produs_id ? "" : l.produs_text || "",
+      um: l.um || l.unitate_masura || "",
+      lot: l.lot || "",
+      pret_unitar: l.pret_unitar == null ? "" : String(l.pret_unitar),
+      furnizor_id: fz.furnizor_id || "",
+      furnizor_text: fz.furnizor_id ? "" : fz.furnizor_text || "",
+      observatii: `Direct la livrare din recepția ${r.numar || "#" + r.id}`,
+      receptie_id: r.id,
+      receptie_linie_id: l.id,
+    },
+    [[]],
+    ramas
+  );
+  if (!ids.length) return { eroare: "Paletul pentru livrare nu s-a putut face." };
+  const cid = destinatie === "comanda" ? parseInt(comandaCeruta, 10) || r.comanda_id || "" : "";
+  const q = new URLSearchParams({
+    palet: String(ids[0]),
+    destinatie,
+    ...(cid ? { comanda_id: String(cid) } : {}),
+    motiv: `livrare directă din recepția ${r.numar || "#" + r.id}`,
+  });
+  return { ok: true, url: "/stocuri/ct-park/iesire?" + q.toString(), palet: Number(ids[0]) };
+}
+
+module.exports = { register, creeaza, liniile, finalizeaza, primesteTot, livrareDirecta };
