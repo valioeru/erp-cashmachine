@@ -114,5 +114,16 @@ console.log("\n5. Locul din meniu: te uiți în nomenclator, nu-l găsești, cer
   );
 }
 
+console.log("\n6. Stocul la zi și din Vânzări (Vali, 09.11.2026: „pune link și acolo”)");
+for (const rol of ROLURI) {
+  const l = linkuri(R.subnavCrm("/crm", om(rol))).map(([h]) => h);
+  const iStoc = l.indexOf("/stocuri/ct-park/stoc");
+  if (!l.includes("/produse")) {
+    verifica(rol + ": „Stoc la zi” în Vânzări", iStoc >= 0);
+    continue;
+  }
+  verifica(rol + ": „Stoc la zi” în Vânzări, chiar înainte de Produse", iStoc >= 0 && l[iStoc + 1] === "/produse");
+}
+
 console.log(esecuri ? "\n" + esecuri + " EȘEC(URI)\n" : "\nToate trecute.\n");
 process.exit(esecuri ? 1 : 0);
