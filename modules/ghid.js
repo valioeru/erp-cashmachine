@@ -339,6 +339,22 @@ const GHID = [
 "sfat":null
 },
 {
+"t":"Stoc la zi și rezervări",
+"p":[
+"<b>Stoc la zi</b> arată CT-Park pe produse și e deschisă oricui are cont în ERP. Pentru fiecare produs vezi cât e în stoc, cât e deja <b>promis</b> (comenzile deschise ale clienților și marfa făcută în producție pentru un anume client), cât e <b>rezervat</b> de agenți și cât e <b>liber</b>.",
+"Coloana <b>Urmează să intre</b> spune ce vine: comenzile trimise la furnizori, cu data cerută, și producția, cu termenul și clientul pentru care se face. Ce se face pentru un client nu e liber când intră.",
+"Agenții și administratorii pot <b>rezerva</b> marfa liberă pentru un client, 3 zile. Clienții cu facturi trecute de scadență nu pot primi rezervări. Când clientul pune comanda cu produsul, rezervarea se închide singură; fără comandă, se eliberează după 3 zile.",
+"Vederea veche, pe paleți — cu lotul, locul, furnizorul și prețul —, e la clicul <b>Pe paleți</b>."
+],
+"pasi":[
+"Cauți produsul sau alegi categoria de sus.",
+"Apeși <b>Rezervă</b> pe rândul lui, alegi clientul din listă și scrii cantitatea.",
+"Rezervarea apare pe produs: „rezervat de agentul Y pentru clientul X”, cu termenul.",
+"Dacă renunți înainte de termen, apeși <b>Eliberează</b> și scrii motivul. Îl vezi apoi în <b>Rezervări → Nefructificate</b>."
+],
+"sfat":"O rezervare o poate elibera înainte de termen doar agentul care a făcut-o sau un administrator."
+},
+{
 "t":"De aprovizionat și Forecast",
 "p":[
 "Ce trebuie cumpărat: materia primă cerută de producție și produsele care se apropie de epuizare. Forecastul merge mai departe și estimează ce va fi nevoie, ca să comanzi din timp.",

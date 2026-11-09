@@ -439,8 +439,9 @@ function codPalet(id, data) {
 const ARATA_SECTIUNEA_TEHNICA = false;
 
 // Fiecare vede doar ce poate deschide: un link spre o pagină care răspunde
-// „Nu ai acces" nu e navigație, e o capcană. Agentul de vânzări rămâne doar cu
-// „Stoc la zi" (vezi PAGINI_AGENT în lib/auth).
+// „Nu ai acces" nu e navigație, e o capcană. Cine n-are Depozitul — agentul de
+// vânzări și, de pe 09.11.2026, oricine altcineva — rămâne cu „Stoc la zi" și
+// „Rezervări" (vezi PAGINI_AGENT în lib/auth).
 function subtabs(activ, user) {
   const toate = [
     ["/stocuri/ct-park", "Harta depozitului"],
@@ -453,6 +454,8 @@ function subtabs(activ, user) {
     ["/avize", "Avize"],
     ["/avize/nou", "Aviz nou"],
     ["/stocuri/ct-park/stoc", "Stoc la zi"],
+    // Rezervările agenților făcute din „Stoc la zi" (modules/stoc-la-zi.js).
+    ["/stocuri/ct-park/stoc/rezervari", "Rezervări"],
     ["/stocuri/ct-park/paleti", "Paleți în depozit"],
     ["/stocuri/ct-park/configurare", "Configurare rânduri"],
     ["/stocuri/ct-park/plan", "Planul halei"],
@@ -1836,7 +1839,13 @@ function register(router) {
     return { cauta, vedeTot, poateIntra, cuFurnizor, randuriStoc, vizibile, ordine, grupe, valoareTotala, faraPret, locuriOcupate };
   }
 
+  // De pe 09.11.2026 „Stoc la zi" se deschide pe PRODUSE, cu rezervările
+  // agenților (modules/stoc-la-zi.js). Vederea de aici, pe paleți — lot, loc,
+  // furnizor, preț —, rămâne la ?vedere=paleti, un clic mai încolo.
   router.get("/stocuri/ct-park/stoc", async (ctx) => {
+    if (String((ctx.query && ctx.query.vedere) || "") !== "paleti") {
+      return require("./stoc-la-zi").pagina(ctx, { subtabs: subtabs("/stocuri/ct-park/stoc", ctx.user) });
+    }
     const { cauta, vedeTot, poateIntra, cuFurnizor, randuriStoc, vizibile, ordine, grupe, valoareTotala, faraPret, locuriOcupate } =
       await stocLaZi(ctx.query, ctx.user);
 
@@ -1910,9 +1919,11 @@ function register(router) {
       }
 
       <form method="get" action="/stocuri/ct-park/stoc" class="toolbar">
+        <span style="font-size:13px"><a href="/stocuri/ct-park/stoc${cauta ? "?q=" + encodeURIComponent(cauta) : ""}">Pe produse</a> · <strong>Pe paleți</strong></span>
+        <input type="hidden" name="vedere" value="paleti">
         <input type="search" name="q" value="${esc(cauta)}" placeholder="${vedeTot ? "caută marfă, lot, furnizor, adresă…" : "caută marfă, cod, lot, adresă…"}" style="min-width:320px">
         <button class="btn" type="submit">Caută</button>
-        ${cauta ? `<a class="btn secondary" href="/stocuri/ct-park/stoc">Vezi tot</a>` : ""}
+        ${cauta ? `<a class="btn secondary" href="/stocuri/ct-park/stoc?vedere=paleti">Vezi tot</a>` : ""}
         ${
           ctx.user && ctx.user.rol === "admin"
             ? `<a class="btn secondary" href="/stocuri/ct-park/stoc/export.xlsx${cauta ? "?q=" + encodeURIComponent(cauta) : ""}"
@@ -5191,6 +5202,10 @@ async function regenereazaLocuri(randId) {
 
 module.exports = {
   register,
+  // Submeniul Depozitului, filtrat pe drepturile omului — îl folosește și
+  // pagina de stoc pe produse (modules/stoc-la-zi.js).
+  subtabs,
+  CATEGORII,
   puneMarfa,
   eticheteCampuri,
   cheieMarfa,
