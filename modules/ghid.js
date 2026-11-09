@@ -199,6 +199,24 @@ const GHID = [
 "sfat":"Pornirea rece a liniei (120 kW × 3 ore = 360 lei) NU e inclusă în preț: e un start de linie, nu un eveniment per comandă. Apare doar ca referință. Se presupune o singură schimbare de tip folie per comandă — dacă în realitate sunt mai multe, costul e subestimat."
 },
 {
+"t":"Calculator cost rolă stretch",
+"p":[
+"Calculatorul de sub <b>Calculator preț</b> pentru rola de stretch făcută din jumbo. E foaia de calcul a firmei, mutată în ERP cu aceleași formule; parametrii de producție stau o singură dată, în aplicație.",
+"Scrii ce cere clientul: <b>greutatea netă</b> a rolei (fără core), <b>grosimea</b> și <b>lățimea</b>, apoi alegi <b>core-ul</b> și <b>mașina</b>. Îți dă pe loc costul pe rolă (material, core, electricitate, manoperă, alte costuri) și prețul de vânzare cu adaosul pus de tine, în lei și în euro.",
+"Materialul pe rolă pleacă de la jumbo: plătești <b>jumbo-ul teoretic</b> (50 kg), dar în role iese doar <b>jumbo-ul util</b> (48,4 kg). Diferența e pierderea și se vede separat, la Indicatori. Dacă restul din jumbo nu ajunge pentru o rolă întreagă și se aruncă, alegi „Doar role întregi: DA”.",
+"Prețul jumbo vine din unul din trei locuri: <b>scris de mână</b>, în EUR/kg, înmulțit cu cursul; <b>media stocului CT-Park</b>, adică media ponderată a paleților de jumbo stretch care au preț; sau <b>un jumbo anume</b> din stoc. Paleții fără preț apar cu „fără preț” și nu intră în medie.",
+"Timpul pe rolă = bobinarea (lungimea foliei ÷ viteza mașinii) + accelerarea și decelerarea + manipularea. Din el ies rolele pe oră, electricitatea și manopera. Dacă alegi mașina normală cu alt core decât cel de rolă manuală, pagina te avertizează: mașina normală face doar role manuale simple.",
+"Jos sunt <b>parametrii</b>: prețul energiei, salariul, contribuțiile, orele pe lună, operatorii, densitatea foliei, timpul de manipulare, core-urile și mașinile. Îi schimbă doar administratorul; ceilalți îi văd."
+],
+"pasi":[
+"Deschizi <b>Vânzări → Calculator preț</b> și alegi din lista derulantă <b>Role stretch — cost din jumbo</b>.",
+"Completezi greutatea, grosimea, lățimea, core-ul, mașina și prețul jumbo, apoi apeși <b>Calculează</b>.",
+"La „Cantitate comandă” scrii câte role vrea clientul: jos vezi câte jumbo-uri îți trebuie, câte ore de mașină și profitul.",
+"Adresa paginii ține tot calculul, deci linkul se poate trimite unui coleg."
+],
+"sfat":"Adaosul e peste cost (preț = cost × (1 + adaos)), nu procent din prețul de vânzare. Puterea mașinilor (5 kW) și timpii de accelerare și manipulare sunt estimări, de confirmat prin cronometrare."
+},
+{
 "t":"Scadențe",
 "p":[
 "Cine ne datorează bani și de când. Sortat pe vechime: ce e de plătit azi, ce a trecut de 30 de zile, ce a trecut de 90.",
