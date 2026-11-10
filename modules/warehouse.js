@@ -86,7 +86,7 @@ async function stocPeProduse() {
             AND NOT EXISTS (SELECT 1 FROM ct_palet_linii x WHERE x.palet_id = p.id)
          UNION ALL
          SELECT rl.produs_id,
-                COALESCE(rl.cantitate_primita, 0) - COALESCE((SELECT SUM(pp.cantitate) FROM ct_paleti pp WHERE pp.receptie_linie_id = rl.id), 0)
+                COALESCE(rl.cantitate_primita, 0) - COALESCE((SELECT SUM(${require("../lib/gata-productie").cantPusa("pp")}) FROM ct_paleti pp WHERE pp.receptie_linie_id = rl.id), 0)
            FROM receptii_linii rl JOIN receptii r ON r.id = rl.receptie_id
           WHERE r.stare = 'finalizata' AND rl.stare = 'primita' AND COALESCE(rl.conditie, 'bun') = 'bun'
             AND ${require("../lib/gata-productie").LINIE_DESCHISA}

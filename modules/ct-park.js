@@ -1071,7 +1071,7 @@ async function dinReceptie(lid) {
       ? await require("../lib/furnizor-comanda").furnizorReceptiei({ sursa: l.sursa, comanda_productie_id: l.comanda_productie_id })
       : { furnizor_id: null, furnizor_text: null, nume: "" };
   const pus = await db
-    .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
+    .prepare(`SELECT COALESCE(SUM(${require("../lib/gata-productie").cantPusa("x")}), 0) AS c FROM ct_paleti x WHERE x.receptie_linie_id = ?`)
     .get(lid)
     .catch(() => ({ c: 0 }));
   const primit = nr(l.cantitate_primita);
@@ -1139,12 +1139,15 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
 
     const r = await db
       .prepare(
-        `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa${cuFurnizor ? ", furnizor_id, furnizor_text" : ""})
-         VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${cuFurnizor ? ", ?, ?" : ""}) RETURNING id`
+        `INSERT INTO ct_paleti (cod, produs_id, produs_text, cantitate, cantitate_intrare, um, lot, categorie, data_intrare, observatii, creat_de, pret_unitar, pret_sursa${cuFurnizor ? ", furnizor_id, furnizor_text" : ""})
+         VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${cuFurnizor ? ", ?, ?" : ""}) RETURNING id`
       )
       .run(
         nr(b.produs_id) || null,
         String(b.produs_text || "").trim() || null,
+        nr(cantitatePalet) || null,
+        // Cu cât a intrat: nu se mai schimbă, orice ar pleca apoi din palet
+        // (lib/gata-productie.js, cantPusa).
         nr(cantitatePalet) || null,
         String(b.um || "").trim() || null,
         String(b.lot || "").trim() || null,
@@ -1202,6 +1205,13 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
       )
       .catch(() => null);
     idPaleti.push(id);
+  }
+  // Pe paleți e mai mult decât scria recepția că a venit: recepția ia
+  // cantitatea de pe paleți (modules/receptie.js, aliniazaLaPaleti).
+  if (nr(b.receptie_linie_id) && idPaleti.length) {
+    await require("./receptie")
+      .aliniazaLaPaleti(nr(b.receptie_linie_id), ctx.user)
+      .catch((e) => console.error("[ct-park] recepția, după paleți:", e.message));
   }
   // Cererea care și-a primit paletul e „intrată în stoc", iar comanda
   // clientului merge mai departe (lib/gata-productie.js, dupaPunere).
@@ -4057,7 +4067,11 @@ function register(router) {
     // Cât mai e de pus din recepție intră pe primul palet; restul îl împarte omul.
     // Venit din alocarea pe cantități („Gata din producție"): doar partea
     // aleasă pentru raft, restul rămâne în listă.
-    const deRaft = pre && nr(ctx.query.cantitate) > 0 ? Math.min(nr(ctx.query.cantitate), pre.ramas) : pre ? pre.ramas : 0;
+    // Cât se pune acum pe raft: ce a rămas din rând sau partea aleasă la
+    // „Alocă pe cantități". Partea aleasă nu trece de ce a rămas decât dacă
+    // omul a bifat acolo „a venit mai mult" (peste=1).
+    const dinAlocare = nr(ctx.query.cantitate);
+    const deRaft = pre && dinAlocare > 0 ? (String(ctx.query.peste || "") === "1" ? dinAlocare : Math.min(dinAlocare, pre.ramas)) : pre ? pre.ramas : 0;
     if (pre && deRaft > 0) {
       randuriTabel = randuriTabel.replace(
         'name="loc_cantitate[]" placeholder="cât"',
@@ -4085,8 +4099,12 @@ function register(router) {
           ? `<div class="detail-box" style="border-left:4px solid var(--success,#1a7f37);margin-bottom:14px">
                Din recepția <a href="/depozit/receptie/${pre.receptie_id}">${esc(pre.numar)}</a>:
                <strong>${esc(pre.denumire || "marfă")}</strong> — au venit ${esc(String(pre.primit))} ${esc(pre.um)},
-               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.${deRaft > 0 && deRaft < pre.ramas - 0.0005 ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>; restul rămâne ${pre.sursa === "productie" ? "în „Gata din producție”" : "de alocat, în lista de sus din Intrare marfă"}.` : ""}
-               ${pre.ramas > 0 ? "" : '<br><span class="badge galben">Tot ce a venit pe rândul ăsta e deja pus. Ce adaugi acum intră în plus.</span>'}
+               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.${deRaft > 0 && deRaft < pre.ramas - 0.0005 ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>; restul rămâne ${pre.sursa === "productie" ? "în „Gata din producție”" : "de alocat, în lista de sus din Intrare marfă"}.` : ""}${
+                 deRaft > pre.ramas + 0.0005 && pre.ramas > 0
+                   ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>, mai mult decât a rămas din rând: recepția ia cantitatea de pe paleți.`
+                   : ""
+               }
+               ${pre.ramas > 0 ? "" : '<br><span class="badge galben">Tot ce a venit pe rândul ăsta e deja pus. Ce adaugi acum intră în plus, iar recepția ia cantitatea de pe paleți.</span>'}
                <p style="margin:6px 0 0;font-size:12px;color:var(--text-muted)">Spune unde se pune: rândul, nivelul, câmpul și poziția (sau doar rândul, ori nimic, și ERP-ul propune locuri libere). Paletul rămâne legat de recepție.</p>
              </div>`
           : ""

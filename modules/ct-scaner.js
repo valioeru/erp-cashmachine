@@ -493,6 +493,11 @@ function register(router) {
         <input type="hidden" name="locuri" value="${esc(loc.join(","))}">
         <input type="hidden" name="sursa" value="${esc(sursa)}">
         <input type="hidden" name="lat" value="${esc(String(cate))}">
+        ${
+          // Pagina s-a întors cu „ai scris mai mult decât era de pus": a doua
+          // apăsare, cu aceeași cantitate, e confirmarea (lib/ct-scaner.js, faPaleti).
+          nr(qy.peste) > 0 ? `<input type="hidden" name="confirma_peste" value="${esc(String(nr(qy.peste)))}">` : ""
+        }
         <label class="sc-f">Cât e pe palet${r.um ? " (" + esc(r.um) + ")" : ""}
           <input name="cant" data-tine="cant" inputmode="decimal" value="${esc(cantScrisa)}" autocomplete="off">
         </label>
@@ -515,19 +520,26 @@ function register(router) {
     const tine = { sursa: sursa === "toate" ? "" : sursa };
     const cuLoc = String(b.actiune || "loc") !== "paleti";
     const loc = cuLoc ? ids(b.locuri) : [];
-    const inapoi = (eroare) =>
-      redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { lat: nr(b.lat) > 1 ? nr(b.lat) : "", loc: ids(b.locuri).join(","), cant: String(b.cant || "").slice(0, 80), eroare }))}`);
+    const inapoi = (eroare, peste) =>
+      redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { lat: nr(b.lat) > 1 ? nr(b.lat) : "", loc: ids(b.locuri).join(","), cant: String(b.cant || "").slice(0, 80), eroare, peste: peste ? String(peste) : "" }))}`);
     const cantitati = SC.cantitatiDinText(b.cant);
     if (!cantitati.length || cantitati.some((x) => !(x > 0))) return inapoi("Scrie cât e pe palet: un număr mai mare ca zero (sau mai multe, cu plus între ele: 400 + 400 + 200).");
     if (cuLoc && !loc.length) return inapoi("Scanează locul de pe raft sau alege unul din cele propuse.");
     if (cuLoc && cantitati.length > 1) return inapoi("Pe locul ales se pune un singur palet. Scrie o singură cantitate, sau apasă „Fă doar paleții și etichetele”.");
-    const r = await SC.faPaleti(ctx.user, cheie, cantitati, loc);
-    if (r.eroare) return inapoi(r.eroare);
+    const r = await SC.faPaleti(ctx.user, cheie, cantitati, loc, { confirmaPeste: b.confirma_peste });
+    // Mai mult decât era de pus: pagina se întoarce cu întrebarea și ține
+    // minte suma, ca a doua apăsare s-o confirme.
+    if (r.eroare) {
+      return r.peste
+        ? inapoi(`${r.eroare} Dacă atât e pe ${r.peste.paleti === 1 ? "palet" : "paleți"}, apasă încă o dată: se salvează cantitatea de pe ${r.peste.paleti === 1 ? "palet" : "paleți"}.`, r.peste.total)
+        : inapoi(r.eroare);
+    }
     const coduri = await coduriPaleti(r.ids);
     await SC.laTipar("etichete", `${coduri.length === 1 ? "Eticheta paletului" : "Etichetele paleților"} ${coduri.join(", ")}`, `/stocuri/ct-park/etichete?paleti=${r.ids.join(",")}`, ctx.user);
+    const spusPeste = r.peste > SC.EPS ? ` E cu ${cant(r.peste, r.um)} peste cât era de pus: s-a salvat cantitatea de pe ${coduri.length === 1 ? "palet" : "paleți"}.` : "";
     if (cuLoc) {
       const unde = (await SC.locuriDupaId(loc)).map((l) => l.adresa).join(" + ");
-      const mesaj = `${coduri[0]} e pe ${unde}. Eticheta lui e la tipărit.`;
+      const mesaj = `${coduri[0]} e pe ${unde}. Eticheta lui e la tipărit.${spusPeste}`;
       if (r.ramas > SC.EPS) {
         return redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { ok: `${mesaj} Mai sunt de pus ${cant(r.ramas, r.um)}.` }))}`);
       }
@@ -535,7 +547,7 @@ function register(router) {
     }
     redirect(
       ctx.res,
-      `${CALE}/intrare${q(Object.assign({}, tine, { ok: `${coduri.length === 1 ? "Un palet făcut" : coduri.length + " paleți făcuți"}: ${coduri.join(", ")}. Etichetele sunt la tipărit; lipește-le, apoi scanează paletul și locul.` }))}`
+      `${CALE}/intrare${q(Object.assign({}, tine, { ok: `${coduri.length === 1 ? "Un palet făcut" : coduri.length + " paleți făcuți"}: ${coduri.join(", ")}. Etichetele sunt la tipărit; lipește-le, apoi scanează paletul și locul.${spusPeste}` }))}`
     );
   });
 
@@ -1110,8 +1122,8 @@ function registerHartii(router) {
         erori.push(`„${scris.slice(0, 40)}” nu e o listă de cantități.`);
         continue;
       }
-      const r = await SC.faPaleti(u, "r" + l.id, cantitati, []);
-      if (r.eroare) erori.push(r.eroare);
+      const r = await SC.faPaleti(u, "r" + l.id, cantitati, [], { peste: String(b.peste || "") === "1" });
+      if (r.eroare) erori.push(r.peste ? `${r.eroare} Dacă a venit mai mult, bifează „pe paleți e mai mult decât s-a numărat” și trimite din nou.` : r.eroare);
       if (r.ids && r.ids.length) facute.push(...r.ids);
     }
     if (!facute.length) return inapoi("eroare", erori.length ? erori.join(" ") : "Scrie cât e pe fiecare palet, la rândurile pentru care faci paleți.");

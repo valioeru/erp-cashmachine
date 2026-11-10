@@ -77,7 +77,16 @@ function sectiunePartiale(s, { titlu } = {}) {
         ["Data", "Cât", "Trimis de", "Recepția", "În depozit"],
         s.trimiteri.map((t) => [
           esc(t.data || ""),
-          t.randuri.map((r) => esc(cantRo(r.cantitate, r.um)) + (s.linii.length > 1 && r.denumire ? " " + esc(r.denumire) : "")).join("<br>"),
+          t.randuri
+            .map(
+              (r) =>
+                esc(cantRo(r.cantitate, r.um)) +
+                (s.linii.length > 1 && r.denumire ? " " + esc(r.denumire) : "") +
+                // Recepția preluată cu altă cantitate decât cea anunțată: rămâne
+                // cea din recepție, iar cea anunțată se vede alături.
+                (Math.abs((r.anuntat || 0) - r.cantitate) > 0.0005 ? ` <span class="mic">(anunțat ${esc(cantRo(r.anuntat, r.um))})</span>` : "")
+            )
+            .join("<br>"),
           esc(t.de || "—"),
           `<a href="/depozit/receptie/${t.receptie_id}">${esc(t.numar)}</a>`,
           esc(STARE_RECEPTIE[t.stare] || t.stare || ""),
@@ -671,13 +680,18 @@ function register(router) {
     };
 
     // Finalizările parțiale (Vali, 10.11.2026): comanda rămâne în producție,
-    // dar sub starea ei scrie cât a plecat deja în depozit.
+    // dar sub starea ei scrie cât a plecat deja în depozit. Ca în
+    // lib/stadiu-comanda.js, trimiteriPartiale: recepția preluată contează cu
+    // ce a primit depozitul în stare bună, cealaltă cu ce a anunțat producția.
     const partialPe = new Map();
     const idsInLucru = comenzi.filter((c) => STARI_IN_LUCRU.includes(c.status)).map((c) => Number(c.id)).filter(Boolean);
     if (idsInLucru.length) {
       const rp = await db
         .prepare(
-          `SELECT r.comanda_productie_id AS cid, r.id AS rid, COALESCE(rl.um, '') AS um, rl.cantitate_asteptata AS cantitate
+          `SELECT r.comanda_productie_id AS cid, r.id AS rid, COALESCE(rl.um, '') AS um,
+                  CASE WHEN r.stare = 'finalizata'
+                       THEN CASE WHEN rl.stare = 'primita' AND COALESCE(rl.conditie, 'bun') = 'bun' THEN COALESCE(rl.cantitate_primita, 0) ELSE 0 END
+                       ELSE rl.cantitate_asteptata END AS cantitate
              FROM receptii r JOIN receptii_linii rl ON rl.receptie_id = r.id
             WHERE COALESCE(r.partiala, 0) = 1 AND r.stare <> 'anulata'
               AND r.comanda_productie_id IN (${idsInLucru.join(",")})
@@ -2271,7 +2285,8 @@ function register(router) {
       <p style="max-width:820px;color:var(--text-muted)">
         Scrie cât s-a terminat până acum. Partea asta pleacă în depozit, la „Gata din producție — de alocat”, de unde se pune
         pe raft, în fulfillment sau direct la livrare. Comanda rămâne în producție până o pui pe „Finalizată”; atunci pleacă
-        doar ce a mai rămas.
+        doar ce a mai rămas. Dacă s-a făcut mai mult decât era comandat, scrie cât s-a făcut: cantitatea din comandă nu e o limită.
+        La „Plecat până acum” se vede ce a primit depozitul, nu ce s-a anunțat.
       </p>
       ${
         inLucru
@@ -2284,8 +2299,10 @@ function register(router) {
                    l.comandat > 0 ? esc(cantRo(l.comandat, l.um)) : '<span class="mic">nescris</span>',
                    l.trimis > 0 ? esc(cantRo(l.trimis, l.um)) : "—",
                    l.comandat > 0 ? esc(cantRo(l.rest, l.um)) : "—",
+                   // Fără „max": se poate scrie și peste ce a rămas (cantitatea
+                   // comenzii nu e plafon — lib/stadiu-comanda.js, finalizeazaPartial).
                    `<input type="number" step="any" min="0" name="cant_${esc(l.cheie)}" inputmode="decimal" style="width:130px"
-                           ${l.comandat > 0 ? `max="${l.rest}"` : ""} aria-label="Gata acum, ${esc(l.denumire || "produs")}"> ${esc(l.um || "")}`,
+                           aria-label="Gata acum, ${esc(l.denumire || "produs")}"> ${esc(l.um || "")}`,
                  ])
                )}
                <div class="form-actions"><button class="btn" type="submit">Trimite partea gata în depozit</button>

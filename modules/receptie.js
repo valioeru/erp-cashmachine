@@ -19,6 +19,7 @@ const db = require("../lib/db");
 const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const R = require("../lib/receptie");
+const { cantPusa } = require("../lib/gata-productie");
 
 const nr = (v) => Number(v || 0);
 function azi() {
@@ -134,7 +135,7 @@ async function sectiuneCtPark(r, linii) {
   const ids = bune.map((l) => Number(l.id));
   const paleti = await db
     .prepare(
-      `SELECT p.id, p.cod, p.cantitate, p.um, p.data_iesire, p.receptie_linie_id,
+      `SELECT p.id, p.cod, p.cantitate, ${cantPusa("p")} AS pusa, p.um, p.data_iesire, p.receptie_linie_id,
               (SELECT string_agg(lo.adresa, ' + ' ORDER BY lo.camp, lo.pozitie) FROM ct_ocupari o JOIN ct_locuri lo ON lo.id = o.loc_id WHERE o.palet_id = p.id) AS adrese,
               (SELECT i.destinatie FROM ct_iesiri i WHERE i.palet_id = p.id ORDER BY i.id DESC LIMIT 1) AS plecat_la
          FROM ct_paleti p WHERE p.receptie_linie_id IN (${ids.map(() => "?").join(",")}) ORDER BY p.id`
@@ -154,14 +155,18 @@ async function sectiuneCtPark(r, linii) {
   const faraPaleti = [];
   const randuri = bune.map((l) => {
     const ale = paleti.filter((p) => Number(p.receptie_linie_id) === Number(l.id));
-    const pus = ale.reduce((s, p) => s + nr(p.cantitate), 0);
+    // Cât a intrat pe paleți din rândul ăsta, nu cât mai e pe ei acum: ce a
+    // plecat între timp dintr-un palet nu se întoarce la „de pus".
+    const pus = ale.reduce((s, p) => s + nr(p.pusa), 0);
     const ramas = Math.round((nr(l.cantitate_primita) - pus) * 1000) / 1000;
     if (ramas > R.EPS && !l.ct_inchis_la) faraPaleti.push({ id: Number(l.id), nume: l.produs_denumire || l.produs_text || "—", ramas, um: l.um || l.unitate_masura || "" });
     const um = esc(l.um || l.unitate_masura || "");
     const unde = ale.length
       ? ale
           .map((p) =>
-            `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a> · ${fmt(nr(p.cantitate))} ${esc(p.um || "")} · ${
+            `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a> · ${fmt(nr(p.pusa))} ${esc(p.um || "")}${
+              !p.data_iesire && Math.abs(nr(p.cantitate) - nr(p.pusa)) > R.EPS ? ` <span class="mic">(acum ${fmt(nr(p.cantitate))})</span>` : ""
+            } · ${
               p.data_iesire
                 ? `<span class="badge gri">plecat${p.plecat_la ? " la " + esc(p.plecat_la) : ""}</span>`
                 : p.adrese
@@ -221,6 +226,9 @@ async function sectiuneCtPark(r, linii) {
                <input name="paleti_${x.id}" value="${esc(String(x.ramas).replace(".", ","))}" inputmode="text" autocomplete="off" placeholder="ex. 400 + 400 + 200 sau 3 x 400 — gol = fără paleți acum"></label>`
            )
            .join("")}
+         <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin:4px 0 0">
+           <input type="checkbox" name="peste" value="1" style="margin-top:3px">
+           <span>Pe paleți e mai mult decât s-a numărat — se salvează cantitatea de pe paleți, iar recepția o ia pe aceea.</span></label>
          <div class="form-actions"><button class="btn" type="submit">Fă paleții și scoate etichetele →</button></div>
        </form>`
     : "";
@@ -919,12 +927,76 @@ async function primesteTot(id) {
     .run(id);
 }
 
+// RECEPȚIA IA CANTITATEA DE PE PALEȚI.
+//
+// Vali, 10.11.2026: „Cantitatea recepționată poate fi mai mare decât cea din
+// comandă și se salvează cantitatea din recepție."
+//
+// Recepția din producție luată „cum a fost anunțată" are drept „primit" ce
+// scria pe comandă. Dacă depozitul pune pe paleți mai mult — producția a făcut
+// 42.000, comanda era de 40.000 —, adevărul e pe paleți, nu pe comandă. Când
+// pe paleții făcuți dintr-un rând ajunge mai mult decât scria rândul că a
+// venit, rândul ia cantitatea de pe paleți. Așa recepția, „de alocat", stocul
+// și „cât a plecat din comanda de producție" (lib/stadiu-comanda.js) spun
+// același lucru ca rafturile. Diferența intră și în mișcările de stoc, sub
+// numărul recepției, ca la finalizare.
+//
+// Doar la recepția finalizată, pe rândul primit în stare bună; în jos nu
+// coboară niciodată (un rând cu mai puțin pe paleți e marfă încă de pus).
+// O cheamă modules/ct-park.js, puneMarfa — singurul loc care face paleți.
+async function aliniazaLaPaleti(linieId, user) {
+  const l = await db
+    .prepare(
+      `SELECT rl.id, rl.receptie_id, rl.produs_id, rl.cantitate_primita, rl.pret_unitar, rl.stare, rl.conditie, rl.um,
+              r.stare AS receptie_stare, r.numar, r.depozit_id,
+              COALESCE((SELECT SUM(${cantPusa("x")}) FROM ct_paleti x WHERE x.receptie_linie_id = rl.id), 0) AS pus
+         FROM receptii_linii rl JOIN receptii r ON r.id = rl.receptie_id
+        WHERE rl.id = ?`
+    )
+    .get(Number(linieId) || 0);
+  if (!l || l.receptie_stare !== "finalizata" || l.stare !== "primita" || (l.conditie && l.conditie !== "bun")) return { surplus: 0 };
+  const primit = Math.round(nr(l.cantitate_primita) * 1000) / 1000;
+  const pus = Math.round(nr(l.pus) * 1000) / 1000;
+  const surplus = Math.round((pus - primit) * 1000) / 1000;
+  if (!(surplus > R.EPS)) return { surplus: 0, primit };
+  await db.prepare("UPDATE receptii_linii SET cantitate_primita = ? WHERE id = ?").run(pus, l.id);
+  if (l.produs_id) {
+    let depozitId = l.depozit_id || null;
+    if (!depozitId) {
+      const d = await db.prepare("SELECT id FROM depozite ORDER BY id LIMIT 1").get();
+      depozitId = d ? d.id : null;
+    }
+    if (depozitId) {
+      await db
+        .prepare(
+          `INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, data, observatii)
+           VALUES (?, ?, 'intrare', ?, ?, ?, ?, ?)`
+        )
+        .run(
+          l.produs_id,
+          depozitId,
+          surplus,
+          l.pret_unitar == null ? null : nr(l.pret_unitar),
+          l.numar || "REC-" + l.receptie_id,
+          acum(),
+          `pe paleți e mai mult decât scria recepția: ${pus} față de ${primit}${l.um ? " " + l.um : ""}${user && user.nume ? " · " + user.nume : ""}`
+        );
+    }
+  }
+  console.log(`[receptie] ${l.numar || "#" + l.receptie_id}, randul ${l.id}: primit ${primit} -> ${pus} (pe paleti e mai mult) de ${(user && user.nume) || "?"}`);
+  return { surplus, primit: pus, inainte: primit, um: l.um || "" };
+}
+
 // Direct la livrare, ca funcție: o folosește și lista „Gata din producție"
 // din Intrare marfă. Întoarce adresa ieșirii din CT-Park, cu paletul bifat.
 // Fără cantitate pleacă tot ce a rămas; cu cantitate, doar atât — restul
 // rămâne de alocat (Vali, 09.11.2026: „o parte la client, o parte în depozit
 // și alta în fulfillment… orice combinație").
-async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, cantitateCeruta) {
+//
+// Cantitatea cerută poate trece de ce a rămas doar cu `opt.peste` — omul a
+// spus că a venit mai mult decât scria recepția; atunci recepția ia cantitatea
+// de pe paleți (aliniazaLaPaleti).
+async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, cantitateCeruta, opt) {
   const r = await db.prepare("SELECT * FROM receptii WHERE id = ?").get(id);
   if (!r) return { eroare: "Recepția nu există.", faraReceptie: true };
   if (r.stare !== "finalizata") return { eroare: "Întâi finalizează recepția: atunci marfa e pe stoc și poate pleca." };
@@ -933,14 +1005,15 @@ async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, ca
   const destinatie = ["comanda", "fulfillment", "productie"].includes(String(destinatieCeruta || "")) ? String(destinatieCeruta) : "";
   if (!destinatie) return { eroare: "Alege unde pleacă marfa: comanda unui client, fulfillment sau producție." };
   const pus = await db
-    .prepare("SELECT COALESCE(SUM(cantitate), 0) AS c FROM ct_paleti WHERE receptie_linie_id = ?")
+    .prepare(`SELECT COALESCE(SUM(${cantPusa("x")}), 0) AS c FROM ct_paleti x WHERE x.receptie_linie_id = ?`)
     .get(l.id)
     .catch(() => ({ c: 0 }));
-  const ramas = Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000;
-  if (!(ramas > R.EPS)) return { eroare: "Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat." };
+  const ramas = Math.max(0, Math.round((nr(l.cantitate_primita) - nr(pus && pus.c)) * 1000) / 1000);
   const ceruta = cantitateCeruta == null || cantitateCeruta === "" ? null : Number(String(cantitateCeruta).replace(",", "."));
   if (ceruta != null && !(ceruta > R.EPS)) return { eroare: "Scrie o cantitate mai mare decât zero." };
-  if (ceruta != null && ceruta > ramas + R.EPS) {
+  const peste = Boolean(opt && opt.peste) && ceruta != null;
+  if (!(ramas > R.EPS) && !peste) return { eroare: "Tot ce a venit pe rândul ăsta e deja pus în CT-Park sau plecat." };
+  if (ceruta != null && ceruta > ramas + R.EPS && !peste) {
     const um = l.um || l.unitate_masura || "";
     return { eroare: `Mai sunt doar ${ramas.toLocaleString("ro-RO", { maximumFractionDigits: 3 })}${um ? " " + um : ""} de alocat pe rândul ăsta.` };
   }
@@ -980,4 +1053,4 @@ async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, ca
   return { ok: true, url: "/stocuri/ct-park/iesire?" + q.toString(), palet: Number(ids[0]), cantitate };
 }
 
-module.exports = { register, creeaza, liniile, finalizeaza, primesteTot, livrareDirecta };
+module.exports = { register, creeaza, liniile, finalizeaza, primesteTot, livrareDirecta, aliniazaLaPaleti };

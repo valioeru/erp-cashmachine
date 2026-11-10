@@ -111,6 +111,8 @@ async function sectiune(user, query) {
             <select name="comanda_id" aria-label="Comanda clientului">${optComenzi(x.comanda_id)}</select>
             <label class="gata-cant" style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0;font-size:13px">În fulfillment <span><input name="q_fulfillment" inputmode="decimal" placeholder="0" style="width:90px;text-align:right" aria-label="Cantitate în fulfillment"> ${esc(x.um)}</span></label>
             <label class="gata-cant" style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0;font-size:13px">Pe raft în CT-Park <span><input name="q_raft" inputmode="decimal" placeholder="0" style="width:90px;text-align:right" aria-label="Cantitate pe raft"> ${esc(x.um)}</span></label>
+            <label style="display:flex;gap:6px;align-items:flex-start;margin:0;font-size:12px;color:var(--text-muted)">
+              <input type="checkbox" name="peste" value="1" style="margin-top:2px"> <span>a venit mai mult decât scrie aici — se salvează cantitatea pe care o scriu</span></label>
             <button class="btn small" type="submit">Alocă →</button>
           </form>
         </details>
@@ -326,7 +328,12 @@ function register(router) {
   });
 
   // Alocarea pe cantități: la client (pe comandă), în fulfillment, pe raft —
-  // orice combinație, cel mult cât a rămas. Ce nu se alocă rămâne în listă.
+  // orice combinație. Ce nu se alocă rămâne în listă.
+  //
+  // Peste cât a rămas se poate (Vali, 10.11.2026: „cantitatea recepționată
+  // poate fi mai mare decât cea din comandă și se salvează cantitatea din
+  // recepție"), dar doar cu bifa „a venit mai mult": fără ea, o cifră scrisă
+  // greșit ar umfla recepția fără să observe nimeni.
   router.post("/stocuri/ct-park/gata/:fel/:id/aloca", async (ctx) => {
     if (!poate(ctx.user)) return redirect(ctx.res, "/stocuri/ct-park");
     const fel = String(ctx.params.fel || "");
@@ -344,6 +351,7 @@ function register(router) {
     if (!(total > GP.EPS)) return inapoi(ctx, "gata_eroare", "Scrie cât pleacă la client, cât în fulfillment sau cât pui pe raft.");
     const cid = parseInt(b.comanda_id, 10) || 0;
     if (parti.client > GP.EPS && !cid) return inapoi(ctx, "gata_eroare", "Alege comanda clientului pe care pleacă partea pentru client.");
+    const peste = String(b.peste || "") === "1";
 
     // Cât e de alocat acum, și de unde se face paletul.
     let ramas = 0;
@@ -357,7 +365,7 @@ function register(router) {
       ramas = rand ? rand.ramas : 0;
       um = rand ? rand.um : "";
       const REC = require("./receptie");
-      faPalet = (dest, q) => REC.livrareDirecta(ctx.user, x.receptie_id, x.linie_id, dest, dest === "comanda" ? cid : "", q);
+      faPalet = (dest, q) => REC.livrareDirecta(ctx.user, x.receptie_id, x.linie_id, dest, dest === "comanda" ? cid : "", q, { peste });
       intrare = `${INTRARE}?receptie_linie=${x.linie_id}`;
     } else {
       const a = await GP.cerere(ctx.params.id);
@@ -387,8 +395,12 @@ function register(router) {
       intrare = `${INTRARE}?aprovizionare=${a.aprovizionare_id}`;
     }
     if (!(ramas > GP.EPS)) return inapoi(ctx, "gata_eroare", "Tot ce era de alocat pe rândul ăsta are deja palet.");
-    if (total > ramas + GP.EPS) {
-      return inapoi(ctx, "gata_eroare", `Ai împărțit ${cant(total)} ${um}, dar sunt de alocat doar ${cant(ramas)} ${um}.`.replace(/\s+/g, " "));
+    if (total > ramas + GP.EPS && !peste) {
+      return inapoi(
+        ctx,
+        "gata_eroare",
+        `Ai împărțit ${cant(total)} ${um}, dar sunt de alocat doar ${cant(ramas)} ${um}. Dacă a venit mai mult, bifează „a venit mai mult” și trimite din nou: se salvează cantitatea scrisă de tine.`.replace(/\s+/g, " ")
+      );
     }
 
     // Întâi paleții pentru ieșire; partea de raft se pune din Intrare.
@@ -400,7 +412,7 @@ function register(router) {
       if (!r || r.eroare) return inapoi(ctx, "gata_eroare", (r && r.eroare) || "Paletul nu s-a putut face.");
       facute.push({ dest, q, url: r.url });
     }
-    if (parti.raft > GP.EPS) return redirect(ctx.res, `${intrare}&cantitate=${encodeURIComponent(String(parti.raft))}`);
+    if (parti.raft > GP.EPS) return redirect(ctx.res, `${intrare}&cantitate=${encodeURIComponent(String(parti.raft))}${peste ? "&peste=1" : ""}`);
     // O singură ieșire: se deschide direct, ca până acum.
     if (facute.length === 1) return redirect(ctx.res, facute[0].url);
     const spus = facute.map((f) => `${cant(f.q)} ${um} ${f.dest === "comanda" ? "la client" : "în fulfillment"}`.replace(/\s+/g, " "));

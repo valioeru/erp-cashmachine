@@ -100,7 +100,7 @@ async function scrieAsumptii(b, user) {
 // unitate decât kg (buc, role) nu se adună la kilograme — se spune doar că
 // există; unitatea goală se ia drept kg, cum se vinde jumbo-ul.
 async function jumboDinStoc() {
-  const { LINIE_DESCHISA } = require("../lib/gata-productie");
+  const { LINIE_DESCHISA, cantPusa } = require("../lib/gata-productie");
   const { normUm } = require("../lib/stoc-produse");
   const text = "LOWER(COALESCE(denumire, '') || ' ' || COALESCE(cod, ''))";
   const randuri = await db
@@ -124,7 +124,7 @@ async function jumboDinStoc() {
          UNION ALL
          SELECT rl.produs_id, COALESCE(pr.denumire, rl.produs_text),
                 COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat), rl.um,
-                COALESCE(rl.cantitate_primita, 0) - COALESCE((SELECT SUM(px.cantitate) FROM ct_paleti px WHERE px.receptie_linie_id = rl.id), 0),
+                COALESCE(rl.cantitate_primita, 0) - COALESCE((SELECT SUM(${cantPusa("px")}) FROM ct_paleti px WHERE px.receptie_linie_id = rl.id), 0),
                 rl.pret_unitar
            FROM receptii_linii rl
            JOIN receptii r ON r.id = rl.receptie_id
