@@ -130,6 +130,9 @@ const CP1 = 98941, CP2 = 98942, CP3 = 98943, CP4 = 98944, CP5 = 98945;
 const R1 = 98951, R2 = 98952, R3 = 98953;
 const P_G = 98907, CP6 = 98946;
 const P_H = 98908, R4 = 98954;
+// Finalizările parțiale (10.11.2026): un produs făcut de trei comenzi de producție.
+const P_I = 98909, CPP1 = 98961, CPP2 = 98962, CPP3 = 98963, CPP4 = 98964;
+const R5 = 98955, R6 = 98956, R7 = 98957, R8 = 98958, R9 = 98959;
 const FURNIZOR_SECRET = "TSR Furnizorul Secret SRL";
 
 function curata() {
@@ -146,8 +149,8 @@ function curata() {
   q("DELETE FROM receptii_linii WHERE receptie_id BETWEEN 98951 AND 98959");
   q("DELETE FROM receptii WHERE id BETWEEN 98951 AND 98959");
   q("DELETE FROM miscari_stoc WHERE produs_id BETWEEN 98901 AND 98909");
-  q("DELETE FROM comenzi_productie_linii WHERE comanda_id BETWEEN 98941 AND 98949");
-  q("DELETE FROM comenzi_productie WHERE id BETWEEN 98941 AND 98949");
+  q("DELETE FROM comenzi_productie_linii WHERE comanda_id BETWEEN 98941 AND 98949 OR comanda_id BETWEEN 98961 AND 98969");
+  q("DELETE FROM comenzi_productie WHERE id BETWEEN 98941 AND 98949 OR id BETWEEN 98961 AND 98969");
   q("DELETE FROM comenzi_istoric WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id BETWEEN 98911 AND 98919)");
   q("DELETE FROM comenzi_linii WHERE comanda_id IN (SELECT id FROM comenzi WHERE partener_id BETWEEN 98911 AND 98919)");
   q("DELETE FROM comenzi WHERE partener_id BETWEEN 98911 AND 98919");
@@ -292,6 +295,33 @@ function pregateste() {
   q(`INSERT INTO receptii (id, numar, sursa, comanda_productie_id, stare) VALUES (${R2}, 'REC-TSR-2', 'productie', ${CP5}, 'asteptata')`);
   q(`INSERT INTO comenzi_productie (id, numar, status, produs_id, cantitate, um, partener_id, trimisa_depozit_la, receptie_id, data_livrare)
       VALUES (${CP5}, 'CP-TSR-5', 'finalizata', ${P_C}, '40', 'kg', ${C_X}, '2026-11-08', ${R2}, '2026-11-10')`);
+
+  // P_I: finalizări parțiale. Ce a intrat deja în depozit e stoc; „urmează să
+  // intre" doar ce n-a fost încă preluat.
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura, activ) VALUES (${P_I}, 'TSR-I', 'TSR Partial I', 'buc', 1)`);
+  const receptie = (id, cp, stare, partiala, cant, primit) => {
+    q(`INSERT INTO receptii (id, numar, sursa, comanda_productie_id, stare, partiala, finalizata_la)
+        VALUES (${id}, 'REC-TSR-${id}', 'productie', ${cp}, '${stare}', ${partiala}, ${stare === "finalizata" ? "'2026-11-09 10:00:00'" : "NULL"})`);
+    q(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, cantitate_primita, um, stare, conditie)
+        VALUES (${id}, ${P_I}, ${cant}, ${primit === null ? "NULL" : primit}, 'buc', '${primit === null ? "de_primit" : "primita"}', 'bun')`);
+  };
+  // CPP1, în lucru, „1,000" buc (virgulă la mii, ca în registru): 300 au intrat
+  // în depozit, alte 200 așteaptă preluarea. Mai vin 700, nu 1.000.
+  q(`INSERT INTO comenzi_productie (id, numar, status, produs_id, cantitate, um, data_propusa) VALUES (${CPP1}, 'CP-TSR-P1', 'in_productie', ${P_I}, '1,000', 'buc', '2026-11-20')`);
+  receptie(R5, CPP1, "finalizata", 1, 300, 300);
+  receptie(R6, CPP1, "asteptata", 1, 200, null);
+  // CPP2, finalizată, 500 buc: totul a plecat pe o recepție parțială, deja
+  // preluată; „Finalizată" n-a mai deschis alta. Nu mai vine nimic.
+  q(`INSERT INTO comenzi_productie (id, numar, status, produs_id, cantitate, um, trimisa_depozit_la) VALUES (${CPP2}, 'CP-TSR-P2', 'finalizata', ${P_I}, '500', 'buc', '2026-11-09')`);
+  receptie(R7, CPP2, "finalizata", 1, 500, 500);
+  // CPP3, finalizată, 400 buc: restul (250) a fost preluat, dar o finalizare
+  // parțială de 150 încă așteaptă. Mai vin 150.
+  q(`INSERT INTO comenzi_productie (id, numar, status, produs_id, cantitate, um, trimisa_depozit_la, receptie_id) VALUES (${CPP3}, 'CP-TSR-P3', 'finalizata', ${P_I}, '400', 'buc', '2026-11-09', ${R8})`);
+  receptie(R8, CPP3, "finalizata", 0, 250, 250);
+  receptie(R9, CPP3, "asteptata", 1, 150, null);
+  // CPP4: pornită dintr-o cerere a depozitului, cu cantitatea scrisă de ERP
+  // („847.625", cu punct la zecimale), la kg: sunt 847,625 kg, nu 847.625.
+  q(`INSERT INTO comenzi_productie (id, numar, status, produs_id, cantitate, um, data_propusa) VALUES (${CPP4}, 'CP-TSR-P4', 'noua', ${P_C}, '847.625', 'kg', '2026-11-28')`);
 }
 
 const rand = (randuri, id) => randuri.find((r) => r.produs_id === id) || null;
@@ -302,9 +332,12 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
   console.log("\n1. Socoteala, fără bază de date");
   {
     egal("unitățile: buc/bucată/Buc./pcs sunt aceeași", ["buc", "bucata", "Bucăți", "Buc.", "pcs", "Rolă", "role", "KG", "m"].map(SP.normUm), ["buc", "buc", "buc", "buc", "buc", "rola", "rola", "kg", "m"]);
-    // „26.148" se citește ca recepția din producție (Number): 26,148. Cu virgulă
-    // la zecimale, punctul e limpede de mii: „1.250,5" = 1250,5.
-    egal("cantitățile scrise ca text", ["240", "2,5", "1.250,5", "26.148", "12 buc", "", "x", 7].map(SP.numarText), [240, 2.5, 1250.5, 26.148, 12, 0, 0, 7]);
+    // Citirea e cea comună (lib/cantitate-text.js, cu testul ei): „67,200" și
+    // „26.148" sunt mii, ca în registru; la kg punctul urmat de trei cifre e
+    // zecimală, fiindcă așa scrie ERP-ul cantitățile cerute de depozit.
+    egal("cantitățile scrise ca text", ["240", "2,5", "1.250,5", "26.148", "67,200", "360 (331)", "12 buc", "", "x", 7].map((v) => SP.numarText(v)), [240, 2.5, 1250.5, 26148, 67200, 360, 12, 0, 0, 7]);
+    egal("…cu unitatea: la kg „847.625” rămâne zecimală, la buc sunt mii", [SP.numarText("847.625", "kg"), SP.numarText("847.625", "buc"), SP.numarText("67,200", "kg")], [847.625, 847625, 67200]);
+    egal("cât mai vine dintr-o comandă: comandat minus ce a intrat deja", [SP.ramasDeVenit(1000, 300), SP.ramasDeVenit(1000, undefined), SP.ramasDeVenit(100, 250), SP.ramasDeVenit(0, 50)], [700, 1000, 0, 0]);
     egal("ora României (noiembrie: UTC+2), ca text comparabil", [RA.oraRo(new Date("2026-11-09T22:30:05Z")), RA.oraRo(new Date("2026-07-01T10:00:00Z"))], ["2026-11-10 00:30:05", "2026-07-01 13:00:00"]);
     egal("producția în drum", [
       { status: "noua" }, { status: "in_productie" }, { status: "anulata" },
@@ -313,6 +346,16 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
       { status: "facturata", trimisa_depozit_la: "2026-11-01", cerere_stare: "gata" },
       { status: "facturata", trimisa_depozit_la: "2026-11-01", cerere_stare: "primita" },
     ].map(SP.productiaInDrum), [true, true, false, false, true, false, true, false]);
+    egal("producția în drum, cu finalizări parțiale", [
+      // restul a fost preluat, dar o recepție parțială încă așteaptă
+      { status: "finalizata", trimisa_depozit_la: "2026-11-09", receptie_id: 1, receptie_stare: "finalizata", receptii_deschise: 1, receptii_preluate: 1 },
+      // totul a plecat pe recepții parțiale, toate preluate; nu există cerere a depozitului
+      { status: "finalizata", trimisa_depozit_la: "2026-11-09", receptii_deschise: 0, receptii_preluate: 2 },
+      // totul a plecat pe recepții parțiale, una încă așteaptă
+      { status: "finalizata", trimisa_depozit_la: "2026-11-09", receptii_deschise: 1, receptii_preluate: 1 },
+      // în lucru, cu o parte deja în depozit: restul tot vine
+      { status: "in_productie", receptii_deschise: 0, receptii_preluate: 1 },
+    ].map(SP.productiaInDrum), [true, false, true, true]);
 
     const produse = new Map([[1, { denumire: "Unu", cod: "U1", unitate_masura: "kg" }], [2, { denumire: "Doi", unitate_masura: "buc" }]]);
     const r = SP.construieste({
@@ -396,8 +439,14 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     const c = rand(toate, P_C);
     egal("P_C: nimic pe stoc, urmează să intre (furnizor + producție pe stoc + gata de preluat pentru client)",
       [c.stoc, c.stare, c.inDrum, c.inDrumClienti, c.intrari.map((i) => [i.fel, i.cantitate, i.liber, i.client])],
-      [0, "Urmează să intre", 1550.5, 40, [["productie", 40, false, "TSR Client Productie SRL"], ["furnizor", 300, true, ""], ["productie", 1250.5, true, ""]]]);
+      [0, "Urmează să intre", 2398.125, 40, [["productie", 40, false, "TSR Client Productie SRL"], ["furnizor", 300, true, ""], ["productie", 1250.5, true, ""], ["productie", 847.625, true, ""]]]);
     bine("P_C: producția veche, netrimisă în depozit, nu intră", !c.intrari.some((i) => i.document === "CP-TSR-4"));
+    const pi = rand(toate, P_I);
+    egal("P_I: ce a intrat pe finalizări parțiale e stoc (300 + 500 + 250), fără palet încă", [pi.stoc, pi.um], [1050, "buc"]);
+    egal("P_I: mai vine doar ce n-a fost preluat — 700 din comanda în lucru, 150 din cea finalizată",
+      [pi.inDrum, pi.intrari.map((i) => [i.fel, i.cantitate, i.document]).sort((a, b) => String(a[2]).localeCompare(String(b[2])))],
+      [850, [["productie", 700, "CP-TSR-P1"], ["productie", 150, "CP-TSR-P3"]]]);
+    bine("P_I: comanda plecată toată pe recepții parțiale preluate nu mai „urmează să intre”", !pi.intrari.some((i) => i.document === "CP-TSR-P2"));
     const d = rand(toate, P_D);
     egal("P_D: făcut pentru C_X (50) + comanda lui (30) = 50 promis, nu 80", [d.stoc, d.promis, d.disponibil, d.stare, d.promisPe.map((p) => [p.client, p.cantitate, p.facutPentru, p.productii])],
       [50, 50, 0, "Promis integral", [["TSR Client Productie SRL", 50, true, ["CP-TSR-2"]]]]);
@@ -620,7 +669,7 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     q(`DELETE FROM comenzi WHERE id = ${oCiorna}`);
     q(`DELETE FROM rezervari_agenti WHERE produs_id = ${P_B} AND stare = 'activa'`);
     egal("căutarea de pe comandă: textul scurt de sub produs", [SP.textScurt(rand(await SP.citeste({}), P_B)).text, SP.textScurt(rand(await SP.citeste({}), P_C)).text, SP.textScurt(null).text],
-      [rand(await SP.citeste({}), P_B).disponibil > 0 ? `stoc 100 buc · liber ${rand(await SP.citeste({}), P_B).disponibil.toLocaleString("ro-RO")}` : "stoc 100 buc · tot promis sau rezervat", "fără stoc · vin 1.550,5 kg pe 18.11", "fără stoc în CT-Park"]);
+      [rand(await SP.citeste({}), P_B).disponibil > 0 ? `stoc 100 buc · liber ${rand(await SP.citeste({}), P_B).disponibil.toLocaleString("ro-RO")}` : "stoc 100 buc · tot promis sau rezervat", "fără stoc · vin 2.398,125 kg pe 18.11", "fără stoc în CT-Park"]);
     q(`DELETE FROM miscari_stoc WHERE produs_id = ${P_B}`);
     // Comenzile de aici pleacă: partea din browser se uită la același produs.
     q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${oAlt}, ${oOk})`);
