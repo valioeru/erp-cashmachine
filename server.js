@@ -34,6 +34,9 @@ require("./modules/stoc-la-zi").register(router);
 // Marfa gata din producție, de alocat în CT-Park (09.11.2026): butoanele listei
 // din Intrare marfă, sub /stocuri/ct-park/gata/….
 require("./modules/gata-productie").register(router);
+// Scanerul din depozit (intrare/ieșire cu terminalul, „De tipărit", etichetele
+// locurilor), sub /stocuri/ct-park/scaner, /tipar, /locuri și /comanda.
+require("./modules/ct-scaner").register(router);
 require("./modules/ct-park").register(router);
 require("./modules/verificari").register(router);
 require("./modules/comenzi").register(router);
