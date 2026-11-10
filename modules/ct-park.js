@@ -449,6 +449,8 @@ function subtabs(activ, user) {
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
     ["/stocuri/ct-park/muta", "Mută marfă"],
     ["/stocuri/ct-park/iesire", "Ieșire marfă"],
+    // Ce s-a scos pentru consum intern, pentru ce și la cererea cui.
+    ["/stocuri/ct-park/consum", "Consum intern"],
     // Intrarea și ieșirea cu terminalul în mână, și ce are de scos imprimanta
     // după ele (modules/ct-scaner.js).
     ["/stocuri/ct-park/scaner", "Scaner"],
@@ -1541,9 +1543,32 @@ const DESTINATII = [
   ["productie", "Producție", "Materie primă care intră în fabricație."],
   ["fulfillment", "Fulfillment", "Marfă care pleacă spre pregătirea comenzilor."],
   ["comanda", "Comandă", "Livrare pe o comandă anume — se alege mai jos."],
+  // Vali, 10.11.2026: „trebuie pusă și varianta când scoți pentru depozit,
+  // pentru consum intern, caz în care spui un motiv pentru ce ai scos și
+  // persoana care a solicitat."
+  ["consum", "Consum intern", "Marfă luată pentru depozit sau pentru firmă — scrii pentru ce și cine a cerut-o."],
 ];
 const eDestinatie = (v) => DESTINATII.some(([c]) => c === String(v || ""));
 const etichetaDestinatie = (v) => (DESTINATII.find(([c]) => c === String(v || "")) || [, String(v || "")])[1];
+const ALEGE_DESTINATIA = "Alege unde se duce marfa: producție, fulfillment, comandă sau consum intern.";
+
+// CONSUMUL INTERN: marfa nu pleacă la un client și nu intră în fabricație, deci
+// nu rămâne nicio comandă și nicio rețetă care să spună unde s-a dus. De-aia se
+// cer două lucruri, amândouă obligatorii: pentru ce s-a scos și cine a cerut-o.
+// Rămân scrise pe ieșire (ct_iesiri.consum_motiv, consum_solicitant) și se văd
+// în lista „Consum intern". La celelalte destinații câmpurile nu se scriu,
+// orice ar veni în formular.
+const CONSUM_MOTIV_MAX = 300;
+const CONSUM_SOLICITANT_MAX = 120;
+function consumIntern(b, destinatie) {
+  if (String(destinatie) !== "consum") return { motiv: null, solicitant: null };
+  const curat = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+  const motiv = curat((b || {}).consum_motiv, CONSUM_MOTIV_MAX);
+  const solicitant = curat((b || {}).consum_solicitant, CONSUM_SOLICITANT_MAX);
+  if (motiv.length < 3) return { eroare: "La consum intern scrie pentru ce s-a scos marfa." };
+  if (solicitant.length < 2) return { eroare: "La consum intern scrie cine a cerut marfa." };
+  return { motiv, solicitant };
+}
 
 async function comenziDeschise() {
   return db
@@ -1600,7 +1625,9 @@ async function iesireIntreaga(user, b) {
   const inapoi = (mesaj) => ({ eroare: mesaj });
 
   if (!ids.length) return inapoi("N-ai bifat niciun palet.");
-  if (!eDestinatie(destinatie)) return inapoi("Alege unde se duce marfa: producție, fulfillment sau comandă.");
+  if (!eDestinatie(destinatie)) return inapoi(ALEGE_DESTINATIA);
+  const consum = consumIntern(b, destinatie);
+  if (consum.eroare) return inapoi(consum.eroare);
 
   let comanda = null;
   if (destinatie === "comanda") {
@@ -1669,8 +1696,8 @@ async function iesireIntreaga(user, b) {
     await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
     const ies = await db
       .prepare(
-        `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand, consum_motiv, consum_solicitant)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         id,
@@ -1685,7 +1712,9 @@ async function iesireIntreaga(user, b) {
         cine,
         cost > 0 ? Math.round(cost * 100) / 100 : null,
         temei,
-        sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
+        sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null,
+        consum.motiv,
+        consum.solicitant
       );
     scoase.push(id);
     if (ies && ies.lastInsertRowid) iesiriNoi.push(Number(ies.lastInsertRowid));
@@ -1734,7 +1763,9 @@ async function iesirePartiala(user, id, b) {
   if (p.data_iesire) return inapoi("eroare", "Paletul a ieșit deja din depozit.");
   b = b || {};
   const destinatie = String(b.destinatie || "");
-  if (!eDestinatie(destinatie)) return inapoi("eroare", "Alege unde se duce marfa: producție, fulfillment sau comandă.");
+  if (!eDestinatie(destinatie)) return inapoi("eroare", ALEGE_DESTINATIA);
+  const consum = consumIntern(b, destinatie);
+  if (consum.eroare) return inapoi("eroare", consum.eroare);
   let comanda = null;
   if (destinatie === "comanda") {
     const cid = nr(b.comanda_id);
@@ -1774,8 +1805,8 @@ async function iesirePartiala(user, id, b) {
 
   const ies = await db
     .prepare(
-      `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand, partiala)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand, partiala, consum_motiv, consum_solicitant)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
     )
     .run(
       id,
@@ -1791,7 +1822,9 @@ async function iesirePartiala(user, id, b) {
       cost > 0 ? cost : null,
       cost > 0 ? "preț pe palet" : "fără preț la intrare",
       sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${obs ? ": " + obs : " — fără motiv scris"}` : null,
-      v.paletGol ? 0 : 1
+      v.paletGol ? 0 : 1,
+      consum.motiv,
+      consum.solicitant
     );
   const iesireId = ies.lastInsertRowid;
   for (const m of v.miscate) {
@@ -1804,7 +1837,9 @@ async function iesirePartiala(user, id, b) {
     await db.prepare("UPDATE ct_palet_linii SET cantitate = ? WHERE id = ? AND palet_id = ?").run(m.ramane, m.linie_id, id);
   }
   const plecat = v.miscate.map((m) => `${m.pleaca.toLocaleString("ro-RO")} ${m.um || ""} ${m.produs_text || ""}`.replace(/\s+/g, " ").trim()).join("; ");
-  const unde = comanda ? `comanda ${comanda.numar || "#" + comanda.id}` : etichetaDestinatie(destinatie).toLowerCase();
+  const unde = comanda
+    ? `comanda ${comanda.numar || "#" + comanda.id}`
+    : etichetaDestinatie(destinatie).toLowerCase() + (consum.solicitant ? `, cerut de ${consum.solicitant}` : "");
   let mesaj;
   if (v.paletGol) {
     // Nu mai rămâne nimic: paletul iese și locul se eliberează, ca la ieșirea
@@ -3099,6 +3134,10 @@ function register(router) {
             <select name="comanda_id"><option value="">— alege comanda —</option>
               ${comenzi.map((c) => `<option value="${c.id}">${esc(c.numar || "#" + c.id)} · ${esc(c.client || "")}</option>`).join("")}
             </select></label>
+          <div class="ct-pa-consum" hidden>
+            <label class="field">Pentru ce s-a scos<input name="consum_motiv" type="text" maxlength="${CONSUM_MOTIV_MAX}" autocomplete="off" placeholder="ex. folie pentru înfoliat paleții din depozit"></label>
+            <label class="field">Cine a cerut<input name="consum_solicitant" type="text" maxlength="${CONSUM_SOLICITANT_MAX}" autocomplete="off" placeholder="numele persoanei"></label>
+          </div>
           <label class="field" style="margin-top:8px">Observații<input name="observatii" type="text" autocomplete="off"></label>
           <button class="btn" type="submit">Scoate de pe palet</button>
           <p class="explic">Scrii cât pleacă și cât rămâne pe palet, numărat: cele două trebuie să dea cât e în sistem.
@@ -3132,8 +3171,20 @@ function register(router) {
           });
         });
         var com = document.querySelector(".ct-pa-comanda");
+        // La „Consum intern" apar, obligatorii, pentru ce s-a scos și cine a
+        // cerut. Ascunse nu sunt obligatorii — altfel n-ar mai pleca formularul
+        // la celelalte destinații.
+        var cons = document.querySelector(".ct-pa-consum");
+        function consum(e) {
+          if (!cons) return;
+          cons.hidden = !e;
+          cons.querySelectorAll("input").forEach(function (i) { i.required = e; });
+        }
         document.querySelectorAll('input[name="destinatie"]').forEach(function (el) {
-          el.addEventListener("change", function () { if (com) com.hidden = el.value !== "comanda" || !el.checked; });
+          el.addEventListener("change", function () {
+            if (com) com.hidden = el.value !== "comanda" || !el.checked;
+            consum(el.value === "consum" && el.checked);
+          });
         });
       })();
       </script>`;
@@ -3208,6 +3259,10 @@ function register(router) {
               }${
                 nr(iesire.cost)
                   ? ` · cost ieșit <strong>${nr(iesire.cost).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</strong> <span style="color:var(--text-muted);font-size:12px">(${esc(iesire.cost_temei || "")})</span>`
+                  : ""
+              }${
+                iesire.consum_motiv || iesire.consum_solicitant
+                  ? `<br><span style="font-size:13px">Pentru: ${esc(iesire.consum_motiv || "—")} · cerut de <strong>${esc(iesire.consum_solicitant || "—")}</strong>${iesire.creat_de ? ` · scos de ${esc(iesire.creat_de)}` : ""}</span>`
                   : ""
               }${iesire.peste_rand ? `<br><span style="color:var(--warn);font-size:12px">Peste rând: ${esc(iesire.peste_rand)}</span>` : ""}</p>`
             : ""
@@ -3696,6 +3751,14 @@ function register(router) {
           <span class="ajutor">Obligatoriu dacă destinația e „Comandă". Clientul, numărul și data ajung pe etichetă.</span>
         </label>
 
+        <div id="camp-consum" style="display:none;border-left:3px solid var(--primary);padding-left:10px">
+          <label class="field"><span>Pentru ce s-a scos</span>
+            <input name="consum_motiv" maxlength="${CONSUM_MOTIV_MAX}" autocomplete="off" placeholder="ex. folie pentru înfoliat paleții din depozit" value="${esc(String(ctx.query.consum_motiv || ""))}"></label>
+          <label class="field"><span>Cine a cerut</span>
+            <input name="consum_solicitant" maxlength="${CONSUM_SOLICITANT_MAX}" autocomplete="off" placeholder="numele persoanei" value="${esc(String(ctx.query.consum_solicitant || ""))}"></label>
+          <span class="ajutor">Amândouă sunt obligatorii la „Consum intern”. Rămân scrise pe ieșire și se văd în lista <a href="/stocuri/ct-park/consum">Consum intern</a>.</span>
+        </div>
+
         <label class="field"><span>Observații (opțional)</span><input name="observatii" placeholder="ex. ridicat de Cargus, AWB 123"></label>
 
         ${
@@ -3795,6 +3858,13 @@ function register(router) {
           for (var i = 0; i < radio.length; i++) if (radio[i].checked) ales = radio[i].value;
           camp.style.display = ales === "comanda" ? "" : "none";
           camp.querySelector("select").required = ales === "comanda";
+          // „Consum intern": pentru ce și cine a cerut, obligatorii doar atunci.
+          var cons = document.getElementById("camp-consum");
+          if (cons) {
+            cons.style.display = ales === "consum" ? "" : "none";
+            var ci = cons.querySelectorAll("input");
+            for (var j = 0; j < ci.length; j++) ci[j].required = ales === "consum";
+          }
         }
         for (var i = 0; i < radio.length; i++) radio[i].addEventListener("change", comuta);
         comuta();
@@ -3815,6 +3885,95 @@ function register(router) {
       );
     }
     redirect(ctx.res, "/stocuri/ct-park/etichete?paleti=" + r.scoase.join(","));
+  });
+
+  // ---- Consum intern ------------------------------------------------------
+  // Vali, 10.11.2026: „trebuie pusă și varianta când scoți pentru depozit,
+  // pentru consum intern, caz în care spui un motiv pentru ce ai scos și
+  // persoana care a solicitat." Ieșirea se face din aceleași trei locuri ca
+  // oricare alta (Ieșire marfă, fișa paletului, scanerul), cu destinația
+  // „Consum intern". Aici e lista lor: ce, cât, pentru ce, la cererea cui și
+  // cine a scos — altfel motivul și numele ar rămâne îngropate pe fiecare palet.
+  router.get("/stocuri/ct-park/consum", async (ctx) => {
+    const luna = /^\d{4}-\d{2}$/.test(String(ctx.query.luna || "")) ? String(ctx.query.luna) : "";
+    const iesiri = await db
+      .prepare(
+        `SELECT i.id, i.data, i.consum_motiv, i.consum_solicitant, i.creat_de, i.cost, i.observatii,
+                p.id AS palet_id, p.cod AS palet_cod, COALESCE(pr.denumire, p.produs_text) AS marfa, p.cantitate, p.um
+           FROM ct_iesiri i
+           JOIN ct_paleti p ON p.id = i.palet_id
+           LEFT JOIN produse pr ON pr.id = p.produs_id
+          WHERE i.destinatie = 'consum'${luna ? " AND i.data LIKE ?" : ""}
+          ORDER BY i.id DESC LIMIT 500`
+      )
+      .all(...(luna ? [luna + "%"] : []))
+      .catch(() => []);
+    // Ieșirea parțială își scrie liniile (ce a plecat din palet); cea întreagă
+    // scoate paletul cu tot ce avea pe el.
+    const ids = iesiri.map((x) => Number(x.id));
+    const linii = ids.length
+      ? await db
+          .prepare(
+            `SELECT il.iesire_id, COALESCE(pr.denumire, il.produs_text) AS produs, il.cantitate, il.um
+               FROM ct_iesiri_linii il LEFT JOIN produse pr ON pr.id = il.produs_id
+              WHERE il.iesire_id IN (${ids.map(() => "?").join(",")}) ORDER BY il.id`
+          )
+          .all(...ids)
+          .catch(() => [])
+      : [];
+    const peIesire = new Map();
+    for (const l of linii) {
+      const k = Number(l.iesire_id);
+      if (!peIesire.has(k)) peIesire.set(k, []);
+      peIesire.get(k).push(l);
+    }
+    const luni = await db
+      .prepare("SELECT DISTINCT SUBSTR(data, 1, 7) AS luna FROM ct_iesiri WHERE destinatie = 'consum' ORDER BY 1 DESC")
+      .all()
+      .catch(() => []);
+    const cant = (v, um) => `${nr(v).toLocaleString("ro-RO", { maximumFractionDigits: 3 })}${um ? " " + esc(um) : ""}`;
+    const cost = iesiri.reduce((s, x) => s + nr(x.cost), 0);
+    const faraCost = iesiri.filter((x) => !nr(x.cost)).length;
+    const body = `
+      ${subtabs("/stocuri/ct-park/consum", ctx.user)}
+      <div class="toolbar"><a class="btn" href="/stocuri/ct-park/iesire?destinatie=consum">+ Scoate pentru consum intern</a></div>
+      <p class="explic" style="max-width:860px">Marfa scoasă din depozit pentru consum intern: ce s-a luat, pentru ce și la cererea cui.
+        Se scoate din <a href="/stocuri/ct-park/iesire?destinatie=consum">Ieșire marfă</a>, din fișa paletului sau cu scanerul, alegând destinația „Consum intern”.</p>
+      <form class="filtre" method="get" action="/stocuri/ct-park/consum">
+        <select name="luna" onchange="this.form.submit()" aria-label="Luna">
+          <option value="">toate lunile</option>
+          ${luni.map((l) => `<option value="${esc(l.luna)}"${l.luna === luna ? " selected" : ""}>${esc(String(l.luna).split("-").reverse().join("."))}</option>`).join("")}
+        </select>
+        <noscript><button class="btn small" type="submit">Arată</button></noscript>
+      </form>
+      <div class="cards">
+        <div class="card"><div class="label">Ieșiri pentru consum intern${luna ? ", " + esc(luna.split("-").reverse().join(".")) : ""}</div><div class="value">${iesiri.length}</div></div>
+        <div class="card"><div class="label">Costul mărfii scoase</div><div class="value">${lei(cost)}</div>
+          <div class="mic">${faraCost ? `${faraCost} ${faraCost === 1 ? "ieșire e" : "ieșiri sunt"} din paleți fără preț la intrare, deci nu ${faraCost === 1 ? "e" : "sunt"} la socoteală` : "toate au preț la intrare"}</div></div>
+      </div>
+      ${
+        iesiri.length
+          ? table(
+              ["Data", "Palet", "Marfă", "Cantitate", "Pentru ce", "Cine a cerut", "Scos de", "Cost"],
+              iesiri.map((x) => {
+                const l = peIesire.get(Number(x.id)) || [];
+                return [
+                  esc(String(x.data || "").slice(0, 10).split("-").reverse().join(".")),
+                  `<a href="/stocuri/ct-park/palet/${x.palet_id}">${esc(x.palet_cod)}</a>`,
+                  l.length ? l.map((y) => esc(y.produs || "—")).join("<br>") : esc(x.marfa || "—"),
+                  l.length ? l.map((y) => cant(y.cantitate, y.um)).join("<br>") : nr(x.cantitate) ? cant(x.cantitate, x.um) : "—",
+                  esc(x.consum_motiv || "—") + (x.observatii ? `<br><span class="mic" style="color:var(--text-muted)">${esc(x.observatii)}</span>` : ""),
+                  `<strong>${esc(x.consum_solicitant || "—")}</strong>`,
+                  esc(x.creat_de || "—"),
+                  nr(x.cost) ? lei(x.cost) : '<span style="color:var(--text-muted)">fără preț</span>',
+                ];
+              })
+            )
+          : `<p style="color:var(--text-muted)">${luna ? "Nimic scos pentru consum intern în luna aleasă." : "Încă nu s-a scos nimic pentru consum intern."}</p>`
+      }
+      ${iesiri.length === 500 ? '<p class="mic">Sunt arătate ultimele 500 de ieșiri. Alege o lună ca să le vezi pe toate din ea.</p>' : ""}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Consum intern · CT-Park", active: "/stocuri/ct-park", body }));
   });
 
 
@@ -4544,6 +4703,8 @@ function register(router) {
             </div>
             <div class="et-destinatie">${esc(etichetaDestinatie(ies.destinatie))}</div>
             ${peComanda ? `<div class="et-client">${esc(ies.client || "—")}</div>` : ""}
+            ${ies.consum_solicitant ? `<div class="et-client">${esc(ies.consum_solicitant)}</div>` : ""}
+            ${ies.consum_motiv ? `<div class="et-comanda">${esc(ies.consum_motiv)}</div>` : ""}
             ${
               peComanda
                 ? `<div class="et-comanda">Comanda ${esc(ies.comanda_numar || "—")}${ies.comanda_data ? ` · ${esc(ies.comanda_data)}` : ""}</div>`
@@ -5404,6 +5565,7 @@ module.exports = {
   // ieșire, același rând de recepție, aceleași destinații ca în pagini.
   iesireIntreaga,
   iesirePartiala,
+  consumIntern,
   dinReceptie,
   liniiPalet,
   DESTINATII,

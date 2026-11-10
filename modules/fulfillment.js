@@ -552,6 +552,38 @@ function register(router) {
 
     const tot = cat + 1e-9 >= peP;
     const data = azi();
+    // O PARTE din palet: ieșirea se face ca oricare altă ieșire parțială din
+    // CT-Park (modules/ct-park.js, iesirePartiala) — scade LINIA paletului,
+    // rescrie rezumatul și lasă ieșirea scrisă în `ct_iesiri`.
+    //
+    // CE ERA GREȘIT (găsit pe 10.11.2026, citind codul): aici se scădea doar
+    // cantitatea din antetul paletului. Linia lui rămânea întreagă, iar Stoc
+    // la zi citește liniile — deci marfa adusă în fulfillment ar fi rămas
+    // numărată și în CT-Park —, și nu rămânea nicio ieșire scrisă. Se face
+    // ÎNAINTE de a scrie intrarea în fulfillment: dacă ieșirea e refuzată,
+    // nu intră nimic nicăieri.
+    if (!tot) {
+      const linii = await db
+        .prepare("SELECT id, cantitate FROM ct_palet_linii WHERE palet_id = ? AND cantitate > 0 ORDER BY id")
+        .all(palet.id)
+        .catch(() => []);
+      if (linii.length !== 1) {
+        return inapoi("eroare", "Din paletul ăsta nu pot aduce doar o parte: adu-l întreg, sau scoate partea din fișa paletului, cu destinația Fulfillment.");
+      }
+      // Antetul paletului spune mai mult decât marfa de pe el (date stricate):
+      // nu se scoate ce nu există, și omul află unde să se uite.
+      const peLinie = nr(linii[0].cantitate);
+      if (cat > peLinie + 1e-9) {
+        return inapoi("eroare", `Pe palet sunt de fapt ${cant(peLinie)} ${palet.um || ""}, nu ${cant(cat)}: cantitatea scrisă pe palet nu se potrivește cu marfa de pe el. Verifică fișa paletului.`.replace(/\s+/g, " "));
+      }
+      const iesire = await require("./ct-park").iesirePartiala(ctx.user, palet.id, {
+        destinatie: "fulfillment",
+        observatii: `transfer în gestiunea de fulfillment${String(b.observatii || "").trim() ? " — " + String(b.observatii).trim().slice(0, 200) : ""}`,
+        ["pleaca_" + linii[0].id]: String(cat),
+        ["ramane_" + linii[0].id]: String(Math.round((peLinie - cat) * 1e6) / 1e6),
+      });
+      if (iesire.eroare) return inapoi("eroare", iesire.eroare);
+    }
     await db
       .prepare(
         `INSERT INTO ff_miscari (produs_id, cantitate, fel, referinta, palet_id, data, creat_de, observatii)
@@ -588,10 +620,9 @@ function register(router) {
           ctx.user ? String(ctx.user.nume || ctx.user.id) : null
         );
       await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(palet.id);
-    } else {
-      // Parțial: paletul rămâne pe locul lui, cu restul.
-      await db.prepare("UPDATE ct_paleti SET cantitate = ? WHERE id = ?").run(Math.round((peP - cat) * 1e6) / 1e6, palet.id);
     }
+    // Parțial: paletul rămâne pe locul lui, cu restul — ieșirea lui s-a făcut
+    // mai sus, înainte de intrarea în fulfillment.
 
     return redirect(
       ctx.res,

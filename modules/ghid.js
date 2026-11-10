@@ -320,14 +320,15 @@ const GHID = [
 {
 "t":"Ieșire marfă",
 "p":[
-"Când marfa pleacă din depozit, o scoți de aici. Bifezi paleții care pleacă și — obligatoriu — spui <b>unde se duc</b>. Sunt trei variante:",
-"<b>Producție</b> — materie primă care intră în fabricație.<br><b>Fulfillment</b> — marfă care pleacă spre pregătirea comenzilor.<br><b>Comandă</b> — livrare pe o comandă anume; în cazul ăsta trebuie aleasă exact comanda.",
+"Când marfa pleacă din depozit, o scoți de aici. Bifezi paleții care pleacă și — obligatoriu — spui <b>unde se duc</b>. Sunt patru variante:",
+"<b>Producție</b> — materie primă care intră în fabricație.<br><b>Fulfillment</b> — marfă care pleacă spre pregătirea comenzilor.<br><b>Comandă</b> — livrare pe o comandă anume; în cazul ăsta trebuie aleasă exact comanda.<br><b>Consum intern</b> — marfă luată pentru depozit sau pentru firmă; scrii pentru ce s-a scos și cine a cerut. Tot ce s-a scos așa e în <b>Depozit → Consum intern</b>.",
 "Fără destinație nu iese nimic din depozit. Locurile se eliberează pe loc, iar la final primești etichetele de ieșire."
 ],
 "pasi":[
 "Bifezi paleții care pleacă (poți bifa mai mulți deodată).",
-"Alegi destinația: Producție, Fulfillment sau Comandă.",
+"Alegi destinația: Producție, Fulfillment, Comandă sau Consum intern.",
 "Dacă ai ales Comandă, alegi din listă exact ce comandă e.",
+"Dacă ai ales Consum intern, scrii pentru ce s-a scos marfa și cine a cerut-o.",
 "Scrii, dacă vrei, o observație (cine ridică, ce AWB).",
 "Apeși „Scoate paleții și tipărește etichetele”."
 ],
@@ -367,7 +368,7 @@ const GHID = [
 "<b>Paleții și etichetele lor se fac la recepție.</b> După ce numeri marfa și finalizezi recepția, scrii cât e pe fiecare palet, cu plus între ei — <code>400 + 400 + 200</code> sau <code>3 x 400</code> — și apeși „Fă paleții și scoate etichetele”. Fiecare palet primește codul lui; eticheta se lipește pe palet. Paleții stau apoi la Scaner → Intrare, la „așteaptă raftul”, până îi pui pe un loc.",
 "<b>Intrare.</b> Alegi de unde vine marfa (din producție, de la furnizor, retururi), scanezi paletul, scanezi locul, apeși <b>Efectuează</b>. ERP-ul îți propune un loc: întâi lângă același produs, apoi lângă produse din aceeași familie, apoi în zona categoriei; dedesubt sunt alte locuri libere, pe care le alegi cu o atingere. Un loc ocupat sau scos din uz e refuzat pe loc, de la scanare. Un palet lat se pune pe două sau trei locuri lipite. Un palet care are deja loc se <b>mută</b> pe cel scanat.",
 "<b>Marfa din producție fără palet</b> o găsești scanând fișa de lot sau codul produsului: scrii cât e pe palet, scanezi locul și apeși Efectuează. Paletul se face atunci, pe locul scanat, iar eticheta lui merge la tipărit. Ce n-ai pus rămâne în listă. Dacă pe palet e mai mult decât scrie la „de pus”, scrie cât e: scanerul te întreabă o dată, iar la a doua apăsare face paletul și recepția ia cantitatea de pe palet.",
-"<b>Ieșire.</b> Scanezi paletul sau locul pe care stă (ori codul produsului: îți arată paleții lui, cel mai vechi primul). Alegi unde pleacă — comandă, fulfillment, producție —, comanda (cele care au produsul sunt primele, cu ✓) și cât pleacă; dacă e mai puțin decât tot, restul rămâne pe palet, pe locul lui. Dacă există un palet mai vechi din aceeași marfă, terminalul ți-l arată și îți cere motivul.",
+"<b>Ieșire.</b> Scanezi paletul sau locul pe care stă (ori codul produsului: îți arată paleții lui, cel mai vechi primul). Alegi unde pleacă — comandă, fulfillment, producție sau consum intern —, comanda (cele care au produsul sunt primele, cu ✓) și cât pleacă; la consum intern scrii pentru ce s-a scos și cine a cerut; dacă e mai puțin decât tot, restul rămâne pe palet, pe locul lui. Dacă există un palet mai vechi din aceeași marfă, terminalul ți-l arată și îți cere motivul.",
 "<b>De tipărit.</b> La ieșirea pe o comandă se fac avizul și <b>comanda clientului</b> (ce a comandat, cât a plecat, cât mai e — fără prețuri). Ele, ca și etichetele paleților făcuți din terminal, ajung în tabul <b>De tipărit</b>. Lăsat deschis pe calculatorul de lângă imprimantă, cu bifa „Printează singur ce apare”, le scoate singur."
 ],
 "pasi":[

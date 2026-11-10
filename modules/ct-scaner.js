@@ -651,6 +651,14 @@ function registerIesire(router) {
           </select>
           <span class="sc-mic">Cu ✓ sunt comenzile care au produsul ăsta. La ieșire se fac avizul și comanda clientului, de tipărit.</span>
         </label>
+        <div id="sc-consum">
+          <label class="sc-f">Pentru ce s-a scos
+            <input name="consum_motiv" maxlength="300" autocomplete="off" value="${esc(String(qy.consum_motiv || ""))}" placeholder="ex. folie pentru înfoliat paleții">
+          </label>
+          <label class="sc-f">Cine a cerut
+            <input name="consum_solicitant" maxlength="120" autocomplete="off" value="${esc(String(qy.consum_solicitant || ""))}" placeholder="numele persoanei">
+          </label>
+        </div>
         ${
           oLinie
             ? `<label class="sc-f">Cât pleacă${um ? " (" + esc(um) + ")" : ""} — pe palet sunt ${esc(cant(total, um))}
@@ -673,6 +681,14 @@ function registerIesire(router) {
           for (var i = 0; i < radio.length; i++) if (radio[i].checked) ales = radio[i].value;
           camp.hidden = ales !== "comanda";
           camp.querySelector("select").required = ales === "comanda";
+          // „Consum intern": pentru ce și cine a cerut — obligatorii doar atunci;
+          // ascunse nu sunt, altfel n-ar mai pleca nicio altă ieșire.
+          var cons = document.getElementById("sc-consum");
+          if (cons) {
+            cons.hidden = ales !== "consum";
+            var ci = cons.querySelectorAll("input");
+            for (var j = 0; j < ci.length; j++) ci[j].required = ales === "consum";
+          }
         }
         for (var i = 0; i < radio.length; i++) radio[i].addEventListener("change", comuta);
         comuta();
@@ -693,7 +709,7 @@ function registerIesire(router) {
     const inapoi = (eroare) =>
       redirect(
         ctx.res,
-        `${CALE}/iesire/palet/${p.id}${q({ destinatie, comanda_id: nr(b.comanda_id) || "", q: text(b.q), peste_rand: text(b.peste_rand), observatii: text(b.observatii), eroare })}`
+        `${CALE}/iesire/palet/${p.id}${q({ destinatie, comanda_id: nr(b.comanda_id) || "", q: text(b.q), peste_rand: text(b.peste_rand), observatii: text(b.observatii), consum_motiv: text(b.consum_motiv), consum_solicitant: text(b.consum_solicitant), eroare })}`
       );
     const oLinie = p.linii.length === 1;
     const total = oLinie ? nr(p.linii[0].cantitate) : nr(p.cantitate);
@@ -713,18 +729,28 @@ function registerIesire(router) {
         destinatie,
         comanda_id: b.comanda_id,
         observatii: [text(b.peste_rand), text(b.observatii)].filter(Boolean).join(" · "),
+        consum_motiv: b.consum_motiv,
+        consum_solicitant: b.consum_solicitant,
         ["pleaca_" + l.id]: String(pleaca),
         ["ramane_" + l.id]: String(rotunjit(total - pleaca)),
       });
     } else {
-      r = await CT.iesireIntreaga(ctx.user, { paleti: [p.id], destinatie, comanda_id: b.comanda_id, peste_rand: text(b.peste_rand), observatii: text(b.observatii) });
+      r = await CT.iesireIntreaga(ctx.user, {
+        paleti: [p.id],
+        destinatie,
+        comanda_id: b.comanda_id,
+        peste_rand: text(b.peste_rand),
+        observatii: text(b.observatii),
+        consum_motiv: b.consum_motiv,
+        consum_solicitant: b.consum_solicitant,
+      });
     }
     if (r.eroare) return inapoi(r.eroare);
 
     const unde =
       destinatie === "comanda"
         ? `comanda ${(r.comanda && (r.comanda.numar || "#" + r.comanda.id)) || "#" + nr(b.comanda_id)}`
-        : CT.etichetaDestinatie(destinatie).toLowerCase();
+        : CT.etichetaDestinatie(destinatie).toLowerCase() + (destinatie === "consum" ? `, cerut de ${text(b.consum_solicitant).replace(/\s+/g, " ")}` : "");
     const mesaj = partial ? r.mesaj : `${p.cod} (${cant(total, um)} ${p.denumire}) a ieșit spre ${unde}.`.replace(/\s+/g, " ");
     // Hârtiile: pe comanda clientului, avizul și comanda; altfel, eticheta de
     // ieșire a paletului plecat întreg. Merg la coada de tipărit, de unde le
