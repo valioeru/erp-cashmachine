@@ -123,11 +123,13 @@ const unul = (s) => ruleaza(s, []).rows[0];
   const dinSchema = [];
   for (const [t, corp] of Object.entries(tabele)) {
     for (const linie of corp.split("\n")) {
-      const c = linie.trim().match(/^(produs_id|componenta_id)\b/);
+      // Și coloanele cu alt nume care țin tot un produs din nomenclator, cum e
+      // `materie_produs_id` (materia primă a comenzii de producție, 10.11.2026).
+      const c = linie.trim().match(/^((?:\w+_)?produs_id|componenta_id)\b/);
       if (c) dinSchema.push(`${t}.${c[1]}`);
     }
   }
-  for (const m of dbjs.matchAll(/ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (produs_id|componenta_id)\b/g)) {
+  for (const m of dbjs.matchAll(/ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS ((?:\w+_)?produs_id|componenta_id)\b/g)) {
     dinSchema.push(`${m[1]}.${m[2]}`);
   }
   const acoperite = new Set(fuziune.TABELE.map((t) => `${t.tabel}.${t.coloana}`));
