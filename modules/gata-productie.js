@@ -26,6 +26,20 @@
 // Recepția din producție încă nenumărată se ia „cum a anunțat-o producția"
 // (modules/receptie.js, primesteTot + finalizeaza) — exact ce ar fi făcut
 // omul apăsând „Finalizează" fără să schimbe cifrele.
+//
+// Tot aici, sub lista din producție (Vali, 10.11.2026: „la fel ca și comenzile
+// intrate din producție, în lista de sus apar și altele, de la furnizori,
+// imediat după ce au fost recepționate, ca să poată fi alocate pe raft"):
+//
+//   Recepționat de la furnizori — de alocat
+//                    → rândurile recepțiilor finalizate de la furnizori (și ale
+//                      retururilor) a căror marfă n-are încă palet, cu aceleași
+//                      butoane. Recepția de la furnizor nenumărată nu apare:
+//                      întâi se numără.
+//   Paleți cu etichetă, fără loc pe raft
+//                    → paleții făcuți la recepție („Paleți și etichete"), cu
+//                      eticheta lipită, care încă n-au loc. Marfa lor are deja
+//                      palet, deci n-ar mai apărea în listele de mai sus.
 
 const db = require("../lib/db");
 const { esc } = require("../lib/render");
@@ -45,12 +59,16 @@ function linkDaca(user, href, text) {
 // Secțiunea de pe Intrare marfă. Goală când nu e nimic de alocat.
 async function sectiune(user, query) {
   const lista = await GP.lista().catch(() => []);
+  const furnizori = await GP.receptiiFurnizori().catch(() => []);
+  // Paleții cu etichetă care așteaptă raftul (lib/ct-scaner.js, faraLoc): cei
+  // pregătiți pentru o ieșire directă sunt mai jos, la „Pregătite pentru ieșire".
+  const faraLoc = await require("../lib/ct-scaner").faraLoc("toate").catch(() => []);
   const gata = await GP.pregatite().catch(() => []);
   const q = query || {};
   const mesaj =
     (q.gata_ok ? `<div class="detail-box" style="border-left:4px solid var(--success,#15803d);margin:6px 0">${esc(String(q.gata_ok))}</div>` : "") +
     (q.gata_eroare ? `<div class="detail-box" role="alert" style="border-left:4px solid var(--danger,#b91c1c);margin:6px 0"><strong>${esc(String(q.gata_eroare))}</strong></div>` : "");
-  if (!lista.length && !gata.length) return mesaj;
+  if (!lista.length && !furnizori.length && !faraLoc.length && !gata.length) return mesaj;
   const comenzi = await db
     .prepare(
       `SELECT c.id, c.numar, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
@@ -67,7 +85,9 @@ async function sectiune(user, query) {
   const rand = (x) => {
     const baza = `/stocuri/ct-park/gata/${x.fel}/${x.id}`;
     const de = x.fel === "receptie"
-      ? `recepția ${linkDaca(user, `/depozit/receptie/${x.receptie_id}`, x.receptie_numar)}${x.productie_numar ? ` · producția ${linkDaca(user, `/productie/${x.productie_id}`, x.productie_numar)}` : ""}`
+      ? `recepția ${linkDaca(user, `/depozit/receptie/${x.receptie_id}`, x.receptie_numar)}${x.productie_numar ? ` · producția ${linkDaca(user, `/productie/${x.productie_id}`, x.productie_numar)}` : ""}${
+          x.sursa_text ? ` · ${esc(x.sursa_text)}${x.partener ? " <strong>" + esc(x.partener) + "</strong>" : ""}${x.document ? ` · ${esc(x.document)}` : ""}` : ""
+        }`
       : `cererea #${x.id} · ${x.sursa === "productie" ? `producție${x.productie_numar ? " " + linkDaca(user, `/productie/${x.productie_id}`, x.productie_numar) : ""}` : `terț${x.furnizor ? " " + esc(x.furnizor) : ""}`}`;
     const pentru = x.comanda_id
       ? `${linkDaca(user, `/comenzi/${x.comanda_id}`, x.comanda_numar || "#" + x.comanda_id)}${x.client ? " · " + esc(x.client) : ""}`
@@ -135,6 +155,33 @@ async function sectiune(user, query) {
         <td>${linkDaca(user, `/stocuri/ct-park/palet/${p.id}`, p.cod || "#" + p.id)}<div class="mic" style="color:var(--text-muted)">fără loc pe raft</div></td>
       </tr>`;
 
+  // Paletul are deja etichetă; îi lipsește doar locul. Se pune cu pagina de
+  // scanare a paletului, care merge și de pe calculator: propune locuri lângă
+  // același produs și verifică locul ales.
+  const SURSA_PALET = { productie: "din producție", furnizor: "de la furnizor", retur_tert: "retur de la client", retur_fulfilment: "retur din fulfillment", inventar_initial: "stoc inițial" };
+  const randFaraLoc = (p) => `<tr>
+        <td style="min-width:220px"><strong>${esc(p.denumire)}</strong>${p.produs_cod ? ` <span class="mic" style="color:var(--text-muted)">${esc(p.produs_cod)}</span>` : ""}
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+            <a class="btn small" href="/stocuri/ct-park/scaner/intrare/palet/${p.id}">Pune pe raft →</a>
+            <a class="btn small secondary" href="/stocuri/ct-park/etichete?paleti=${p.id}" target="_blank">Eticheta</a>
+          </div></td>
+        <td><strong>${cant(p.cantitate)} ${esc(p.um || "")}</strong>${p.lot ? `<div class="mic" style="color:var(--text-muted)">lot ${esc(p.lot)}</div>` : ""}</td>
+        <td style="white-space:normal">${esc(SURSA_PALET[p.sursa] || "fără recepție")}${
+          p.receptie_id ? ` · recepția ${linkDaca(user, `/depozit/receptie/${p.receptie_id}`, p.receptie_numar || "#" + p.receptie_id)}` : p.aprovizionare_id ? ` · cererea #${Number(p.aprovizionare_id)}` : ""
+        }</td>
+        <td>${linkDaca(user, `/stocuri/ct-park/palet/${p.id}`, p.cod || "#" + p.id)}${
+          p.data_intrare ? `<div class="mic" style="color:var(--text-muted)">${esc(String(p.data_intrare).slice(0, 10).split("-").reverse().join("."))}</div>` : ""
+        }</td>
+      </tr>`;
+
+  // Ce mai e în casetă, sub lista din producție: se vede de sus, ca marfa de
+  // la furnizori să nu stea ascunsă sub o listă lungă.
+  const maiJos = [
+    furnizori.length ? `<a href="#de-la-furnizori">de la furnizori (${furnizori.length})</a>` : "",
+    faraLoc.length ? `<a href="#fara-loc">paleți fără loc pe raft (${faraLoc.length})</a>` : "",
+    gata.length ? `<a href="#pregatite">pregătite pentru ieșire (${gata.length})</a>` : "",
+  ].filter(Boolean);
+
   return `${mesaj}
     <section class="detail-box" id="gata-productie" style="border-left:4px solid var(--warn,#c07018);margin:0 0 16px">
       <h2 style="margin:0 0 4px;font-size:17px">Gata din producție — de alocat <span class="badge galben">${lista.length}</span></h2>
@@ -144,6 +191,7 @@ async function sectiune(user, query) {
         fulfillment, o parte pe raft — ce nu aloci rămâne aici. Ce vine din producție se ia cu cantitatea anunțată;
         dacă a venit altceva, deschide recepția și numără.
       </p>
+      ${maiJos.length ? `<p class="gata-mai-jos" style="margin:0 0 8px;font-size:13px">Tot aici, mai jos: ${maiJos.join(" · ")}.</p>` : ""}
       ${
         lista.length
           ? `<div class="tabel-scroll"><table class="table">
@@ -151,6 +199,32 @@ async function sectiune(user, query) {
         <tbody>${lista.map(rand).join("")}</tbody>
       </table></div>`
           : '<p style="margin:0;font-size:13px">Nimic de alocat acum.</p>'
+      }
+      ${
+        furnizori.length
+          ? `<h3 id="de-la-furnizori" style="margin:16px 0 4px;font-size:15px">Recepționat de la furnizori — de alocat <span class="badge galben">${furnizori.length}</span></h3>
+      <p style="margin:0 0 8px;font-size:13px;color:var(--text-muted);max-width:900px">
+        Marfa de la furnizori și retururile apar aici imediat ce recepția lor e finalizată. Se alocă la fel ca marfa din
+        producție: toată pe raft sau pe cantități. Un rând iese din listă când toată cantitatea lui are palet.
+      </p>
+      <div class="tabel-scroll"><table class="table">
+        <thead><tr><th>Produs</th><th>De alocat</th><th>De unde / pentru</th><th>Stare</th></tr></thead>
+        <tbody>${furnizori.map(rand).join("")}</tbody>
+      </table></div>`
+          : ""
+      }
+      ${
+        faraLoc.length
+          ? `<h3 id="fara-loc" style="margin:16px 0 4px;font-size:15px">Paleți cu etichetă, fără loc pe raft <span class="badge galben">${faraLoc.length}</span></h3>
+      <p style="margin:0 0 8px;font-size:13px;color:var(--text-muted);max-width:900px">
+        Paleții făcuți la recepție, cu eticheta lipită, care n-au încă loc. „Pune pe raft” deschide paletul cu locurile
+        propuse lângă același produs; alegi unul (sau scanezi eticheta locului) și apeși Efectuează.
+      </p>
+      <div class="tabel-scroll"><table class="table">
+        <thead><tr><th>Produs</th><th>Cantitate</th><th>De unde</th><th>Palet</th></tr></thead>
+        <tbody>${faraLoc.map(randFaraLoc).join("")}</tbody>
+      </table></div>`
+          : ""
       }
       ${
         gata.length
@@ -169,12 +243,17 @@ async function sectiune(user, query) {
 }
 
 // Recepția din producție, numărată „cum a fost anunțată" dacă nu e încă.
+// Recepția de la furnizor (sau un retur) trebuie să fie deja numărată: ce
+// scrie pe aviz nu e neapărat ce a venit, deci nu se ia pe cuvânt.
 async function receptiaGata(lid, user) {
   const l = await db
-    .prepare("SELECT l.id, l.receptie_id, r.stare, r.sursa FROM receptii_linii l JOIN receptii r ON r.id = l.receptie_id WHERE l.id = ?")
+    .prepare("SELECT l.id, l.receptie_id, r.stare, r.sursa, r.numar FROM receptii_linii l JOIN receptii r ON r.id = l.receptie_id WHERE l.id = ?")
     .get(Number(lid) || 0);
-  if (!l || l.sursa !== "productie") return { eroare: "Rândul de recepție nu există." };
+  if (!l) return { eroare: "Rândul de recepție nu există." };
   if (l.stare === "anulata") return { eroare: "Recepția e anulată." };
+  if (l.stare !== "finalizata" && l.sursa !== "productie") {
+    return { eroare: `Recepția ${l.numar || "#" + l.receptie_id} nu e încă numărată. Deschide-o, numără marfa și finalizeaz-o; apoi o aloci de aici.` };
+  }
   if (l.stare !== "finalizata") {
     const REC = require("./receptie");
     await REC.primesteTot(l.receptie_id);
@@ -274,7 +353,7 @@ function register(router) {
     if (fel === "receptie") {
       const x = await receptiaGata(ctx.params.id, ctx.user);
       if (x.eroare) return inapoi(ctx, "gata_eroare", x.eroare);
-      const rand = (await GP.receptii()).find((r) => r.id === x.linie_id);
+      const rand = await GP.randReceptie(x.linie_id);
       ramas = rand ? rand.ramas : 0;
       um = rand ? rand.um : "";
       const REC = require("./receptie");

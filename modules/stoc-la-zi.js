@@ -19,12 +19,16 @@ const { send, redirect } = require("../lib/router");
 const { poateAccesa } = require("../lib/auth");
 const SP = require("../lib/stoc-produse");
 const RA = require("../lib/rezervari-agenti");
+const SC = require("../lib/stoc-categorii");
 
 const STOC = "/stocuri/ct-park/stoc";
 const REZERVARI = "/stocuri/ct-park/stoc/rezervari";
 
-// Categoriile paleților, în ordinea din depozit (modules/ct-park.js, CATEGORII).
-const TIPURI = ["produse finite", "produse intermediare", "consumabile", "materie primă"];
+// Categoriile simple din depozit, în ordinea lor (lib/stoc-categorii.js;
+// aceleași ca pe paleți, modules/ct-park.js, CATEGORII).
+const TIPURI = SC.TIPURI;
+// Cele două categorii ale produsului le schimbă, de aici, doar administratorul.
+const poateCategorii = (u) => Boolean(u) && u.rol === "admin";
 const FARA_TIP = "(fără categorie)";
 
 const ARATA = {
@@ -176,10 +180,33 @@ function celule(r, ctx, inapoi, poateRez) {
            }>Rezervă</button>`
       : "";
 
+  // Cele două categorii se schimbă de aici (Vali, 10.11.2026): cea din
+  // nomenclator e a produsului; cea simplă se scrie pe produs și pe paleții
+  // lui din stoc (lib/stoc-categorii.js).
+  const schimba =
+    poateCategorii(user) && r.produs_id
+      ? `<details class="stoc-cat" style="margin-top:3px">
+           <summary style="cursor:pointer;font-size:12px;color:var(--primary,#2f5d9c)">modifică</summary>
+           <form method="post" action="${STOC}/categorii" style="display:grid;gap:4px;margin-top:4px;min-width:210px">
+             <input type="hidden" name="inapoi" value="${esc(inapoi)}">
+             <input type="hidden" name="produs_id" value="${r.produs_id}">
+             <input type="hidden" name="tip_vechi" value="${esc(r.tip || "")}">
+             <label style="font-size:12px;margin:0;display:grid;gap:2px">Categorie nomenclator
+               <input name="categorie" list="categorii-nomenclator" value="${esc(r.categorie || "")}" maxlength="${SC.LUNGIME_MAX}" autocomplete="off" style="font-size:13px"></label>
+             <label style="font-size:12px;margin:0;display:grid;gap:2px">Categorie (se scrie și pe paleții din stoc)
+               <select name="tip" style="font-size:13px"><option value="">—</option>${TIPURI.map(
+                 (t) => `<option value="${esc(t)}"${r.tip === t ? " selected" : ""}>${esc(t)}</option>`
+               ).join("")}</select></label>
+             <button class="btn small" type="submit">Salvează</button>
+           </form>
+         </details>`
+      : "";
+
   // Butonul „Rezervă" stă sub cifra liberă: e cifra după care se hotărăște,
   // și rămâne la vedere și când tabelul e mai lat decât ecranul.
   return [
     produs,
+    esc(r.categorie || "—") + schimba,
     esc(r.tip || "—"),
     inStoc + alte,
     disponibil + (actiune ? `<div style="margin-top:4px">${actiune}</div>` : ""),
@@ -188,7 +215,6 @@ function celule(r, ctx, inapoi, poateRez) {
     rezervat,
     intra,
     r.sosire ? dataRo(r.sosire) : "—",
-    esc(r.categorie || "—"),
   ];
 }
 
@@ -315,8 +341,12 @@ async function pagina(ctx, opt) {
       </script>`;
   }
 
-  const cap = ["Produs", "Categorie", "În stoc", "Disponibil", "Stare", "Promis pe comenzi", "Rezervat", "Urmează să intre", "Sosire", "Categorie nomenclator"];
+  const cap = ["Produs", "Categorie nomenclator", "Categorie", "În stoc", "Disponibil", "Stare", "Promis pe comenzi", "Rezervat", "Urmează să intre", "Sosire"];
   const randuri = vizibile.map((r) => celule(r, ctx, inapoi, poateRez));
+  // Lista din care se alege categoria din nomenclator: cele folosite deja.
+  const listaCategorii = poateCategorii(user)
+    ? `<datalist id="categorii-nomenclator">${(await SC.categoriiNomenclator()).map((c) => `<option value="${esc(c)}">`).join("")}</datalist>`
+    : "";
 
   const body = `
     ${opt && opt.subtabs ? opt.subtabs : ""}
@@ -353,7 +383,7 @@ async function pagina(ctx, opt) {
     ${panou}
     ${
       vizibile.length
-        ? `<div class="tabel-scroll">${table(cap, randuri, { filtre: "stoc-produse" })}</div>`
+        ? `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: "stoc-produse" })}</div>`
         : `<p style="margin-top:18px">${cauta || tip || arata ? "Nimic nu se potrivește cu ce ai ales." : "Depozitul e gol și nu urmează să intre nimic."}</p>`
     }
     ${scriptClienti}
@@ -425,6 +455,26 @@ function register(router) {
     redirect(ctx.res, cuMesaj(inapoi, r.ok ? "ok" : "eroare", r.ok ? r.mesaj : r.eroare));
   });
 
+  // Categoriile produsului, schimbate din „Stoc la zi". Categoria simplă se
+  // scrie doar dacă omul a schimbat-o față de ce arăta pagina: altfel salvarea
+  // celei din nomenclator ar rescrie și paleții. Cu „doar_goi=1" se completează
+  // doar paleții fără categorie, fără să se atingă cei care au alta.
+  router.post(`${STOC}/categorii`, async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const b = ctx.body || {};
+    const inapoi = inapoiSigur(b.inapoi);
+    const vreaJson = /application\/json/.test(String((ctx.req && ctx.req.headers && ctx.req.headers.accept) || ""));
+    const raspunde = (r) => {
+      if (vreaJson) return send(ctx.res, r.ok ? 200 : 400, JSON.stringify(r), { "Content-Type": "application/json; charset=utf-8" });
+      redirect(ctx.res, cuMesaj(inapoi, r.ok ? "ok" : "eroare", r.ok ? r.mesaj : r.eroare));
+    };
+    if (!poateCategorii(ctx.user)) return raspunde({ eroare: "Categoriile le schimbă doar administratorul." });
+    const schimb = {};
+    if (b.categorie !== undefined) schimb.categorie = b.categorie;
+    if (b.tip !== undefined && String(b.tip) !== String(b.tip_vechi == null ? "" : b.tip_vechi)) schimb.tip = b.tip;
+    raspunde(await SC.seteaza(b.produs_id, schimb, ctx.user, { doarGoi: String(b.doar_goi || "") === "1" }));
+  });
+
   router.get(REZERVARI, async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
     await paginaRezervari(ctx);
@@ -439,4 +489,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, pagina, paginaRezervari, inapoiSigur, cuMesaj, TIPURI, ARATA };
+module.exports = { register, pagina, paginaRezervari, inapoiSigur, cuMesaj, poateCategorii, TIPURI, ARATA };

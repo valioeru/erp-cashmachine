@@ -1093,6 +1093,7 @@ async function dinReceptie(lid) {
     ramas: Math.max(0, Math.round((primit - nr(pus && pus.c)) * 1000) / 1000),
     // Ce vine din producția noastră e produs finit.
     categorie: l.sursa === "productie" ? "produse finite" : "",
+    sursa: l.sursa,
   };
 }
 
@@ -1115,6 +1116,13 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
       pretSursa = "preț de achiziție de pe produs";
     }
   }
+
+  // Categoria simplă a paletului: ce a ales omul sau, dacă n-a ales nimic, cea
+  // a produsului (lib/stoc-categorii.js). Fără asta, paleții intrau fără
+  // categorie de câte ori câmpul rămânea necompletat.
+  const categoriePalet = CATEGORII.includes(String(b.categorie || ""))
+    ? String(b.categorie)
+    : await require("../lib/stoc-categorii").tipPentruPaletNou(nr(b.produs_id)).catch(() => null);
 
   const idPaleti = [];
   for (const locuri of grupuri) {
@@ -1140,7 +1148,7 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet) {
         nr(cantitatePalet) || null,
         String(b.um || "").trim() || null,
         String(b.lot || "").trim() || null,
-        CATEGORII.includes(String(b.categorie || "")) ? String(b.categorie) : null,
+        categoriePalet,
         data,
         String(b.observatii || "").trim() || null,
         ctx.user ? ctx.user.nume : null,
@@ -4077,7 +4085,7 @@ function register(router) {
           ? `<div class="detail-box" style="border-left:4px solid var(--success,#1a7f37);margin-bottom:14px">
                Din recepția <a href="/depozit/receptie/${pre.receptie_id}">${esc(pre.numar)}</a>:
                <strong>${esc(pre.denumire || "marfă")}</strong> — au venit ${esc(String(pre.primit))} ${esc(pre.um)},
-               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.${deRaft > 0 && deRaft < pre.ramas - 0.0005 ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>; restul rămâne în „Gata din producție”.` : ""}
+               ${pre.pus ? `pe raft sunt deja ${esc(String(pre.pus))}, ` : ""}de pus acum: <strong>${esc(String(pre.ramas))} ${esc(pre.um)}</strong>.${deRaft > 0 && deRaft < pre.ramas - 0.0005 ? ` Pe raft pui acum <strong>${esc(String(deRaft))} ${esc(pre.um)}</strong>; restul rămâne ${pre.sursa === "productie" ? "în „Gata din producție”" : "de alocat, în lista de sus din Intrare marfă"}.` : ""}
                ${pre.ramas > 0 ? "" : '<br><span class="badge galben">Tot ce a venit pe rândul ăsta e deja pus. Ce adaugi acum intră în plus.</span>'}
                <p style="margin:6px 0 0;font-size:12px;color:var(--text-muted)">Spune unde se pune: rândul, nivelul, câmpul și poziția (sau doar rândul, ori nimic, și ERP-ul propune locuri libere). Paletul rămâne legat de recepție.</p>
              </div>`

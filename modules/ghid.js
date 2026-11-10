@@ -298,7 +298,8 @@ const GHID = [
 "p":[
 "Când vine marfă în depozit, o înregistrezi aici. Spui ce e, câtă e, din ce lot, și câte locuri de palet ocupă. Sistemul îți dă adresa liberă și îți tipărește eticheta.",
 "Eticheta se lipește pe palet. Pe ea scrie mare adresa — după aia nu mai cauți marfa, o găsești.",
-"Sus, în <b>Gata din producție — de alocat</b>, stă marfa terminată în producție și cererile marcate „intrată în stoc” care n-au încă palet. De la fiecare rând o pui pe raft (Intrarea se completează singură) sau o trimiți direct în fulfillment ori la livrare pe comanda clientului."
+"Sus, în <b>Gata din producție — de alocat</b>, stă marfa terminată în producție și cererile marcate „intrată în stoc” care n-au încă palet. De la fiecare rând o pui pe raft (Intrarea se completează singură) sau o trimiți direct în fulfillment ori la livrare pe comanda clientului.",
+"Dedesubt, în <b>Recepționat de la furnizori — de alocat</b>, apare marfa de la furnizori și retururile, imediat ce recepția lor e finalizată, cu aceleași butoane. Mai jos sunt <b>paleții cu etichetă, fără loc pe raft</b>: îi pui pe raft cu „Pune pe raft”."
 ],
 "pasi":[
 "Apeși „+ Intrare marfă”.",
@@ -384,7 +385,8 @@ const GHID = [
 "<b>Stoc la zi</b> arată CT-Park pe produse și e deschisă oricui are cont în ERP. Pentru fiecare produs vezi cât e în stoc, cât e deja <b>promis</b> (comenzile deschise ale clienților și marfa făcută în producție pentru un anume client), cât e <b>rezervat</b> de agenți și cât e <b>liber</b>.",
 "Coloana <b>Urmează să intre</b> spune ce vine: comenzile trimise la furnizori, cu data cerută, și producția, cu termenul și clientul pentru care se face. Ce se face pentru un client nu e liber când intră.",
 "Agenții și administratorii pot <b>rezerva</b> marfa liberă pentru un client, 3 zile. Clienții cu facturi trecute de scadență nu pot primi rezervări. Când clientul pune comanda cu produsul, rezervarea se închide singură; fără comandă, se eliberează după 3 zile.",
-"Vederea veche, pe paleți — cu lotul, locul, furnizorul și prețul —, e la clicul <b>Pe paleți</b>."
+"Vederea veche, pe paleți — cu lotul, locul, furnizorul și prețul —, e la clicul <b>Pe paleți</b>.",
+"Lângă produs sunt cele două categorii: <b>Categorie nomenclator</b> (a produsului) și <b>Categorie</b> (produse finite, produse intermediare, consumabile, materie primă). Administratorul le schimbă cu „modifică”; categoria simplă se scrie și pe paleții din stoc, iar paleții noi o moștenesc."
 ],
 "pasi":[
 "Cauți produsul sau alegi categoria de sus.",
