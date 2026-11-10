@@ -9,6 +9,11 @@
 //   • CAT A VENIT NU E CAT S-A ANUNTAT. Daca lipsa trece fara sa spuna
 //     nimeni nimic, receptia nu verifica — doar semneaza.
 //
+//   • MAI MULT DECAT S-A ANUNTAT SE PRIMESTE, fara motiv (Vali, 10.11.2026:
+//     „Cantitatea receptionata poate fi mai mare decat cea din comanda si se
+//     salveaza cantitatea din receptie"); cat e in plus ramane la vedere.
+//     Randul care n-a fost anuntat DELOC cere in continuare de unde vine.
+//
 //   • MARFA INTOARSA NU E MARFA NOUA. Un retur nedeclarat ca bun intra in
 //     stocul vandabil si se vinde a doua oara.
 //
@@ -64,10 +69,21 @@ console.log("\n2. Lipsa cere explicație");
 console.log("\n3. Mai mult decât s-a anunțat");
 {
   const fara = R.validareLinie(LINIE, { cantitate_primita: "120", loc_id: "5" }, { sursa: "furnizor", cereLoc: true });
-  bine("surplusul fără explicație nu trece", !!fara.eroare);
-  bine("fiindcă ajunge pe stoc marfă necomandată", /necomandată/.test(fara.eroare), fara.eroare);
+  bine("surplusul trece fără explicație: se salvează cantitatea din recepție", !fara.eroare && fara.cantitate_primita === 120 && fara.stare === "primita", fara.eroare);
+  bine("…și se vede cât e în plus", fara.in_plus === 20 && fara.lipsa === 0 && fara.lipsa_reala === false, JSON.stringify(fara));
   const cu = R.validareLinie(LINIE, { cantitate_primita: "120", loc_id: "5", motiv: "a trimis un bax în plus" }, { sursa: "furnizor", cereLoc: true });
-  bine("cu explicație trece", !cu.eroare && cu.in_plus === 20, cu.eroare);
+  bine("cu explicație trece la fel, iar explicația se păstrează", !cu.eroare && cu.in_plus === 20 && cu.motiv === "a trimis un bax în plus", cu.eroare);
+  for (const sursa of ["productie", "retur_tert"]) {
+    const x = R.validareLinie(LINIE, { cantitate_primita: "250", loc_id: "5", conditie: "bun" }, { sursa, cereLoc: true });
+    bine(`la fel din ${sursa}: de două ori și jumătate cât s-a anunțat, fără motiv`, !x.eroare && x.in_plus === 150, x.eroare);
+  }
+  const zecimal = R.validareLinie({ cantitate_asteptata: 847.625, um: "kg" }, { cantitate_primita: "850,5", loc_id: "5" }, { sursa: "productie", cereLoc: true });
+  bine("…și cu virgulă: 850,5 kg față de 847,625 anunțate, 2,875 în plus", !zecimal.eroare && zecimal.cantitate_primita === 850.5 && zecimal.in_plus === 2.875, JSON.stringify(zecimal));
+  // Rândul care n-a fost anunțat deloc nu e „mai mult decât comanda".
+  const neanuntat = R.validareLinie({ cantitate_asteptata: 0 }, { cantitate_primita: "10", loc_id: "7" }, { sursa: "productie", cereLoc: true });
+  bine("rândul neanunțat deloc cere în continuare de unde vine", /n-a fost anunțat deloc/.test(neanuntat.eroare || "") && /10/.test(neanuntat.eroare || ""), neanuntat.eroare);
+  bine("…și trece când se scrie", !R.validareLinie({ cantitate_asteptata: 0 }, { cantitate_primita: "10", loc_id: "7", motiv: "rămas de la comanda veche" }, { sursa: "productie", cereLoc: true }).eroare);
+  bine("…dar zero primit pe un rând neanunțat nu cere nimic", !R.validareLinie({ cantitate_asteptata: 0 }, { cantitate_primita: "0" }, { sursa: "furnizor", cereLoc: true }).eroare);
 }
 
 console.log("\n4. Returul nu e o cumpărare");

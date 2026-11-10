@@ -15,8 +15,16 @@
 //     depozit nu închide cererea.
 //   • LA „FINALIZATĂ" PLEACĂ DOAR RESTUL; dacă totul plecase parțial, nu se mai
 //     deschide altă recepție.
-//   • NU SE TRIMITE MAI MULT DECÂT A RĂMAS, nici zero, nici de pe o comandă
-//     deja finalizată sau anulată.
+//   • CANTITATEA COMENZII NU E PLAFON (Vali, 10.11.2026: „Cantitatea
+//     recepționată poate fi mai mare decât cea din comandă și se salvează
+//     cantitatea din recepție"): peste „rămas de făcut" se trimite, iar mesajul,
+//     recepția și istoricul clientului spun cu cât e peste comandă. Restul nu
+//     coboară sub zero. Zero, negativ, de pe o comandă deja finalizată sau
+//     anulată — tot nu se trimite.
+//   • „PLECAT" E CE A PRIMIT DEPOZITUL: recepția preluată contează cu cantitatea
+//     primită în stare bună, nu cu cea anunțată; cea respinsă sau primită
+//     deteriorată nu e plecată din comandă. Când pe paleți ajunge mai mult
+//     decât scria recepția, recepția ia cantitatea de pe paleți.
 //   • RECEPȚIA PARȚIALĂ ANULATĂ își întoarce cantitatea la „rămas de făcut".
 //   • LISTA: opțiunea „Finalizată parțial…" doar la comenzile în lucru; nu e o
 //     stare și nu se poate scrie pe comandă.
@@ -132,8 +140,11 @@ const CP_LINII = 97831, CP_PLAT = 97832, CP_GATA = 97833, CP_NESCRIS = 97834, CP
 // Cantități scrise ca în registrul adevărat (10.11.2026) și una scrisă de ERP.
 const CP_REG = 97837, CP_NOTA = 97838, CP_KG = 97839;
 const A_CERERE = 97841, A_CERERE2 = 97842;
+// Peste cantitatea comenzii, și „plecat" socotit din ce a primit depozitul.
+const CP_PESTE = 97843, CP_PESTE2 = 97844, CP_PRIMIT = 97845;
+const CMD2 = 97822;
 const PREFIX = "TFP";
-const TOATE_CP = [CP_LINII, CP_PLAT, CP_GATA, CP_NESCRIS, CP_TEXT, CP_ANULATA, CP_REG, CP_NOTA, CP_KG];
+const TOATE_CP = [CP_LINII, CP_PLAT, CP_GATA, CP_NESCRIS, CP_TEXT, CP_ANULATA, CP_REG, CP_NOTA, CP_KG, CP_PESTE, CP_PESTE2, CP_PRIMIT];
 
 function curata() {
   const cp = TOATE_CP.join(",");
@@ -153,9 +164,9 @@ function curata() {
   q(`DELETE FROM comenzi_productie WHERE id IN (${cp})`);
   q(`DELETE FROM aprovizionari WHERE id IN (${A_CERERE}, ${A_CERERE2}) OR produs_id IN (${P1}, ${P2})`);
   q(`DELETE FROM rezervari_stoc WHERE produs_id IN (${P1}, ${P2})`);
-  try { q(`DELETE FROM comenzi_istoric WHERE comanda_id = ${CMD}`); } catch (_) { /* tabela poate lipsi */ }
-  q(`DELETE FROM comenzi_linii WHERE comanda_id = ${CMD}`);
-  q(`DELETE FROM comenzi WHERE id = ${CMD}`);
+  try { q(`DELETE FROM comenzi_istoric WHERE comanda_id IN (${CMD}, ${CMD2})`); } catch (_) { /* tabela poate lipsi */ }
+  q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${CMD}, ${CMD2})`);
+  q(`DELETE FROM comenzi WHERE id IN (${CMD}, ${CMD2})`);
   q(`DELETE FROM produse WHERE id IN (${P1}, ${P2})`);
   q(`DELETE FROM interactiuni WHERE partener_id = ${CLIENT}`);
   q(`DELETE FROM parteneri WHERE id = ${CLIENT}`);
@@ -201,8 +212,10 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   console.log("1. Pagina de finalizare parțială");
   let pag = await cer("get", `/productie/${CP_LINII}/partial`, MIHAI, { query: { inapoi: "/productie?status=in_productie" } });
   bine("se deschide, cu cele două produse", pag.cod === 200 && pag.corp.includes(`${PREFIX} Punga curier`) && pag.corp.includes(`${PREFIX} Folie`), pag.cod);
-  bine("fiecare produs are câmpul lui, limitat la ce a rămas", pag.corp.includes(`name="cant_${L1}"`) && pag.corp.includes(`name="cant_${L2}"`) && /name="cant_\d+"[^>]*\n?[^>]*max="10000"/.test(pag.corp) && /max="500"/.test(pag.corp));
+  bine("fiecare produs are câmpul lui, cu cât e comandat și cât a rămas alături", pag.corp.includes(`name="cant_${L1}"`) && pag.corp.includes(`name="cant_${L2}"`) && pag.corp.includes("10.000 buc") && pag.corp.includes("500 kg"));
+  bine("…fără limită pe câmp: cantitatea comenzii nu e plafon", !/name="cant_\d+"[^>]*\smax=/.test(pag.corp), (pag.corp.match(/name="cant_\d+"[^>]*>/) || [])[0]);
   bine("spune ce se întâmplă cu partea gata și cu comanda", /Gata din producție — de alocat/.test(pag.corp) && /rămâne în producție până o pui pe „Finalizată”/.test(pag.corp));
+  bine("…și că se poate scrie mai mult decât era comandat", /cantitatea din comandă nu e o limită/.test(pag.corp) && /ce a primit depozitul, nu ce s-a anunțat/.test(pag.corp));
   bine("ține minte unde se întoarce", pag.corp.includes('name="inapoi" value="/productie?status=in_productie"'));
   pag = await cer("get", `/productie/${CP_LINII}/partial`, MIHAI, { query: { inapoi: "https://rau.example/x" } });
   bine("o adresă din afara Producției nu e crezută", pag.corp.includes(`name="inapoi" value="/productie/${CP_LINII}"`) && !pag.corp.includes("rau.example"));
@@ -233,14 +246,10 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
 
   // ------------------------------------------------------------------------
   console.log("\n3. Ce nu se poate");
-  r = await cer("post", `/productie/${CP_LINII}/partial`, MIHAI, { body: { [`cant_${L1}`]: "7001" } });
-  bine("mai mult decât a rămas: refuzat, cu cât a mai rămas", unde(r).startsWith(`/productie/${CP_LINII}/partial?`) && /ai scris 7\.001 buc, au mai rămas 7\.000 buc/.test(parametri(r).eroare || "") && /pune comanda pe „Finalizată”/.test(parametri(r).eroare || ""), unde(r));
   r = await cer("post", `/productie/${CP_LINII}/partial`, MIHAI, { body: { [`cant_${L1}`]: "0", [`cant_${L2}`]: "" } });
   bine("zero sau gol: refuzat", /Scrie cât s-a terminat/.test(parametri(r).eroare || ""), unde(r));
   r = await cer("post", `/productie/${CP_LINII}/partial`, MIHAI, { body: { [`cant_${L1}`]: "-5" } });
   bine("negativ: refuzat", /Scrie cât s-a terminat/.test(parametri(r).eroare || ""), unde(r));
-  r = await cer("post", `/productie/${CP_LINII}/partial`, MIHAI, { body: { [`cant_${L1}`]: "100", [`cant_${L2}`]: "501" } });
-  bine("un rând bun și unul prea mare: nu pleacă nimic", /au mai rămas 500 kg/.test(parametri(r).eroare || ""), unde(r));
   egal("…deci tot o singură recepție parțială", partiale(CP_LINII).length, 1);
   r = await cer("post", `/productie/${CP_GATA}/partial`, MIHAI, { body: { cant_0: "10" } });
   bine("de pe o comandă finalizată: refuzat", /deja finalizată/.test(parametri(r).eroare || "") && partiale(CP_GATA).length === 0, unde(r));
@@ -272,6 +281,7 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   bine("pagina comenzii are caseta, cu butonul", pag.corp.includes("caseta-partial") && pag.corp.includes(`href="/productie/${CP_LINII}/partial"`), pag.cod);
   bine("…și istoricul: cât a plecat din cât", /5\.000,5 buc din 10\.000 buc/.test(pag.corp) && /200 kg din 500 kg/.test(pag.corp));
   bine("…cu recepțiile și starea lor în depozit", pag.corp.includes(`href="/depozit/receptie/${pr[0].id}"`) && /preluată în depozit/.test(pag.corp) && /de preluat în depozit/.test(pag.corp));
+  bine("…fără „(anunțat …)” unde depozitul a primit exact cât s-a anunțat, sau n-a preluat încă", !/\(anunțat /.test(pag.corp), (pag.corp.match(/\(anunțat [^)]*\)/) || [])[0]);
   pag = await cer("get", `/productie/${CP_GATA}`, MIHAI);
   bine("o comandă finalizată fără trimiteri parțiale n-are caseta", !pag.corp.includes("caseta-partial"));
   pag = await cer("get", "/productie", MIHAI, { query: { q: PREFIX, status: "toate" } });
@@ -312,8 +322,8 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   r = await cer("post", `/productie/${CP_PLAT}/partial`, MIHAI, { body: { cant_0: "600" } });
   bine("exact restul se poate trimite, cu îndemnul de a finaliza", /Nu a mai rămas nimic de făcut: pune comanda pe „Finalizată”/.test(parametri(r).ok || ""), parametri(r).ok);
   egal("…comanda fiind tot în producție", cp(CP_PLAT).status, "in_productie");
-  r = await cer("post", `/productie/${CP_PLAT}/partial`, MIHAI, { body: { cant_0: "1" } });
-  bine("după asta nu mai e nimic de trimis", /au mai rămas 0 buc/.test(parametri(r).eroare || ""), unde(r));
+  s = await STADIU.situatiePartiala(q(`SELECT * FROM comenzi_productie WHERE id = ${CP_PLAT}`)[0]);
+  egal("după asta nu a mai rămas nimic de făcut", [s.linii.map((l) => [l.trimis, l.rest]), s.restTotal], [[[1000, 0]], 0]);
   await STADIU.laSchimbareaProductiei(CP_PLAT, "in_productie", "finalizata", { user: MIHAI });
   q(`UPDATE comenzi_productie SET status = 'finalizata' WHERE id = ${CP_PLAT}`);
   let c2 = cp(CP_PLAT);
@@ -356,28 +366,28 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   // ------------------------------------------------------------------------
   console.log("\n9. Cantități scrise ca text sau nescrise");
   egal("citirea cantității: număr, text cu spații și unitate, virgulă, gol", ["700000", "1 200 kg", "12,5", "", null].map((v) => STADIU.cantNr(v)), [700000, 1200, 12.5, 0, 0]);
-  r = await cer("post", `/productie/${CP_TEXT}/partial`, MIHAI, { body: { cant_0: "1201" } });
-  bine("„1 200 kg” se citește 1.200: 1.201 e prea mult", /au mai rămas 1\.200 kg/.test(parametri(r).eroare || ""), unde(r));
+  egal("„1 200 kg” se citește 1.200", (await STADIU.situatiePartiala(q(`SELECT * FROM comenzi_productie WHERE id = ${CP_TEXT}`)[0])).linii.map((l) => [l.comandat, l.rest]), [[1200, 1200]]);
   r = await cer("post", `/productie/${CP_TEXT}/partial`, MIHAI, { body: { cant_0: "200" } });
   await STADIU.laSchimbareaProductiei(CP_TEXT, "in_productie", "finalizata", { user: MIHAI });
   egal("…iar restul de la „Finalizată” e 1.000 kg", randuri(cp(CP_TEXT).receptie_id), [[P2, 1000, "kg", null]]);
   r = await cer("post", `/productie/${CP_NESCRIS}/partial`, MIHAI, { body: { cant_0: "75" } });
   bine("fără cantitate pe comandă: se trimite cât scrie omul", /75 buc au plecat/.test(parametri(r).ok || "") && randuri(partiale(CP_NESCRIS)[0].id)[0][1] === 75, unde(r));
+  egal("…și, neștiind cât e comandat, recepția spune că restul e încă în lucru", partiale(CP_NESCRIS)[0].observatii, "Finalizare parțială din comanda de producție TFP-CP-4; restul e încă în lucru.");
+  bine("…fără vreun „peste comandă” în mesaj", !/peste cât era comandat/.test(parametri(r).ok || ""), parametri(r).ok);
   pag = await cer("get", `/productie/${CP_NESCRIS}/partial`, MIHAI);
-  bine("…iar pagina nu pune limită acolo", /name="cant_0"/.test(pag.corp) && !/name="cant_0"[^>]*\n?[^>]*max=/.test(pag.corp) && /nescris/.test(pag.corp));
+  bine("…iar pagina spune că acolo cantitatea e nescrisă", /name="cant_0"/.test(pag.corp) && /nescris/.test(pag.corp));
   // Registrul scrie miile cu virgulă: „67,200" sunt 67.200 de bucăți, nu 67,2.
   // Citită greșit, comanda n-ar fi putut trimite parțial mai mult de 67 de bucăți.
   pag = await cer("get", `/productie/${CP_REG}/partial`, MIHAI);
-  bine("„67,200” buc sunt 67.200: atât e limita din pagină", /max="67200"/.test(pag.corp) && pag.corp.includes("67.200 buc"), (pag.corp.match(/max="[^"]*"/) || [])[0]);
+  egal("„67,200” buc sunt 67.200: atât scrie pagina la comandat și la rămas", [(pag.corp.match(/67\.200 buc/g) || []).length, /67,2 buc/.test(pag.corp)], [2, false]);
   r = await cer("post", `/productie/${CP_REG}/partial`, MIHAI, { body: { cant_0: "20000" } });
   bine("…din care pleacă 20.000", /20\.000 buc au plecat/.test(parametri(r).ok || ""), unde(r));
-  r = await cer("post", `/productie/${CP_REG}/partial`, MIHAI, { body: { cant_0: "50000" } });
-  bine("…iar 50.000 e prea mult: au mai rămas 47.200", /au mai rămas 47\.200 buc/.test(parametri(r).eroare || ""), unde(r));
+  egal("…și rămân 47.200", (await STADIU.situatiePartiala(q(`SELECT * FROM comenzi_productie WHERE id = ${CP_REG}`)[0])).linii.map((l) => [l.trimis, l.rest]), [[20000, 47200]]);
   r = await cer("post", "/productie/stare", MIHAI, { body: { comanda_id: String(CP_REG), status: "finalizata" } });
   egal("…și la „Finalizată” pleacă restul de 47.200", randuri(cp(CP_REG).receptie_id), [[P1, 47200, "buc", null]]);
   // „205(65 DONE)": cantitatea e 205; nota de după nu se lipește de ea.
   pag = await cer("get", `/productie/${CP_NOTA}/partial`, MIHAI);
-  bine("„205(65 DONE)” sunt 205 bucăți", /max="205"/.test(pag.corp), (pag.corp.match(/max="[^"]*"/) || [])[0]);
+  bine("„205(65 DONE)” sunt 205 bucăți", (pag.corp.match(/>205 buc</g) || []).length === 2, (pag.corp.match(/>\d[\d.]* buc</g) || []).join(" "));
   r = await cer("post", `/productie/${CP_NOTA}/partial`, MIHAI, { body: { cant_0: "65" } });
   egal("…din care 65 pleacă și rămân 140", (await STADIU.situatiePartiala(q(`SELECT * FROM comenzi_productie WHERE id = ${CP_NOTA}`)[0])).linii.map((l) => [l.comandat, l.trimis, l.rest]), [[205, 65, 140]]);
   // Tot ce era de făcut pleacă parțial și e preluat ÎNAINTE ca producția să
@@ -398,7 +408,7 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   egal("comandă gata, dar cu toate recepțiile anulate: cererea rămâne „gata”", [await STADIU.inchideCerereaDacaAIntratTot(CP_NOTA), unul(`SELECT status FROM aprovizionari WHERE id = ${A_CERERE2}`)], [false, "gata"]);
   // Cantitatea scrisă de ERP dintr-o cerere a depozitului, la kg: punctul e zecimală.
   pag = await cer("get", `/productie/${CP_KG}/partial`, MIHAI);
-  bine("„847.625” kg rămân 847,625 kg, nu 847.625", /max="847\.625"/.test(pag.corp) && pag.corp.includes("847,625 kg"), (pag.corp.match(/max="[^"]*"/) || [])[0]);
+  bine("„847.625” kg rămân 847,625 kg, nu 847.625", (pag.corp.match(/>847,625 kg</g) || []).length === 2 && !/847\.625 kg/.test(pag.corp), (pag.corp.match(/>[\d.,]+ kg</g) || []).join(" "));
   r = await cer("post", `/productie/${CP_KG}/partial`, MIHAI, { body: { cant_0: "800" } });
   r = await cer("post", "/productie/stare", MIHAI, { body: { comanda_id: String(CP_KG), status: "finalizata" } });
   egal("…după 800 kg trimise parțial, restul e 47,625 kg", randuri(cp(CP_KG).receptie_id), [[P2, 47.625, "kg", null]]);
@@ -414,6 +424,104 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
     STADIU.stareDinProductie([{ status: "finalizata", receptie_id: 5, receptie_stare: "finalizata", receptii_deschise: 0 }]) === null &&
     STADIU.stareDinProductie([{ status: "finalizata", receptie_id: null, cerere_stare: "gata", receptii_deschise: 0, receptii_preluate: 2 }]) === null &&
     STADIU.stareDinProductie([{ status: "in_productie", receptii_deschise: 1 }]) === "in_productie");
+
+  // ------------------------------------------------------------------------
+  console.log("\n10b. Cantitatea comenzii nu e plafon");
+  const sit = async (id) => STADIU.situatiePartiala(q(`SELECT * FROM comenzi_productie WHERE id = ${id}`)[0]);
+  q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD2}, ${CLIENT}, '${PREFIX}-2', '${azi()}', 'in_productie')`);
+  q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${CMD2}, ${P1}, 100, 1), (${CMD2}, ${P2}, 50, 1)`);
+  q(`INSERT INTO comenzi_productie (id, numar, produs_id, tip_produs, cantitate, um, status, data_initiere, client_text) VALUES
+       (${CP_PESTE}, '${PREFIX}-CP-10', ${P1}, '${PREFIX} Punga curier', '1000', 'buc', 'in_productie', '${ziPlus(-1)}', 'SAMEDAY COURIER'),
+       (${CP_PRIMIT}, '${PREFIX}-CP-12', ${P1}, '${PREFIX} Punga curier', '1000', 'buc', 'in_productie', '${ziPlus(-1)}', 'SAMEDAY COURIER')`);
+  q(`INSERT INTO comenzi_productie (id, numar, produs_id, tip_produs, cantitate, um, status, data_initiere, partener_id, comanda_id) VALUES
+       (${CP_PESTE2}, '${PREFIX}-CP-11', ${P1}, '${PREFIX} Punga curier', '100', 'buc', 'in_productie', '${ziPlus(-1)}', ${CLIENT}, ${CMD2})`);
+  const M1 = Number(unul(`INSERT INTO comenzi_productie_linii (comanda_id, produs_id, denumire, cantitate, um, ordine) VALUES (${CP_PESTE2}, ${P1}, '${PREFIX} Punga curier', '100', 'buc', 1) RETURNING id`));
+  const M2 = Number(unul(`INSERT INTO comenzi_productie_linii (comanda_id, produs_id, denumire, cantitate, um, ordine) VALUES (${CP_PESTE2}, ${P2}, '${PREFIX} Folie', '50', 'kg', 2) RETURNING id`));
+  r = await cer("post", `/productie/${CP_PESTE}/partial`, MIHAI, { body: { cant_0: "700" } });
+  r = await cer("post", `/productie/${CP_PESTE}/partial`, MIHAI, { body: { cant_0: "400" } });
+  let ok = parametri(r).ok || "";
+  bine("peste ce a rămas (400, când mai erau 300 de făcut): pleacă", unde(r).startsWith(`/productie/${CP_PESTE}?ok=`) && /400 buc au plecat în depozit/.test(ok) && !parametri(r).eroare, unde(r));
+  bine("…iar mesajul spune cu cât e peste comandă", /E cu 100 buc peste cât era comandat\. /.test(ok), ok);
+  bine("…și că nu a mai rămas nimic de făcut", /Nu a mai rămas nimic de făcut: pune comanda pe „Finalizată”/.test(ok), ok);
+  pr = partiale(CP_PESTE);
+  egal("recepția are cantitatea scrisă de producție, nu restul comenzii", pr.map((x) => randuri(x.id)), [[[P1, 700, "buc", null]], [[P1, 400, "buc", null]]]);
+  egal("…pe ea scrie cu cât e peste comandă, fără „restul e încă în lucru”", pr[1].observatii, "Finalizare parțială din comanda de producție TFP-CP-10, cu 100 buc peste cât era comandat.");
+  egal("cea de sub rest spune, ca înainte, că restul e în lucru", pr[0].observatii, "Finalizare parțială din comanda de producție TFP-CP-10; restul e încă în lucru.");
+  s = await sit(CP_PESTE);
+  egal("situația: 1.100 plecate din 1.000, restul e zero, nu negativ", [s.linii.map((l) => [l.comandat, l.trimis, l.rest]), s.restTotal], [[[1000, 1100, 0]], 0]);
+  pag = await cer("get", `/productie/${CP_PESTE}/partial`, MIHAI);
+  bine("pagina arată 1.100 plecate, zero rămase, și lasă în continuare să scrii", />1\.100 buc</.test(pag.corp) && />0 buc</.test(pag.corp) && /name="cant_0"/.test(pag.corp), (pag.corp.match(/>[\d.]+ buc</g) || []).join(" "));
+  r = await cer("post", "/productie/stare", MIHAI, { body: { comanda_id: String(CP_PESTE), status: "finalizata" } });
+  egal("„Finalizată”, după ce a plecat mai mult decât comanda: nicio recepție nouă", [cp(CP_PESTE).status, cp(CP_PESTE).receptie_id, cp(CP_PESTE).trimisa_depozit_la !== null, Number(unul(`SELECT COUNT(*) FROM receptii WHERE comanda_productie_id = ${CP_PESTE}`))], ["finalizata", null, true, 2]);
+  // Două produse: unul trece de comandă, celălalt mai are de făcut.
+  r = await cer("post", `/productie/${CP_PESTE2}/partial`, MIHAI, { body: { [`cant_${M1}`]: "150", [`cant_${M2}`]: "20" } });
+  ok = parametri(r).ok || "";
+  bine("la mai multe produse, mesajul numește produsul trecut de comandă", /E cu 50 buc TFP Punga curier peste cât era comandat\. /.test(ok), ok);
+  bine("…și spune că, având folia de făcut, comanda rămâne în producție", /rămâne în producție până o pui pe „Finalizată”/.test(ok), ok);
+  egal("recepția spune și ea, iar restul e încă în lucru", partiale(CP_PESTE2)[0].observatii, "Finalizare parțială din comanda de producție TFP-CP-11, cu 50 buc TFP Punga curier peste cât era comandat; restul e încă în lucru.");
+  egal("agentul află din istoricul clientului, cu tot cu surplus", q(`SELECT descriere FROM interactiuni WHERE partener_id = ${CLIENT} AND descriere LIKE '%TFP-CP-11%' ORDER BY id`).map((x) => x.descriere),
+    ["Producția (Mihai Productie) a trimis în depozit 150 buc TFP Punga curier, 20 kg TFP Folie din comanda de producție TFP-CP-11, cu 50 buc TFP Punga curier peste cât era comandat. Restul e încă în lucru."]);
+  r = await cer("post", `/productie/${CP_PESTE2}/partial`, MIHAI, { body: { [`cant_${M2}`]: "30" } });
+  egal("când pleacă exact restul, istoricul spune că e gata toată", q(`SELECT descriere FROM interactiuni WHERE partener_id = ${CLIENT} AND descriere LIKE '%TFP-CP-11%' ORDER BY id`).map((x) => x.descriere)[1],
+    "Producția (Mihai Productie) a trimis în depozit 30 kg din comanda de producție TFP-CP-11. Cu asta, cantitatea comandată e gata toată.");
+  egal("…și recepția nu mai spune că e ceva în lucru", partiale(CP_PESTE2)[1].observatii, "Finalizare parțială din comanda de producție TFP-CP-11.");
+  s = await sit(CP_PESTE2);
+  egal("situația pe cele două produse: 150 din 100 și 50 din 50, fără rest", s.linii.map((l) => [l.comandat, l.trimis, l.rest]), [[100, 150, 0], [50, 50, 0]]);
+
+  // ------------------------------------------------------------------------
+  console.log("\n10c. „Plecat” e ce a primit depozitul, nu ce s-a anunțat");
+  const linieRec = (rid) => Number(unul(`SELECT id FROM receptii_linii WHERE receptie_id = ${rid} ORDER BY id LIMIT 1`));
+  const primit = (lid) => Number(unul(`SELECT cantitate_primita FROM receptii_linii WHERE id = ${lid}`));
+  r = await cer("post", `/productie/${CP_PRIMIT}/partial`, MIHAI, { body: { cant_0: "400" } });
+  let pp = partiale(CP_PRIMIT);
+  egal("anunțată, nepreluată: contează cu ce a anunțat producția", (await sit(CP_PRIMIT)).linii.map((l) => [l.trimis, l.rest]), [[400, 600]]);
+  r = await cer("post", `/depozit/receptie/${pp[0].id}/linie/${linieRec(pp[0].id)}`, DEP, { body: { cantitate_primita: "430" } });
+  bine("depozitul numără mai mult decât s-a anunțat: rândul se salvează fără motiv", !parametri(r).eroare && primit(linieRec(pp[0].id)) === 430, unde(r));
+  bine("…și spune cât e în plus", /Rând salvat: 30 în plus față de cât s-a anunțat\./.test(parametri(r).ok || ""), parametri(r).ok);
+  egal("numărată, dar încă nefinalizată: tot cu ce s-a anunțat", (await sit(CP_PRIMIT)).linii.map((l) => [l.trimis, l.rest]), [[400, 600]]);
+  let fz = await REC.finalizeaza(Number(pp[0].id), DEP);
+  s = await sit(CP_PRIMIT);
+  egal("preluată: „plecat” e ce a primit depozitul (430), nu ce s-a anunțat (400)", [fz.ok, s.linii.map((l) => [l.trimis, l.rest])], [true, [[430, 570]]]);
+  egal("…iar trimiterea ține minte și cât se anunțase", s.trimiteri.map((t) => t.randuri.map((x) => [x.cantitate, x.anuntat])), [[[430, 400]]]);
+  pag = await cer("get", `/productie/${CP_PRIMIT}`, MIHAI);
+  bine("pagina comenzii scrie 430 buc din 1.000", /430 buc din 1\.000 buc/.test(pag.corp));
+  bine("…și, lângă trimitere, cât se anunțase", /430 buc <span class="mic">\(anunțat 400 buc\)<\/span>/.test(pag.corp), (pag.corp.match(/430 buc[^<]*<[^>]*>[^<]*/) || [])[0]);
+  // A doua trimitere: respinsă de depozit (zero primit, cu motiv).
+  r = await cer("post", `/productie/${CP_PRIMIT}/partial`, MIHAI, { body: { cant_0: "100" } });
+  pp = partiale(CP_PRIMIT);
+  r = await cer("post", `/depozit/receptie/${pp[1].id}/linie/${linieRec(pp[1].id)}`, DEP, { body: { cantitate_primita: "0", motiv: "marfa nu corespunde" } });
+  fz = await REC.finalizeaza(Number(pp[1].id), DEP);
+  egal("recepția respinsă de depozit nu e plecată din comandă", [fz.ok, unul(`SELECT stare FROM receptii_linii WHERE id = ${linieRec(pp[1].id)}`), (await sit(CP_PRIMIT)).linii.map((l) => [l.trimis, l.rest])], [true, "respinsa", [[430, 570]]]);
+  // A treia: primită, dar deteriorată.
+  r = await cer("post", `/productie/${CP_PRIMIT}/partial`, MIHAI, { body: { cant_0: "200" } });
+  pp = partiale(CP_PRIMIT);
+  r = await cer("post", `/depozit/receptie/${pp[2].id}/linie/${linieRec(pp[2].id)}`, DEP, { body: { cantitate_primita: "200", conditie: "deteriorat" } });
+  fz = await REC.finalizeaza(Number(pp[2].id), DEP);
+  egal("nici cea primită deteriorată: tot de făcut rămâne", [fz.ok, (await sit(CP_PRIMIT)).linii.map((l) => [l.trimis, l.rest])], [true, [[430, 570]]]);
+  // Un rând numărat și apoi respins (cantitatea rămâne scrisă pe el): tot neplecat.
+  q(`UPDATE receptii_linii SET cantitate_primita = 100 WHERE id = ${linieRec(pp[1].id)}`);
+  egal("rândul respins nu e plecat nici când are o cantitate scrisă pe el", (await sit(CP_PRIMIT)).linii.map((l) => [l.trimis, l.rest]), [[430, 570]]);
+  // A patra: luată „cum a fost anunțată", dar pe palet se pune mai mult.
+  r = await cer("post", `/productie/${CP_PRIMIT}/partial`, MIHAI, { body: { cant_0: "50" } });
+  pp = partiale(CP_PRIMIT);
+  const lid4 = linieRec(pp[3].id);
+  const gata4 = await require(path.join(RAD, "modules", "gata-productie.js")).receptiaGata(lid4, DEP);
+  egal("luată cum a fost anunțată: 50 primite", [gata4.ok, primit(lid4)], [true, 50]);
+  const CT = require(path.join(RAD, "modules", "ct-park.js"));
+  const nrRec4 = unul(`SELECT numar FROM receptii WHERE id = ${pp[3].id}`);
+  const miscari4 = () => q(`SELECT cantitate, observatii FROM miscari_stoc WHERE produs_id = ${P1} AND document_ref = '${nrRec4}' ORDER BY id`).map((x) => [Number(x.cantitate), x.observatii]);
+  await CT.puneMarfa({ user: DEP }, { produs_id: P1, um: "buc", receptie_id: Number(pp[3].id), receptie_linie_id: lid4 }, [[]], 30);
+  egal("30 din 50 puse pe palet: recepția rămâne la 50", [primit(lid4), miscari4().length], [50, 1]);
+  await CT.puneMarfa({ user: DEP }, { produs_id: P1, um: "buc", receptie_id: Number(pp[3].id), receptie_linie_id: lid4 }, [[]], 30);
+  egal("încă 30, deci 60 pe paleți: recepția ia cantitatea de pe paleți", primit(lid4), 60);
+  egal("…iar diferența intră în mișcările de stoc, sub numărul recepției", miscari4(), [[50, null], [10, "pe paleți e mai mult decât scria recepția: 60 față de 50 buc · Om Depozit"]]);
+  egal("…și comanda de producție arată 490 plecate", (await sit(CP_PRIMIT)).linii.map((l) => [l.trimis, l.rest]), [[490, 510]]);
+  await CT.puneMarfa({ user: DEP }, { produs_id: P1, um: "buc", receptie_id: Number(pp[1].id), receptie_linie_id: linieRec(pp[1].id) }, [[]], 5);
+  egal("pe un rând respins recepția nu se schimbă, orice s-ar pune pe palet", [primit(linieRec(pp[1].id)), (await sit(CP_PRIMIT)).linii.map((l) => l.trimis)], [100, [490]]);
+  pag = await cer("get", "/productie", MIHAI, { query: { q: PREFIX, status: "toate" } });
+  bine("în listă, sub stare: ce a primit depozitul din cele patru trimiteri", /nota-partial[^>]*title="Plecat în depozit prin 4 finalizări parțiale[^"]*">parțial: 490 buc în depozit/.test(rand(CP_PRIMIT)), rand(CP_PRIMIT).slice(-220));
+  r = await cer("post", "/productie/stare", MIHAI, { body: { comanda_id: String(CP_PRIMIT), status: "finalizata" } });
+  egal("la „Finalizată” pleacă restul socotit din ce a primit depozitul: 510", randuri(cp(CP_PRIMIT).receptie_id), [[P1, 510, "buc", null]]);
 
   // ------------------------------------------------------------------------
   console.log("\n11. În browser: alegerea din listă deschide pagina, fără să schimbe starea");

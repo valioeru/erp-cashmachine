@@ -435,6 +435,54 @@ const ziPlus = (n) => new Date(Date.parse(azi() + "T00:00:00Z") + n * 86400000).
   q(`DELETE FROM ct_paleti WHERE aprovizionare_id = 97750`);
   q(`DELETE FROM aprovizionari WHERE id = 97750`);
 
+  // ------------------------------------------------------------------------
+  // Vali, 10.11.2026: „Cantitatea recepționată poate fi mai mare decât cea din
+  // comandă și se salvează cantitatea din recepție."
+  console.log("\n12. A venit mai mult decât era de alocat: cu bifa, se salvează cantitatea scrisă");
+  const RECM = require(path.join(RAD, "modules", "receptie.js"));
+  const rPeste = Number(unul(`INSERT INTO receptii (numar, sursa, data, stare) VALUES ('TGP-PESTE', 'productie', '${azi()}', 'asteptata') RETURNING id`));
+  const lP = Number(unul(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, um, stare) VALUES (${rPeste}, ${P2}, 100, 'buc', 'de_primit') RETURNING id`));
+  const alocaP = (body) => cer("post", `/stocuri/ct-park/gata/receptie/${lP}/aloca`, DEP, { body });
+  const paletiP = (lid) => q(`SELECT cantitate, iesire_plan FROM ct_paleti WHERE receptie_linie_id = ${lid} ORDER BY id`).map((x) => [Number(x.cantitate), x.iesire_plan]);
+  const primitP = (lid) => Number(unul(`SELECT cantitate_primita FROM receptii_linii WHERE id = ${lid}`));
+  const ramasP = async (lid) => ((await GP.lista()).find((x) => x.fel === "receptie" && x.id === lid) || {}).ramas;
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP);
+  const formP = (() => { const i = pag.corp.indexOf(`action="/stocuri/ct-park/gata/receptie/${lP}/aloca"`); return i < 0 ? "" : pag.corp.slice(i, pag.corp.indexOf("</form>", i)); })();
+  bine("formularul de alocare are bifa „a venit mai mult”", /<input type="checkbox" name="peste" value="1"/.test(formP) && /a venit mai mult decât scrie aici — se salvează cantitatea pe care o scriu/.test(formP), formP.slice(-420));
+  r = await alocaP({ q_client: "70", comanda_id: String(CMD_SPLIT), q_fulfillment: "50" });
+  bine("120 din 100, fără bifă: mesajul spune ce să faci, nimic făcut", /Ai împărțit 120 buc, dar sunt de alocat doar 100 buc\. Dacă a venit mai mult, bifează „a venit mai mult” și trimite din nou: se salvează cantitatea scrisă de tine\./.test(parametri(r).gata_eroare || "") && paletiP(lP).length === 0, unde(r));
+  r = await alocaP({ q_client: "70", comanda_id: String(CMD_SPLIT), q_fulfillment: "50", peste: "0" });
+  bine("o bifă cu altă valoare decât „1” nu e bifă", /sunt de alocat doar 100 buc/.test(parametri(r).gata_eroare || "") && paletiP(lP).length === 0, unde(r));
+  r = await alocaP({ q_client: "70", comanda_id: String(CMD_SPLIT), q_fulfillment: "50", peste: "1" });
+  egal("cu bifa: 70 la client și 50 în fulfillment", paletiP(lP), [[70, "comanda"], [50, "fulfillment"]]);
+  egal("…recepția ia cantitatea de pe paleți (120 din 100 anunțate), iar rândul iese din listă", [primitP(lP), await ramasP(lP)], [120, undefined]);
+  // Livrarea directă, chemată ca funcție: peste rest doar cu „peste” și cu o cantitate.
+  let ld = await RECM.livrareDirecta(DEP, rPeste, lP, "fulfillment", "", "5");
+  bine("când totul e pus, livrarea directă e refuzată", /deja pus în CT-Park sau plecat/.test(ld.eroare || "") && paletiP(lP).length === 2, JSON.stringify(ld));
+  ld = await RECM.livrareDirecta(DEP, rPeste, lP, "fulfillment", "", null, { peste: true });
+  bine("…și cu „peste”, dar fără cantitate: tot refuzată, n-are ce pleca", /deja pus în CT-Park sau plecat/.test(ld.eroare || "") && paletiP(lP).length === 2, JSON.stringify(ld));
+  ld = await RECM.livrareDirecta(DEP, rPeste, lP, "fulfillment", "", "5", { peste: true });
+  egal("…cu „peste” și cu o cantitate: pleacă, iar recepția urcă la 125", [ld.ok, ld.cantitate, paletiP(lP).length, primitP(lP)], [true, 5, 3, 125]);
+  // Partea de raft: Intrarea se deschide cu cantitatea scrisă, nu cu restul.
+  const rPeste2 = Number(unul(`INSERT INTO receptii (numar, sursa, data, stare) VALUES ('TGP-PESTE2', 'productie', '${azi()}', 'asteptata') RETURNING id`));
+  const lP2 = Number(unul(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, um, stare) VALUES (${rPeste2}, ${P2}, 40, 'buc', 'de_primit') RETURNING id`));
+  r = await cer("post", `/stocuri/ct-park/gata/receptie/${lP2}/aloca`, DEP, { body: { q_raft: "55" } });
+  bine("55 pe raft din 40, fără bifă: mesaj", /Ai împărțit 55 buc, dar sunt de alocat doar 40 buc/.test(parametri(r).gata_eroare || ""), unde(r));
+  r = await cer("post", `/stocuri/ct-park/gata/receptie/${lP2}/aloca`, DEP, { body: { q_raft: "55", peste: "1" } });
+  egal("cu bifa: se deschide Intrarea, cu cantitatea scrisă și cu semnul că e peste", unde(r), `/stocuri/ct-park/intrare?receptie_linie=${lP2}&cantitate=55&peste=1`);
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP, { query: parametri(r) });
+  bine("…completată cu 55, nu cu 40", /name="loc_cantitate\[\]" value="55"/.test(pag.corp), (pag.corp.match(/name="loc_cantitate\[\]"[^>]*/) || [])[0]);
+  bine("…și spune că e mai mult decât a rămas din rând", /Pe raft pui acum <strong>55 buc<\/strong>, mai mult decât a rămas din rând: recepția ia cantitatea de pe paleți\./.test(pag.corp));
+  // Livrarea directă, chemată fără „peste": cantitatea cerută nu trece de ce a rămas.
+  ld = await RECM.livrareDirecta(DEP, rPeste2, lP2, "fulfillment", "", "41");
+  bine("livrarea directă fără „peste”: 41 din 40 e refuzat, fără palet", /Mai sunt doar 40 buc de alocat pe rândul ăsta/.test(ld.eroare || "") && paletiP(lP2).length === 0, JSON.stringify(ld));
+  ld = await RECM.livrareDirecta(DEP, rPeste2, lP2, "fulfillment", "", "41", { peste: false });
+  bine("…la fel cu „peste” stins", /Mai sunt doar 40 buc/.test(ld.eroare || "") && paletiP(lP2).length === 0, JSON.stringify(ld));
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(lP2), cantitate: "55" } });
+  bine("fără semn, cantitatea venită din alocare rămâne cel mult restul", /name="loc_cantitate\[\]" value="40"/.test(pag.corp) && !/mai mult decât a rămas din rând/.test(pag.corp), (pag.corp.match(/name="loc_cantitate\[\]"[^>]*/) || [])[0]);
+  pag = await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(lP2), cantitate: "25", peste: "1" } });
+  bine("sub rest, semnul nu schimbă nimic: 25, cu restul rămas în listă", /name="loc_cantitate\[\]" value="25"/.test(pag.corp) && /Pe raft pui acum <strong>25 buc<\/strong>; restul rămâne/.test(pag.corp) && !/mai mult decât a rămas din rând/.test(pag.corp));
+
   curata();
   console.log(esecuri ? `\n${esecuri} EȘECURI` : "\nTOATE BUNE");
   process.exit(esecuri ? 1 : 0);

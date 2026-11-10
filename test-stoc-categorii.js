@@ -129,9 +129,9 @@ function bine(descriere, conditie, detaliu) {
 const egal = (d, a, b) => bine(d + " = " + JSON.stringify(b), JSON.stringify(a) === JSON.stringify(b), JSON.stringify(a));
 
 // ---- datele de test ------------------------------------------------------
-const A = 96201, B = 96202, C = 96203, D = 96204, E = 96205;
+const A = 96201, B = 96202, C = 96203, D = 96204, E = 96205, F = 96206;
 const PREFIX = "TSK";
-const PRODUSE = [A, B, C, D, E];
+const PRODUSE = [A, B, C, D, E, F];
 const SC = require(path.join(RAD, "lib", "stoc-categorii.js"));
 const SP = require(path.join(RAD, "lib", "stoc-produse.js"));
 const CT = require(path.join(RAD, "modules", "ct-park.js"));
@@ -178,7 +178,8 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
        (${B}, 'TSK-B', '${PREFIX} Folie B', 'kg', '${PREFIX} Folie stretch', 1),
        (${C}, 'TSK-C', '${PREFIX} Banda C', 'buc', 'diverse', 1),
        (${D}, 'TSK-D', '${PREFIX} Granule D', 'kg', '${PREFIX} Granule', 1),
-       (${E}, 'TSK-E', '${PREFIX} Nou E', 'buc', NULL, 1)`);
+       (${E}, 'TSK-E', '${PREFIX} Nou E', 'buc', NULL, 1),
+       (${F}, 'TSK-F', '${PREFIX} Jumbo F', 'kg', NULL, 1)`);
   const PA1 = palet(A, 100, "buc", null);
   const PA2 = palet(A, 50, "buc", null);
   const PA_IESIT = palet(A, 30, "buc", null, { iesit: true });
@@ -240,6 +241,19 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
   q(`UPDATE ct_paleti SET categorie = NULL WHERE id = ${PA2}`);
   r = await SC.seteaza(A, { tip: "materie primă" }, ADMIN);
   egal("aceeași categorie, dar un palet gol: paletul se completează și jurnalul o ține minte", [catPalet(PA2), r.paleti, jurnal(A).slice(-1)], ["materie primă", 1, [["categorie_depozit", "materie primă", "materie primă", 1, "Vali Test"]]]);
+  // Paleții puși pe raft fără cantitate (se scrie după numărare) sunt tot ai
+  // produsului de pe ei. Pe 10.11.2026, la încadrarea de pe live, 24 de asemenea
+  // paleți au rămas fără categorie: regula se uita doar la liniile cu cantitate.
+  const PF_PLIN = palet(F, 800, "kg", null);
+  const PF_ZERO = palet(F, 0, "kg", null); // linia e scrisă, cu zero
+  const PF_FARA_LINIE = Number(unul(`INSERT INTO ct_paleti (cod, produs_id, um, data_intrare) VALUES ('${PREFIX}-PAL-GOL', ${F}, 'kg', '${azi()}') RETURNING id`));
+  const PF_ALTUL = palet(F, 0, "kg", null, { linii: [[E, 7]] }); // golit de F, a rămas pe el alt produs
+  const PF_ZERO_CU_CAT = palet(F, 0, "kg", "produse finite");
+  r = await SC.seteaza(F, { tip: "materie primă" }, ADMIN, { doarGoi: true });
+  egal("paletul cu marfă, cel fără cantitate și cel fără nicio linie primesc categoria produsului", [catPalet(PF_PLIN), catPalet(PF_ZERO), catPalet(PF_FARA_LINIE), r.paleti], ["materie primă", "materie primă", "materie primă", 3]);
+  egal("…dar nu și paletul pe care a rămas doar alt produs, nici (cu „doar goi”) cel care are deja o categorie", [catPalet(PF_ALTUL), catPalet(PF_ZERO_CU_CAT)], [null, "produse finite"]);
+  r = await SC.seteaza(F, { tip: "produse intermediare" }, ADMIN);
+  egal("fără „doar goi”, paletul fără cantitate cu altă categorie o ia pe cea nouă", [catPalet(PF_ZERO_CU_CAT), catPalet(PF_ALTUL), r.paleti], ["produse intermediare", null, 4]);
   egal("cele patru categorii simple", SC.TIPURI, ["produse finite", "produse intermediare", "consumabile", "materie primă"]);
 
   // ------------------------------------------------------------------------

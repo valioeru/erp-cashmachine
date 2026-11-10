@@ -143,7 +143,7 @@ const azi = () => new Date().toLocaleString("sv-SE", { timeZone: "Europe/Buchare
 
 // ---- datele de test ------------------------------------------------------
 const PREFIX = "TSC";
-const P1 = 97801, P2 = 97802, P3 = 97803;
+const P1 = 97801, P2 = 97802, P3 = 97803, P4 = 97804;
 const CLIENT = 97811, FURNIZOR = 97812;
 const CMD = 97821, CMD2 = 97822;
 const CP = 97831;
@@ -164,7 +164,7 @@ function receptiiMele() {
 }
 function curata() {
   const r = receptiiMele().join(",") || "0";
-  const pal = q(`SELECT id FROM ct_paleti WHERE produs_id IN (${P1}, ${P2}, ${P3}) OR receptie_id IN (${r}) OR aprovizionare_id = ${A_GATA}`).map((x) => Number(x.id));
+  const pal = q(`SELECT id FROM ct_paleti WHERE produs_id IN (${P1}, ${P2}, ${P3}, ${P4}) OR receptie_id IN (${r}) OR aprovizionare_id = ${A_GATA}`).map((x) => Number(x.id));
   const p = pal.join(",") || "0";
   q(`DELETE FROM ct_tipar WHERE creat_de IN ('${DEPOZIT.nume}', '${PREFIX} vechi')`);
   q(`DELETE FROM ct_iesiri_linii WHERE iesire_id IN (SELECT id FROM ct_iesiri WHERE palet_id IN (${p}))`);
@@ -175,19 +175,19 @@ function curata() {
   q(`DELETE FROM ct_paleti WHERE id IN (${p})`);
   q(`DELETE FROM ct_locuri WHERE rand_id = ${RAND}`);
   q(`DELETE FROM ct_randuri WHERE id = ${RAND}`);
-  q(`DELETE FROM miscari_stoc WHERE produs_id IN (${P1}, ${P2}, ${P3})`);
-  q(`DELETE FROM stoc_locuri WHERE receptie_id IN (${r}) OR produs_id IN (${P1}, ${P2}, ${P3})`);
+  q(`DELETE FROM miscari_stoc WHERE produs_id IN (${P1}, ${P2}, ${P3}, ${P4})`);
+  q(`DELETE FROM stoc_locuri WHERE receptie_id IN (${r}) OR produs_id IN (${P1}, ${P2}, ${P3}, ${P4})`);
   q(`DELETE FROM receptii_linii_locuri WHERE linie_id IN (SELECT id FROM receptii_linii WHERE receptie_id IN (${r}))`);
   q(`DELETE FROM receptii_linii WHERE receptie_id IN (${r})`);
   q(`DELETE FROM receptii WHERE id IN (${r})`);
   q(`DELETE FROM comenzi_productie_linii WHERE comanda_id = ${CP}`);
   q(`DELETE FROM comenzi_productie WHERE id = ${CP}`);
-  q(`DELETE FROM aprovizionari WHERE id = ${A_GATA} OR produs_id IN (${P1}, ${P2}, ${P3})`);
-  q(`DELETE FROM rezervari_stoc WHERE produs_id IN (${P1}, ${P2}, ${P3})`);
+  q(`DELETE FROM aprovizionari WHERE id = ${A_GATA} OR produs_id IN (${P1}, ${P2}, ${P3}, ${P4})`);
+  q(`DELETE FROM rezervari_stoc WHERE produs_id IN (${P1}, ${P2}, ${P3}, ${P4})`);
   try { q(`DELETE FROM comenzi_istoric WHERE comanda_id IN (${CMD}, ${CMD2})`); } catch (_) { /* tabela poate lipsi */ }
   q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${CMD}, ${CMD2})`);
   q(`DELETE FROM comenzi WHERE id IN (${CMD}, ${CMD2})`);
-  q(`DELETE FROM produse WHERE id IN (${P1}, ${P2}, ${P3})`);
+  q(`DELETE FROM produse WHERE id IN (${P1}, ${P2}, ${P3}, ${P4})`);
   q(`DELETE FROM interactiuni WHERE partener_id IN (${CLIENT}, ${FURNIZOR})`);
   q(`DELETE FROM parteneri WHERE id IN (${CLIENT}, ${FURNIZOR})`);
 }
@@ -284,7 +284,8 @@ async function ruleaza() {
   const rGol = await cer("post", `/depozit/receptie/${REC_F}/paleti`, DEPOZIT, { body: { [`paleti_${RL_F}`]: "" } });
   bine("nimic scris: eroare, fără paleți", /eroare=/.test(unde(rGol)) && paletiFaraLoc(P1).length === 0, unde(rGol));
   const rPrea = await cer("post", `/depozit/receptie/${REC_F}/paleti`, DEPOZIT, { body: { [`paleti_${RL_F}`]: "600 + 600" } });
-  bine("600 + 600 din 1000: refuzat, fără paleți", /eroare=/.test(unde(rPrea)) && /doar 1\.000 kg/.test(parametri(rPrea).eroare || "") && paletiFaraLoc(P1).length === 0, unde(rPrea));
+  bine("600 + 600 din 1000, fără bifă: întreabă, fără paleți", /eroare=/.test(unde(rPrea)) && /Ai scris 1\.200 kg, dar mai erau de pus 1\.000 kg — cu 200 kg mai mult\./.test(parametri(rPrea).eroare || "") && paletiFaraLoc(P1).length === 0, unde(rPrea));
+  bine("…și spune cum se confirmă pe pagina recepției", /bifează „pe paleți e mai mult decât s-a numărat” și trimite din nou/.test(parametri(rPrea).eroare || ""), parametri(rPrea).eroare);
   const rPal = await cer("post", `/depozit/receptie/${REC_F}/paleti`, DEPOZIT, { body: { [`paleti_${RL_F}`]: "400 + 400" } });
   const facuti = paletiFaraLoc(P1);
   egal("400 + 400: doi paleți de 400, fără loc", facuti.map((p) => Number(p.cantitate)), [400, 400]);
@@ -418,7 +419,8 @@ async function ruleaza() {
   const direct = await SC.faPaleti(DEPOZIT, `r${RL_P}`, [10, 10], [L(2, 2, 2)]);
   bine("doi paleți pe același loc nu se fac nici chemat de-a dreptul", /un singur palet/.test(direct.eroare || "") && nrP2() === 3, JSON.stringify(direct));
   const ePrea = await peRand(`r${RL_P}`, { actiune: "loc", cant: "999", locuri: String(L(2, 2, 2)) });
-  bine("mai mult decât a rămas: refuzat", /mai sunt de pus doar 150 buc/.test(parametri(ePrea).eroare || "") && nrP2() === 3, unde(ePrea));
+  bine("mai mult decât a rămas: întâi întreabă, fără palet", /Ai scris 999 buc, dar mai erau de pus 150 buc — cu 849 buc mai mult\./.test(parametri(ePrea).eroare || "") && nrP2() === 3, unde(ePrea));
+  egal("…ține minte locul, cantitatea și suma de confirmat", [parametri(ePrea).loc, parametri(ePrea).cant, parametri(ePrea).peste], [String(L(2, 2, 2)), "999", "999"]);
   const propP2 = (await cer("get", `${BAZA}/intrare/rand/r${RL_P}`, DEPOZIT)).corp;
   bine("locul propus pentru restul: lângă același produs", /lângă același produs/.test((propP2.match(/class="sc-propus"[\s\S]*?<\/a>/) || [""])[0]), (propP2.match(/class="sc-propus"[\s\S]*?<\/a>/) || [""])[0]);
 
@@ -670,4 +672,95 @@ async function ruleaza() {
   } finally {
     await br.close();
   }
+
+  // ------------------------------------------------------------------------
+  // Vali, 10.11.2026: „Cantitatea recepționată poate fi mai mare decât cea din
+  // comandă și se salvează cantitatea din recepție."
+  console.log("\n15. Mai mult decât era de pus: scanerul întreabă o dată, apoi face paletul");
+  const GP = require(path.join(RAD, "lib", "gata-productie.js"));
+  egal("după ieșirea parțială de 50 kg din paletul făcut la recepție, rândul recepției nu reapare ca „de pus”",
+    [await SC.randDeAsezat(`r${RL_F}`), (await GP.receptiiFurnizori()).filter((x) => x.id === RL_F).length], [null, 0]);
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${P4}, '${PREFIX}-P4', '${PREFIX} Sac menaj', 'buc')`);
+  const receptieNoua = (numar, sursa, stare) => Number(unul(`INSERT INTO receptii (numar, sursa, partener_id, data, stare, finalizata_la) VALUES ('${PREFIX}-${numar}', '${sursa}', ${sursa === "furnizor" ? FURNIZOR : "NULL"}, '${azi()}', '${stare}', ${stare === "finalizata" ? "'" + azi() + " 09:00:00'" : "NULL"}) RETURNING id`));
+  const linieNoua = (rid, anuntat, primit) => Number(unul(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, cantitate_primita, um, stare, conditie) VALUES (${rid}, ${P4}, ${anuntat}, ${primit == null ? "NULL" : primit}, 'buc', '${primit == null ? "de_primit" : "primita"}', ${primit == null ? "NULL" : "'bun'"}) RETURNING id`));
+  const paletiRand = (lid) => q(`SELECT cantitate, cantitate_intrare FROM ct_paleti WHERE receptie_linie_id = ${lid} ORDER BY id`).map((p) => [Number(p.cantitate), Number(p.cantitate_intrare)]);
+  const primitPe = (lid) => Number(unul(`SELECT cantitate_primita FROM receptii_linii WHERE id = ${lid}`));
+  const miscariRec = (numar) => q(`SELECT cantitate FROM miscari_stoc WHERE produs_id = ${P4} AND document_ref = '${PREFIX}-${numar}' ORDER BY id`).map((x) => Number(x.cantitate));
+  // Din producție, anunțată cu 100 buc, încă nenumărată.
+  const REC_X = receptieNoua("REC-X", "productie", "asteptata");
+  const RL_X = linieNoua(REC_X, 100, null);
+  await peRand(`r${RL_X}`, { actiune: "paleti", cant: "60" });
+  egal("60 din 100 pe un palet: rămân 40 de pus, recepția arată 100", [paletiRand(RL_X), primitPe(RL_X), (await SC.randDeAsezat(`r${RL_X}`)).ramas], [[[60, 60]], 100, 40]);
+  const x1 = await peRand(`r${RL_X}`, { actiune: "paleti", cant: "65" });
+  bine("65 când mai erau 40 de pus: scanerul întreabă, nu face paletul", adresa(x1).pathname === `${BAZA}/intrare/rand/r${RL_X}` && /^Ai scris 65 buc, dar mai erau de pus 40 buc — cu 25 buc mai mult\. /.test(parametri(x1).eroare || "") && paletiRand(RL_X).length === 1, unde(x1));
+  bine("…spune cum se confirmă", /Dacă atât e pe palet, apasă încă o dată: se salvează cantitatea de pe palet\.$/.test(parametri(x1).eroare || ""), parametri(x1).eroare);
+  egal("…ține minte ce a scris omul și suma de confirmat", [parametri(x1).cant, parametri(x1).peste], ["65", "65"]);
+  const pagX = await cer("get", `${BAZA}/intrare/rand/r${RL_X}`, DEPOZIT, { query: parametri(x1) });
+  bine("pagina întoarsă are confirmarea ascunsă, cu aceeași sumă, și cantitatea scrisă de om", /name="confirma_peste" value="65"/.test(pagX.corp) && /name="cant"[^>]*value="65"/.test(pagX.corp) && /sc-flash rau/.test(pagX.corp));
+  bine("pagina deschisă normal n-are nicio confirmare", !/confirma_peste/.test((await cer("get", `${BAZA}/intrare/rand/r${RL_X}`, DEPOZIT)).corp));
+  const x2 = await peRand(`r${RL_X}`, { actiune: "paleti", cant: "650", confirma_peste: "65" });
+  bine("altă cantitate decât cea confirmată (650, un zero în plus): întreabă din nou", /^Ai scris 650 buc, dar mai erau de pus 40 buc — cu 610 buc mai mult\. /.test(parametri(x2).eroare || "") && parametri(x2).peste === "650" && paletiRand(RL_X).length === 1, unde(x2));
+  const x2b = await peRand(`r${RL_X}`, { actiune: "paleti", cant: "30 + 35" });
+  bine("doi paleți care trec împreună de rest: întreabă la plural", /cu 25 buc mai mult\. Dacă atât e pe paleți, apasă încă o dată: se salvează cantitatea de pe paleți\.$/.test(parametri(x2b).eroare || "") && parametri(x2b).peste === "65" && paletiRand(RL_X).length === 1, parametri(x2b).eroare);
+  const x3 = await peRand(`r${RL_X}`, { actiune: "paleti", cant: "65", confirma_peste: "65" });
+  egal("a doua apăsare, cu aceeași cantitate: paletul de 65 se face", paletiRand(RL_X), [[60, 60], [65, 65]]);
+  bine("…mesajul spune că e peste și că s-a salvat cantitatea de pe palet", adresa(x3).pathname === `${BAZA}/intrare` && /Un palet făcut/.test(parametri(x3).ok || "") && /E cu 25 buc peste cât era de pus: s-a salvat cantitatea de pe palet\.$/.test(parametri(x3).ok || ""), parametri(x3).ok);
+  egal("recepția ia cantitatea de pe paleți: 125 primite, 100 anunțate", [primitPe(RL_X), Number(unul(`SELECT cantitate_asteptata FROM receptii_linii WHERE id = ${RL_X}`))], [125, 100]);
+  egal("…iar diferența e în mișcările de stoc, sub numărul recepției", miscariRec("REC-X"), [100, 25]);
+  bine("rândul nu mai e de pus", (await SC.randDeAsezat(`r${RL_X}`)) === null && /nu mai e de pus/.test(parametri(await cer("get", `${BAZA}/intrare/rand/r${RL_X}`, DEPOZIT)).eroare || ""));
+  const x4 = await peRand(`r${RL_X}`, { actiune: "paleti", cant: "10", confirma_peste: "10" });
+  bine("după ce tot rândul are palet nu se mai face altul, nici confirmat", /are deja palet/.test(parametri(x4).eroare || "") && paletiRand(RL_X).length === 2, unde(x4));
+  // Cu loc scanat: un singur palet, cu mai mult decât era de pus.
+  const REC_Y = receptieNoua("REC-Y", "productie", "asteptata");
+  const RL_Y = linieNoua(REC_Y, 50, null);
+  const locLiber = Number(unul(`SELECT l.id FROM ct_locuri l WHERE l.rand_id = ${RAND} AND COALESCE(l.blocat, 0) = 0
+      AND NOT EXISTS (SELECT 1 FROM ct_ocupari o JOIN ct_paleti p ON p.id = o.palet_id AND p.data_iesire IS NULL WHERE o.loc_id = l.id) ORDER BY l.id LIMIT 1`));
+  const adresaLibera = unul(`SELECT adresa FROM ct_locuri WHERE id = ${locLiber}`);
+  const y1 = await peRand(`r${RL_Y}`, { actiune: "loc", cant: "80", locuri: String(locLiber) });
+  egal("cu loc scanat: întâi întreabă și păstrează locul", [parametri(y1).peste, parametri(y1).loc, paletiRand(RL_Y).length], ["80", String(locLiber), 0]);
+  const y2 = await peRand(`r${RL_Y}`, { actiune: "loc", cant: "80", locuri: String(locLiber), confirma_peste: "80" });
+  const palY = q(`SELECT id, cantitate FROM ct_paleti WHERE receptie_linie_id = ${RL_Y}`)[0] || {};
+  egal("confirmat: paletul de 80 e pe locul scanat, recepția arată 80", [Number(palY.cantitate), locurilePaletului(palY.id), primitPe(RL_Y), miscariRec("REC-Y")], [80, [adresaLibera], 80, [50, 30]]);
+  bine("…terminalul se întoarce la intrare (rândul e gata), cu mesajul întreg", adresa(y2).pathname === `${BAZA}/intrare` && new RegExp(` e pe ${adresaLibera}\\. Eticheta lui e la tipărit\\. E cu 30 buc peste cât era de pus: s-a salvat cantitatea de pe palet\\.$`).test(parametri(y2).ok || ""), parametri(y2).ok);
+  // Pagina recepției de la furnizor: formularul de paleți, cu bifa.
+  const REC_Z = receptieNoua("REC-Z", "furnizor", "finalizata");
+  const RL_Z = linieNoua(REC_Z, 200, 200);
+  const z1 = await cer("post", `/depozit/receptie/${REC_Z}/paleti`, DEPOZIT, { body: { [`paleti_${RL_Z}`]: "150 + 100" } });
+  bine("pagina recepției, 150 + 100 din 200, fără bifă: întreabă, fără paleți", /Ai scris 250 buc, dar mai erau de pus 200 buc — cu 50 buc mai mult\. Dacă a venit mai mult, bifează/.test(parametri(z1).eroare || "") && paletiRand(RL_Z).length === 0, unde(z1));
+  const pagZ = (await cer("get", `/depozit/receptie/${REC_Z}`, DEPOZIT)).corp;
+  bine("formularul are bifa, cu ce face", /<input type="checkbox" name="peste" value="1"/.test(pagZ) && /se salvează cantitatea de pe paleți/.test(pagZ));
+  const z2 = await cer("post", `/depozit/receptie/${REC_Z}/paleti`, DEPOZIT, { body: { [`paleti_${RL_Z}`]: "150 + 100", peste: "1" } });
+  egal("cu bifa: doi paleți, de 150 și de 100, și etichetele lor", [paletiRand(RL_Z), /^\/stocuri\/ct-park\/etichete\?paleti=\d+,\d+$/.test(unde(z2))], [[[150, 150], [100, 100]], true]);
+  egal("…iar recepția de la furnizor arată 250 primite", [primitPe(RL_Z), miscariRec("REC-Z")], [250, [50]]);
+  const pagZ2 = (await cer("get", `/depozit/receptie/${REC_Z}`, DEPOZIT)).corp;
+  bine("pagina recepției: 250 primite, +50 față de anunțat, tot pus, fără „pus mai mult decât a venit”", /<strong>250<\/strong>/.test(pagZ2) && /badge galben">\+50</.test(pagZ2) && /tot pus/.test(pagZ2) && !/mai mult decât a venit/.test(pagZ2));
+  // Chemat de-a dreptul: fără confirmare întoarce întrebarea, cu cifrele ei.
+  const REC_W = receptieNoua("REC-W", "furnizor", "finalizata");
+  const RL_W = linieNoua(REC_W, 20, 20);
+  const d1 = await SC.faPaleti(DEPOZIT, `r${RL_W}`, [12, 18], []);
+  egal("chemat fără confirmare: nu face paleți și întoarce cifrele", [d1.ok, d1.peste, paletiRand(RL_W).length], [undefined, { total: 30, ramas: 20, cu: 10, um: "buc", paleti: 2 }, 0]);
+  egal("o confirmare cu altă sumă, goală sau zero nu e confirmare", [
+    Boolean((await SC.faPaleti(DEPOZIT, `r${RL_W}`, [12, 18], [], { confirmaPeste: "29.9" })).peste),
+    Boolean((await SC.faPaleti(DEPOZIT, `r${RL_W}`, [12, 18], [], { confirmaPeste: "" })).peste),
+    Boolean((await SC.faPaleti(DEPOZIT, `r${RL_W}`, [12, 18], [], { confirmaPeste: 0 })).peste),
+    Boolean((await SC.faPaleti(DEPOZIT, `r${RL_W}`, [12, 18], [], { peste: "1" })).peste),
+    paletiRand(RL_W).length,
+  ], [true, true, true, true, 0]);
+  const d2 = await SC.faPaleti(DEPOZIT, `r${RL_W}`, [12, 18], [], { peste: true });
+  egal("cu `peste: true` (bifa din formulare): paleții se fac", [d2.ok, d2.ids.length, d2.ramas, d2.peste, d2.um, primitPe(RL_W)], [true, 2, 0, 10, "buc", 30]);
+  const d3 = await SC.faPaleti(DEPOZIT, `r${RL_X}`, [5], [], { peste: true });
+  bine("un rând deja pus tot nu primește alt palet nici așa", /are deja palet/.test(d3.eroare || "") && !d3.peste, JSON.stringify(d3));
+  // Sub rest și exact restul: nicio întrebare, recepția neatinsă.
+  const REC_V = receptieNoua("REC-V", "furnizor", "finalizata");
+  const RL_V = linieNoua(REC_V, 90, 90);
+  const v1 = await SC.faPaleti(DEPOZIT, `r${RL_V}`, [40], []);
+  const v2 = await SC.faPaleti(DEPOZIT, `r${RL_V}`, [50], []);
+  egal("sub rest, apoi exact restul: fără întrebare, fără „peste”, recepția rămâne la 90", [v1.ok, v1.ramas, v1.peste, v2.ok, v2.ramas, v2.peste, primitPe(RL_V), miscariRec("REC-V")], [true, 50, 0, true, 0, 0, 90, []]);
+  // Cererea depozitului (fără recepție): la fel, cu confirmare.
+  const cerereInainte = await GP.cerere(A_GATA);
+  const c1 = await peRand(`c${A_GATA}`, { actiune: "paleti", cant: String(cerereInainte.ramas + 5) });
+  bine("cererea depozitului: peste ce a rămas, întâi întreabă", parametri(c1).peste === String(cerereInainte.ramas + 5) && (await GP.cerere(A_GATA)).pus === cerereInainte.pus, unde(c1));
+  const c2 = await peRand(`c${A_GATA}`, { actiune: "paleti", cant: String(cerereInainte.ramas + 5), confirma_peste: String(cerereInainte.ramas + 5) });
+  const cerereDupa = await GP.cerere(A_GATA);
+  egal("…confirmat: paletul se face, iar din cerere nu mai rămâne nimic", [/E cu 5 buc peste cât era de pus/.test(parametri(c2).ok || ""), cerereDupa.pus - cerereInainte.pus, cerereDupa.ramas], [true, cerereInainte.ramas + 5, 0]);
 }
