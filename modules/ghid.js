@@ -424,7 +424,10 @@ const GHID = [
 "p":[
 "Asta e lista de comenzi a firmei, aceeași pe care o țineam în Excel, cu <b>exact aceleași coloane</b>: nr. comandă, client, reprezentant, produs, caracteristici, cantitate, UM, tip ambalare, data plasării, data livrării, stare, DoC, fișă tehnică, facturat, rețetă, observații.",
 "Tabelul se derulează lateral (are șaisprezece coloane) și <b>orice coloană se sortează</b> cu un click pe capul ei. Sus sunt cifrele: câte sunt în producție, câte finalizate, câte facturate și câte au trecut de termenul de livrare — alea din urmă apar cu data pe roșu.",
-"Mai jos, sub tabel, e <b>„Comenzi spre alocare”</b>: ce e deschis și n-a fost încă pus pe nicio mașină. Aia e întrebarea de dimineață — nu „ce lucrăm”, ci „ce n-are încă cine și pe ce să lucreze”."
+"Mai jos, sub tabel, e <b>„Comenzi spre alocare”</b>: ce e deschis și n-a fost încă pus pe nicio mașină. Aia e întrebarea de dimineață — nu „ce lucrăm”, ci „ce n-are încă cine și pe ce să lucreze”.",
+"Când o parte din comandă e gata înaintea restului, alege la stare <b>„Finalizată parțial…”</b> și scrie cât s-a terminat. Partea aceea pleacă în depozit, la „Gata din producție — de alocat”, iar comanda rămâne în producție până o pui pe „Finalizată”; atunci pleacă doar restul. Sub stare scrie cât a plecat deja.",
+"Pe pagina comenzii, în caseta <b>„Materia primă”</b>, alegi din ce se face comanda: din stocul CT-Park, din catalog sau scris de mână. Dedesubt e furnizorul materialului, care se completează singur când materia e pe stoc de la un singur furnizor.",
+"La <b>„Alocă pe un utilaj”</b> scrii totalul de ore, iar ERP-ul îl împarte pe zilele libere ale utilajului, după „ore pe zi” și după ce e deja alocat pe el. Împărțirea se vede înainte să salvezi."
 ],
 "pasi":[],
 "sfat":"Data livrării scrisă cu roșu înseamnă că a trecut termenul și comanda e încă deschisă."

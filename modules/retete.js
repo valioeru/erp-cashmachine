@@ -439,7 +439,8 @@ function register(router) {
       .get(ctx.params.id);
     if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
 
-    const cant = Number(String(c.cantitate || "").replace(/[^\d.,-]/g, "").replace(",", ".")) || 0;
+    // Aceeași citire ca la cost și la recepție: „67,200" sunt 67.200 de bucăți.
+    const cant = require("../lib/cantitate-text").citesteCantitate(c.cantitate, c.um);
     const capTabel = `
       <div class="toolbar">
         <a class="btn secondary" href="/productie/${c.id}">← Înapoi la comandă</a>

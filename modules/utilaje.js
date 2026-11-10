@@ -26,6 +26,8 @@ const { send, redirect } = require("../lib/router");
 const PLAN = require("../lib/plan-lunar");
 const drive = require("../lib/drive");
 const SCH = require("../lib/schimburi");
+// Împărțirea orelor unei comenzi pe zilele libere ale utilajului (10.11.2026).
+const AZ = require("../lib/alocare-zile");
 const PROG = require("./program");
 
 const nr = (v) => Number(v || 0);
@@ -71,14 +73,11 @@ function cant(v) {
   return n.toLocaleString("ro-RO", { maximumFractionDigits: 2 });
 }
 
-// Cantitatea din comenzi e text liber („1.200", „1200 kg", „12,5"). Ce nu se
-// poate citi ca număr rămâne necunoscut — mai bine fără estimare decât cu una
-// inventată.
-function cantitateDin(text) {
-  const s = String(text || "").replace(/\s/g, "").replace(/\.(?=\d{3}(?!\d))/g, "").replace(",", ".");
-  const m = s.match(/-?\d+(\.\d+)?/);
-  return m ? Number(m[0]) : 0;
-}
+// Cantitatea din comenzi e text liber („1.200", „67,200", „1200 kg", „12,5").
+// Ce nu se poate citi ca număr rămâne necunoscut — mai bine fără estimare decât
+// cu una inventată. Citirea e cea comună (lib/cantitate-text.js): „67,200" era
+// citit aici 67,2, iar estimarea ieșea de o mie de ori mai scurtă.
+const cantitateDin = require("../lib/cantitate-text").citesteCantitate;
 
 const NIVELURI = [
   [1, "învață"],
@@ -179,7 +178,7 @@ function potriveste(cap, comanda) {
 function estimeaza(comenzi, caps) {
   const harta = new Map();
   for (const c of comenzi) {
-    const q = cantitateDin(c.cantitate);
+    const q = cantitateDin(c.cantitate, c.um);
     const variante = [];
     for (const cap of caps) {
       if (!potriveste(cap, c)) continue;
@@ -249,6 +248,29 @@ async function incarcareResurse(deLa, panaLa) {
   const h = new Map();
   for (const r of randuri) h.set(`${r.resursa_id}|${r.data}`, nr(r.ore));
   return h;
+}
+
+// Cum se așază `ore` ore pe utilaj, începând cu `data`: capacitatea zilei
+// („ore pe zi" de pe utilaj) minus ce e deja alocat pe el. Aceeași socoteală
+// pentru previzualizarea din pagină și pentru scrierea alocărilor.
+async function planImpartire(utilaj, { data, oraStart, ore, weekend }) {
+  const panaLa = ziPlus(data, AZ.ORIZONT);
+  const randuri = await db
+    .prepare(
+      `SELECT data, SUM(ore) AS ore, MAX(ora_start + ore) AS sfarsit
+         FROM alocari_productie
+        WHERE utilaj_id = ? AND status <> 'anulata' AND data >= ? AND data <= ?
+        GROUP BY data`
+    )
+    .all(Number(utilaj.id), data, panaLa);
+  const ocupat = {};
+  const sfarsit = {};
+  for (const r of randuri) {
+    const zi = String(r.data).slice(0, 10);
+    ocupat[zi] = nr(r.ore);
+    sfarsit[zi] = nr(r.sfarsit);
+  }
+  return AZ.imparte({ ore, data, oraStart, capZi: nr(utilaj.ore_pe_zi) || 8, ocupat, sfarsit, weekend: Boolean(weekend) });
 }
 
 function culoareIncarcare(oreAlocate, capacitate) {
@@ -1401,8 +1423,21 @@ function register(router) {
           </label>
           <label class="field">Data<input type="date" name="data" value="${esc(dataImplicit)}" required></label>
           <label class="field">Ora start<input type="number" name="ora_start" min="0" max="23" step="1" value="8"></label>
-          <label class="field">Ore<input type="number" name="ore" id="alocOre" min="0" step="0.5" value="${ORE_IMPLICIT}" required></label>
-          <label class="field">Cantitate<input type="number" name="cantitate" min="0" step="0.01" value="${cantitateDin(c.cantitate) || ""}"></label>
+          <label class="field">Ore (total)<input type="number" name="ore" id="alocOre" min="0" step="0.5" value="${ORE_IMPLICIT}" required></label>
+          <label class="field">Cantitate<input type="number" name="cantitate" min="0" step="0.01" value="${cantitateDin(c.cantitate, c.um) || ""}"></label>
+        </div>
+
+        <!-- Vali, 10.11.2026: orele le scrie omul, de mână, iar ERP-ul le împarte
+             pe zilele libere ale utilajului (lib/alocare-zile.js). -->
+        <div class="aloc-impartire" style="margin:2px 0 12px">
+          <label style="display:inline-flex;gap:6px;align-items:center;margin:0 18px 0 0;font-weight:400">
+            <input type="checkbox" name="imparte" id="alocImparte" value="1" checked>
+            Împarte orele pe zilele libere ale utilajului
+          </label>
+          <label style="display:inline-flex;gap:6px;align-items:center;margin:0;font-weight:400">
+            <input type="checkbox" name="weekend" id="alocWeekend" value="1"> se lucrează și sâmbăta și duminica
+          </label>
+          <div id="alocPlan" style="font-size:13px;margin-top:8px;border-left:3px solid var(--border);padding:6px 10px;display:none"></div>
         </div>
 
         <h2 style="margin-bottom:4px">Cine lucrează</h2>
@@ -1524,6 +1559,67 @@ function register(router) {
           else if (orePuseDePagina) oreInput.value = ORE_IMPLICIT;
         }
         if (oreInput) oreInput.addEventListener("input", function () { orePuseDePagina = false; });
+
+        // Previzualizarea împărțirii: aceeași socoteală ca la salvare, cerută
+        // serverului la fiecare schimbare. Dacă nu vine răspuns, pagina merge
+        // mai departe fără ea — alocarea se împarte oricum la salvare.
+        var plan = document.getElementById("alocPlan");
+        var bifaImparte = document.getElementById("alocImparte");
+        var bifaWeekend = document.getElementById("alocWeekend");
+        var cererePlan = 0;
+        var ZILE = ["Du", "Lu", "Ma", "Mi", "Jo", "Vi", "Sâ"];
+        function ziScurt(d) {
+          var t = new Date(d + "T00:00:00Z");
+          return ZILE[t.getUTCDay()] + " " + d.slice(8) + "." + d.slice(5, 7);
+        }
+        function oreText(v) { return String(Math.round(v * 100) / 100).replace(".", ","); }
+        function scrie(tag, text, stil) {
+          var e = document.createElement(tag);
+          e.textContent = text;
+          if (stil) e.setAttribute("style", stil);
+          plan.appendChild(e);
+          return e;
+        }
+        function aratPlan() {
+          if (!plan) return;
+          var id = sel.value, zi = dataInput ? dataInput.value : "", totalOre = Number(oreInput.value);
+          if (!bifaImparte || !bifaImparte.checked || !id || !zi || !(totalOre > 0)) { plan.style.display = "none"; return; }
+          var nrCerere = ++cererePlan;
+          var q = new URLSearchParams({ utilaj_id: id, data: zi, ora_start: oraInput ? oraInput.value : "8", ore: String(totalOre), weekend: bifaWeekend && bifaWeekend.checked ? "1" : "" });
+          fetch("/productie/aloca/${c.id}/impartire?" + q.toString(), { credentials: "same-origin" })
+            .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+            .then(function (p) {
+              if (nrCerere !== cererePlan) return; // a venit între timp altă alegere
+              plan.textContent = "";
+              plan.style.display = "";
+              var b = p.bucati || [];
+              if (!b.length) { scrie("div", "Nu am găsit nicio zi liberă pe utilaj."); return; }
+              scrie("strong", b.length === 1 ? "Încape într-o singură zi" : "Se împarte pe " + b.length + " zile");
+              scrie("span", " — utilajul lucrează " + oreText(p.cap) + " h pe zi:");
+              var ul = document.createElement("ul");
+              ul.setAttribute("style", "margin:6px 0 0 18px;padding:0");
+              for (var i = 0; i < b.length; i++) {
+                var li = document.createElement("li");
+                li.textContent = ziScurt(b[i].data) + ", de la " + b[i].ora_start + ":00 — " + oreText(b[i].ore) + " h" +
+                  (b[i].ocupat > 0 ? " (alte " + oreText(b[i].ocupat) + " h sunt deja ocupate)" : "");
+                ul.appendChild(li);
+              }
+              plan.appendChild(ul);
+              var pline = (p.sarite || []).filter(function (x) { return x.motiv === "plina"; }).map(function (x) { return ziScurt(x.data); });
+              if (pline.length) scrie("div", "Sărite, fiind pline: " + pline.join(", ") + ".", "margin-top:4px;color:var(--text-muted)");
+              if ((p.sarite || []).some(function (x) { return x.motiv === "weekend"; })) {
+                scrie("div", "Sâmbăta și duminica sunt sărite; bifează alături dacă se lucrează.", "margin-top:4px;color:var(--text-muted)");
+              }
+              if (p.rest > 0) scrie("div", "Nu au încăput " + oreText(p.rest) + " h în următoarele luni.", "margin-top:4px;color:var(--danger)");
+            })
+            .catch(function () { if (nrCerere === cererePlan) plan.style.display = "none"; });
+        }
+        [sel, dataInput, oraInput, oreInput, bifaImparte, bifaWeekend].forEach(function (e) {
+          if (!e) return;
+          e.addEventListener("change", aratPlan);
+          if (e === oreInput || e === oraInput) e.addEventListener("input", aratPlan);
+        });
+
         if (sel) {
           sel.addEventListener("change", orePentruUtilaj);
           sel.addEventListener("change", filtreaza);
@@ -1535,6 +1631,21 @@ function register(router) {
       </script>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Alocare ${c.numar || c.id}`, active: "/productie", body }));
+  });
+
+  // Previzualizarea împărțirii pe zile, pentru pagina de alocare. Nu scrie nimic.
+  router.get("/productie/aloca/:id/impartire", async (ctx) => {
+    const jsonRaspuns = (cod, obiect) => {
+      ctx.res.writeHead(cod, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      ctx.res.end(JSON.stringify(obiect));
+    };
+    if (!ctx.user) return jsonRaspuns(401, { eroare: "neautentificat" });
+    const q = ctx.query || {};
+    const u = await db.prepare("SELECT id, ore_pe_zi, activ FROM utilaje WHERE id = ?").get(nr(q.utilaj_id) || 0);
+    const data = String(q.data || "").slice(0, 10);
+    if (!u || Number(u.activ) !== 1 || !/^\d{4}-\d{2}-\d{2}$/.test(data)) return jsonRaspuns(400, { eroare: "utilaj sau dată greșită" });
+    const plan = await planImpartire(u, { data, oraStart: q.ora_start === "" || q.ora_start == null ? 8 : nr(q.ora_start), ore: nr(q.ore), weekend: q.weekend === "1" });
+    jsonRaspuns(200, plan);
   });
 
   router.post("/productie/aloca/:id", async (ctx) => {
@@ -1567,39 +1678,87 @@ function register(router) {
         );
       }
     }
-    const r = await db
-      .prepare(
-        `INSERT INTO alocari_productie (comanda_productie_id, utilaj_id, data, ora_start, ore, cantitate, status, observatii, creat_de)
-         VALUES (?, ?, ?, ?, ?, ?, 'planificata', ?, ?) RETURNING id`
-      )
-      .run(
-        ctx.params.id,
-        utilajId,
-        data,
-        nr(b.ora_start) || 8,
-        nr(b.ore),
-        nr(b.cantitate) || null,
-        String(b.observatii || "").trim() || null,
-        ctx.user ? ctx.user.nume : null
-      );
-    const alocareId = r.lastInsertRowid;
-    if (alocareId) {
-      // Pe mașină intră doar cine o știe. Filtrul din pagină ascunde restul,
-      // dar ascunderea nu e o regulă: un formular trimis cu fereastra lăsată
-      // deschisă de ieri, sau după ce s-a schimbat utilajul fără să se
-      // reîncarce pagina, ar pune pe cineva la un post pe care nu-l poate
-      // lucra — și asta se descoperă abia în tură. De-aia se verifică și aici.
-      const permisi = utilajId
-        ? await db
-            .prepare(
-              `SELECT r.id FROM resurse r
-                 JOIN resurse_competente rc ON rc.resursa_id = r.id AND rc.utilaj_id = ?
-                WHERE r.activ = 1`
-            )
-            .all(utilajId)
-        : [];
-      for (const o of permisi) {
-        if (b[`resursa_${o.id}`]) await db.prepare("INSERT INTO alocari_resurse (alocare_id, resursa_id) VALUES (?, ?)").run(alocareId, o.id);
+    // ORELE ÎMPĂRȚITE PE ZILELE LIBERE ALE UTILAJULUI (Vali, 10.11.2026).
+    //
+    // Omul scrie totalul de ore; cu bifa „Împarte orele…" (pusă din oficiu în
+    // pagină) ele se așază zi după zi, în ce e liber pe utilaj, câte o alocare
+    // pe zi. Fără bifă — sau fără utilaj, sau cu zero ore — rămâne un singur
+    // rând, pe ziua aleasă, ca înainte.
+    const oreCerute = nr(b.ore);
+    const utilajAles = utilajId ? await db.prepare("SELECT id, ore_pe_zi FROM utilaje WHERE id = ?").get(utilajId) : null;
+    let bucati = [{ data, ora_start: nr(b.ora_start) || 8, ore: oreCerute }];
+    if (String(b.imparte || "") === "1" && utilajAles && oreCerute > 0) {
+      const plan = await planImpartire(utilajAles, { data, oraStart: nr(b.ora_start) || 8, ore: oreCerute, weekend: String(b.weekend || "") === "1" });
+      if (plan.rest > 0 || !plan.bucati.length) {
+        return send(
+          ctx.res,
+          400,
+          layout({
+            user: ctx.user,
+            title: "Alocare refuzată",
+            active: "/productie",
+            body: `<div class="detail-box" style="border-left:4px solid var(--danger)">
+              <h1 style="margin-top:0">Orele nu încap pe utilaj</h1>
+              <p>Din ${esc(ore(oreCerute))} h, ${esc(ore(plan.rest || oreCerute))} h n-au mai găsit nicio zi liberă în următoarele ${AZ.ORIZONT} de zile.
+                 Verifică „ore pe zi” de pe utilaj sau alege alt utilaj.</p>
+              <p><a class="btn" href="/productie/aloca/${esc(String(ctx.params.id))}">Înapoi la alocare</a></p>
+            </div>`,
+          })
+        );
+      }
+      bucati = plan.bucati;
+    }
+    const cantitati = bucati.length > 1 ? AZ.imparteCantitate(nr(b.cantitate), bucati) : [nr(b.cantitate) || null];
+
+    // Pe mașină intră doar cine o știe. Filtrul din pagină ascunde restul,
+    // dar ascunderea nu e o regulă: un formular trimis cu fereastra lăsată
+    // deschisă de ieri, sau după ce s-a schimbat utilajul fără să se
+    // reîncarce pagina, ar pune pe cineva la un post pe care nu-l poate
+    // lucra — și asta se descoperă abia în tură. De-aia se verifică și aici.
+    const permisi = utilajId
+      ? await db
+          .prepare(
+            `SELECT r.id FROM resurse r
+               JOIN resurse_competente rc ON rc.resursa_id = r.id AND rc.utilaj_id = ?
+              WHERE r.activ = 1`
+          )
+          .all(utilajId)
+      : [];
+    const bifati = permisi.filter((o) => b[`resursa_${o.id}`]);
+    // În zilele următoare omul bifat intră doar dacă e în tură atunci. Unde
+    // programul zilei nu e încă scris, nu se poate ști: rămâne pus.
+    let program = [];
+    if (bucati.length > 1 && bifati.length) {
+      program = await db
+        .prepare("SELECT resursa_id, data, schimb FROM resurse_program WHERE data >= ? AND data <= ?")
+        .all(ziPlus(bucati[0].data, -1), bucati[bucati.length - 1].data)
+        .catch(() => []);
+    }
+    const zileCuProgram = new Set(program.map((p) => String(p.data).slice(0, 10)));
+
+    for (let i = 0; i < bucati.length; i++) {
+      const x = bucati[i];
+      const r = await db
+        .prepare(
+          `INSERT INTO alocari_productie (comanda_productie_id, utilaj_id, data, ora_start, ore, cantitate, status, observatii, creat_de)
+           VALUES (?, ?, ?, ?, ?, ?, 'planificata', ?, ?) RETURNING id`
+        )
+        .run(
+          ctx.params.id,
+          utilajId,
+          x.data,
+          x.ora_start,
+          x.ore,
+          cantitati[i] || null,
+          String(b.observatii || "").trim() || null,
+          ctx.user ? ctx.user.nume : null
+        );
+      const alocareId = r.lastInsertRowid;
+      if (!alocareId) continue;
+      const inTura = i > 0 && zileCuProgram.has(x.data) ? SCH.disponibili(program, x.data, x.ora_start) : null;
+      for (const o of bifati) {
+        if (inTura && !inTura.has(Number(o.id))) continue;
+        await db.prepare("INSERT INTO alocari_resurse (alocare_id, resursa_id) VALUES (?, ?)").run(alocareId, o.id);
       }
     }
     // O comandă alocată nu mai e „nouă" — cineva a pus-o pe o mașină. Și
@@ -1612,7 +1771,9 @@ function register(router) {
         console.error("[utilaje] nu am putut duce starea mai departe:", e.message);
       }
     }
-    redirect(ctx.res, `/productie/planificare?de_la=${encodeURIComponent(data)}`);
+    // Planificarea se deschide pe prima zi în care a intrat ceva: dacă ziua
+    // aleasă era plină, alocarea începe mai târziu.
+    redirect(ctx.res, `/productie/planificare?de_la=${encodeURIComponent(bucati[0].data)}`);
   });
 
   router.post("/productie/alocari/:id/sterge", async (ctx) => {

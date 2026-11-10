@@ -80,8 +80,8 @@ async function creeaza(date, linii) {
   const ins = await db
     .prepare(
       `INSERT INTO receptii (numar, sursa, partener_id, depozit_id, aprovizionare_id, comanda_productie_id,
-                             comanda_id, iesire_id, document_extern, data, stare, anuntata_de, observatii, creata_la)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'asteptata', ?, ?, ?) RETURNING id`
+                             comanda_id, iesire_id, document_extern, data, stare, anuntata_de, observatii, creata_la, partiala)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'asteptata', ?, ?, ?, ?) RETURNING id`
     )
     .run(
       numar,
@@ -96,16 +96,29 @@ async function creeaza(date, linii) {
       d.data || azi(),
       text(d.anuntata_de, 120),
       text(d.observatii, 500),
-      acum()
+      acum(),
+      // Finalizare parțială din producție: comanda ei rămâne în lucru
+      // (lib/stadiu-comanda.js, finalizeazaPartial).
+      d.partiala ? 1 : 0
     );
   const id = ins.lastInsertRowid;
   for (const l of linii || []) {
     await db
       .prepare(
-        `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare)
-         VALUES (?, ?, ?, ?, ?, ?, 'de_primit')`
+        `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare, productie_linie_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?)`
       )
-      .run(id, l.produs_id || null, text(l.produs_text, 200), nr(l.cantitate), text(l.um, 20), l.pret_unitar == null ? null : nr(l.pret_unitar));
+      .run(
+        id,
+        l.produs_id || null,
+        text(l.produs_text, 200),
+        nr(l.cantitate),
+        text(l.um, 20),
+        l.pret_unitar == null ? null : nr(l.pret_unitar),
+        // Linia comenzii de producție din care vine rândul, la finalizările
+        // parțiale: după ea se știe cât a mai rămas de făcut pe fiecare produs.
+        Number(l.productie_linie_id) || null
+      );
   }
   return id;
 }
@@ -841,11 +854,22 @@ async function finalizeaza(id, user) {
   // Daca receptia a venit dintr-o aprovizionare, aceasta se inchide odata
   // cu ea — altfel ar ramane in lista „de aprovizionat" cu marfa deja in
   // depozit, si ar comanda cineva a doua oara.
+  //
+  // O recepție PARȚIALĂ din producție nu închide cererea: comanda de producție
+  // încă se face, iar restul vine pe altă recepție. Cererea se închide când
+  // comanda e gata și nu mai are nicio recepție de preluat
+  // (lib/stadiu-comanda.js, inchideCerereaDacaAIntratTot).
   if (r.aprovizionare_id) {
-    await db
-      .prepare("UPDATE aprovizionari SET status = 'primita' WHERE id = ? AND status <> 'primita'")
-      .run(r.aprovizionare_id)
-      .catch(() => {});
+    if (Number(r.partiala) === 1 && r.comanda_productie_id) {
+      await require("../lib/stadiu-comanda")
+        .inchideCerereaDacaAIntratTot(r.comanda_productie_id)
+        .catch((e) => console.error("[receptie] cererea depozitului, dupa o receptie partiala:", e.message));
+    } else {
+      await db
+        .prepare("UPDATE aprovizionari SET status = 'primita' WHERE id = ? AND status <> 'primita'")
+        .run(r.aprovizionare_id)
+        .catch(() => {});
+    }
   }
 
   // Și comanda clientului pentru care a venit marfa: dacă acum stocul o

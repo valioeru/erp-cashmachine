@@ -40,6 +40,17 @@ const STATUSURI = [
   ["anulata", "Anulată"],
 ].map(([cheie, text]) => [cheie, text, STARI.culoare(cheie)]);
 const DESCHISE = ["noua", "in_productie", "finalizata"];
+// Comenzile din care se mai poate trimite o parte în depozit.
+const STARI_IN_LUCRU = ["noua", "in_productie"];
+// Valoarea din lista de stări care deschide finalizarea parțială. Nu e o stare
+// și nu se scrie niciodată pe comandă: /productie/stare o refuză.
+const PARTIAL = "__partial";
+const cantRo = (v, um) => `${(Number(v) || 0).toLocaleString("ro-RO", { maximumFractionDigits: 3 })}${um ? " " + um : ""}`;
+// Înapoi doar în Producție: adresa vine din formular, deci nu se crede pe cuvânt.
+const inapoiSigur = (v, altfel) => {
+  const t = String(v || "");
+  return /^\/productie(\/|\?|$)/.test(t) && !t.includes("//") && !/[\r\n]/.test(t) ? t : altfel;
+};
 
 function badge(status) {
   const g = STATUSURI.find((s) => s[0] === status);
@@ -47,6 +58,32 @@ function badge(status) {
 }
 function azi() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Ce a plecat prin finalizări parțiale: câte un rând pe trimitere, cu
+// recepția ei și unde a ajuns în depozit. `s` = STADIU.situatiePartiala(c).
+const STARE_RECEPTIE = { asteptata: "de preluat în depozit", in_lucru: "depozitul o preia acum", finalizata: "preluată în depozit" };
+function sectiunePartiale(s, { titlu } = {}) {
+  if (!s || !s.areTrimiteri) return "";
+  const plecat = s.linii
+    .filter((l) => l.trimis > 0)
+    .map((l) => `${esc(cantRo(l.trimis, l.um))}${l.comandat > 0 ? ` din ${esc(cantRo(l.comandat, l.um))}` : ""}${s.linii.length > 1 ? " " + esc(l.denumire || "") : ""}`)
+    .join("; ");
+  return `
+    <div class="partiale" style="margin-top:10px">
+      ${titlu ? `<h2 style="font-size:15px;margin:0 0 6px">${esc(titlu)}</h2>` : ""}
+      <p style="margin:0 0 6px"><strong>Plecat în depozit până acum:</strong> ${plecat}.</p>
+      ${table(
+        ["Data", "Cât", "Trimis de", "Recepția", "În depozit"],
+        s.trimiteri.map((t) => [
+          esc(t.data || ""),
+          t.randuri.map((r) => esc(cantRo(r.cantitate, r.um)) + (s.linii.length > 1 && r.denumire ? " " + esc(r.denumire) : "")).join("<br>"),
+          esc(t.de || "—"),
+          `<a href="/depozit/receptie/${t.receptie_id}">${esc(t.numar)}</a>`,
+          esc(STARE_RECEPTIE[t.stare] || t.stare || ""),
+        ])
+      )}
+    </div>`;
 }
 
 
@@ -633,6 +670,39 @@ function register(router) {
       return lista.map((t) => `<span class="cel-lung">${esc(t)}</span>`).join("<br>");
     };
 
+    // Finalizările parțiale (Vali, 10.11.2026): comanda rămâne în producție,
+    // dar sub starea ei scrie cât a plecat deja în depozit.
+    const partialPe = new Map();
+    const idsInLucru = comenzi.filter((c) => STARI_IN_LUCRU.includes(c.status)).map((c) => Number(c.id)).filter(Boolean);
+    if (idsInLucru.length) {
+      const rp = await db
+        .prepare(
+          `SELECT r.comanda_productie_id AS cid, r.id AS rid, COALESCE(rl.um, '') AS um, rl.cantitate_asteptata AS cantitate
+             FROM receptii r JOIN receptii_linii rl ON rl.receptie_id = r.id
+            WHERE COALESCE(r.partiala, 0) = 1 AND r.stare <> 'anulata'
+              AND r.comanda_productie_id IN (${idsInLucru.join(",")})
+            ORDER BY r.id, rl.id`
+        )
+        .all()
+        .catch(() => []);
+      for (const x of rp) {
+        const k = Number(x.cid);
+        if (!partialPe.has(k)) partialPe.set(k, { receptii: new Set(), peUm: new Map() });
+        const p = partialPe.get(k);
+        p.receptii.add(Number(x.rid));
+        // Bucățile și kilogramele nu se adună între ele: câte o sumă pe unitate.
+        p.peUm.set(x.um, (p.peUm.get(x.um) || 0) + (Number(x.cantitate) || 0));
+      }
+    }
+    const notaPartial = (c) => {
+      const x = partialPe.get(Number(c.id));
+      if (!x) return "";
+      const n = x.receptii.size;
+      return `<div class="mic nota-partial" title="Plecat în depozit prin ${n === 1 ? "o finalizare parțială" : n + " finalizări parțiale"}; restul e încă în lucru">parțial: ${[...x.peUm]
+        .map(([um, v]) => esc(cantRo(v, um)))
+        .join(" + ")} în depozit</div>`;
+    };
+
     const contoare = await db.prepare("SELECT status, COUNT(*) AS n FROM comenzi_productie GROUP BY status").all();
     const cnt = Object.fromEntries(contoare.map((r) => [r.status, Number(r.n)]));
     const aziStr = azi();
@@ -670,7 +740,7 @@ function register(router) {
     // contabilitate nu mai intră în el.
     const comenziDeschise = await db
       .prepare(
-        `SELECT c.id, c.numar, c.cantitate, c.valoare_estimata, c.produs_id,
+        `SELECT c.id, c.numar, c.cantitate, c.um, c.valoare_estimata, c.produs_id,
                 pr.denumire AS produs, pr.cost_reteta, pr.pret_vanzare
            FROM comenzi_productie c
            LEFT JOIN produse pr ON pr.id = c.produs_id
@@ -816,12 +886,18 @@ function register(router) {
           // schimba des si pe multe comenzi deodata — pana acum trebuia sa
           // intre in fiecare fisa, sa schimbe, sa se intoarca, si tot asa.
           // Culoarea ramane, ca sa se vada dintr-o privire ce e unde.
+          //
+          // „Finalizată parțial…" nu e o stare: e o acțiune. Deschide pagina pe
+          // care se scrie cât e gata, iar comanda rămâne în producție. Apare
+          // doar la comenzile încă în lucru, imediat după „În producție".
           `<select class="sel-stare stare-${esc(c.status || "")}" data-stare="${c.id}"
                    title="Schimbă starea comenzii">
              ${STATUSURI.map(
-               ([v, t]) => `<option value="${v}"${c.status === v ? " selected" : ""}>${esc(t)}</option>`
+               ([v, t]) =>
+                 `<option value="${v}"${c.status === v ? " selected" : ""}>${esc(t)}</option>` +
+                 (v === "in_productie" && STARI_IN_LUCRU.includes(c.status) ? `<option value="${PARTIAL}">Finalizată parțial…</option>` : "")
              ).join("")}
-           </select>`,
+           </select>${notaPartial(c)}`,
           utilajulComenzii(c),
           esc(c.doc_emisa_txt || (c.doc_emisa ? "DA" : "")),
           esc(c.fisa_tehnica_txt || (c.fisa_tehnica ? "DA" : "")),
@@ -858,6 +934,13 @@ function register(router) {
         var s = ev.target.closest ? ev.target.closest("[data-stare]") : null;
         if (!s) return;
         var veche = s.dataset.veche || "";
+        // Finalizarea parțială se face pe pagina ei: acolo se scrie cât e gata.
+        // Lista rămâne pe starea de dinainte — comanda e tot în producție.
+        if (s.value === "${PARTIAL}") {
+          if (veche) s.value = veche;
+          location.href = "/productie/" + encodeURIComponent(s.dataset.stare) + "/partial?inapoi=" + encodeURIComponent(location.pathname + location.search);
+          return;
+        }
         s.disabled = true;
         fetch("/productie/stare", {
           method: "POST", credentials: "same-origin",
@@ -1737,8 +1820,16 @@ function register(router) {
       (liniiPdf[0] && unitate(liniiPdf[0].cantitate, liniiPdf[0].um)) || unitate(c.cantitate, c.um) || "buc";
     const operatii = FL.operatii(pasiCuOameni, { um: umFinal });
 
+    // Materia primă aleasă pe comandă și furnizorul ei, ca omul de la post să
+    // știe ce material ia din depozit.
+    const materiePdf = await FC.materiaComenzii(c);
+    const furnizorPdf = materiePdf.nume ? await FC.furnizorulComenzii(c) : "";
+
     const html = FL.fisa({
       comanda: c,
+      materieText: materiePdf.nume
+        ? materiePdf.nume + (materiePdf.cod ? ` (${materiePdf.cod})` : "") + (furnizorPdf ? ` · supplier / furnizor: ${furnizorPdf}` : "")
+        : "",
       linii: liniiPdf,
       caracteristici: caracPdf,
       operatii,
@@ -1808,7 +1899,7 @@ function register(router) {
         .catch(() => null);
     }
     const costPeBucata = produsComanda ? Number(produsComanda.cost_reteta) || 0 : 0;
-    const cantComanda = COST.cantitateComanda(c.cantitate);
+    const cantComanda = COST.cantitateComanda(c.cantitate, c.um);
     const costComanda = costPeBucata * cantComanda;
     // Aceeași judecată ca pe pagina rețetei și pe cardul din /productie: o
     // rețetă care iese de peste trei ori prețul de vânzare e scrisă pe lot, iar
@@ -1908,7 +1999,10 @@ function register(router) {
       }
     }
 
+    const partiale = await STADIU.situatiePartiala(c);
+
     const body = `
+      ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:820px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
       <div class="detail-box">
         <h1 style="margin-top:0">Comanda ${esc(c.numar || c.id)} ${badge(c.status)}
           ${c.doc_emisa ? '<span class="badge verde">DoC emisă</span>' : '<span class="badge gri">fără DoC</span>'}
@@ -1965,7 +2059,15 @@ function register(router) {
           ["finalizata", "facturata"].includes(c.status)
             ? c.trimisa_depozit_la
               ? `<p style="margin-top:12px">${
-                  receptia && receptia.stare === "finalizata"
+                  // Fără recepție finală: totul plecase deja prin finalizări
+                  // parțiale, iar starea o spun recepțiile lor.
+                  !c.receptie_id && partiale.areTrimiteri
+                    ? `${
+                        partiale.trimiteri.every((t) => t.stare === "finalizata")
+                          ? '<span class="badge verde">preluată în depozit</span>'
+                          : '<span class="badge galben">de preluat în depozit</span>'
+                      } · totul a plecat prin finalizări parțiale`
+                    : receptia && receptia.stare === "finalizata"
                     ? `<span class="badge verde">preluată în depozit</span> la ${esc(String(receptia.finalizata_la || "").slice(0, 16))}${receptia.primita_de ? " de " + esc(receptia.primita_de) : ""}`
                     : receptia && receptia.stare === "in_lucru"
                       ? `<span class="badge galben">depozitul o preia acum</span>`
@@ -2036,6 +2138,21 @@ function register(router) {
         }
         ${alegeProdus}
       </div>
+
+      ${
+        STARI_IN_LUCRU.includes(c.status) || partiale.areTrimiteri
+          ? `<div class="detail-box caseta-partial" style="margin-top:12px">
+               <h2 style="font-size:15px;margin:0 0 6px">Finalizare parțială</h2>
+               ${
+                 STARI_IN_LUCRU.includes(c.status)
+                   ? `<p class="mic" style="margin:0 0 8px">O parte e gata înaintea restului? Trimite-o în depozit, la alocare; comanda rămâne în producție până la „Finalizată”.</p>
+                      <a class="btn small" href="/productie/${c.id}/partial">Finalizează parțial</a>`
+                   : ""
+               }
+               ${sectiunePartiale(partiale, { titlu: "" })}
+             </div>`
+          : ""
+      }
 
       ${await FC.casetaProductie(c, { inapoi: `/productie/${c.id}`, poateScrie: poateAlegeFurnizor(ctx.user) })}
 
@@ -2131,6 +2248,70 @@ function register(router) {
     return redirect(ctx.res, `/productie/${ctx.params.id}`);
   });
 
+  // ---- Finalizare parțială ------------------------------------------------
+  // Vali, 10.11.2026: „să am și opțiune de finalizare parțială, caz în care se
+  // duce spre alocare partea indicată din marfa comandată, însă rămâne în
+  // producție până la finalizarea completă". Regula e în lib/stadiu-comanda.js.
+  router.get("/productie/:id/partial", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const c = await db
+      .prepare("SELECT c.*, p.nume AS partener_nume FROM comenzi_productie c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+      .get(parseInt(ctx.params.id, 10) || 0);
+    if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsită", active: "/productie", body: "<p>Comanda nu există.</p>" }));
+    const inapoi = inapoiSigur(ctx.query.inapoi, `/productie/${c.id}`);
+    const s = await STADIU.situatiePartiala(c);
+    const inLucru = STARI_IN_LUCRU.includes(c.status);
+    const body = `
+      <div class="toolbar"><a class="btn secondary" href="${esc(inapoi)}">← Înapoi</a>
+        <a class="btn secondary" href="/productie/${c.id}">Comanda ${esc(c.numar || c.id)}</a></div>
+      <h1 style="margin:6px 0 2px">Finalizare parțială — comanda ${esc(c.numar || c.id)} ${badge(c.status)}</h1>
+      <p class="mic" style="margin:0 0 12px">${esc(c.partener_nume || c.client_text || "")}</p>
+      ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:820px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
+      ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:820px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
+      <p style="max-width:820px;color:var(--text-muted)">
+        Scrie cât s-a terminat până acum. Partea asta pleacă în depozit, la „Gata din producție — de alocat”, de unde se pune
+        pe raft, în fulfillment sau direct la livrare. Comanda rămâne în producție până o pui pe „Finalizată”; atunci pleacă
+        doar ce a mai rămas.
+      </p>
+      ${
+        inLucru
+          ? `<form method="post" action="/productie/${c.id}/partial" class="form" style="max-width:920px">
+               <input type="hidden" name="inapoi" value="${esc(inapoi)}">
+               ${table(
+                 ["Produs", "Comandat", "Plecat până acum", "Rămas de făcut", "Gata acum"],
+                 s.linii.map((l) => [
+                   esc(l.denumire || "—"),
+                   l.comandat > 0 ? esc(cantRo(l.comandat, l.um)) : '<span class="mic">nescris</span>',
+                   l.trimis > 0 ? esc(cantRo(l.trimis, l.um)) : "—",
+                   l.comandat > 0 ? esc(cantRo(l.rest, l.um)) : "—",
+                   `<input type="number" step="any" min="0" name="cant_${esc(l.cheie)}" inputmode="decimal" style="width:130px"
+                           ${l.comandat > 0 ? `max="${l.rest}"` : ""} aria-label="Gata acum, ${esc(l.denumire || "produs")}"> ${esc(l.um || "")}`,
+                 ])
+               )}
+               <div class="form-actions"><button class="btn" type="submit">Trimite partea gata în depozit</button>
+                 <a class="btn secondary" href="${esc(inapoi)}">Renunță</a></div>
+             </form>`
+          : `<p><strong>Comanda nu mai e în lucru</strong> (${badge(c.status)}), deci nu mai are ce trimite parțial.</p>`
+      }
+      ${sectiunePartiale(s, { titlu: "Ce a plecat până acum" })}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Finalizare parțială ${c.numar || c.id}`, active: "/productie", body }));
+  });
+
+  router.post("/productie/:id/partial", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const id = parseInt(ctx.params.id, 10) || 0;
+    const b = ctx.body || {};
+    const inapoi = inapoiSigur(b.inapoi, `/productie/${id}`);
+    const cantitati = {};
+    for (const [k, v] of Object.entries(b)) if (/^cant_\d+$/.test(k)) cantitati[k.slice(5)] = v;
+    const r = await STADIU.finalizeazaPartial(id, cantitati, { user: ctx.user });
+    if (r.eroare) {
+      return redirect(ctx.res, `/productie/${id}/partial?inapoi=${encodeURIComponent(inapoi)}&eroare=${encodeURIComponent(r.eroare)}`);
+    }
+    redirect(ctx.res, inapoi + (inapoi.includes("?") ? "&" : "?") + "ok=" + encodeURIComponent(r.mesaj));
+  });
+
   router.post("/productie/:id/actualizeaza", async (ctx) => {
     const b = ctx.body;
     const status = STATUSURI.some((s) => s[0] === b.status) ? b.status : "noua";
@@ -2194,6 +2375,21 @@ function register(router) {
     redirect(ctx.res, inapoi);
   });
 
+  // Materia primă a comenzii, aleasă din aceeași casetă cu furnizorul ei
+  // (Vali, 10.11.2026: „și să poată alege și materia primă tot de aici").
+  // Vezi lib/furnizor-comanda.js.
+  router.post("/productie/:id/materie", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const b = ctx.body || {};
+    const cerut = String(b.inapoi || "");
+    const inapoi = cerut === `/productie/${id}/necesar` ? cerut : `/productie/${id}`;
+    if (!poateAlegeFurnizor(ctx.user)) return redirect(ctx.res, inapoi);
+    const ales = await FC.rezolvaMaterie(b);
+    const r = await FC.seteazaMaterie(id, ales, ctx.user);
+    if (!r.gasita) return redirect(ctx.res, "/productie");
+    redirect(ctx.res, inapoi);
+  });
+
   router.post("/productie/:id/trimite-depozit", async (ctx) => {
     if (!ctx.user || !["admin", "productie", "depozit"].includes(ctx.user.rol)) return redirect(ctx.res, "/productie");
     const id = parseInt(ctx.params.id, 10);
@@ -2205,6 +2401,8 @@ function register(router) {
 
     // Aceeași funcție care deschide recepția singură la „Finalizată".
     const receptieId = await STADIU.trimiteInDepozit(c, { user: ctx.user });
+    // Fără recepție nouă: totul plecase deja prin finalizări parțiale.
+    if (!receptieId) return redirect(ctx.res, `/productie/${id}`);
     redirect(ctx.res, `/depozit/receptie/${receptieId}`);
   });
 
