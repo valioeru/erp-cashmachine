@@ -222,6 +222,28 @@ const CAUTARI = {
     return (await paletiCu("UPPER(TRIM(p.cod)) = ?", f.cod)).map(gPalet);
   },
 
+  // Eticheta unui loc de pe raft. Cu marfă pe el, scanerul duce la paletul
+  // lui; liber, îl ține ales pentru următoarea intrare (modules/ct-scaner.js).
+  async loc(f) {
+    const l = await db
+      .prepare(
+        `SELECT l.id, l.adresa, l.rand_id,
+                (SELECT p.cod FROM ct_ocupari o JOIN ct_paleti p ON p.id = o.palet_id AND p.data_iesire IS NULL WHERE o.loc_id = l.id LIMIT 1) AS palet
+           FROM ct_locuri l WHERE UPPER(l.adresa) = ?`
+      )
+      .get(f.adresa);
+    if (!l) return [];
+    return [
+      {
+        fel: "Loc în CT-Park",
+        cheie: "loc:" + l.id,
+        titlu: `Locul ${l.adresa}`,
+        detalii: l.palet ? `pe el stă paletul ${l.palet}` : "liber",
+        unde: [{ url: `/stocuri/ct-park/scaner/loc?cod=${encodeURIComponent(l.adresa)}` }, { url: `/stocuri/ct-park/rand/${l.rand_id}` }],
+      },
+    ];
+  },
+
   // Lotul scris pe paleți (pe palet sau pe una dintre liniile lui): doar
   // paleții încă în depozit — cei plecați nu mai sunt de găsit pe raft.
   async lot(f) {
@@ -367,6 +389,7 @@ const AJUTOR = `
       <li><strong>Avizul</strong> — CHMA-1389, de sub numărul avizului.</li>
       <li><strong>Paletul</strong> — CT261105-0012, de pe eticheta lui; <strong>lotul</strong> de pe palet arată paleții cu el.</li>
       <li><strong>Producția</strong> — codul lotului și al operațiilor, de pe fișa de lot.</li>
+      <li><strong>Locul de pe raft</strong> — R3-05-2-1, de pe eticheta lipită pe stâlp: cu marfă pe el, se deschide ieșirea paletului; liber, rămâne ales pentru intrare.</li>
       <li><strong>Comanda la furnizor</strong> — CF-2026-0001, de pe foaia comenzii.</li>
       <li><strong>AWB-ul</strong> — de pe eticheta curierului: coletele din fulfillment și transporturile din Logistică.</li>
     </ul>

@@ -449,6 +449,10 @@ function subtabs(activ, user) {
     ["/stocuri/ct-park/intrare", "Intrare marfă"],
     ["/stocuri/ct-park/muta", "Mută marfă"],
     ["/stocuri/ct-park/iesire", "Ieșire marfă"],
+    // Intrarea și ieșirea cu terminalul în mână, și ce are de scos imprimanta
+    // după ele (modules/ct-scaner.js).
+    ["/stocuri/ct-park/scaner", "Scaner"],
+    ["/stocuri/ct-park/tipar", "De tipărit"],
     // Avizele se emit de aici (ieșirea pe comandă) și se fac și manual. Le vede
     // doar cine are bifa „Avize” — taburile se filtrează după acces, mai jos.
     ["/avize", "Avize"],
@@ -1504,6 +1508,331 @@ async function sumarRanduri() {
     locuri: hl.get(Number(r.id)) || 0,
     ocupate: ho.get(Number(r.id)) || 0,
   }));
+}
+
+// ---- Ieșirea de marfă ---------------------------------------------------
+//
+// Simetric cu intrarea, cu o singură diferență care contează: la ieșire
+// trebuie spus OBLIGATORIU unde se duce paletul. Marfa care „a plecat" fără
+// să se știe unde e marfă pierdută pe hârtie, chiar dacă în realitate a
+// ajuns unde trebuia.
+//
+// Trei drumuri: producție, fulfillment, sau o comandă anume. La comandă se
+// alege exact comanda, iar clientul și numărul ei ajung pe etichetă.
+const DESTINATII = [
+  ["productie", "Producție", "Materie primă care intră în fabricație."],
+  ["fulfillment", "Fulfillment", "Marfă care pleacă spre pregătirea comenzilor."],
+  ["comanda", "Comandă", "Livrare pe o comandă anume — se alege mai jos."],
+];
+const eDestinatie = (v) => DESTINATII.some(([c]) => c === String(v || ""));
+const etichetaDestinatie = (v) => (DESTINATII.find(([c]) => c === String(v || "")) || [, String(v || "")])[1];
+
+async function comenziDeschise() {
+  return db
+    .prepare(
+      `SELECT c.id, c.numar, c.data, c.status, p.nume AS client
+         FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
+        WHERE c.status NOT IN ('anulata')
+        ORDER BY c.id DESC LIMIT 300`
+    )
+    .all()
+    .catch(() => []);
+}
+
+// Ce a plecat pe paleții scoși întregi, pentru aviz: liniile fiecărui palet
+// (ieșirea întreagă nu le atinge), cu denumirea din nomenclator; paletul vechi,
+// fără linii, intră cu rezumatul lui. Codul paletului rămâne lângă linie.
+async function liniiPentruAviz(ids) {
+  if (!ids.length) return [];
+  const semne = ids.map(() => "?").join(",");
+  const paleti = await db
+    .prepare(
+      `SELECT p.id, p.cod, p.produs_id, p.cantitate, p.um, COALESCE(pr.denumire, NULLIF(p.produs_text, '')) AS produs,
+              COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
+         FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id WHERE p.id IN (${semne}) ORDER BY p.id`
+    )
+    .all(...ids);
+  const linii = await db
+    .prepare(
+      `SELECT pl.palet_id, pl.produs_id, pl.cantitate, pl.um, COALESCE(pr.denumire, NULLIF(pl.produs_text, '')) AS produs,
+              COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
+         FROM ct_palet_linii pl LEFT JOIN produse pr ON pr.id = pl.produs_id
+        WHERE pl.palet_id IN (${semne}) AND pl.cantitate > 0 ORDER BY pl.palet_id, pl.id`
+    )
+    .all(...ids)
+    .catch(() => []);
+  const out = [];
+  for (const p of paleti) {
+    const ale = (linii || []).filter((l) => Number(l.palet_id) === Number(p.id));
+    const surse = ale.length ? ale : [{ produs_id: p.produs_id, cantitate: p.cantitate, um: p.um, produs: p.produs, produs_cod: p.produs_cod }];
+    for (const l of surse)
+      out.push({ produs_id: l.produs_id, denumire: l.produs, cod: l.produs_cod, um: l.um, cantitate: l.cantitate, palet: p.cod });
+  }
+  return out;
+}
+
+// Ieșirea întreagă a unor paleți: fiecare iese din depozit cu destinația
+// lui, locurile se eliberează, iar pe o comandă de client se emite avizul.
+// Întoarce { eroare } sau { scoase, comanda, aviz | avizEroare } — ruta de
+// ieșire și scanerul (modules/ct-scaner.js) hotărăsc fiecare unde trimit omul.
+async function iesireIntreaga(user, b) {
+  b = b || {};
+  const ids = [].concat(b.paleti || []).map((x) => nr(x)).filter(Boolean);
+  const destinatie = String(b.destinatie || "");
+  const inapoi = (mesaj) => ({ eroare: mesaj });
+
+  if (!ids.length) return inapoi("N-ai bifat niciun palet.");
+  if (!eDestinatie(destinatie)) return inapoi("Alege unde se duce marfa: producție, fulfillment sau comandă.");
+
+  let comanda = null;
+  if (destinatie === "comanda") {
+    const cid = nr(b.comanda_id);
+    if (!cid) return inapoi("La destinația „Comandă” trebuie aleasă exact comanda.");
+    comanda = await db
+      .prepare(
+        `SELECT c.id, c.numar, c.data, c.partener_id, p.nume AS client FROM comenzi c
+           JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`
+      )
+      .get(cid);
+    if (!comanda) return inapoi("Comanda aleasă nu mai există.");
+  }
+
+  // Adresa de unde pleacă fiecare palet, luată ÎNAINTE de a elibera
+  // locurile — după ștergere n-am mai avea de unde s-o scriem pe etichetă.
+  const adrese = await db
+    .prepare(
+      `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id
+        WHERE o.palet_id IN (${ids.map(() => "?").join(",")}) ORDER BY l.camp, l.pozitie`
+    )
+    .all(...ids);
+  const ha = new Map();
+  for (const a of adrese) {
+    const k = Number(a.palet_id);
+    if (!ha.has(k)) ha.set(k, []);
+    ha.get(k).push(a.adresa);
+  }
+
+  const azi = aziStr();
+  const cine = user ? user.nume : null;
+  const motivPeste = String(b.peste_rand || "").trim() || null;
+  const scoase = [];
+  const iesiriNoi = [];
+  for (const id of ids) {
+    const p = await db
+      .prepare(
+        `SELECT p.id, p.cantitate, p.um, p.produs_id, p.produs_text, p.data_intrare,
+                p.pret_unitar, p.pret_sursa, COALESCE(pr.denumire, p.produs_text) AS marfa
+           FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
+          WHERE p.id = ? AND p.data_iesire IS NULL`
+      )
+      .get(id);
+    if (!p) continue; // deja ieșit între timp — nu-l scoatem de două ori
+
+    // FIFO, verificat și pe server: câți paleți mai vechi din aceeași marfă
+    // rămân în depozit după ieșirea asta. Verificarea din pagină e o
+    // comoditate; asta e cea care ajunge în date.
+    const maiVechi = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM ct_paleti x LEFT JOIN produse xr ON xr.id = x.produs_id
+          WHERE x.data_iesire IS NULL AND x.id <> ?
+            AND LOWER(COALESCE(xr.denumire, x.produs_text, '')) = LOWER(COALESCE(?, ''))
+            AND (x.data_intrare < ? OR (x.data_intrare = ? AND x.id < ?))
+            AND x.id NOT IN (${ids.map(() => "?").join(",")})`
+      )
+      .get(id, p.marfa, p.data_intrare, p.data_intrare, id, ...ids)
+      .catch(() => ({ n: 0 }));
+    const sarite = Number((maiVechi && maiVechi.n) || 0);
+
+    // Costul care iese efectiv din depozit, cu prețul paletului ăsta.
+    const cost = nr(p.cantitate) * nr(p.pret_unitar);
+    const temei = nr(p.pret_unitar) ? p.pret_sursa || "preț pe palet" : "fără preț la intrare";
+
+    await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
+    await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
+    const ies = await db
+      .prepare(
+        `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      )
+      .run(
+        id,
+        destinatie,
+        comanda ? comanda.id : null,
+        comanda ? comanda.client : null,
+        comanda ? comanda.numar || "#" + comanda.id : null,
+        comanda ? String(comanda.data || "").slice(0, 10) : null,
+        (ha.get(Number(id)) || []).join(" + ") || null,
+        azi,
+        String(b.observatii || "").trim() || null,
+        cine,
+        cost > 0 ? Math.round(cost * 100) / 100 : null,
+        temei,
+        sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
+      );
+    scoase.push(id);
+    if (ies && ies.lastInsertRowid) iesiriNoi.push(Number(ies.lastInsertRowid));
+  }
+
+  if (!scoase.length) return inapoi("Paleții bifați ieșiseră deja din depozit.");
+
+  // Livrarea pe o comandă de client: în loc de etichete, AVIZUL de însoțire
+  // a mărfii (Vali, 03.11.2026), fără prețuri, cu tot ce a plecat acum.
+  // Ieșirea s-a făcut deja; dacă avizul nu se poate emite, omul primește
+  // etichetele și motivul — nu o ieșire pe jumătate.
+  if (comanda) {
+    try {
+      const linii = await liniiPentruAviz(scoase);
+      const aviz = await require("./avize").emite({
+        partenerId: comanda.partener_id,
+        comandaId: comanda.id,
+        comandaNumar: comanda.numar || null,
+        linii,
+        creatDe: cine,
+        creatDeId: user ? user.id : null,
+        sursa: "depozit",
+        observatii: String(b.observatii || "").trim() || null,
+      });
+      if (iesiriNoi.length)
+        await db.prepare(`UPDATE ct_iesiri SET aviz_id = ? WHERE id IN (${iesiriNoi.map(() => "?").join(",")})`).run(aviz.id, ...iesiriNoi);
+      return { scoase, comanda, aviz };
+    } catch (e) {
+      console.error("[ct-park] aviz la ieșire:", e.message);
+      return { scoase, comanda, avizEroare: e.message };
+    }
+  }
+  return { scoase, comanda: null };
+}
+
+// Ieșirea unei părți dintr-un palet: pe fiecare linie cât pleacă și cât
+// rămâne (se verifică una cu alta). Paletul golit iese și eliberează locul;
+// altfel rămâne pe loc, cu cantitățile scăzute. Întoarce { lipsa } pentru un
+// palet care nu există, { eroare }, sau { mesaj, paletGol, iesireId, aviz |
+// avizEroare } — ca la ieșirea întreagă, o folosesc pagina paletului și scanerul.
+async function iesirePartiala(user, id, b) {
+  id = nr(id);
+  const inapoi = (k, mesaj) => ({ eroare: mesaj });
+  const p = await db.prepare("SELECT * FROM ct_paleti WHERE id = ?").get(id);
+  if (!p) return { lipsa: true, eroare: "Paletul nu există." };
+  if (p.data_iesire) return inapoi("eroare", "Paletul a ieșit deja din depozit.");
+  b = b || {};
+  const destinatie = String(b.destinatie || "");
+  if (!eDestinatie(destinatie)) return inapoi("eroare", "Alege unde se duce marfa: producție, fulfillment sau comandă.");
+  let comanda = null;
+  if (destinatie === "comanda") {
+    const cid = nr(b.comanda_id);
+    if (!cid) return inapoi("eroare", "La destinația „Comandă” trebuie aleasă exact comanda.");
+    comanda = await db
+      .prepare("SELECT c.id, c.numar, c.data, c.partener_id, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+      .get(cid);
+    if (!comanda) return inapoi("eroare", "Comanda aleasă nu mai există.");
+  }
+
+  const linii = (await liniiPalet(id)).filter((l) => nr(l.cantitate) > CPL.EPS);
+  const scrise = {};
+  for (const l of linii) scrise[l.id] = { pleaca: b["pleaca_" + l.id], ramane: b["ramane_" + l.id] };
+  const v = CPL.validareIesire(linii, scrise);
+  if (v.eroare) return inapoi("eroare", v.eroare);
+
+  const adrese = (
+    await db
+      .prepare("SELECT l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id WHERE o.palet_id = ? ORDER BY l.camp, l.pozitie")
+      .all(id)
+  ).map((a) => a.adresa);
+  // FIFO, ca la ieșirea întreagă: câți paleți mai vechi din aceeași marfă rămân.
+  const maiVechi = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM ct_paleti x LEFT JOIN produse xr ON xr.id = x.produs_id
+        WHERE x.data_iesire IS NULL AND x.id <> ?
+          AND LOWER(COALESCE(xr.denumire, x.produs_text, '')) = LOWER(COALESCE(?, ''))
+          AND (x.data_intrare < ? OR (x.data_intrare = ? AND x.id < ?))`
+    )
+    .get(id, linii.length === 1 ? linii[0].produs_text : p.produs_text, p.data_intrare, p.data_intrare, id)
+    .catch(() => ({ n: 0 }));
+  const sarite = Number((maiVechi && maiVechi.n) || 0);
+  const obs = String(b.observatii || "").trim() || null;
+  const azi = aziStr();
+  const cine = user ? user.nume : null;
+  const cost = Math.round(v.cost * 100) / 100;
+
+  const ies = await db
+    .prepare(
+      `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand, partiala)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    )
+    .run(
+      id,
+      destinatie,
+      comanda ? comanda.id : null,
+      comanda ? comanda.client : null,
+      comanda ? comanda.numar || "#" + comanda.id : null,
+      comanda ? String(comanda.data || "").slice(0, 10) : null,
+      adrese.join(" + ") || null,
+      azi,
+      obs,
+      cine,
+      cost > 0 ? cost : null,
+      cost > 0 ? "preț pe palet" : "fără preț la intrare",
+      sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${obs ? ": " + obs : " — fără motiv scris"}` : null,
+      v.paletGol ? 0 : 1
+    );
+  const iesireId = ies.lastInsertRowid;
+  for (const m of v.miscate) {
+    await db
+      .prepare(
+        `INSERT INTO ct_iesiri_linii (iesire_id, palet_linie_id, produs_id, produs_text, cantitate, cantitate_ramasa, um, pret_unitar)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(iesireId, m.linie_id, m.produs_id, m.produs_text, m.pleaca, m.ramane, m.um, m.pret_unitar);
+    await db.prepare("UPDATE ct_palet_linii SET cantitate = ? WHERE id = ? AND palet_id = ?").run(m.ramane, m.linie_id, id);
+  }
+  const plecat = v.miscate.map((m) => `${m.pleaca.toLocaleString("ro-RO")} ${m.um || ""} ${m.produs_text || ""}`.replace(/\s+/g, " ").trim()).join("; ");
+  const unde = comanda ? `comanda ${comanda.numar || "#" + comanda.id}` : etichetaDestinatie(destinatie).toLowerCase();
+  let mesaj;
+  if (v.paletGol) {
+    // Nu mai rămâne nimic: paletul iese și locul se eliberează, ca la ieșirea
+    // întreagă. Rezumatul de pe palet rămâne cel de dinainte — istoricul lui.
+    await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
+    await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
+    console.log(`[ct-park] golit ${p.cod} spre ${unde} de ${cine || "?"}`);
+    mesaj = `A plecat tot (${plecat}) spre ${unde}. Paletul a ieșit din depozit, iar ${adrese.join(" + ") || "locul"} e liber.`;
+  } else {
+    const r = await rescrieRezumat(id);
+    console.log(`[ct-park] scos din ${p.cod}: ${plecat} spre ${unde} de ${cine || "?"}`);
+    mesaj = `A plecat ${plecat} spre ${unde}. Pe palet rămân ${r.cantitate ? r.cantitate.toLocaleString("ro-RO") + " " + (r.um || "") : r.produs_text || "—"}; paletul stă pe loc.`;
+  }
+
+  // Pe o comandă de client, ce a plecat acum primește avizul de însoțire
+  // (Vali, 03.11.2026) — doar ce a plecat, nu ce rămâne pe palet.
+  if (comanda) {
+    try {
+      const ids = [...new Set(v.miscate.map((m) => Number(m.produs_id)).filter(Boolean))];
+      const din = ids.length
+        ? await db
+            .prepare(`SELECT id, denumire, COALESCE(NULLIF(TRIM(cod), ''), cod_generat) AS cod FROM produse WHERE id IN (${ids.map(() => "?").join(",")})`)
+            .all(...ids)
+        : [];
+      const catalog = new Map((din || []).map((x) => [Number(x.id), x]));
+      const aviz = await require("./avize").emite({
+        partenerId: comanda.partener_id,
+        comandaId: comanda.id,
+        comandaNumar: comanda.numar || null,
+        linii: v.miscate.map((m) => {
+          const c = catalog.get(Number(m.produs_id));
+          return { produs_id: m.produs_id, denumire: c ? c.denumire : m.produs_text, cod: c ? c.cod : null, um: m.um, cantitate: m.pleaca, palet: p.cod };
+        }),
+        creatDe: cine,
+        creatDeId: user ? user.id : null,
+        sursa: "depozit",
+        observatii: obs,
+      });
+      await db.prepare("UPDATE ct_iesiri SET aviz_id = ? WHERE id = ?").run(aviz.id, iesireId);
+      return { mesaj, aviz, comanda, paletGol: v.paletGol, iesireId };
+    } catch (e) {
+      console.error("[ct-park] aviz la ieșirea parțială:", e.message);
+      return { mesaj, avizEroare: e.message, comanda, paletGol: v.paletGol, iesireId };
+    }
+  }
+  return { mesaj, comanda: null, paletGol: v.paletGol, iesireId };
 }
 
 function register(router) {
@@ -2975,128 +3304,12 @@ function register(router) {
   router.post("/stocuri/ct-park/palet/:id/scoate-partial", async (ctx) => {
     const id = nr(ctx.params.id);
     const inapoi = (k, mesaj) => redirect(ctx.res, `/stocuri/ct-park/palet/${id}?${k}=${encodeURIComponent(mesaj)}`);
-    const p = await db.prepare("SELECT * FROM ct_paleti WHERE id = ?").get(id);
-    if (!p) return redirect(ctx.res, "/stocuri/ct-park");
-    if (p.data_iesire) return inapoi("eroare", "Paletul a ieșit deja din depozit.");
-    const b = ctx.body || {};
-    const destinatie = String(b.destinatie || "");
-    if (!eDestinatie(destinatie)) return inapoi("eroare", "Alege unde se duce marfa: producție, fulfillment sau comandă.");
-    let comanda = null;
-    if (destinatie === "comanda") {
-      const cid = nr(b.comanda_id);
-      if (!cid) return inapoi("eroare", "La destinația „Comandă” trebuie aleasă exact comanda.");
-      comanda = await db
-        .prepare("SELECT c.id, c.numar, c.data, c.partener_id, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
-        .get(cid);
-      if (!comanda) return inapoi("eroare", "Comanda aleasă nu mai există.");
-    }
-
-    const linii = (await liniiPalet(id)).filter((l) => nr(l.cantitate) > CPL.EPS);
-    const scrise = {};
-    for (const l of linii) scrise[l.id] = { pleaca: b["pleaca_" + l.id], ramane: b["ramane_" + l.id] };
-    const v = CPL.validareIesire(linii, scrise);
-    if (v.eroare) return inapoi("eroare", v.eroare);
-
-    const adrese = (
-      await db
-        .prepare("SELECT l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id WHERE o.palet_id = ? ORDER BY l.camp, l.pozitie")
-        .all(id)
-    ).map((a) => a.adresa);
-    // FIFO, ca la ieșirea întreagă: câți paleți mai vechi din aceeași marfă rămân.
-    const maiVechi = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM ct_paleti x LEFT JOIN produse xr ON xr.id = x.produs_id
-          WHERE x.data_iesire IS NULL AND x.id <> ?
-            AND LOWER(COALESCE(xr.denumire, x.produs_text, '')) = LOWER(COALESCE(?, ''))
-            AND (x.data_intrare < ? OR (x.data_intrare = ? AND x.id < ?))`
-      )
-      .get(id, linii.length === 1 ? linii[0].produs_text : p.produs_text, p.data_intrare, p.data_intrare, id)
-      .catch(() => ({ n: 0 }));
-    const sarite = Number((maiVechi && maiVechi.n) || 0);
-    const obs = String(b.observatii || "").trim() || null;
-    const azi = aziStr();
-    const cine = ctx.user ? ctx.user.nume : null;
-    const cost = Math.round(v.cost * 100) / 100;
-
-    const ies = await db
-      .prepare(
-        `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand, partiala)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-      )
-      .run(
-        id,
-        destinatie,
-        comanda ? comanda.id : null,
-        comanda ? comanda.client : null,
-        comanda ? comanda.numar || "#" + comanda.id : null,
-        comanda ? String(comanda.data || "").slice(0, 10) : null,
-        adrese.join(" + ") || null,
-        azi,
-        obs,
-        cine,
-        cost > 0 ? cost : null,
-        cost > 0 ? "preț pe palet" : "fără preț la intrare",
-        sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${obs ? ": " + obs : " — fără motiv scris"}` : null,
-        v.paletGol ? 0 : 1
-      );
-    const iesireId = ies.lastInsertRowid;
-    for (const m of v.miscate) {
-      await db
-        .prepare(
-          `INSERT INTO ct_iesiri_linii (iesire_id, palet_linie_id, produs_id, produs_text, cantitate, cantitate_ramasa, um, pret_unitar)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(iesireId, m.linie_id, m.produs_id, m.produs_text, m.pleaca, m.ramane, m.um, m.pret_unitar);
-      await db.prepare("UPDATE ct_palet_linii SET cantitate = ? WHERE id = ? AND palet_id = ?").run(m.ramane, m.linie_id, id);
-    }
-    const plecat = v.miscate.map((m) => `${m.pleaca.toLocaleString("ro-RO")} ${m.um || ""} ${m.produs_text || ""}`.replace(/\s+/g, " ").trim()).join("; ");
-    const unde = comanda ? `comanda ${comanda.numar || "#" + comanda.id}` : etichetaDestinatie(destinatie).toLowerCase();
-    let mesaj;
-    if (v.paletGol) {
-      // Nu mai rămâne nimic: paletul iese și locul se eliberează, ca la ieșirea
-      // întreagă. Rezumatul de pe palet rămâne cel de dinainte — istoricul lui.
-      await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
-      await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
-      console.log(`[ct-park] golit ${p.cod} spre ${unde} de ${cine || "?"}`);
-      mesaj = `A plecat tot (${plecat}) spre ${unde}. Paletul a ieșit din depozit, iar ${adrese.join(" + ") || "locul"} e liber.`;
-    } else {
-      const r = await rescrieRezumat(id);
-      console.log(`[ct-park] scos din ${p.cod}: ${plecat} spre ${unde} de ${cine || "?"}`);
-      mesaj = `A plecat ${plecat} spre ${unde}. Pe palet rămân ${r.cantitate ? r.cantitate.toLocaleString("ro-RO") + " " + (r.um || "") : r.produs_text || "—"}; paletul stă pe loc.`;
-    }
-
-    // Pe o comandă de client, ce a plecat acum primește avizul de însoțire
-    // (Vali, 03.11.2026) — doar ce a plecat, nu ce rămâne pe palet.
-    if (comanda) {
-      try {
-        const ids = [...new Set(v.miscate.map((m) => Number(m.produs_id)).filter(Boolean))];
-        const din = ids.length
-          ? await db
-              .prepare(`SELECT id, denumire, COALESCE(NULLIF(TRIM(cod), ''), cod_generat) AS cod FROM produse WHERE id IN (${ids.map(() => "?").join(",")})`)
-              .all(...ids)
-          : [];
-        const catalog = new Map((din || []).map((x) => [Number(x.id), x]));
-        const aviz = await require("./avize").emite({
-          partenerId: comanda.partener_id,
-          comandaId: comanda.id,
-          comandaNumar: comanda.numar || null,
-          linii: v.miscate.map((m) => {
-            const c = catalog.get(Number(m.produs_id));
-            return { produs_id: m.produs_id, denumire: c ? c.denumire : m.produs_text, cod: c ? c.cod : null, um: m.um, cantitate: m.pleaca, palet: p.cod };
-          }),
-          creatDe: cine,
-          creatDeId: ctx.user ? ctx.user.id : null,
-          sursa: "depozit",
-          observatii: obs,
-        });
-        await db.prepare("UPDATE ct_iesiri SET aviz_id = ? WHERE id = ?").run(aviz.id, iesireId);
-        return redirect(ctx.res, `/stocuri/ct-park/aviz/${aviz.id}?palet=${id}&mesaj=${encodeURIComponent(mesaj)}`);
-      } catch (e) {
-        console.error("[ct-park] aviz la ieșirea parțială:", e.message);
-        return inapoi("eroare", `${mesaj} Avizul nu s-a putut emite: ${e.message}`);
-      }
-    }
-    return inapoi("ok", mesaj);
+    const r = await iesirePartiala(ctx.user, id, ctx.body || {});
+    if (r.lipsa) return redirect(ctx.res, "/stocuri/ct-park");
+    if (r.eroare) return inapoi("eroare", r.eroare);
+    if (r.aviz) return redirect(ctx.res, `/stocuri/ct-park/aviz/${r.aviz.id}?palet=${id}&mesaj=${encodeURIComponent(r.mesaj)}`);
+    if (r.avizEroare) return inapoi("eroare", `${r.mesaj} Avizul nu s-a putut emite: ${r.avizEroare}`);
+    return inapoi("ok", r.mesaj);
   });
 
   // Ruta veche de scoatere, fără destinație. Nu mai scoate nimic: trimite la
@@ -3106,34 +3319,9 @@ function register(router) {
     redirect(ctx.res, "/stocuri/ct-park/iesire?palet=" + encodeURIComponent(ctx.params.id));
   });
 
-  // ---- Ieșirea de marfă ---------------------------------------------------
-  //
-  // Simetric cu intrarea, cu o singură diferență care contează: la ieșire
-  // trebuie spus OBLIGATORIU unde se duce paletul. Marfa care „a plecat" fără
-  // să se știe unde e marfă pierdută pe hârtie, chiar dacă în realitate a
-  // ajuns unde trebuia.
-  //
-  // Trei drumuri: producție, fulfillment, sau o comandă anume. La comandă se
-  // alege exact comanda, iar clientul și numărul ei ajung pe etichetă.
-  const DESTINATII = [
-    ["productie", "Producție", "Materie primă care intră în fabricație."],
-    ["fulfillment", "Fulfillment", "Marfă care pleacă spre pregătirea comenzilor."],
-    ["comanda", "Comandă", "Livrare pe o comandă anume — se alege mai jos."],
-  ];
-  const eDestinatie = (v) => DESTINATII.some(([c]) => c === String(v || ""));
-  const etichetaDestinatie = (v) => (DESTINATII.find(([c]) => c === String(v || "")) || [, String(v || "")])[1];
-
-  async function comenziDeschise() {
-    return db
-      .prepare(
-        `SELECT c.id, c.numar, c.data, c.status, p.nume AS client
-           FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
-          WHERE c.status NOT IN ('anulata')
-          ORDER BY c.id DESC LIMIT 300`
-      )
-      .all()
-      .catch(() => []);
-  }
+  // Ieșirea de marfă: destinațiile, comenzile și scoaterea propriu-zisă stau
+  // mai sus, în afara rutelor (iesireIntreaga, iesirePartiala) — le folosește
+  // și scanerul din depozit (modules/ct-scaner.js).
 
   // ---- Mută marfa dintr-un loc în altul ----------------------------------
   //
@@ -3599,180 +3787,52 @@ function register(router) {
   });
 
   router.post("/stocuri/ct-park/iesire", async (ctx) => {
-    const b = ctx.body;
-    const ids = [].concat(b.paleti || []).map((x) => nr(x)).filter(Boolean);
-    const destinatie = String(b.destinatie || "");
-    const inapoi = (mesaj) => redirect(ctx.res, "/stocuri/ct-park/iesire?eroare=" + encodeURIComponent(mesaj));
-
-    if (!ids.length) return inapoi("N-ai bifat niciun palet.");
-    if (!eDestinatie(destinatie)) return inapoi("Alege unde se duce marfa: producție, fulfillment sau comandă.");
-
-    let comanda = null;
-    if (destinatie === "comanda") {
-      const cid = nr(b.comanda_id);
-      if (!cid) return inapoi("La destinația „Comandă” trebuie aleasă exact comanda.");
-      comanda = await db
-        .prepare(
-          `SELECT c.id, c.numar, c.data, c.partener_id, p.nume AS client FROM comenzi c
-             JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`
-        )
-        .get(cid);
-      if (!comanda) return inapoi("Comanda aleasă nu mai există.");
+    const r = await iesireIntreaga(ctx.user, ctx.body);
+    if (r.eroare) return redirect(ctx.res, "/stocuri/ct-park/iesire?eroare=" + encodeURIComponent(r.eroare));
+    if (r.aviz) return redirect(ctx.res, `/stocuri/ct-park/aviz/${r.aviz.id}?paleti=${r.scoase.join(",")}`);
+    if (r.avizEroare) {
+      return redirect(
+        ctx.res,
+        "/stocuri/ct-park/etichete?paleti=" + r.scoase.join(",") + "&eroare=" + encodeURIComponent("Paleții au ieșit, dar avizul nu s-a putut emite: " + r.avizEroare)
+      );
     }
-
-    // Adresa de unde pleacă fiecare palet, luată ÎNAINTE de a elibera
-    // locurile — după ștergere n-am mai avea de unde s-o scriem pe etichetă.
-    const adrese = await db
-      .prepare(
-        `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id
-          WHERE o.palet_id IN (${ids.map(() => "?").join(",")}) ORDER BY l.camp, l.pozitie`
-      )
-      .all(...ids);
-    const ha = new Map();
-    for (const a of adrese) {
-      const k = Number(a.palet_id);
-      if (!ha.has(k)) ha.set(k, []);
-      ha.get(k).push(a.adresa);
-    }
-
-    const azi = aziStr();
-    const cine = ctx.user ? ctx.user.nume : null;
-    const motivPeste = String(b.peste_rand || "").trim() || null;
-    const scoase = [];
-    const iesiriNoi = [];
-    for (const id of ids) {
-      const p = await db
-        .prepare(
-          `SELECT p.id, p.cantitate, p.um, p.produs_id, p.produs_text, p.data_intrare,
-                  p.pret_unitar, p.pret_sursa, COALESCE(pr.denumire, p.produs_text) AS marfa
-             FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
-            WHERE p.id = ? AND p.data_iesire IS NULL`
-        )
-        .get(id);
-      if (!p) continue; // deja ieșit între timp — nu-l scoatem de două ori
-
-      // FIFO, verificat și pe server: câți paleți mai vechi din aceeași marfă
-      // rămân în depozit după ieșirea asta. Verificarea din pagină e o
-      // comoditate; asta e cea care ajunge în date.
-      const maiVechi = await db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM ct_paleti x LEFT JOIN produse xr ON xr.id = x.produs_id
-            WHERE x.data_iesire IS NULL AND x.id <> ?
-              AND LOWER(COALESCE(xr.denumire, x.produs_text, '')) = LOWER(COALESCE(?, ''))
-              AND (x.data_intrare < ? OR (x.data_intrare = ? AND x.id < ?))
-              AND x.id NOT IN (${ids.map(() => "?").join(",")})`
-        )
-        .get(id, p.marfa, p.data_intrare, p.data_intrare, id, ...ids)
-        .catch(() => ({ n: 0 }));
-      const sarite = Number((maiVechi && maiVechi.n) || 0);
-
-      // Costul care iese efectiv din depozit, cu prețul paletului ăsta.
-      const cost = nr(p.cantitate) * nr(p.pret_unitar);
-      const temei = nr(p.pret_unitar) ? p.pret_sursa || "preț pe palet" : "fără preț la intrare";
-
-      await db.prepare("UPDATE ct_paleti SET data_iesire = ? WHERE id = ?").run(azi, id);
-      await db.prepare("DELETE FROM ct_ocupari WHERE palet_id = ?").run(id);
-      const ies = await db
-        .prepare(
-          `INSERT INTO ct_iesiri (palet_id, destinatie, comanda_id, client, comanda_numar, comanda_data, adresa, data, observatii, creat_de, cost, cost_temei, peste_rand)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-        )
-        .run(
-          id,
-          destinatie,
-          comanda ? comanda.id : null,
-          comanda ? comanda.client : null,
-          comanda ? comanda.numar || "#" + comanda.id : null,
-          comanda ? String(comanda.data || "").slice(0, 10) : null,
-          (ha.get(Number(id)) || []).join(" + ") || null,
-          azi,
-          String(b.observatii || "").trim() || null,
-          cine,
-          cost > 0 ? Math.round(cost * 100) / 100 : null,
-          temei,
-          sarite ? `${sarite} ${sarite === 1 ? "palet mai vechi rămas" : "paleți mai vechi rămași"}${motivPeste ? ": " + motivPeste : " — fără motiv scris"}` : null
-        );
-      scoase.push(id);
-      if (ies && ies.lastInsertRowid) iesiriNoi.push(Number(ies.lastInsertRowid));
-    }
-
-    if (!scoase.length) return inapoi("Paleții bifați ieșiseră deja din depozit.");
-
-    // Livrarea pe o comandă de client: în loc de etichete, AVIZUL de însoțire
-    // a mărfii (Vali, 03.11.2026), fără prețuri, cu tot ce a plecat acum.
-    // Ieșirea s-a făcut deja; dacă avizul nu se poate emite, omul primește
-    // etichetele și motivul — nu o ieșire pe jumătate.
-    if (comanda) {
-      try {
-        const linii = await liniiPentruAviz(scoase);
-        const aviz = await require("./avize").emite({
-          partenerId: comanda.partener_id,
-          comandaId: comanda.id,
-          comandaNumar: comanda.numar || null,
-          linii,
-          creatDe: cine,
-          creatDeId: ctx.user ? ctx.user.id : null,
-          sursa: "depozit",
-          observatii: String(b.observatii || "").trim() || null,
-        });
-        if (iesiriNoi.length)
-          await db.prepare(`UPDATE ct_iesiri SET aviz_id = ? WHERE id IN (${iesiriNoi.map(() => "?").join(",")})`).run(aviz.id, ...iesiriNoi);
-        return redirect(ctx.res, `/stocuri/ct-park/aviz/${aviz.id}?paleti=${scoase.join(",")}`);
-      } catch (e) {
-        console.error("[ct-park] aviz la ieșire:", e.message);
-        return redirect(
-          ctx.res,
-          "/stocuri/ct-park/etichete?paleti=" + scoase.join(",") + "&eroare=" + encodeURIComponent("Paleții au ieșit, dar avizul nu s-a putut emite: " + e.message)
-        );
-      }
-    }
-    redirect(ctx.res, "/stocuri/ct-park/etichete?paleti=" + scoase.join(","));
+    redirect(ctx.res, "/stocuri/ct-park/etichete?paleti=" + r.scoase.join(","));
   });
 
-  // Ce a plecat pe paleții scoși întregi, pentru aviz: liniile fiecărui palet
-  // (ieșirea întreagă nu le atinge), cu denumirea din nomenclator; paletul vechi,
-  // fără linii, intră cu rezumatul lui. Codul paletului rămâne lângă linie.
-  async function liniiPentruAviz(ids) {
-    if (!ids.length) return [];
-    const semne = ids.map(() => "?").join(",");
-    const paleti = await db
-      .prepare(
-        `SELECT p.id, p.cod, p.produs_id, p.cantitate, p.um, COALESCE(pr.denumire, NULLIF(p.produs_text, '')) AS produs,
-                COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
-           FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id WHERE p.id IN (${semne}) ORDER BY p.id`
-      )
-      .all(...ids);
-    const linii = await db
-      .prepare(
-        `SELECT pl.palet_id, pl.produs_id, pl.cantitate, pl.um, COALESCE(pr.denumire, NULLIF(pl.produs_text, '')) AS produs,
-                COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS produs_cod
-           FROM ct_palet_linii pl LEFT JOIN produse pr ON pr.id = pl.produs_id
-          WHERE pl.palet_id IN (${semne}) AND pl.cantitate > 0 ORDER BY pl.palet_id, pl.id`
-      )
-      .all(...ids)
-      .catch(() => []);
-    const out = [];
-    for (const p of paleti) {
-      const ale = (linii || []).filter((l) => Number(l.palet_id) === Number(p.id));
-      const surse = ale.length ? ale : [{ produs_id: p.produs_id, cantitate: p.cantitate, um: p.um, produs: p.produs, produs_cod: p.produs_cod }];
-      for (const l of surse)
-        out.push({ produs_id: l.produs_id, denumire: l.produs, cod: l.produs_cod, um: l.um, cantitate: l.cantitate, palet: p.cod });
-    }
-    return out;
-  }
 
   // ---- Paleții din depozit -----------------------------------------------
   router.get("/stocuri/ct-park/paleti", async (ctx) => {
     const toate = String(ctx.query.toate || "") === "1";
+    // Căutarea după denumire (Vali, 10.11.2026, cu poza listei de 246 de
+    // paleți: „fă un box de căutare după denumire în pagina asta"). Fiecare
+    // cuvânt scris trebuie să se regăsească în denumirea mărfii — a paletului
+    // sau a unei linii de pe el —, în codul produsului, în codul paletului ori
+    // în lot; ordinea cuvintelor nu contează, nici literele mari, nici
+    // diacriticele („banda pet" găsește „Bandă PET 5mm").
+    const cauta = String(ctx.query.q || "").trim().slice(0, 80);
+    const faraSemne = (t) => String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const curat = (col) => `translate(LOWER(${col}), 'ăâîșşțţ', 'aaisstt')`;
+    const conditii = toate ? [] : ["p.data_iesire IS NULL"];
+    const argCauta = [];
+    for (const cuvant of faraSemne(cauta).split(/\s+/).filter(Boolean).slice(0, 6)) {
+      // „%" și „_" scrise de om se caută ca atare, nu ca „orice".
+      const tipar = `%${cuvant.replace(/[\\%_]/g, (c) => "\\" + c)}%`;
+      conditii.push(`(${curat("COALESCE(pr.denumire, p.produs_text, '')")} LIKE ?
+            OR ${curat("COALESCE(pr.cod, '')")} LIKE ? OR ${curat("COALESCE(p.cod, '')")} LIKE ? OR ${curat("COALESCE(p.lot, '')")} LIKE ?
+            OR EXISTS (SELECT 1 FROM ct_palet_linii pl LEFT JOIN produse plr ON plr.id = pl.produs_id
+                        WHERE pl.palet_id = p.id AND pl.cantitate > 0
+                          AND ${curat("COALESCE(plr.denumire, pl.produs_text, '')")} LIKE ?))`);
+      argCauta.push(tipar, tipar, tipar, tipar, tipar);
+    }
     const paleti = await db
       .prepare(
         `SELECT p.*, pr.denumire AS produs,
                 (SELECT COUNT(*) FROM ct_ocupari o WHERE o.palet_id = p.id) AS locuri
            FROM ct_paleti p LEFT JOIN produse pr ON pr.id = p.produs_id
-          ${toate ? "" : "WHERE p.data_iesire IS NULL"}
+          ${conditii.length ? "WHERE " + conditii.join(" AND ") : ""}
           ORDER BY p.data_intrare DESC, p.id DESC LIMIT 400`
       )
-      .all();
+      .all(...argCauta);
     const adrese = await db
       .prepare(
         `SELECT o.palet_id, l.adresa FROM ct_ocupari o JOIN ct_locuri l ON l.id = o.loc_id ORDER BY l.camp, l.pozitie`
@@ -3785,6 +3845,31 @@ function register(router) {
       ha.get(k).push(a.adresa);
     }
 
+    // Ce nu se vede pe rând, dar se caută: codul produsului și produsele de pe
+    // liniile unui palet cu mai multe. Stau ascunse în celula mărfii, ca
+    // filtrarea de pe pagină să găsească exact ce găsește și căutarea.
+    const liniiCautate = paleti.length
+      ? await db
+          .prepare(
+            `SELECT pl.palet_id, COALESCE(plr.denumire, pl.produs_text) AS nume, plr.cod
+               FROM ct_palet_linii pl LEFT JOIN produse plr ON plr.id = pl.produs_id
+              WHERE pl.cantitate > 0 AND pl.palet_id IN (${paleti.map(() => "?").join(",")})`
+          )
+          .all(...paleti.map((p) => Number(p.id)))
+          .catch(() => [])
+      : [];
+    const ascuns = new Map();
+    for (const l of liniiCautate) {
+      const k = Number(l.palet_id);
+      if (!ascuns.has(k)) ascuns.set(k, new Set());
+      for (const t of [l.nume, l.cod]) if (t) ascuns.get(k).add(String(t));
+    }
+    const deCautat = (p) => {
+      const vazut = String(p.produs || p.produs_text || "");
+      const t = [...(ascuns.get(Number(p.id)) || [])].filter((x) => x !== vazut);
+      return t.length ? ` <span hidden>${esc(t.join(" · "))}</span>` : "";
+    };
+
     // Valoarea stocului: din prețul cu care a intrat fiecare palet, nu dintr-o
     // medie pe produs. Spunem și câți paleți n-au preț, ca să se vadă cât din
     // cifră lipsește.
@@ -3795,9 +3880,16 @@ function register(router) {
     const body = `
       ${subtabs("/stocuri/ct-park/paleti", ctx.user)}
       <div class="toolbar"><a class="btn" href="/stocuri/ct-park/intrare">+ Intrare marfă</a></div>
+      <form class="filtre" method="get" action="/stocuri/ct-park/paleti">
+        ${toate ? '<input type="hidden" name="toate" value="1">' : ""}
+        <input type="search" name="q" id="cauta-paleti" value="${esc(cauta)}" placeholder="Caută după denumire (merge și codul paletului sau lotul)…" style="min-width:340px" autocomplete="off">
+        <button class="btn small" type="submit">Caută</button>
+        ${cauta ? `<a class="btn secondary small" href="/stocuri/ct-park/paleti${toate ? "?toate=1" : ""}">Arată tot</a>` : ""}
+        <span id="cate-paleti" style="font-size:13px;color:var(--text-muted)">${cauta ? `${paleti.length} ${paleti.length === 1 ? "palet găsit" : "paleți găsiți"} pentru „${esc(cauta)}”${paleti.length === 400 ? " (primii 400)" : ""}` : ""}</span>
+      </form>
       <div class="cards">
-        <div class="card"><div class="label">Paleți în depozit</div><div class="value">${inDepozit.length}</div></div>
-        <div class="card"><div class="label">Valoarea stocului</div>
+        <div class="card"><div class="label">${cauta ? "Paleți găsiți, în depozit" : "Paleți în depozit"}</div><div class="value">${inDepozit.length}</div></div>
+        <div class="card"><div class="label">${cauta ? "Valoarea lor" : "Valoarea stocului"}</div>
           <div class="value">${valoare.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} lei</div>
           <div class="mic">${faraPret ? `${faraPret} ${faraPret === 1 ? "palet n-are" : "paleți n-au"} preț la intrare, deci nu ${faraPret === 1 ? "e" : "sunt"} la socoteală` : "toți paleții au preț la intrare"}</div></div>
       </div>
@@ -3805,7 +3897,7 @@ function register(router) {
         ["Cod", "Marfă", "Cantitate", "Lot", "Categorie", "Adresă", "Intrată", "Valoare", "Stare", ""],
         paleti.map((p) => [
           `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod)}</a>`,
-          p.produs_id ? `<a href="/produse/${p.produs_id}">${esc(p.produs || "—")}</a>` : esc(p.produs_text || "—"),
+          (p.produs_id ? `<a href="/produse/${p.produs_id}">${esc(p.produs || "—")}</a>` : esc(p.produs_text || "—")) + deCautat(p),
           nr(p.cantitate) ? nr(p.cantitate).toLocaleString("ro-RO") + " " + esc(p.um || "") : "—",
           esc(p.lot || "—"),
           pastila(p.categorie) || "—",
@@ -3818,9 +3910,32 @@ function register(router) {
           `<a class="btn small secondary" href="/stocuri/ct-park/etichete?paleti=${p.id}" target="_blank">Etichetă</a>`,
         ])
       )}
+      ${cauta && !paleti.length ? `<p>Niciun palet${toate ? "" : " în depozit"} cu „${esc(cauta)}” în denumire, cod sau lot.${toate ? "" : ` <a href="/stocuri/ct-park/paleti?toate=1&q=${encodeURIComponent(cauta)}">Caută și printre cei scoși</a>.`}</p>` : ""}
       <p style="font-size:12px;color:var(--text-muted)">
-        ${toate ? `<a href="/stocuri/ct-park/paleti">Doar paleții din depozit</a>` : `<a href="/stocuri/ct-park/paleti?toate=1">Arată și paleții scoși</a>`}
+        ${toate ? `<a href="/stocuri/ct-park/paleti${cauta ? "?q=" + encodeURIComponent(cauta) : ""}">Doar paleții din depozit</a>` : `<a href="/stocuri/ct-park/paleti?toate=1${cauta ? "&q=" + encodeURIComponent(cauta) : ""}">Arată și paleții scoși</a>`}
       </p>
+      <script>
+      // Pe măsură ce scrii, rândurile de pe pagină se filtrează pe loc; Enter
+      // (sau „Caută") caută în tot depozitul, și dincolo de primii 400.
+      (function () {
+        var camp = document.getElementById("cauta-paleti"), cate = document.getElementById("cate-paleti");
+        if (!camp) return;
+        var randuri = [].slice.call(document.querySelectorAll("table.table tbody tr"));
+        function fara(t) { return String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+        var texte = randuri.map(function (r) { return fara(r.textContent); });
+        var initial = cate ? cate.textContent : "";
+        camp.addEventListener("input", function () {
+          var cuvinte = fara(camp.value).split(/\\s+/).filter(Boolean), n = 0;
+          for (var i = 0; i < randuri.length; i++) {
+            var ok = true;
+            for (var j = 0; j < cuvinte.length; j++) if (texte[i].indexOf(cuvinte[j]) === -1) { ok = false; break; }
+            randuri[i].style.display = ok ? "" : "none";
+            if (ok) n++;
+          }
+          if (cate) cate.textContent = cuvinte.length ? n + " din " + randuri.length + " de pe pagină — Enter caută în tot depozitul" : initial;
+        });
+      })();
+      </script>
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Paleți în CT-Park", active: "/stocuri/ct-park", body }));
   });
@@ -4453,7 +4568,15 @@ function register(router) {
             <div class="et-firma">CASH MACHINE · CT-PARK</div>
             <div class="et-data">${esc(p.data_intrare)}</div>
           </div>
-          <div class="et-adresa">${esc(adr[0] || "—")}</div>
+          ${
+            // Paletul făcut la recepție își primește eticheta ÎNAINTE de raft
+            // (Vali, 10.11.2026: „se lipește pe palet, apoi se scanează și se
+            // pun pe rafturi"). Eticheta lui n-are ce adresă să poarte: spune
+            // ce urmează, iar locul îl află ERP-ul la scanare.
+            adr.length
+              ? `<div class="et-adresa">${esc(adr[0])}</div>`
+              : `<div class="et-adresa et-fara-loc">DE PUS PE RAFT</div><div class="et-adrese-plus">scanezi paletul, apoi locul</div>`
+          }
           ${adr.length > 1 ? `<div class="et-adrese-plus">+ ${adr.slice(1).map((a) => esc(a)).join(" + ")}</div>` : ""}
           <div class="et-produs">${esc(p.produs || p.produs_text || "—")}</div>
           ${
@@ -4466,7 +4589,7 @@ function register(router) {
             <tr><td>Cantitate</td><td><strong>${nr(p.cantitate) ? nr(p.cantitate).toLocaleString("ro-RO") + " " + esc(p.um || "") : "—"}</strong></td></tr>
             <tr><td>Lot</td><td>${esc(p.lot || "—")}</td></tr>
             <tr><td>Categorie</td><td>${esc(p.categorie || "—")}</td></tr>
-            <tr><td>Locuri</td><td>${adr.length}</td></tr>
+            ${adr.length ? `<tr><td>Locuri</td><td>${adr.length}</td></tr>` : ""}
           </table>
           <div class="et-jos et-jos-palet">${codbare.svg(p.cod, { inalt: 13, modul: 0.4, subtitlu: false, latimeMax: 86 })}<div>${esc(p.cod)}</div></div>
         </div>`;
@@ -4499,6 +4622,7 @@ function register(router) {
         .et-sus { display:flex; justify-content:space-between; font-size:9pt; letter-spacing:.04em; border-bottom:1.5pt solid #000; padding-bottom:2mm; }
         .et-firma { font-weight:700; }
         .et-adresa { font-size:38pt; font-weight:800; letter-spacing:-.01em; text-align:center; margin:5mm 0 0; font-family:"Consolas","DejaVu Sans Mono",monospace; }
+        .et-fara-loc { font-size:22pt; font-family:Arial,Helvetica,sans-serif; letter-spacing:.02em; }
         .et-adrese-plus { text-align:center; font-size:11pt; color:#444; margin-top:1mm; font-family:"Consolas","DejaVu Sans Mono",monospace; }
         .et-produs { font-size:14pt; font-weight:600; margin-top:6mm; line-height:1.15; }
         .et-cod { font-size:11pt; color:#444; font-family:"Consolas","DejaVu Sans Mono",monospace; margin-top:1mm; }
@@ -5250,6 +5374,15 @@ module.exports = {
   subtabs,
   CATEGORII,
   puneMarfa,
+  // Folosite și de scanerul din depozit (modules/ct-scaner.js): aceeași
+  // ieșire, același rând de recepție, aceleași destinații ca în pagini.
+  iesireIntreaga,
+  iesirePartiala,
+  dinReceptie,
+  liniiPalet,
+  DESTINATII,
+  etichetaDestinatie,
+  comenziDeschise,
   eticheteCampuri,
   cheieMarfa,
   culoareMarfa,

@@ -136,10 +136,14 @@ async function sectiuneCtPark(r, linii) {
     .all()
     .catch(() => []);
   const fmt = (v) => Number(v).toLocaleString("ro-RO", { maximumFractionDigits: 3 });
+  // Rândurile care n-au încă toată marfa pe paleți: pentru ele se fac paleții
+  // și etichetele, mai jos (Vali, 10.11.2026).
+  const faraPaleti = [];
   const randuri = bune.map((l) => {
     const ale = paleti.filter((p) => Number(p.receptie_linie_id) === Number(l.id));
     const pus = ale.reduce((s, p) => s + nr(p.cantitate), 0);
     const ramas = Math.round((nr(l.cantitate_primita) - pus) * 1000) / 1000;
+    if (ramas > R.EPS && !l.ct_inchis_la) faraPaleti.push({ id: Number(l.id), nume: l.produs_denumire || l.produs_text || "—", ramas, um: l.um || l.unitate_masura || "" });
     const um = esc(l.um || l.unitate_masura || "");
     const unde = ale.length
       ? ale
@@ -186,8 +190,30 @@ async function sectiuneCtPark(r, linii) {
       actiuni,
     ];
   });
+  // „La recepție marfă să te asiguri că se generează etichete pentru fiecare
+  // palet — se lipește pe palet, apoi se scanează și se pun pe rafturi."
+  // Un singur formular pentru toate rândurile: câte un palet cu tot ce a
+  // rămas, dacă omul nu scrie altceva.
+  const formularPaleti = faraPaleti.length
+    ? `<form method="post" action="/depozit/receptie/${r.id}/paleti" class="form" style="max-width:860px;margin:10px 0 16px;border-left:4px solid var(--primary)">
+         <strong>Paleți și etichete</strong>
+         <p class="explic" style="margin:0">
+           Scrie cât e pe fiecare palet, cu plus între ei: <code>400 + 400 + 200</code>, sau <code>3 x 400</code>. Lăsat așa, se face un singur palet cu tot rândul.
+           Fiecare palet primește codul lui și o etichetă cu cod de bare. O lipești pe palet, iar pe raft îl pui cu
+           <a href="/stocuri/ct-park/scaner">scanerul</a>: scanezi paletul, scanezi locul, Efectuează.
+         </p>
+         ${faraPaleti
+           .map(
+             (x) => `<label class="field"><span>${esc(x.nume)} — de pus <strong>${fmt(x.ramas)} ${esc(x.um)}</strong></span>
+               <input name="paleti_${x.id}" value="${esc(String(x.ramas).replace(".", ","))}" inputmode="text" autocomplete="off" placeholder="ex. 400 + 400 + 200 sau 3 x 400 — gol = fără paleți acum"></label>`
+           )
+           .join("")}
+         <div class="form-actions"><button class="btn" type="submit">Fă paleții și scoate etichetele →</button></div>
+       </form>`
+    : "";
   return `
-    <h3 style="margin-top:22px">Unde pui marfa — CT-Park</h3>
+    <h3 style="margin-top:22px" id="ct-park">Unde pui marfa — CT-Park</h3>
+    ${formularPaleti}
     <p class="explic" style="max-width:860px">
       Depozitul e unul singur, CT-Park. Pentru fiecare rând spune unde pui marfa: <strong>Pune în CT-Park</strong>
       deschide Intrarea marfă cu produsul, cantitatea, lotul, prețul și furnizorul deja scrise — alegi rândul, nivelul,
@@ -550,7 +576,8 @@ function register(router) {
     redirect(
       ctx.res,
       `/depozit/receptie/${id}?ok=` +
-        encodeURIComponent(f.mesaj + (f.scrise ? " Acum spune, mai jos, unde pui marfa în CT-Park — sau trimite-o direct la livrare." : ""))
+        encodeURIComponent(f.mesaj + (f.scrise ? " Acum fă, mai jos, paleții și etichetele lor — sau spune direct unde pui marfa în CT-Park, ori trimite-o la livrare." : "")) +
+        (f.scrise ? "#ct-park" : "")
     );
   });
 

@@ -352,10 +352,31 @@ const GHID = [
 {
 "t":"Paleți în depozit",
 "p":[
-"Lista completă a paleților aflați acum în depozit, cu adresa și marfa fiecăruia. De aici cauți un palet anume."
+"Lista completă a paleților aflați acum în depozit, cu adresa și marfa fiecăruia. De aici cauți un palet anume.",
+"Sus e <b>căsuța de căutare</b>: scrii o parte din denumire și rândurile se filtrează pe loc. Nu contează literele mari, diacriticele sau ordinea cuvintelor — „banda pet” găsește „Bandă PET 5mm”. Găsește și paletul cu mai multe produse, după oricare din ele, și merge și cu codul produsului, codul paletului sau lotul. <b>Enter</b> caută în tot depozitul, nu doar în rândurile de pe pagină."
 ],
 "pasi":[],
 "sfat":null
+},
+{
+"t":"Scanerul: intrare și ieșire cu terminalul în mână",
+"p":[
+"Tabul <b>Scaner</b> e făcut pentru terminalul din mână și merge pe orice telefon. Are două butoane mari, <b>Intrare</b> și <b>Ieșire</b>, și un singur câmp, mereu pregătit: cititorul scrie codul în el și trimite singur.",
+"Ca să meargă, fiecare lucru are eticheta lui cu cod de bare: <b>paletul</b> (CT…), <b>locul de pe raft</b> (de exemplu R3-05-2-1) și marfa din producție (fișa de lot CM-… sau codul produsului).",
+"<b>Paleții și etichetele lor se fac la recepție.</b> După ce numeri marfa și finalizezi recepția, scrii cât e pe fiecare palet, cu plus între ei — <code>400 + 400 + 200</code> sau <code>3 x 400</code> — și apeși „Fă paleții și scoate etichetele”. Fiecare palet primește codul lui; eticheta se lipește pe palet. Paleții stau apoi la Scaner → Intrare, la „așteaptă raftul”, până îi pui pe un loc.",
+"<b>Intrare.</b> Alegi de unde vine marfa (din producție, de la furnizor, retururi), scanezi paletul, scanezi locul, apeși <b>Efectuează</b>. ERP-ul îți propune un loc: întâi lângă același produs, apoi lângă produse din aceeași familie, apoi în zona categoriei; dedesubt sunt alte locuri libere, pe care le alegi cu o atingere. Un loc ocupat sau scos din uz e refuzat pe loc, de la scanare. Un palet lat se pune pe două sau trei locuri lipite. Un palet care are deja loc se <b>mută</b> pe cel scanat.",
+"<b>Marfa din producție fără palet</b> o găsești scanând fișa de lot sau codul produsului: scrii cât e pe palet, scanezi locul și apeși Efectuează. Paletul se face atunci, pe locul scanat, iar eticheta lui merge la tipărit. Ce n-ai pus rămâne în listă.",
+"<b>Ieșire.</b> Scanezi paletul sau locul pe care stă (ori codul produsului: îți arată paleții lui, cel mai vechi primul). Alegi unde pleacă — comandă, fulfillment, producție —, comanda (cele care au produsul sunt primele, cu ✓) și cât pleacă; dacă e mai puțin decât tot, restul rămâne pe palet, pe locul lui. Dacă există un palet mai vechi din aceeași marfă, terminalul ți-l arată și îți cere motivul.",
+"<b>De tipărit.</b> La ieșirea pe o comandă se fac avizul și <b>comanda clientului</b> (ce a comandat, cât a plecat, cât mai e — fără prețuri). Ele, ca și etichetele paleților făcuți din terminal, ajung în tabul <b>De tipărit</b>. Lăsat deschis pe calculatorul de lângă imprimantă, cu bifa „Printează singur ce apare”, le scoate singur."
+],
+"pasi":[
+"O singură dată: tipărești etichetele locurilor din <b>Scaner → Etichete pentru rafturi</b> (A4 sau Zebra) și le lipești pe stâlpul fiecărui câmp, la înălțimea ochilor, cu nivelul de sus deasupra.",
+"La recepție: finalizezi, scrii cât e pe fiecare palet, scoți etichetele și le lipești pe paleți.",
+"La raft: <b>Scaner → Intrare</b>, scanezi paletul, scanezi locul, <b>Efectuează</b>.",
+"La plecare: <b>Scaner → Ieșire</b>, scanezi paletul sau locul, alegi destinația, comanda și cantitatea, <b>Efectuează</b>.",
+"Hârtiile le iei de la imprimantă sau din tabul <b>De tipărit</b>."
+],
+"sfat":"Cititorul de mână citește de aproape. De-aia etichetele nivelurilor de sus se lipesc jos, pe stâlp, nu pe grinda de la patru metri: nivelul e scris mare pe fiecare, cu săgeată în sus. Pe terminal, „Ascunde tastatura” lasă tot ecranul liber; alegerea rămâne pe terminalul acela."
 },
 {
 "t":"Stoc la zi și rezervări",
