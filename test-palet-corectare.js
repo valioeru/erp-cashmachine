@@ -515,6 +515,7 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   contine("mai multe produse, unul fără denumire: depozitul îl poate completa doar pe acela", c,
     [`name="produs_linie" value="${p24.linii[1]}"`, 'name="produs_text_nou"', `name="um_${p24.linii[1]}"`], [`name="um_${p24.linii[0]}"`, "<select"]);
   egal("pe paletul ieșit nu e niciun card", card(await pagina(ADMIN, pIesit)), "");
+  bine("…și nicio legătură spre corectare", !(await pagina(ADMIN, pIesit)).includes('href="#corecteaza"'));
   egal("cine nu face intrări nu vede cardul", card(await pagina(AGENT, p1)), "");
   c = card(await pagina(DEP, p5));
   contine("paletul fără cantitate la intrare are și el cardul", card(await pagina(DEP, palet([[PA, null, 0, "kg", 2.5]]))), ["fără cantitate", "Cantitate corectă"]);

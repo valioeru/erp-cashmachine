@@ -16,6 +16,12 @@
 //   • COMANDA SE PUNE LA ZI DOAR CÂT E „NOUĂ". Una confirmată nu o rescrie un
 //     import; una scrisă de mână e adoptată, nu dublată și nu rescrisă.
 //   • PRODUSUL NELEGAT LA NOMENCLATOR NU DISPARE TĂCUT — se spune pe nume.
+//   • COMANDA ZILEI SE VEDE ÎN RAPORT ȘI SE POATE CERE DIN BUTON (11.11.2026:
+//     „Avem aici o problemă la import care mergea dar nu mai merge” — comanda
+//     zilei nu s-a făcut, fiindcă niciun produs nu era legat la nomenclator).
+//     După legare nu mai trebuie urcat fișierul a doua oară: rândul zilei are
+//     „Fă comanda”. Doar pentru zilele proaspete, doar pentru cine poate urca
+//     ziua, și tot o singură comandă pe zi.
 //   • GABI ARE DOAR RAPORTUL SAMEDAY, nu toate rapoartele; cine are toate
 //     rapoartele îl are în continuare.
 //   • LINIA DEJA COMANDATĂ DIN DEPOZIT ARE BUTONUL VERDE și întreabă înainte
@@ -97,6 +103,8 @@ const DEPOZIT = { id: 97325, nume: "Depozit", rol: "depozit", email: "d.sd@test.
 const PARTENER = 97331;
 const P1 = 97341, P2 = 97342;
 const Z1 = "2097-05-05", Z2 = "2097-05-06", Z3 = "2097-05-07", Z4 = "2097-05-08";
+// Pentru butonul din raport: „azi” e 10.05.2097, deci 09.05 e proaspătă, 01.05 e veche.
+const AZI_TEST = "2097-05-10", Z5 = "2097-05-09", Z6 = "2097-05-01", Z7 = "2097-05-10";
 
 function curata() {
   for (const s of [
@@ -238,6 +246,87 @@ function puneZi(data, linii) {
   })();
   egal("se deschide pentru Gabi", pag.cod || 200, 200);
   egal("rândul de facturare al primei chenzine (1–15 mai 2097)", /De facturat (la zi )?01\.05\.2097/.test(pag.corp), true);
+
+  console.log("\nComanda zilei în raport: ce comandă are fiecare zi și butonul care o face:");
+  CZ.__test.azi = AZI_TEST;
+  const C0 = "/rapoarte/comenzi-la-zi";
+  const cere = async (metoda, cale, user, o) => {
+    const r = { cod: 0, corp: "", antet: {}, writeHead(c, h) { this.cod = c; this.antet = h || {}; }, setHeader(k, v) { this.antet[k] = v; }, end(x) { this.corp = x || ""; } };
+    await ruteZi[metoda][cale]({ user, params: {}, query: (o && o.query) || {}, body: (o && o.body) || {}, res: r, req: { url: cale, method: metoda.toUpperCase() } });
+    return r;
+  };
+  // Rândul unei zile din tabelul „Pe zi” (primul din pagină; „Pe luni” vine după).
+  const randul = (corp, zi) => {
+    const ro = zi.slice(8, 10) + "\\." + zi.slice(5, 7) + "\\." + zi.slice(0, 4);
+    const m = String(corp).match(new RegExp("<tr[^>]*>\\s*<td[^>]*><strong>" + ro + "</strong>[\\s\\S]*?</tr>"));
+    return m ? m[0] : "";
+  };
+  const Zd = CZ.__test.ziDeComanda;
+  egal("fereastra butonului: ultimele 7 zile și mâine, nimic altceva",
+    [Zd("2097-05-03", AZI_TEST), Zd("2097-05-02", AZI_TEST), Zd("2097-05-11", AZI_TEST), Zd("2097-05-12", AZI_TEST), Zd("prostie", AZI_TEST), Zd("", AZI_TEST)],
+    [true, false, true, false, false, false]);
+  puneZi(Z5, [["TSTSD1", 700, 0.09], ["TSTSD3", 5, 0.5]]);
+  puneZi(Z6, [["TSTSD1", 100, 0.09]]);
+  let pg = await cere("get", C0, GABI, { query: { luna: "2097-05" } });
+  if (process.env.SALVEAZA_PAGINI) require("fs").writeFileSync(path.join(process.env.SALVEAZA_PAGINI, "comenzi-zi-raport.html"), pg.corp);
+  egal("tabelul zilelor are coloana „Comanda zilei”", /<th[^>]*>Comanda zilei<\/th>/.test(pg.corp), true);
+  const r1z = randul(pg.corp, Z1), r2z = randul(pg.corp, Z2), r5z = randul(pg.corp, Z5), r6z = randul(pg.corp, Z6);
+  egal("ziua cu comanda făcută de ERP o arată, cu link", [r1z.includes(`href="/comenzi/${c1[0].id}"`), r1z.includes("făcută de ERP")], [true, true]);
+  egal("ziua cu comanda lui Gabi o arată ca scrisă de mână", [r2z.includes(`href="/comenzi/${deMana.id}"`), r2z.includes("scrisă de mână")], [true, true]);
+  egal("ziua cu comandă nu are buton", [r1z.includes("fa-comanda"), r2z.includes("fa-comanda")], [false, false]);
+  egal("ziua proaspătă fără comandă are butonul, cu ziua ei și cu întrebare",
+    [r5z.includes(`action="${C0}/comanda-zilei"`), r5z.includes(`name="zi" value="${Z5}"`), />Fă comanda<\/button>/.test(r5z), /onsubmit="return confirm\('Fac comanda pentru DELIVERY SOLUTIONS pe ziua 09\.05\.2097/.test(r5z)],
+    [true, true, true, true]);
+  egal("ziua veche fără comandă nu are buton", [r6z !== "", r6z.includes("fa-comanda")], [true, false]);
+  const pgFara = await cere("get", C0, FARA, { query: { luna: "2097-05" } });
+  egal("cine n-are voie să urce ziua nu vede butonul", [randul(pgFara.corp, Z5) !== "", pgFara.corp.includes("fa-comanda")], [true, false]);
+
+  let rz = await cere("post", C0 + "/comanda-zilei", FARA, { body: { zi: Z5 } });
+  egal("cine n-are voie e trimis înapoi, fără comandă", [rz.cod, rz.antet.Location, ziua(Z5).comanda_id], [302, C0, null]);
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: "ieri" } });
+  egal("fără zi: spune că lipsește", [rz.cod, /Lipsește ziua/.test(rz.corp)], [400, true]);
+  const cateInainte = comenziClient().length;
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z6 } });
+  egal("ziua veche: refuzată, cu motivul", [rz.cod, /doar pentru ultimele 7 zile/.test(rz.corp), /Ziua 01\.05\.2097 e mai veche/.test(rz.corp)], [422, true, true]);
+  egal("…și nicio comandă făcută", [comenziClient().length, ziua(Z6).comanda_id], [cateInainte, null]);
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: "2097-05-12" } });
+  egal("nici o zi de peste două zile nu se comandă", [rz.cod, comenziClient().length], [422, cateInainte]);
+
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z5 } });
+  const c5 = comenziClient().filter((c) => c.numar === "Sameday 09.05.2097");
+  egal("butonul face comanda zilei", [rz.cod, c5.length, c5[0] && c5[0].sursa, c5[0] && c5[0].status], [200, 1, "sameday", "noua"]);
+  egal("…cu produsele legate, la prețul zilei", liniiComanda(c5[0].id), [[P1, 700, 0.09]]);
+  egal("ziua știe comanda ei", Number(ziua(Z5).comanda_id), Number(c5[0].id));
+  egal("pagina spune că a făcut-o și duce la ea", [/Am făcut comanda zilei 09\.05\.2097\./.test(rz.corp), rz.corp.includes(`href="/comenzi/${c5[0].id}"`)], [true, true]);
+  egal("…spune pe nume ce n-a intrat, unde se leagă și că fișierul nu mai trebuie urcat",
+    [/Pungă nelegată \(raport\) \(5 buc/.test(rz.corp), rz.corp.includes(`href="${C0}?legare=1"`), /apasă „Fă comanda” pe rândul zilei/.test(rz.corp), /urcă ziua din nou/.test(rz.corp)],
+    [true, true, true, false]);
+  egal("…și are drumul înapoi la ziua din raport", rz.corp.includes(`href="${C0}?perioada=custom&de=${Z5}&pana=${Z5}"`), true);
+  const ist5 = q("SELECT ce, nou FROM comenzi_istoric WHERE comanda_id = ? ORDER BY id", [c5[0].id]);
+  egal("istoricul comenzii spune că a fost cerută din buton, și de cine", [ist5[0].ce, /butonul din raport/.test(ist5[0].nou || ""), /urcată de Gabriela Tecuceanu/.test(ist5[0].nou || "")], ["Comandă creată automat", true, true]);
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z5 } });
+  egal("a doua apăsare nu face a doua comandă", [rz.cod, comenziClient().filter((c) => c.numar === "Sameday 09.05.2097").length, /e deja la zi/.test(rz.corp)], [200, 1, true]);
+  pg = await cere("get", C0, GABI, { query: { luna: "2097-05" } });
+  egal("după, rândul zilei arată comanda, nu butonul", [randul(pg.corp, Z5).includes(`href="/comenzi/${c5[0].id}"`), randul(pg.corp, Z5).includes("fa-comanda")], [true, false]);
+
+  // Exact ce s-a întâmplat pe 11.11.2026: ziua urcată, niciun produs legat.
+  puneZi(Z7, [["TSTSD3", 5, 0.5]]);
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z7 } });
+  egal("zi cu produse nelegate: comanda nu se face, și se spune de ce",
+    [rz.cod, /nu s-a făcut: niciun produs al zilei nu e legat la nomenclator/.test(rz.corp), rz.corp.includes(`href="${C0}?legare=1"`), ziua(Z7).comanda_id],
+    [200, true, true, null]);
+  exec(`UPDATE consumabile_produse SET produs_id = ${P2} WHERE cod = 'TSTSD3'`);
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z7 } });
+  const c7 = comenziClient().filter((c) => c.numar === "Sameday 10.05.2097");
+  egal("după legare, butonul o face — fără a urca fișierul din nou", [c7.length, c7[0] ? liniiComanda(c7[0].id) : null, /Nu au intrat pe comandă/.test(rz.corp)], [1, [[P2, 5, 0.5]], false]);
+  exec(`UPDATE consumabile_produse SET produs_id = NULL WHERE cod = 'TSTSD3'`);
+
+  exec(`UPDATE comenzi SET status = 'anulata' WHERE id = ${c5[0].id}`);
+  pg = await cere("get", C0, GABI, { query: { luna: "2097-05" } });
+  egal("comanda anulată se vede ca anulată, fără buton", [/făcută de ERP, anulată/.test(randul(pg.corp, Z5)), randul(pg.corp, Z5).includes("fa-comanda")], [true, false]);
+  rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z5 } });
+  egal("…și cererea n-o reface", [comenziClient().filter((c) => c.numar === "Sameday 09.05.2097").length, /a fost anulată/.test(rz.corp)], [1, true]);
+  CZ.__test.azi = null;
 
   console.log("\nCine are voie la raportul Sameday:");
   const C = "/rapoarte/comenzi-la-zi";

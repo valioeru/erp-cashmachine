@@ -17,7 +17,12 @@
 //   • CE NU E ÎN FORMULAR NU SE ATINGE: produsele scoase din listă (activ = 0)
 //     nu mai primesc preț 0 și cost gol la fiecare salvare.
 //   • UN COST CARE NU E NUMĂR NU ȘTERGE COSTUL VECHI și pagina spune unde.
-//   • PRODUSUL LEGAT LA NOMENCLATOR nu primește cost de mână.
+//   • COSTUL SCRIS DE MÂNĂ ARE ÎNTÂIETATE, și la produsul legat la nomenclator
+//     (11.11.2026): legarea nu-l șterge, recalculul nu-l înlocuiește, iar golit
+//     lasă locul celui automat. Până atunci legarea l-ar fi înlocuit pe tot ce
+//     era scris de mână — de-aia nu s-a legat nimic, iar fără legături comanda
+//     zilei nu se putea face.
+//   • LEGAREA atinge doar ce e în formular și scrie în jurnal cine a legat ce.
 //   • ZILELE DEJA SCRISE: rândurile fără cost îl primesc, cele cu cost înghețat
 //     rămân cum erau.
 //   • PAGINA SPUNE CE S-A SALVAT, iar cine n-are drept află asta.
@@ -152,7 +157,9 @@ const num = (v) => (v == null ? null : Number(v));
   bine("caseta de cost la produsul nelegat, fără pas de 4 zecimale", new RegExp(`<input name="k_${id.a}" type="number" step="any"`).test(form), form.slice(0, 200));
   bine("are casete și pentru preț și alias", new RegExp(`<input name="p_${id.a}" type="number" step="any"`).test(form) && new RegExp(`name="a_${id.a}"`).test(form));
   bine("…și butonul le salvează pe toate", /Salvează prețurile, costurile manuale și aliasurile<\/button>/.test(form));
-  bine("produsul legat la nomenclator n-are casetă de cost", !new RegExp(`name="k_${id.d}"`).test(form));
+  bine("produsul legat la nomenclator are și el casetă de cost, cu costul automat în ea", new RegExp(`<input name="k_${id.d}" type="number" step="any" min="0" value="0.5"`).test(form), form.slice(-900));
+  bine("…lângă care scrie că e automat și de unde vine", /class="sursa-cost"[^>]*>automat, din nomenclator: cost producție — scrie alt cost dacă nu e cel bun</.test(form));
+  bine("…fără casetă de notă: nota e a costului scris de mână", !new RegExp(`name="n_${id.d}"`).test(form));
   bine("produsul scos din listă nu e în formular", !form.includes("TST Plic scos din listă"));
   pag = await cer("get", CALE, ADMIN);
   const formA = (pag.corp.match(/<form method="post" action="\/rapoarte\/comenzi-la-zi\/costuri"[\s\S]*?<\/form>/) || [""])[0];
@@ -165,7 +172,6 @@ const num = (v) => (v == null ? null : Number(v));
       [`k_${id.a}`]: "2,5", [`n_${id.a}`]: "factura 123",
       [`p_${id.a}`]: "1,40", [`a_${id.a}`]: "Cutie A eticheta",
       [`k_${id.b}`]: "1.5", [`n_${id.b}`]: "oferta veche",
-      [`k_${id.d}`]: "0.01",
     },
   });
   const d1 = dupa(r);
@@ -181,7 +187,7 @@ const num = (v) => (v == null ? null : Number(v));
     q(`SELECT l.pret, l.cost FROM consumabile_linii l JOIN consumabile_zile z ON z.id = l.zi_id WHERE z.data = '${ZI2}' AND l.produs_id = ${id.a}`).map((x) => [num(x.pret), num(x.cost)]),
     [[1.4, 2.5]]);
   egal("cutia B, netrimisă schimbată, rămâne", [num(prod("tst-cst-b").cost), prod("tst-cst-b").nota_cost], [1.5, "oferta veche"]);
-  egal("produsul legat nu ia cost de mână", num(prod("tst-cst-d").cost), 0.5);
+  egal("produsul legat, netrimis, rămâne cu costul automat", [num(prod("tst-cst-d").cost), prod("tst-cst-d").cost_sursa], [0.5, "cost producție"]);
   const c1 = prod("tst-cst-c");
   egal("produsul scos din listă rămâne neatins", [num(c1.pret), num(c1.cost), c1.nota_cost, c1.aliasuri], [3, 2, "n", "x"]);
   egal("ziua deja scrisă: rândul fără cost îl primește, cel înghețat rămâne",
@@ -221,6 +227,79 @@ const num = (v) => (v == null ? null : Number(v));
   egal("costul rămâne", num(prod("tst-cst-a").cost), 2.5);
   pag = await cer("get", CALE, GABI, { query: { costuri_ok: "Salvat: TST Cutie A: cost gol → 2,5 lei.", costuri_eroare: "Costul nu e un număr și n-a intrat la: TST Cutie B." } });
   bine("mesajele apar pe pagină, lângă formular", pag.corp.includes('<h2 id="preturi">') && pag.corp.includes("Salvat: TST Cutie A: cost gol → 2,5 lei.") && pag.corp.includes('class="flash flash-rosu" role="alert">Costul nu e un număr'));
+
+  // ------------------------------------------------------------------------
+  console.log("\n6. Produsul legat la nomenclator: costul scris de mână are întâietate");
+  r = await cer("post", `${CALE}/costuri`, GABI, { body: { [`k_${id.d}`]: "0.5" } });
+  egal("caseta neatinsă nu face din costul automat unul de mână", [dupa(r).ok, num(prod("tst-cst-d").cost), prod("tst-cst-d").cost_sursa], ["Nicio schimbare de salvat.", 0.5, "cost producție"]);
+  r = await cer("post", `${CALE}/costuri`, GABI, { body: { [`k_${id.d}`]: "" } });
+  egal("caseta golită la un cost automat nu schimbă nimic", [dupa(r).ok, num(prod("tst-cst-d").cost), prod("tst-cst-d").cost_sursa], ["Nicio schimbare de salvat.", 0.5, "cost producție"]);
+  r = await cer("post", `${CALE}/costuri`, GABI, { body: { [`k_${id.d}`]: "abc" } });
+  bine("un cost care nu e număr e refuzat și la produsul legat", /TST Legat la nomenclator/.test(dupa(r).eroare || "") && num(prod("tst-cst-d").cost) === 0.5, dupa(r).eroare);
+  // Nomenclatorul are un cost plauzibil (0,40 la preț 4): tocmai ăsta l-ar fi înlocuit pe cel scris de om.
+  q(`UPDATE produse SET pret_achizitie = 0.4 WHERE id = ${NOMENCLATOR}`);
+  r = await cer("post", `${CALE}/costuri`, GABI, { body: { [`k_${id.d}`]: "0,45" } });
+  const d6 = prod("tst-cst-d");
+  egal("costul scris de mână intră și la produsul legat, cu cine l-a scris", [num(d6.cost), d6.cost_sursa], [0.45, "scris de mână de Gabi Test"]);
+  egal("…fără nota rămasă de la costul automat", d6.nota_cost, null);
+  bine("pagina spune schimbarea", /TST Legat la nomenclator: cost 0,5 lei → 0,45 lei/.test(dupa(r).ok || ""), dupa(r).ok);
+  const rc = await mod.recalculeazaCosturi();
+  egal("recalculul din nomenclator nu-l înlocuiește", [num(prod("tst-cst-d").cost), prod("tst-cst-d").cost_sursa], [0.45, "scris de mână de Gabi Test"]);
+  const dRc = (rc.detalii || []).find((x) => x.denumire === "TST Legat la nomenclator") || {};
+  egal("…și îl numără ca produs cu cost, scris de mână", [dRc.cost, dRc.manual], [0.45, true]);
+  egal("…fiecare produs legat e numărat o dată: cu cost sau fără", rc.cu_cost + rc.fara_cost, rc.produse);
+  pag = await cer("get", CALE, GABI);
+  if (process.env.SALVEAZA_PAGINI) require("fs").writeFileSync(path.join(process.env.SALVEAZA_PAGINI, "comenzi-zi-costuri.html"), pag.corp);
+  bine("formularul spune că e al omului și cum revine cel automat", /class="sursa-cost"[^>]*>scris de mână de Gabi Test — rămâne al tău; golește caseta ca să revină costul din nomenclator</.test(pag.corp));
+  r = await cer("post", `${CALE}/costuri`, GABI, { body: { [`k_${id.d}`]: "0.45" } });
+  egal("costul de mână trimis neschimbat rămâne al omului", [dupa(r).ok, num(prod("tst-cst-d").cost), prod("tst-cst-d").cost_sursa], ["Nicio schimbare de salvat.", 0.45, "scris de mână de Gabi Test"]);
+  r = await cer("post", `${CALE}/costuri`, GABI, { body: { [`k_${id.d}`]: "" } });
+  const d7 = prod("tst-cst-d");
+  egal("golit, lasă locul celui din nomenclator, pe loc", [num(d7.cost), d7.cost_sursa], [0.4, "preț de achiziție de pe produs"]);
+  bine("…și pagina spune că a revenit cel din nomenclator", /TST Legat la nomenclator: cost 0,45 lei → cel din nomenclator/.test(dupa(r).ok || ""), dupa(r).ok);
+  const E = mod.__test.eCostManual;
+  egal("ce e cost scris de mână: cel cu numele omului, cel vechi fără sursă; nu cel automat, nu cel gol",
+    [E({ cost: 1, cost_sursa: "scris de mână de Gabi" }), E({ cost: 1, cost_sursa: "scris de mână" }), E({ cost: 1, cost_sursa: null }),
+     E({ cost: 1, cost_sursa: "cost producție (rețeta produsului)" }), E({ cost: 1, cost_sursa: "intrare de marfă din 01.11.2026" }),
+     E({ cost: 1, cost_sursa: "preț de achiziție de pe produs" }), E({ cost: null, cost_sursa: "scris de mână" }), E({ cost: 0, cost_sursa: "scris de mână" }), E(null)],
+    [true, true, true, false, false, false, false, true, false]);
+
+  // ------------------------------------------------------------------------
+  console.log("\n7. Legarea la nomenclator nu șterge costul scris de mână");
+  q(`INSERT INTO consumabile_produse (cod, denumire, pret, cost, ordine, activ) VALUES ('tst-cst-e', 'TST Cost vechi fără sursă', 2, 0.7, 995, 1)`);
+  const idE = unul("SELECT id FROM consumabile_produse WHERE cod = 'tst-cst-e'");
+  // Produsul scos din listă e legat, dar formularul nu-l arată: câmpul lui nu vine.
+  q(`UPDATE consumabile_produse SET produs_id = ${NOMENCLATOR} WHERE cod = 'tst-cst-c'`);
+  // Legăturile celorlalte produse din bază se trimit neschimbate, ca din formular.
+  const legate = Object.fromEntries(q("SELECT id, produs_id FROM consumabile_produse WHERE produs_id IS NOT NULL AND activ = 1").map((x) => [`l_${x.id}`, String(x.produs_id)]));
+  const jurnal = [];
+  const scrie = console.log;
+  console.log = (...a) => { jurnal.push(a.join(" ")); };
+  let rl;
+  try {
+    rl = await cer("post", `${CALE}/legare`, ADMIN, { body: { ...legate, [`l_${id.a}`]: String(NOMENCLATOR), [`l_${id.b}`]: String(NOMENCLATOR), [`l_${idE}`]: String(NOMENCLATOR) } });
+  } finally { console.log = scrie; }
+  egal("legarea se întoarce la formularul ei", [rl.cod, String(rl.antet.Location)], [302, `${CALE}?legare=1`]);
+  egal("cele trei sunt legate", q(`SELECT produs_id FROM consumabile_produse WHERE cod IN ('tst-cst-a','tst-cst-b','tst-cst-e') ORDER BY cod`).map((x) => Number(x.produs_id)), [NOMENCLATOR, NOMENCLATOR, NOMENCLATOR]);
+  egal("cutia A, cu costul scris de Gabi: rămâne al ei, nu cel din nomenclator", [num(prod("tst-cst-a").cost), prod("tst-cst-a").cost_sursa, prod("tst-cst-a").nota_cost], [2.5, "scris de mână de Gabi Test", "factura 123"]);
+  egal("costul vechi, salvat fără sursă, e tot al omului și rămâne", [num(prod("tst-cst-e").cost), prod("tst-cst-e").cost_sursa], [0.7, null]);
+  egal("cutia B, fără cost, îl primește pe cel din nomenclator", [num(prod("tst-cst-b").cost), prod("tst-cst-b").cost_sursa], [0.4, "preț de achiziție de pe produs"]);
+  egal("produsul scos din listă, netrimis în formular, nu se dezleagă", [Number(unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-c'`)), num(prod("tst-cst-c").cost)], [NOMENCLATOR, 2]);
+  const linieJurnal = jurnal.find((x) => /a schimbat legăturile la nomenclator/.test(x)) || "";
+  bine("jurnalul spune cine a legat ce", /Vali Test a schimbat legăturile la nomenclator: /.test(linieJurnal) && linieJurnal.includes(`TST Cutie A: nelegat → #${NOMENCLATOR}`) && linieJurnal.includes(`TST Cutie B: nelegat → #${NOMENCLATOR}`), linieJurnal);
+  bine("…doar ce s-a schimbat (produsul deja legat nu apare)", !linieJurnal.includes("TST Legat la nomenclator"), linieJurnal);
+  // Dezlegarea se face tot din formular, cu câmpul trimis gol.
+  jurnal.length = 0;
+  console.log = (...a) => { jurnal.push(a.join(" ")); };
+  try {
+    await cer("post", `${CALE}/legare`, ADMIN, { body: { ...legate, [`l_${id.a}`]: String(NOMENCLATOR), [`l_${id.b}`]: "", [`l_${idE}`]: String(NOMENCLATOR) } });
+  } finally { console.log = scrie; }
+  egal("câmpul trimis gol dezleagă produsul", unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-b'`), null);
+  bine("…și jurnalul o spune", jurnal.some((x) => x.includes(`TST Cutie B: #${NOMENCLATOR} → nelegat`)) && !jurnal.some((x) => x.includes("TST Cutie A:")), jurnal.join(" | ").slice(0, 300));
+  rl = await cer("post", `${CALE}/legare`, GABI, { body: { [`l_${id.a}`]: "" } });
+  egal("legăturile rămân ale administratorului", [rl.cod, Number(unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-a'`))], [302, NOMENCLATOR]);
+  pag = await cer("get", CALE, ADMIN);
+  bine("pagina spune la ce folosește legătura și că ce e scris de mână rămâne", /ce produs din nomenclator intră pe comanda zilei/.test(pag.corp) && /Costul scris de mână rămâne neatins/.test(pag.corp));
 
   curata();
   console.log(esecuri ? `\n${esecuri} EȘECURI` : "\nTOATE BUNE");
