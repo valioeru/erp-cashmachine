@@ -124,6 +124,8 @@ function curata() {
     "DELETE FROM utilizatori WHERE id BETWEEN 97321 AND 97329",
   ]) execFileSync("psql", ["-X", "-q", "-c", s], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
 }
+// Următoarea zi lucrătoare, socotită aici pe altă cale decât în modul.
+const ziLucratoareDupa = (zi) => { const d = new Date(zi + "T12:00:00Z"); do { d.setUTCDate(d.getUTCDate() + 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6); return d.toISOString().slice(0, 10); };
 const comenziClient = () => q("SELECT id, status, sursa, numar, agent_id, data_livrare_ceruta FROM comenzi WHERE partener_id = ? ORDER BY id", [PARTENER]);
 const liniiComanda = (id) => q("SELECT produs_id, cantitate, pret_unitar, um FROM comenzi_linii WHERE comanda_id = ? ORDER BY produs_id", [id]).map((l) => [Number(l.produs_id), Number(l.cantitate), Number(l.pret_unitar)]);
 const ziua = (data) => q("SELECT id, comanda_id FROM consumabile_zile WHERE client = 'Sameday' AND data = ?", [data])[0];
@@ -168,7 +170,12 @@ function puneZi(data, linii) {
   egal("acțiunea", r1.actiune, "creeaza");
   const c1 = comenziClient();
   egal("o singură comandă pe client", c1.length, 1);
-  egal("numărul, sursa, starea și ziua cerută", [c1[0].numar, c1[0].sursa, c1[0].status, c1[0].data_livrare_ceruta], ["Sameday 05.05.2097", "sameday", "noua", Z1]);
+  egal("numărul, sursa și starea", [c1[0].numar, c1[0].sursa, c1[0].status], ["Sameday 05.05.2097", "sameday", "noua"]);
+  egal("livrarea cerută: următoarea zi lucrătoare, cum scria Gabi", [c1[0].data_livrare_ceruta, c1[0].data_livrare_ceruta !== Z1], [ziLucratoareDupa(Z1), true]);
+  const ZL = CZ.__test.ziuaLivrarii;
+  egal("…miercuri → joi, joi → vineri, vineri → luni, sâmbătă → luni, duminică → luni",
+    [ZL("2026-11-11"), ZL("2026-11-12"), ZL("2026-11-13"), ZL("2026-11-14"), ZL("2026-11-15")],
+    ["2026-11-12", "2026-11-13", "2026-11-16", "2026-11-16", "2026-11-16"]);
   egal("liniile: produsele legate, cu prețul zilei", liniiComanda(c1[0].id), [[P1, 8000, 0.09], [P2, 125, 3.3]]);
   egal("ziua știe comanda ei", Number(ziua(Z1).comanda_id), Number(c1[0].id));
   egal("pungă nelegată spusă pe nume", (r1.nelegate || []).map((n) => n.denumire), ["Pungă nelegată (raport)"]);
@@ -221,7 +228,7 @@ function puneZi(data, linii) {
   console.log("\nDouă urcări în aceeași clipă fac o singură comandă:");
   puneZi(Z3, [["TSTSD2", 300, 3.3]]);
   const [a, b] = await Promise.all([CZ.comandaZilei(Z3, GABI, "comenzile aprobate"), CZ.comandaZilei(Z3, ADMIN, "AWB-urile")]);
-  const pentruZ3 = comenziClient().filter((c) => c.data_livrare_ceruta === Z3);
+  const pentruZ3 = comenziClient().filter((c) => c.numar === "Sameday 07.05.2097");
   egal("o singură comandă pentru zi", pentruZ3.length, 1);
   egal("ziua e legată de ea", Number(ziua(Z3).comanda_id), Number(pentruZ3[0].id));
   egal("una a făcut-o, cealaltă a lăsat-o", [a.actiune, b.actiune].sort(), ["creeaza", "lasa"]);
@@ -232,7 +239,7 @@ function puneZi(data, linii) {
   puneZi(Z4, [["TSTSD2", 10, 3.3]]);
   const r7 = await CZ.comandaZilei(Z4, ADMIN, "AWB-urile");
   egal("acțiunea", r7.actiune, "creeaza");
-  const pentruZ4 = comenziClient().filter((c) => c.data_livrare_ceruta === Z4 && c.status !== "anulata");
+  const pentruZ4 = comenziClient().filter((c) => c.numar === "Sameday 08.05.2097" && c.status !== "anulata");
   egal("comanda nouă, nu cea anulată, e a zilei", [pentruZ4.length, Number(ziua(Z4).comanda_id)], [1, Number(pentruZ4[0] && pentruZ4[0].id)]);
   egal("agentul: de pe ultima comandă (Gabi), nu Vali care a urcat", Number(pentruZ4[0] && pentruZ4[0].agent_id), GABI.id);
 
@@ -295,6 +302,7 @@ function puneZi(data, linii) {
   rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z5 } });
   const c5 = comenziClient().filter((c) => c.numar === "Sameday 09.05.2097");
   egal("butonul face comanda zilei", [rz.cod, c5.length, c5[0] && c5[0].sursa, c5[0] && c5[0].status], [200, 1, "sameday", "noua"]);
+  egal("…cu livrarea cerută în următoarea zi lucrătoare", c5[0].data_livrare_ceruta, ziLucratoareDupa(Z5));
   egal("…cu produsele legate, la prețul zilei", liniiComanda(c5[0].id), [[P1, 700, 0.09]]);
   egal("ziua știe comanda ei", Number(ziua(Z5).comanda_id), Number(c5[0].id));
   egal("pagina spune că a făcut-o și duce la ea", [/Am făcut comanda zilei 09\.05\.2097\./.test(rz.corp), rz.corp.includes(`href="/comenzi/${c5[0].id}"`)], [true, true]);

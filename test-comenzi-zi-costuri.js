@@ -125,11 +125,13 @@ const AGENT = { id: 98992, nume: "Agent Test", rol: "vanzari", sectiuni: "/crm" 
 
 const ZI = "2031-02-10", ZI2 = "2031-02-11";
 const NOMENCLATOR = 98995;
+// Un produs care nu seamănă la nume cu nimic din raport: nu apare între sugestii.
+const ALTUL = 98996;
 function curata() {
   q(`DELETE FROM consumabile_linii WHERE zi_id IN (SELECT id FROM consumabile_zile WHERE data IN ('${ZI}', '${ZI2}'))`);
   q(`DELETE FROM consumabile_zile WHERE data IN ('${ZI}', '${ZI2}')`);
   q(`DELETE FROM consumabile_produse WHERE cod LIKE 'tst-cst-%'`);
-  q(`DELETE FROM produse WHERE id = ${NOMENCLATOR}`);
+  q(`DELETE FROM produse WHERE id IN (${NOMENCLATOR}, ${ALTUL})`);
 }
 const prod = (cod) => q(`SELECT pret, cost, nota_cost, cost_sursa, aliasuri FROM consumabile_produse WHERE cod = '${cod}'`)[0] || {};
 const num = (v) => (v == null ? null : Number(v));
@@ -139,7 +141,7 @@ const num = (v) => (v == null ? null : Number(v));
   // Ziua scrisă de mână ține minte cine a scris-o: oamenii testului trebuie să existe.
   const uid = Number(unul("SELECT id FROM utilizatori ORDER BY id LIMIT 1"));
   ADMIN.id = uid; GABI.id = uid; AGENT.id = uid;
-  q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${NOMENCLATOR}, 'TSTCST', 'TST Nomenclator cost', 'buc')`);
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${NOMENCLATOR}, 'TSTCST', 'TST Nomenclator cost', 'buc'), (${ALTUL}, 'ZZQX', 'ZZQ Xylofon albastru', 'buc')`);
   q(`INSERT INTO consumabile_produse (cod, denumire, pret, cost, nota_cost, aliasuri, ordine, activ, produs_id, cost_sursa) VALUES
        ('tst-cst-a', 'TST Cutie A', 1, NULL, NULL, NULL, 991, 1, NULL, NULL),
        ('tst-cst-b', 'TST Cutie B', 2, 1.5, 'oferta veche', NULL, 992, 1, NULL, 'scris de mână'),
@@ -279,7 +281,9 @@ const num = (v) => (v == null ? null : Number(v));
   try {
     rl = await cer("post", `${CALE}/legare`, ADMIN, { body: { ...legate, [`l_${id.a}`]: String(NOMENCLATOR), [`l_${id.b}`]: String(NOMENCLATOR), [`l_${idE}`]: String(NOMENCLATOR) } });
   } finally { console.log = scrie; }
-  egal("legarea se întoarce la formularul ei", [rl.cod, String(rl.antet.Location)], [302, `${CALE}?legare=1`]);
+  const dl = (r) => { const u = new URL(String((r.antet && r.antet.Location) || ""), "http://erp.test"); return { cale: u.pathname, legare: u.searchParams.get("legare"), ancora: u.hash, ok: u.searchParams.get("legare_ok"), eroare: u.searchParams.get("legare_eroare") }; };
+  egal("legarea se întoarce la formularul ei", [rl.cod, dl(rl).cale, dl(rl).legare, dl(rl).ancora], [302, CALE, "1", "#legare"]);
+  bine("…și spune ce a legat", new RegExp(`^Salvat: .*TST Cutie A: nelegat → #${NOMENCLATOR}`).test(dl(rl).ok || "") && dl(rl).eroare === null, dl(rl).ok);
   egal("cele trei sunt legate", q(`SELECT produs_id FROM consumabile_produse WHERE cod IN ('tst-cst-a','tst-cst-b','tst-cst-e') ORDER BY cod`).map((x) => Number(x.produs_id)), [NOMENCLATOR, NOMENCLATOR, NOMENCLATOR]);
   egal("cutia A, cu costul scris de Gabi: rămâne al ei, nu cel din nomenclator", [num(prod("tst-cst-a").cost), prod("tst-cst-a").cost_sursa, prod("tst-cst-a").nota_cost], [2.5, "scris de mână de Gabi Test", "factura 123"]);
   egal("costul vechi, salvat fără sursă, e tot al omului și rămâne", [num(prod("tst-cst-e").cost), prod("tst-cst-e").cost_sursa], [0.7, null]);
@@ -296,6 +300,35 @@ const num = (v) => (v == null ? null : Number(v));
   } finally { console.log = scrie; }
   egal("câmpul trimis gol dezleagă produsul", unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-b'`), null);
   bine("…și jurnalul o spune", jurnal.some((x) => x.includes(`TST Cutie B: #${NOMENCLATOR} → nelegat`)) && !jurnal.some((x) => x.includes("TST Cutie A:")), jurnal.join(" | ").slice(0, 300));
+  // --- orice produs din nomenclator, nu doar cele opt sugestii ---
+  const legarePag = async () => (await cer("get", CALE, ADMIN, { query: { legare: "1" } })).corp;
+  let fl = await legarePag();
+  bine("formularul are lista întregului nomenclator, cu numărul produsului în față", fl.includes('<datalist id="lista-nomenclator">') && fl.includes(`<option value="#${ALTUL} · ZZQ Xylofon albastru [ZZQX]">`) && fl.includes(`<option value="#${NOMENCLATOR} · TST Nomenclator cost [TSTCST]">`));
+  bine("…și fiecare rând are caseta „alt produs”", new RegExp(`<input name="alt_${id.b}" list="lista-nomenclator"`).test(fl) && new RegExp(`<input name="alt_${id.a}" list="lista-nomenclator"`).test(fl));
+  const leagaB = async (campuri) => { const r = await cer("post", `${CALE}/legare`, ADMIN, { body: campuri }); return { r, b: unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-b'`), d: dl(r) }; };
+  let x = await leagaB({ [`l_${id.b}`]: "", [`alt_${id.b}`]: `#${ALTUL} · ZZQ Xylofon albastru [ZZQX]` });
+  egal("produsul ales în casetă se leagă, chiar dacă nu era între sugestii", [Number(x.b), /TST Cutie B: nelegat → #98996/.test(x.d.ok || ""), x.d.eroare], [ALTUL, true, null]);
+  fl = await legarePag();
+  bine("produsul legat din afara sugestiilor apare cu numele lui, nu doar cu numărul", new RegExp(`<option value="${ALTUL}" selected>ZZQ Xylofon albastru \\[ZZQX\\] — legat acum</option>`).test(fl), (fl.match(/<option value="98996"[^>]*>[^<]*/) || [""])[0]);
+  x = await leagaB({ [`l_${id.b}`]: String(ALTUL), [`alt_${id.b}`]: `#${NOMENCLATOR} · TST Nomenclator cost [TSTCST]` });
+  egal("caseta are întâietate față de listă", Number(x.b), NOMENCLATOR);
+  x = await leagaB({ [`l_${id.b}`]: String(NOMENCLATOR), [`alt_${id.b}`]: "xylofon" });
+  egal("un nume scris fără să fie ales din listă nu leagă nimic și se spune", [Number(x.b), /TST Cutie B \(„xylofon”\)/.test(x.d.eroare || ""), x.d.ok], [NOMENCLATOR, true, "Nicio legătură schimbată."]);
+  x = await leagaB({ [`alt_${id.b}`]: String(ALTUL) });
+  egal("un număr fără # nu se ia drept produs (un nume poate începe cu o cifră)", [Number(x.b), /TST Cutie B/.test(x.d.eroare || "")], [NOMENCLATOR, true]);
+  x = await leagaB({ [`l_${id.b}`]: "97999999" });
+  egal("un produs care nu există e refuzat, fără să pice pagina", [x.r.cod, Number(x.b), /TST Cutie B/.test(x.d.eroare || "")], [302, NOMENCLATOR, true]);
+  q(`UPDATE produse SET activ = 0 WHERE id = ${ALTUL}`);
+  x = await leagaB({ [`alt_${id.b}`]: `#${ALTUL} · ZZQ Xylofon albastru [ZZQX]` });
+  egal("un produs scos din nomenclator nu se mai poate alege în casetă", [Number(x.b), /TST Cutie B/.test(x.d.eroare || "")], [NOMENCLATOR, true]);
+  q(`UPDATE consumabile_produse SET produs_id = ${ALTUL} WHERE cod = 'tst-cst-b'`);
+  fl = await legarePag();
+  bine("legătura spre un produs care nu mai e activ se vede ca atare", fl.includes(`<option value="${ALTUL}" selected>produsul #${ALTUL}, legat acum — nu mai e activ în nomenclator</option>`), (fl.match(/<option value="98996"[^>]*>[^<]*/) || [""])[0]);
+  x = await leagaB({ [`l_${id.b}`]: String(ALTUL) });
+  egal("…și retrimisă neschimbată rămâne, fără eroare", [Number(x.b), x.d.eroare, x.d.ok], [ALTUL, null, "Nicio legătură schimbată."]);
+  const pagMesaje = await cer("get", CALE, ADMIN, { query: { legare: "1", legare_ok: "Salvat: TST Cutie B: nelegat → #98996.", legare_eroare: "N-am găsit în nomenclator produsul ales la: TST Cutie B." } });
+  bine("mesajele legării apar lângă formular", pagMesaje.corp.includes('<h2 id="legare">') && pagMesaje.corp.includes("Salvat: TST Cutie B: nelegat → #98996.") && pagMesaje.corp.includes('role="alert">N-am găsit în nomenclator produsul ales la: TST Cutie B.'));
+
   rl = await cer("post", `${CALE}/legare`, GABI, { body: { [`l_${id.a}`]: "" } });
   egal("legăturile rămân ale administratorului", [rl.cod, Number(unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-a'`))], [302, NOMENCLATOR]);
   pag = await cer("get", CALE, ADMIN);
