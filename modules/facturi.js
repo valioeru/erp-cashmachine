@@ -773,7 +773,12 @@ function register(router) {
           ? `<h2>Integrare SmartBill</h2>
       ${
         smartbill.isConfigured()
-          ? `<form method="post" action="/facturi/${factura.id}/smartbill" class="inline-form">
+          ? `<form method="post" action="/facturi/${factura.id}/smartbill" class="inline-form" id="spre-smartbill"${
+              factura.smartbill_sync_la
+                ? ` onsubmit="if (!confirm('Factura e deja în SmartBill. Dacă o trimiți din nou, SmartBill emite încă o factură. O trimiți din nou?')) return false; this.querySelector('button').disabled = true;"`
+                : ` onsubmit="this.querySelector('button').disabled = true;"`
+            }>
+              ${factura.smartbill_sync_la ? '<input type="hidden" name="iar" value="1">' : ""}
               <button type="submit" class="btn secondary small">${factura.smartbill_sync_la ? "Retrimite în SmartBill" : "Trimite factura în SmartBill"}</button>
             </form>`
           : `<p style="color:var(--text-muted);font-size:13px">Integrarea SmartBill nu este configurată încă (lipsesc variabilele de mediu SMARTBILL_*). Vezi README.</p>`
@@ -969,6 +974,10 @@ function register(router) {
   // altă poveste, cu lămurirea ei mai jos.
   const eDespreCod = (mesaj) => /nu are codul|cod(ul|urile|uri)? (de )?produs/i.test(String(mesaj || ""));
 
+  // Un răspuns 4xx e un refuz: SmartBill n-a emis nimic. Orice altceva — rețea
+  // căzută, răspuns 5xx, niciun răspuns — lasă întrebarea deschisă.
+  const eRefuzLimpede = (mesaj) => /răspuns cu eroare \(4[0-9][0-9]\)/.test(String(mesaj || ""));
+
   function lamurireCod(linii) {
     const faraCod = linii.filter((l) => !l.cod_smartbill);
     if (faraCod.length) {
@@ -983,7 +992,52 @@ function register(router) {
       .join("; ")}. Dacă SmartBill vrea alt cod la un produs, corectează-l în fișa produsului și trimite din nou.</p>`;
   }
 
+  // O factură trimisă de două ori înseamnă două facturi emise în SmartBill —
+  // documente fiscale, care pleacă și în e-Factura. Două paze, amândouă pe
+  // server, fiindcă un dublu-clic trimite două cereri oricât ar fi de atent
+  // browserul:
+  //   • cât o factură e pe drum spre SmartBill, a doua cerere pentru ea nu
+  //     mai pleacă (`peDrum`);
+  //   • o factură deja trimisă pleacă din nou doar dacă omul a cerut anume
+  //     retrimiterea (`iar=1`, pus doar de butonul „Retrimite", după întrebare).
+  //     O pagină rămasă deschisă, cu butonul vechi „Trimite", nu mai emite a
+  //     doua factură.
+  // `peDrum` ține în memoria serverului: ERP-ul rulează într-un singur proces
+  // (Render, o instanță). Cu mai multe, paza ar trebui mutată în baza de date.
+  const peDrum = new Set();
+  const inapoiCuMesaj = (ctx, factura, mesaj) =>
+    redirect(ctx.res, `/facturi/${factura.id}?mesaj=${encodeURIComponent(mesaj)}`);
+
+  function ePeDrum(ctx, factura) {
+    if (!peDrum.has(Number(factura.id))) return false;
+    inapoiCuMesaj(ctx, factura, "Factura se trimite chiar acum în SmartBill. N-am trimis-o a doua oară — reîncarcă pagina peste câteva secunde.");
+    return true;
+  }
+
+  function eDejaTrimisa(ctx, factura) {
+    if (!factura.smartbill_sync_la || String((ctx.body || {}).iar || "") === "1") return false;
+    const care = [factura.smartbill_serie, factura.smartbill_numar].filter(Boolean).join("-");
+    inapoiCuMesaj(ctx, factura, `Factura e deja în SmartBill${care ? " (" + care + ")" : ""}. N-am trimis-o a doua oară. Dacă chiar trebuie emisă din nou, apasă „Retrimite în SmartBill”.`);
+    return true;
+  }
+
+  const opritaDeLaADouaTrimitere = (ctx, factura) => ePeDrum(ctx, factura) || eDejaTrimisa(ctx, factura);
+
   async function trimiteInSmartBill(ctx, factura, adresa) {
+    if (ePeDrum(ctx, factura)) return;
+    peDrum.add(Number(factura.id));
+    try {
+      // Starea se citește din nou, sub pază: cererea asta putea să fi citit
+      // factura înainte ca alta, pornită cu o clipă mai devreme, să o fi trimis.
+      const acum = await db.prepare("SELECT smartbill_sync_la, smartbill_serie, smartbill_numar FROM facturi WHERE id = ?").get(factura.id);
+      if (eDejaTrimisa(ctx, { ...factura, ...(acum || {}) })) return;
+      return await trimiteAcum(ctx, factura, adresa);
+    } finally {
+      peDrum.delete(Number(factura.id));
+    }
+  }
+
+  async function trimiteAcum(ctx, factura, adresa) {
     const linii = await liniiPentruSmartBill(factura.id);
     try {
       const rezultat = await smartbill.trimiteFactura(factura, linii, adresa);
@@ -1000,6 +1054,12 @@ function register(router) {
           active: "/facturi",
           body: `<p>Trimiterea către SmartBill a eșuat: ${esc(err.message)}</p>
                  ${eDespreCod(err.message) ? lamurireCod(linii) : ""}
+                 ${
+                   eRefuzLimpede(err.message)
+                     ? ""
+                     : `<p><strong>Nu se știe dacă factura a ajuns.</strong> SmartBill n-a dat un răspuns limpede, așa că e posibil să o fi emis totuși.
+                        Înainte să trimiți din nou, uită-te în SmartBill dacă factura apare acolo — altfel se emite de două ori.</p>`
+                 }
                  <p style="color:var(--text-muted);font-size:13px">Clientul a plecat cu: ${esc(
                    [adresa.localitate, adresa.judet, adresa.tara].filter(Boolean).join(", ") || "fără localitate, județ și țară"
                  )}. Dacă eroarea e despre client, corectează-le în <a href="/parteneri/${esc(String(factura.partener_id))}">fișa clientului</a> și trimite din nou.</p>
@@ -1023,6 +1083,7 @@ function register(router) {
       </p>
       ${factura.adresa ? `<p style="font-size:13px;color:var(--text-muted);max-width:720px">Adresa din fișă: ${esc(factura.adresa)}</p>` : ""}
       <form method="post" action="/facturi/${factura.id}/smartbill/client" class="form" style="max-width:560px">
+        ${String((ctx.body || {}).iar || "") === "1" ? '<input type="hidden" name="iar" value="1">' : ""}
         <label class="field"><span>Țară</span><input name="tara" value="${esc(v.tara)}" required placeholder="Romania"></label>
         <label class="field"><span>Județ (pentru România)</span>
           <select name="judet">
@@ -1045,6 +1106,8 @@ function register(router) {
     if (!factura) return redirect(ctx.res, "/facturi");
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
 
+    if (opritaDeLaADouaTrimitere(ctx, factura)) return;
+
     const a = ADR.pentruSmartBill(factura);
     if (!a.sigur) return formularAdresa(ctx, factura, a);
 
@@ -1064,6 +1127,8 @@ function register(router) {
     const factura = await facturaPentruSmartBill(ctx.params.id);
     if (!factura) return redirect(ctx.res, "/facturi");
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
+
+    if (opritaDeLaADouaTrimitere(ctx, factura)) return;
 
     const v = ADR.verifica(ctx.body);
     if (!v.ok) {
