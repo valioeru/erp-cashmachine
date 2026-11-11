@@ -3763,6 +3763,38 @@ function register(router) {
         <label class="field"><span>Observații (opțional)</span><input name="observatii" placeholder="ex. ridicat de Cargus, AWB 123"></label>
 
         ${
+          // Butonul de scoatere stă SUS, deasupra listei, și rămâne la vedere
+          // cât se derulează (Vali, 11.11.2026, cu poza paginii: „butonul de
+          // validare și scoatere etichete să fie undeva sus, să nu trebuiască
+          // să scrolezi toată lista și să fie tocmai jos"). Lângă el, câți
+          // paleți sunt bifați. Motivul pentru „peste rând" apare tot aici:
+          // e obligatoriu, iar jos, sub 250 de paleți, nu l-ar vedea nimeni.
+          paleti.length
+            ? `<div class="bara-iesire" id="bara-iesire">
+                 <div class="bara-iesire-rand">
+                   <span id="cati-bifati" class="cati-bifati">niciun palet bifat — bifează în listă paleții care pleacă</span>
+                   <button class="btn" type="submit" id="scoate-sus" disabled>Scoate paleții și tipărește etichetele →</button>
+                 </div>
+                 <label class="field" id="camp-peste-rand" style="display:none;border-left:3px solid var(--warn);padding-left:10px;margin:0">
+                   <span>De ce scoți peste rând</span>
+                   <input name="peste_rand" placeholder="ex. paletul vechi e blocat în spate, clientul cere lotul ăsta" value="${esc(String(ctx.query.motiv || ""))}">
+                   <span class="ajutor">Ai bifat un palet deși există unul mai vechi din aceeași marfă. Scrie motivul — rămâne pe ieșire.</span>
+                 </label>
+               </div>
+               <style>
+                 .bara-iesire { position:sticky; top:0; z-index:6; display:flex; flex-direction:column; gap:8px;
+                   background:var(--surface,#fff); border:1px solid var(--primary,#2f5d9c); border-radius:8px; padding:8px 12px;
+                   box-shadow:0 4px 12px rgba(0,0,0,.10); }
+                 .bara-iesire-rand { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+                 .bara-iesire .cati-bifati { font-size:14px; font-weight:600; margin-right:auto; }
+                 /* Pe telefon butonul de jos e deja lipit de marginea ecranului
+                    (public/style.css): două bare lipite ar mânca din listă. */
+                 @media (max-width: 760px) { .bara-iesire { position:static; } }
+               </style>`
+            : ""
+        }
+
+        ${
           paleti.length
             ? table(
                 ['<input type="checkbox" id="bifa-toti">', "Palet", "Marfă", "Cantitate", "Lot", "Adresă", "Intrată la", "Cost", "Rând"],
@@ -3789,12 +3821,6 @@ function register(router) {
               )
             : `<p style="color:var(--text-muted)">${cauta ? "Niciun palet care să semene cu „" + esc(cauta) + "”." : "Nu e nimic în depozit."}</p>`
         }
-
-        <label class="field" id="camp-peste-rand" style="display:none;border-left:3px solid var(--warn);padding-left:10px">
-          <span>De ce scoți peste rând</span>
-          <input name="peste_rand" placeholder="ex. paletul vechi e blocat în spate, clientul cere lotul ăsta" value="${esc(String(ctx.query.motiv || ""))}">
-          <span class="ajutor">Ai bifat un palet deși există unul mai vechi din aceeași marfă. Scrie motivul — rămâne pe ieșire.</span>
-        </label>
 
         <div class="form-actions">
           <button class="btn" type="submit"${paleti.length ? "" : " disabled"}>Scoate paleții și tipărește etichetele →</button>
@@ -3836,6 +3862,7 @@ function register(router) {
           return lista;
         }
         function peste() {
+          numara();
           if (!campPeste) return;
           var l = sarite();
           campPeste.style.display = l.length ? "" : "none";
@@ -3847,6 +3874,26 @@ function register(router) {
               (l.length > 6 ? " și încă " + (l.length - 6) : "") + ". Scrie de ce le sari — motivul rămâne pe ieșire.";
           }
         }
+        // Câți paleți sunt bifați, lângă butonul de sus. Fără niciunul, butonul
+        // de sus stă stins — ar trimite o ieșire goală.
+        var cati = document.getElementById("cati-bifati");
+        var sus = document.getElementById("scoate-sus");
+        function numara() {
+          if (!cati) return;
+          var n = document.querySelectorAll(".bifa-palet:checked").length;
+          cati.textContent = n === 0 ? "niciun palet bifat — bifează în listă paleții care pleacă" : n === 1 ? "1 palet bifat" : n + " paleți bifați";
+          if (sus) sus.disabled = n === 0;
+        }
+        // Bara stă sub capul paginii, care e și el lipit de marginea de sus.
+        var bara = document.getElementById("bara-iesire");
+        function asazaBara() {
+          if (!bara) return;
+          var cap = document.querySelector("header.topbar");
+          var lipit = cap && getComputedStyle(cap).position === "sticky";
+          bara.style.top = (lipit ? cap.offsetHeight : 0) + "px";
+        }
+        asazaBara();
+        window.addEventListener("resize", asazaBara);
         var bifePalet = document.querySelectorAll(".bifa-palet");
         for (var i = 0; i < bifePalet.length; i++) bifePalet[i].addEventListener("change", peste);
         peste();
