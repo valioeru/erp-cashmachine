@@ -7,6 +7,7 @@ const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const smartbill = require("../lib/smartbill");
 const ADR = require("../lib/adresa-client");
+const SCAN = require("../lib/scan");
 // Cine validează o factură: administratorul, rolul financiar și cine are bifa
 // „Facturare” (lib/auth.js, areFacturare).
 const { areFacturare } = require("../lib/auth");
@@ -945,14 +946,45 @@ function register(router) {
       .get(id);
   }
 
-  async function trimiteInSmartBill(ctx, factura, adresa) {
+  // Liniile, cum pleacă în SmartBill: cu unitatea de măsură a produsului și cu
+  // codul lui. Codul e cel arătat peste tot în ERP — `cod`, altfel
+  // `cod_generat` — iar produsul fără niciunul pleacă cu P-<id>, ca pe aviz și
+  // pe etichete (lib/scan.js). Linia fără produs rămâne fără cod.
+  async function liniiPentruSmartBill(facturaId) {
     const linii = await db
       .prepare(
-        `SELECT fl.*, p.unitate_masura FROM facturi_linii fl
+        `SELECT fl.*, p.unitate_masura,
+                COALESCE(NULLIF(TRIM(p.cod), ''), NULLIF(TRIM(p.cod_generat), '')) AS produs_cod
+           FROM facturi_linii fl
            LEFT JOIN produse p ON p.id = fl.produs_id
           WHERE fl.factura_id = ? ORDER BY fl.id`
       )
-      .all(factura.id);
+      .all(facturaId);
+    return linii.map((l) => ({ ...l, cod_smartbill: SCAN.codProdus(l.produs_cod, l.produs_id) }));
+  }
+
+  // Ce se spune omului când SmartBill refuză factura din cauza codului de
+  // produs: care linii au plecat fără cod și de ce, sau cu ce coduri au plecat.
+  // Doar la eroarea despre codul produsului — „codul fiscal" al clientului e
+  // altă poveste, cu lămurirea ei mai jos.
+  const eDespreCod = (mesaj) => /nu are codul|cod(ul|urile|uri)? (de )?produs/i.test(String(mesaj || ""));
+
+  function lamurireCod(linii) {
+    const faraCod = linii.filter((l) => !l.cod_smartbill);
+    if (faraCod.length) {
+      const una = faraCod.length === 1;
+      return `<p>SmartBill cere cod la fiecare produs de pe factură. ${una ? "Linia" : "Liniile"}
+        ${faraCod.map((l) => `<strong>${esc(l.denumire)}</strong>`).join(", ")}
+        ${una ? "e scrisă" : "sunt scrise"} de mână, fără produs ales din nomenclator, așa că ${una ? "n-are" : "n-au"} cod.
+        Factura trebuie făcută din nou, cu produsul ales din listă pe ${una ? "linia aceea" : "liniile acelea"}.</p>`;
+    }
+    return `<p>Produsele au plecat cu codurile: ${linii
+      .map((l) => `${esc(l.denumire)} — <strong>${esc(l.cod_smartbill)}</strong>`)
+      .join("; ")}. Dacă SmartBill vrea alt cod la un produs, corectează-l în fișa produsului și trimite din nou.</p>`;
+  }
+
+  async function trimiteInSmartBill(ctx, factura, adresa) {
+    const linii = await liniiPentruSmartBill(factura.id);
     try {
       const rezultat = await smartbill.trimiteFactura(factura, linii, adresa);
       await db
@@ -967,6 +999,7 @@ function register(router) {
           title: "Eroare integrare SmartBill",
           active: "/facturi",
           body: `<p>Trimiterea către SmartBill a eșuat: ${esc(err.message)}</p>
+                 ${eDespreCod(err.message) ? lamurireCod(linii) : ""}
                  <p style="color:var(--text-muted);font-size:13px">Clientul a plecat cu: ${esc(
                    [adresa.localitate, adresa.judet, adresa.tara].filter(Boolean).join(", ") || "fără localitate, județ și țară"
                  )}. Dacă eroarea e despre client, corectează-le în <a href="/parteneri/${esc(String(factura.partener_id))}">fișa clientului</a> și trimite din nou.</p>
