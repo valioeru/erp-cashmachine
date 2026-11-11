@@ -1012,14 +1012,34 @@ function register(router) {
     const monede = await monedeDisponibile();
     const bnr = await cursuriBnr(azi());
 
+    // Comanda pornită din Forecast de comandat (modules/forecast.js): produsele
+    // și cantitățile vin în adresă, ca „id:cantitate;id:cantitate". Se pun doar
+    // produse din catalog, cu cantitate peste zero; prețul îl scrie omul.
+    const dupaId = new Map(produse.map((p) => [Number(p.id), p]));
+    const liniiPuse = [];
+    for (const bucata of String((ctx.query || {}).linii || "").split(";").slice(0, 60)) {
+      const parti = bucata.split(":");
+      const p = dupaId.get(parseInt(parti[0], 10));
+      const cantitate = Number(parti[1]);
+      if (!p || parti.length !== 2 || !(cantitate > 0) || !(cantitate < 1e9)) continue;
+      if (liniiPuse.some((l) => Number(l.produs_id) === Number(p.id))) continue;
+      liniiPuse.push({ produs_id: p.id, denumire: p.denumire, cantitate, um: p.unitate_masura || "" });
+    }
+
     const body = `
       ${eroare ? `<div class="flash eroare">${esc(MESAJE_EROARE[eroare] || "Comanda nu s-a putut salva.")}</div>` : ""}
+      ${
+        liniiPuse.length
+          ? `<div class="flash" id="din-forecast">${liniiPuse.length === 1 ? "Un produs pus" : liniiPuse.length + " produse puse"} din Forecast de comandat, cu cantitatea propusă acolo.
+               Alege furnizorul, verifică și cantitățile, scrie prețurile.</div>`
+          : ""
+      }
 
       ${formularComanda({
         mod: "nou",
         actiune: "/procurement/comenzi",
         c: { furnizor_id: furnizorAles, data: azi(), moneda: "RON" },
-        linii: [],
+        linii: liniiPuse,
         furnizori,
         monede,
       })}

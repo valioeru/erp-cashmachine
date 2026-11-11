@@ -408,10 +408,17 @@ const GHID = [
 "t":"De aprovizionat și Forecast",
 "p":[
 "Ce trebuie cumpărat: materia primă cerută de producție și produsele care se apropie de epuizare. Forecastul merge mai departe și estimează ce va fi nevoie, ca să comanzi din timp.",
-"Ideea e simplă: să nu afli că nu mai ai folie în ziua în care trebuie să produci."
+"Ideea e simplă: să nu afli că nu mai ai folie în ziua în care trebuie să produci.",
+"<b>Forecast de comandat</b> (în Procurement; aceeași pagină se deschide și din Depozit, la „Forecast aprovizionări”) are un rând pentru fiecare lucru pe care îl cumpărăm. Socoteala: <b>de comandat = comenzile în curs + consumul pe zilele de acoperire − stocul − ce e pe drum</b>. Consumul vine din ce s-a facturat în ultimele 90, 180 sau 365 de zile. La produsele făcute de noi, vânzările și comenzile se desfac prin rețete în materie primă, după ce se scade produsul finit care există deja și producția începută.",
+"„Comenzi în curs” înseamnă comenzile clienților nelivrate și producția făcută pentru un client care n-are comandă în ERP. „Stocul ajunge până la” e ziua în care se termină stocul în ritmul de acum; dedesubt scrie și până când ajunge cu ce e pe drum de la furnizori.",
+"Dacă o cifră pare greșită, uită-te la atenționările de deasupra tabelului: vânzări facturate fără produs din catalog, marfă scrisă liber în depozit, stoc în altă unitate de măsură decât a produsului. Toate scad precizia forecastului și toate se pot îndrepta."
 ],
-"pasi":[],
-"sfat":null
+"pasi":[
+"Alegi istoricul (90, 180 sau 365 de zile) și pentru câte zile vrei stoc (15–90).",
+"Te uiți întâi la ce e roșu: „lipsește acum” și ce se termină în câteva zile.",
+"Bifezi ce vrei să comanzi și apeși <b>„Fă o comandă la furnizor cu cele bifate”</b>: se deschide comanda cu produsele și cantitățile puse. Alegi furnizorul și scrii prețurile."
+],
+"sfat":"Cantitatea propusă e un punct de plecare, nu o comandă: o rotunjești la palet sau la minimul furnizorului."
 },
 {
 "t":"Achiziții",

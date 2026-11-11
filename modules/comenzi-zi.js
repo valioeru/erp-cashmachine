@@ -364,6 +364,21 @@ function costPlauzibil(cost, pret) {
   return c <= COST_ABERANT * p;
 }
 
+// Costul SCRIS DE MÂNĂ are întâietate față de cel din nomenclator.
+//
+// Până pe 11.11.2026 era invers: cum legai un produs, costul lui se lua din
+// nomenclator și cel pus de mână dispărea — iar dacă nomenclatorul n-avea un
+// cost plauzibil, produsul rămânea FĂRĂ cost și nici nu mai aveai unde să-l
+// scrii. De-aia nu s-a legat niciun produs o lună întreagă, iar fără legături
+// comanda zilei nu se putea face („niciun produs al zilei nu e legat la
+// nomenclator”, 11.11.2026). Acum legătura spune doar CE produs intră pe
+// comandă; costul rămâne cel scris de om până când omul golește caseta.
+//
+// „De mână” = orice cost care nu poartă una din sursele scrise de recalcul.
+// Așa intră aici și costurile vechi, salvate înainte ca sursa să fie notată.
+const SURSA_AUTOMATA = /^(cost producție|intrare de marfă|preț de achiziție|nomenclatorul n-are|produsul legat nu mai există)/;
+const eCostManual = (p) => !!p && p.cost != null && !SURSA_AUTOMATA.test(String(p.cost_sursa || ""));
+
 async function recalculeazaCosturi() {
   const produse = await db
     .prepare("SELECT id, cod, denumire, pret, produs_id, cost, cost_sursa FROM consumabile_produse WHERE produs_id IS NOT NULL")
@@ -377,6 +392,11 @@ async function recalculeazaCosturi() {
   const detalii = [];
 
   for (const p of produse) {
+    if (eCostManual(p)) {
+      cuCost++;
+      detalii.push({ cod: p.cod, denumire: p.denumire, cost: Number(p.cost), sursa: p.cost_sursa || "scris de mână", manual: true });
+      continue;
+    }
     const n = await db
       .prepare("SELECT id, denumire, pret_achizitie, cost_reteta, cost_reteta_lipsa, cost_rata FROM produse WHERE id = ?")
       .get(p.produs_id)
@@ -1053,7 +1073,7 @@ function textComandaZi(c) {
   const nelegate = (c.nelegate || []).length
     ? `<br><span style="color:var(--warn)">Nu au intrat pe comandă, fiindcă nu sunt legate la nomenclator: ${c.nelegate
         .map((n) => `${esc(n.denumire)} (${nr(n.cantitate).toLocaleString("ro-RO")} buc, ${money(n.valoare)})`)
-        .join(", ")}. Leagă-le din „Arată legăturile la nomenclator” și urcă ziua din nou.</span>`
+        .join(", ")}. Leagă-le din <a href="${CALE}?legare=1">legăturile la nomenclator</a>, apoi apasă „Fă comanda” pe rândul zilei, în raport — fișierul nu mai trebuie urcat a doua oară.</span>`
     : "";
   return `<div class="flash" style="margin:10px 0">${esc(spune)}${link}${nelegate}</div>`;
 }
@@ -1081,15 +1101,16 @@ async function peProdus(deLa, panaLa) {
 async function peZi(deLa, panaLa) {
   return db
     .prepare(
-      `SELECT z.data, z.sursa,
+      `SELECT z.data, z.sursa, z.comanda_id, c.status AS comanda_status, c.sursa AS comanda_sursa,
               SUM(l.cantitate * l.pret) AS venit,
               SUM(CASE WHEN l.cost IS NULL THEN 0 ELSE l.cantitate * l.cost END) AS cost,
               SUM(CASE WHEN l.cost IS NULL THEN l.cantitate * l.pret ELSE 0 END) AS venit_fara_cost,
               COUNT(*) AS linii
          FROM consumabile_zile z
          JOIN consumabile_linii l ON l.zi_id = z.id
+         LEFT JOIN comenzi c ON c.id = z.comanda_id
         WHERE z.client = ? AND z.data >= ? AND z.data <= ?
-        GROUP BY z.data, z.sursa
+        GROUP BY z.id, z.data, z.sursa, z.comanda_id, c.status, c.sursa
         ORDER BY z.data DESC`
     )
     .all(CLIENT, deLa, panaLa);
@@ -1403,10 +1424,36 @@ function randFacturare(zileleP, p) {
     ...coloaneBani(t).map((c) => `<strong>${c}</strong>`),
     `${t.zile} zile`,
     "",
+    "",
   ];
 }
 
-function tabelZile(zile, eticheta, aziZi) {
+// Comanda zilei se mai poate cere doar pentru zilele proaspete. O zi mai veche
+// a plecat demult pe comanda scrisă atunci de mână; un buton apăsat din greșeală
+// pe ea ar face a doua comandă pentru aceeași marfă.
+const ZILE_COMANDA = 7;
+const ziDeComanda = (zi, az) => eData(zi) && zi >= ziPlus(az || azi(), -ZILE_COMANDA) && zi <= ziPlus(az || azi(), 1);
+// Azi, pentru butonul comenzii. Testele îl fixează (lucrează pe zile din 2097).
+const aziComanda = () => (module.exports.__test && module.exports.__test.azi) || azi();
+
+// Ce comandă are ziua. Fără ea, cine poate urca ziua primește butonul care o
+// face — după ce produsele s-au legat la nomenclator nu mai trebuie urcat
+// fișierul a doua oară.
+function celulaComanda(z, az, opt) {
+  if (z.comanda_id) {
+    const fel = z.comanda_sursa === "sameday" ? "făcută de ERP" : "scrisă de mână";
+    return `<a class="comanda-zilei" href="/comenzi/${Number(z.comanda_id)}">#${Number(z.comanda_id)}</a> <span style="font-size:12px;color:var(--text-muted)">${fel}${
+      z.comanda_status === "anulata" ? ", anulată" : ""
+    }</span>`;
+  }
+  if (!(opt && opt.poateFace) || !ziDeComanda(z.data, az)) return '<span style="color:var(--text-muted)">—</span>';
+  return `<form method="post" action="${CALE}/comanda-zilei" style="margin:0" onsubmit="return confirm('Fac comanda pentru DELIVERY SOLUTIONS pe ziua ${dataRo(z.data)}, cu produsele din raport?')">
+    <input type="hidden" name="zi" value="${esc(z.data)}">
+    <button class="btn secondary fa-comanda" type="submit" style="padding:2px 10px;font-size:12px">Fă comanda</button>
+  </form>`;
+}
+
+function tabelZile(zile, eticheta, aziZi, opt) {
   if (!zile.length) return '<p style="color:var(--text-muted)">Nicio zi cu comenzi în perioada aleasă.</p>';
   const t = sumaZile(zile);
   const az = aziZi || azi();
@@ -1417,7 +1464,7 @@ function tabelZile(zile, eticheta, aziZi) {
   let grup = [];
   for (let i = 0; i < zile.length; i++) {
     const z = zile[i];
-    randuri.push([`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || "")]);
+    randuri.push([`<strong>${dataRo(z.data)}</strong>`, ...coloaneBani(z), nr(z.linii), esc(z.sursa || ""), celulaComanda(z, az, opt)]);
     grup.push(z);
     const p = perioadaFacturarii(z.data, az);
     const urm = zile[i + 1];
@@ -1429,13 +1476,14 @@ function tabelZile(zile, eticheta, aziZi) {
   }
 
   return table(
-    ["Ziua", "Venit", "Cost", "Marjă", "Marjă %", "Produse", "Sursa"],
+    ["Ziua", "Venit", "Cost", "Marjă", "Marjă %", "Produse", "Sursa", "Comanda zilei"],
     randuri,
     {
       total: [
         `<strong>Total${eticheta ? " " + esc(eticheta) : ""}</strong>`,
         ...coloaneBani(t).map((c) => `<strong>${c}</strong>`),
         `${t.zile} zile`,
+        "",
         "",
       ],
     }
@@ -1519,11 +1567,13 @@ function formularCosturi(produse) {
     return [
       esc(p.denumire),
       `<input name="p_${p.id}" type="number" step="any" min="0" value="${nr(p.pret) || ""}" style="width:110px">`,
+      `<input name="k_${p.id}" type="number" step="any" min="0" value="${p.cost == null ? "" : nr(p.cost)}" style="width:110px" placeholder="necunoscut">`,
       legat
-        ? `<span title="${esc(p.cost_sursa || "")}">${p.cost == null ? "—" : money(p.cost)}</span>`
-        : `<input name="k_${p.id}" type="number" step="any" min="0" value="${p.cost == null ? "" : nr(p.cost)}" style="width:110px" placeholder="necunoscut">`,
-      legat
-        ? `<span style="font-size:12px;color:var(--text-muted)">${esc(p.cost_sursa || "nomenclator")}</span>`
+        ? `<span class="sursa-cost" style="font-size:12px;color:var(--text-muted)">${
+            eCostManual(p)
+              ? esc(p.cost_sursa || "scris de mână") + " — rămâne al tău; golește caseta ca să revină costul din nomenclator"
+              : "automat, din nomenclator: " + esc(p.cost_sursa || "încă necalculat") + " — scrie alt cost dacă nu e cel bun"
+          }</span>`
         : `<input name="n_${p.id}" value="${esc(p.nota_cost || "")}" placeholder="de unde vine costul" style="width:100%">`,
       `<input name="a_${p.id}" value="${esc(p.aliasuri || "")}" placeholder="alt nume de pe etichetă" style="width:100%">`,
     ];
@@ -1531,8 +1581,8 @@ function formularCosturi(produse) {
   return `<form method="post" action="${CALE}/costuri" class="form">
     ${table(["Produs", "Preț vânzare (lei)", "Cost (lei)", "De unde vine costul", "Alias pe eticheta AWB"], randuri)}
     <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0">
-      Costul produselor legate la nomenclator nu se mai scrie de mână — se ia singur, din rețetă sau din
-      ultima intrare de marfă. Caseta de cost rămâne editabilă numai la produsele nelegate.
+      La produsele legate la nomenclator costul se ia singur, din rețetă sau din ultima intrare de marfă.
+      Dacă scrii tu un cost, rămâne al tău și are întâietate — până golești caseta, când revine cel din nomenclator.
     </p>
     <button class="btn" type="submit" style="margin-top:10px">Salvează prețurile, costurile manuale și aliasurile</button>
   </form>`;
@@ -1816,7 +1866,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       ${tabelProduse(pProd, marjaLuna)}
 
       <h2>Pe zi — ${esc(per.eticheta)}</h2>
-      ${tabelZile(zile, per.eticheta, azi())}
+      ${tabelZile(zile, per.eticheta, aziComanda(), { poateFace: poateUrca(ctx.user) })}
 
       <h2>Pe luni</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">Apasă pe o lună ca să-i vezi zilele, cu totalul lunii dedesubt.</p>
@@ -1841,9 +1891,10 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
 
       <h2>Costul, luat din nomenclator</h2>
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">
-        Costul nu se mai scrie de mână. Se leagă o dată produsul de comandă la produsul din nomenclator, iar apoi
-        costul vine singur: <strong>din rețetă</strong> dacă îl facem noi, <strong>din ultima intrare de marfă</strong>
-        dacă îl cumpărăm, iar la nevoie din prețul de achiziție scris pe produs. Un cost de peste cinci ori prețul
+        Legătura spune <strong>ce produs din nomenclator intră pe comanda zilei</strong> — fără ea, produsul din raport
+        nu poate ajunge pe comandă. Tot de la ea vine și costul, acolo unde n-ai scris tu unul: <strong>din rețetă</strong>
+        dacă îl facem noi, <strong>din ultima intrare de marfă</strong> dacă îl cumpărăm, iar la nevoie din prețul de
+        achiziție scris pe produs. Costul scris de mână rămâne neatins. Un cost automat de peste cinci ori prețul
         de vânzare nu se acceptă — aia nu e marjă proastă, e legătură greșită.
       </p>
       ${legare ? formularLegare(produse, legare) : `<p><a class="btn secondary" href="${CALE}?${per.qs}${perC0 ? "&" + perC0.qs : ""}&legare=1">Arată legăturile la nomenclator</a></p>`}
@@ -1939,10 +1990,11 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     const are = (k) => Object.prototype.hasOwnProperty.call(b, k);
     const acum = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Bucharest" }).slice(0, 19);
     const produse = await db
-      .prepare("SELECT id, denumire, pret, aliasuri, cost, nota_cost, produs_id FROM consumabile_produse")
+      .prepare("SELECT id, denumire, pret, aliasuri, cost, nota_cost, cost_sursa, produs_id FROM consumabile_produse")
       .all();
     const schimbari = [];
     const refuzate = [];
+    let legateSchimbate = 0;
     for (const p of produse) {
       // Doar ce a venit în formular. Produsele scoase din listă (activ = 0)
       // nu apar pe pagină, iar un câmp care lipsește nu înseamnă „golește-l":
@@ -1956,10 +2008,10 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         if (!egaleBani(nr(p.pret), pret)) schimbari.push(`${p.denumire}: preț ${textBani(nr(p.pret))} → ${textBani(pret)}`);
         if ((p.aliasuri || null) !== aliasuri) schimbari.push(`${p.denumire}: alias „${p.aliasuri || ""}” → „${aliasuri || ""}”`);
       }
-      // Costul manual se mai poate scrie DOAR la produsele nelegate. La cele
-      // legate, formularul nici nu trimite câmpul — iar dacă îl trimite cineva
-      // de mână, nu-l luăm: altfel costul automat ar fi tăcut peste.
-      if (p.produs_id || !are(`k_${p.id}`)) continue;
+      // Costul de mână se scrie și la produsele legate la nomenclator și are
+      // întâietate față de cel automat (vezi eCostManual). La un produs legat
+      // caseta arată costul automat: neatinsă sau golită, rămâne automat.
+      if (!are(`k_${p.id}`)) continue;
       const cost = numarScris(b[`k_${p.id}`]);
       if (cost != null && !(Number.isFinite(cost) && cost >= 0)) {
         // Un cost care nu e număr nu șterge costul vechi: rămâne cum era,
@@ -1967,15 +2019,29 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         refuzate.push(p.denumire);
         continue;
       }
-      const nota = are(`n_${p.id}`) ? String(b[`n_${p.id}`] || "").slice(0, 200).trim() || null : p.nota_cost || null;
+      const legat = !!p.produs_id;
+      const manual = eCostManual(p);
       const vechi = p.cost == null ? null : Number(p.cost);
+      if (legat && !manual && (cost == null || egaleBani(vechi, cost))) continue;
+      // Nota e a costului scris de mână. La un produs legat formularul n-o
+      // trimite: cea rămasă de la costul automat nu se ia cu costul nou.
+      const nota = are(`n_${p.id}`)
+        ? String(b[`n_${p.id}`] || "").slice(0, 200).trim() || null
+        : legat && (!manual || cost == null)
+          ? null
+          : p.nota_cost || null;
       if (egaleBani(vechi, cost) && (p.nota_cost || null) === nota) continue;
       await db
         .prepare("UPDATE consumabile_produse SET cost = ?, nota_cost = ?, cost_sursa = ?, cost_la = ? WHERE id = ?")
         .run(cost, nota, cost == null ? null : `scris de mână de ${ctx.user.nume || "cineva"}`, acum, p.id);
-      if (!egaleBani(vechi, cost)) schimbari.push(`${p.denumire}: cost ${textBani(vechi)} → ${textBani(cost)}`);
+      if (legat) legateSchimbate++;
+      if (legat && cost == null) schimbari.push(`${p.denumire}: cost ${textBani(vechi)} → cel din nomenclator`);
+      else if (!egaleBani(vechi, cost)) schimbari.push(`${p.denumire}: cost ${textBani(vechi)} → ${textBani(cost)}`);
       else schimbari.push(`${p.denumire}: nota costului`);
     }
+    // Un produs legat căruia i s-a golit costul de mână îl primește pe loc pe
+    // cel din nomenclator, nu abia la următoarea pornire a serverului.
+    if (legateSchimbate) await recalculeazaCosturi().catch((e) => console.error("[comenzi-zi] recalcul după costuri:", e.message));
     if (schimbari.length) console.log(`[comenzi-zi] ${ctx.user.nume || "?"} a schimbat în prețuri și costuri: ${schimbari.join("; ")}`);
 
     // Costul scris aici trebuie să ajungă și pe zilele DEJA scrise, altfel
@@ -2011,18 +2077,51 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     return redirect(ctx.res, `${CALE}?${q.toString()}#preturi`);
   });
 
+  // Comanda zilei, cerută de om din raport. Același drum ca la urcarea zilei:
+  // o zi = o comandă, cea scrisă de mână e adoptată, nimic nu se dublează.
+  router.post(`${CALE}/comanda-zilei`, async (ctx) => {
+    if (!poateUrca(ctx.user)) return redirect(ctx.res, CALE);
+    const zi = String((ctx.body || {}).zi || "").slice(0, 10);
+    const pagina = (stare, corp) => send(ctx.res, stare, rapoarte.pagina(ctx, "Comanda zilei", CALE, corp));
+    if (!eData(zi)) return pagina(400, `<p><a href="${CALE}">← Comenzi consumabile la zi</a></p><p>Lipsește ziua.</p>`);
+    const inapoi = `<p><a href="${CALE}?perioada=custom&de=${zi}&pana=${zi}">← Ziua ${dataRo(zi)} în raport</a></p>`;
+    if (!ziDeComanda(zi, aziComanda())) {
+      return pagina(
+        422,
+        `${inapoi}<h1 style="margin-top:0">Comanda zilei — ${dataRo(zi)}</h1>
+         <div class="flash flash-rosu" role="alert">Comanda zilei se face doar pentru ultimele ${ZILE_COMANDA} zile. Ziua ${dataRo(zi)} e mai veche: marfa ei a plecat pe comanda scrisă atunci, iar una nouă ar dubla-o. Dacă chiar îți trebuie, scrie comanda de mână, din Comenzi.</div>`
+      );
+    }
+    const c = await comandaZilei(zi, ctx.user, "butonul din raport");
+    return pagina(
+      200,
+      `${inapoi}<h1 style="margin-top:0">Comanda zilei — ${dataRo(zi)}</h1>
+       ${textComandaZi(c) || '<div class="flash">Nimic de făcut.</div>'}`
+    );
+  });
+
   // Legarea la nomenclator + recalculul costurilor, într-un singur drum.
   router.post(`${CALE}/legare`, async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
     const b = ctx.body || {};
-    const produse = await db.prepare("SELECT id FROM consumabile_produse").all();
+    const produse = await db.prepare("SELECT id, denumire, produs_id FROM consumabile_produse").all();
+    const legaturi = [];
     for (const p of produse) {
+      // Doar ce a venit în formular. Produsele scoase din listă (activ = 0) nu
+      // apar pe pagină, iar un câmp care lipsește nu înseamnă „dezleagă-l”:
+      // până pe 11.11.2026 orice salvare le rupea legătura.
+      if (!Object.prototype.hasOwnProperty.call(b, `l_${p.id}`)) continue;
       const brut = String(b[`l_${p.id}`] == null ? "" : b[`l_${p.id}`]).trim();
       const id = brut === "" ? null : Number(brut);
-      await db
-        .prepare("UPDATE consumabile_produse SET produs_id = ? WHERE id = ?")
-        .run(Number.isFinite(id) && id > 0 ? id : null, p.id);
+      const nou = Number.isFinite(id) && id > 0 ? id : null;
+      const vechi = Number(p.produs_id) > 0 ? Number(p.produs_id) : null;
+      if (nou === vechi) continue;
+      await db.prepare("UPDATE consumabile_produse SET produs_id = ? WHERE id = ?").run(nou, p.id);
+      legaturi.push(`${p.denumire}: ${vechi ? "#" + vechi : "nelegat"} → ${nou ? "#" + nou : "nelegat"}`);
     }
+    // Cine a legat ce rămâne în jurnal: fără legături nu se face comanda zilei,
+    // iar pe 11.11.2026 a durat să aflăm că nu fuseseră făcute niciodată.
+    if (legaturi.length) console.log(`[comenzi-zi] ${ctx.user.nume || "?"} a schimbat legăturile la nomenclator: ${legaturi.join("; ")}`);
     const r = await recalculeazaCosturi();
     let umplut = { linii: 0, linii_awb: 0 };
     if (String(b.umple || "") === "1") umplut = await umpleCosturiLipsa();
@@ -2263,5 +2362,5 @@ module.exports = {
   poateUrca,
   // Expuse pentru teste: recunoașterea produsului e piesa de care atârnă jobul
   // de noapte, iar ea se verifică pe cele 419 etichete reale, nu din priviri.
-  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil },
+  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, textComandaZi, azi: null },
 };
