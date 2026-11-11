@@ -244,6 +244,8 @@ async function salveazaMesaj(cont, id) {
   if (existent) return { sarit: true };
 
   const m = await gmail.mesaj(cont.adresa, id);
+  // Mesajul a apărut în istoric, dar nu mai e în Gmail (lib/gmail.js, mesaj).
+  if (!m) return { sarit: true, disparut: true };
   const de = gmail.adresa(m.de_la);
 
   // Blocatul se verifică ÎNAINTE de atașamente: un newsletter cu poze în el
@@ -302,7 +304,7 @@ function mesajul(e) {
 }
 
 async function sincronizeazaCont(cont) {
-  const rezumat = { adresa: cont.adresa, noi: 0, sarite: 0, blocate: 0, atasamente: 0, eroare: null };
+  const rezumat = { adresa: cont.adresa, noi: 0, sarite: 0, blocate: 0, disparute: 0, esuate: 0, atasamente: 0, eroare: null };
   try {
     let iduri = [];
     let historyNou = "";
@@ -324,14 +326,39 @@ async function sincronizeazaCont(cont) {
       historyNou = p.historyId;
     }
 
+    // Un mesaj care nu se poate salva nu le oprește pe cele de după el.
+    // Înainte, primul mesaj căzut încheia sincronizarea căsuței, iar tot ce
+    // venise după el rămânea afară până îl repara cineva (11.11.2026: așa au
+    // lipsit AWB-urile unei nopți). Acum restul intră, iar cel căzut se reia.
+    let primaEroare = null;
     for (const id of iduri) {
-      const r = await salveazaMesaj(cont, id);
-      if (r.blocat) { rezumat.sarite++; rezumat.blocate++; }
+      let r;
+      try {
+        r = await salveazaMesaj(cont, id);
+      } catch (e) {
+        rezumat.esuate++;
+        if (!primaEroare) primaEroare = mesajul(e);
+        continue;
+      }
+      if (r.disparut) { rezumat.sarite++; rezumat.disparute++; }
+      else if (r.blocat) { rezumat.sarite++; rezumat.blocate++; }
       else if (r.sarit) rezumat.sarite++;
       else {
         rezumat.noi++;
         rezumat.atasamente += r.urcate || 0;
       }
+    }
+    if (rezumat.disparute) console.log(`[inbox] ${cont.adresa}: ${rezumat.disparute} ${rezumat.disparute === 1 ? "mesaj nu mai există" : "mesaje nu mai există"} în Gmail — sărite`);
+
+    if (rezumat.esuate) {
+      // Punctul din istoric rămâne pe loc: la următoarea sincronizare mesajele
+      // căzute se cer din nou, iar cele salvate acum sunt sărite (există deja).
+      // Dacă ar înainta, mesajul căzut n-ar mai fi cerut niciodată.
+      rezumat.eroare = `${rezumat.esuate} ${rezumat.esuate === 1 ? "mesaj nu s-a putut salva" : "mesaje nu s-au putut salva"}; celelalte au intrat, iar ${rezumat.esuate === 1 ? "acesta se reia" : "acestea se reiau"} la următoarea sincronizare. ${primaEroare || ""}`.slice(0, 500);
+      await db
+        .prepare("UPDATE email_conturi SET ultima_sincronizare = ?, ultima_eroare = ?, mesaje_aduse = mesaje_aduse + ? WHERE id = ?")
+        .run(acum(), rezumat.eroare, rezumat.noi, cont.id);
+      return rezumat;
     }
 
     await db
