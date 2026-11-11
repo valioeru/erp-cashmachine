@@ -300,6 +300,8 @@ const GHID = [
 "Eticheta se lipește pe palet. Pe ea scrie mare adresa — după aia nu mai cauți marfa, o găsești.",
 "<b>Prețul de intrare e obligatoriu.</b> Dacă ERP-ul îl știe — de pe rândul recepției sau de pe produs (rețeta, costul de producție, prețul de achiziție) — vine gata scris și îl poți schimba; dacă nu, îl scrii de pe factura sau avizul furnizorului, în lei pe unitatea de măsură. Sub total vezi și valoarea intrării: dacă pare uriașă, prețul e probabil pe mia de bucăți, iar marfa e numărată în bucăți. Fără preț nu intră decât marfa care pleacă direct la client, fără raft.",
 "Paleții care sunt deja în depozit fără preț se găsesc în <b>Paleți în depozit</b>, la „arată-i și pune prețurile”: scrii prețul pe rândul paletului și apeși „Pune”; bifa de lângă îl pune pe toți paleții cu aceeași marfă. Un preț deja pus îl schimbă doar administratorul, cu „modifică”, iar schimbarea rămâne scrisă în fișa paletului.",
+"<b>Și denumirea e obligatorie.</b> Alegi produsul din catalog sau, dacă nu e acolo, scrii denumirea. Fără una din două, marfa nu intră: un palet fără denumire nu se mai găsește în stoc.",
+"<b>Ai greșit ceva la intrare?</b> Deschizi paletul (din hartă sau din Paleți în depozit, cu „corectează”) și mergi la <b>Corectează marfa de pe palet</b>. Cantitatea o corectează oricine face intrări. Denumirea și unitatea de măsură le completează oricine acolo unde lipsesc; odată scrise, le schimbă doar administratorul, care poate alege și alt produs din catalog. Fiecare corectare rămâne scrisă în fișa paletului: ce era, ce e, cine a schimbat și când. După corectare, tipărește din nou eticheta. Corectarea e pentru o cifră sau o denumire scrisă greșit; marfa care a venit sau a plecat se trece cu „Adaugă” și „Scoate”.",
 "Sus, în <b>Gata din producție — de alocat</b>, stă marfa terminată în producție și cererile marcate „intrată în stoc” care n-au încă palet. De la fiecare rând o pui pe raft (Intrarea se completează singură) sau o trimiți direct în fulfillment ori la livrare pe comanda clientului.",
 "Dedesubt, în <b>Recepționat de la furnizori — de alocat</b>, apare marfa de la furnizori și retururile, imediat ce recepția lor e finalizată, cu aceleași butoane. Mai jos sunt <b>paleții cu etichetă, fără loc pe raft</b>: îi pui pe raft cu „Pune pe raft”. Dacă a venit mai mult decât scrie pe rând, la „Alocă pe cantități” bifezi „a venit mai mult” și scrii cât e: se salvează cantitatea scrisă de tine."
 ],
@@ -357,7 +359,8 @@ const GHID = [
 "t":"Paleți în depozit",
 "p":[
 "Lista completă a paleților aflați acum în depozit, cu adresa și marfa fiecăruia. De aici cauți un palet anume.",
-"Sus e <b>căsuța de căutare</b>: scrii o parte din denumire și rândurile se filtrează pe loc. Nu contează literele mari, diacriticele sau ordinea cuvintelor — „banda pet” găsește „Bandă PET 5mm”. Găsește și paletul cu mai multe produse, după oricare din ele, și merge și cu codul produsului, codul paletului sau lotul. <b>Enter</b> caută în tot depozitul, nu doar în rândurile de pe pagină."
+"Sus e <b>căsuța de căutare</b>: scrii o parte din denumire și rândurile se filtrează pe loc. Nu contează literele mari, diacriticele sau ordinea cuvintelor — „banda pet” găsește „Bandă PET 5mm”. Găsește și paletul cu mai multe produse, după oricare din ele, și merge și cu codul produsului, codul paletului sau lotul. <b>Enter</b> caută în tot depozitul, nu doar în rândurile de pe pagină.",
+"Pe fiecare rând ai <b>corectează</b>, care te duce la fișa paletului, unde se îndreaptă o cantitate sau o denumire scrisă greșit. Dacă în depozit sunt paleți <b>fără denumirea mărfii</b>, cardul de sus spune câți sunt și ți-i arată: deschizi fiecare și scrii ce e pe el."
 ],
 "pasi":[],
 "sfat":null
@@ -368,6 +371,7 @@ const GHID = [
 "Tabul <b>Scaner</b> e făcut pentru terminalul din mână și merge pe orice telefon. Are două butoane mari, <b>Intrare</b> și <b>Ieșire</b>, și un singur câmp, mereu pregătit: cititorul scrie codul în el și trimite singur.",
 "Ca să meargă, fiecare lucru are eticheta lui cu cod de bare: <b>paletul</b> (CT…), <b>locul de pe raft</b> (de exemplu R3-05-2-1) și marfa din producție (fișa de lot CM-… sau codul produsului).",
 "<b>Paleții și etichetele lor se fac la recepție.</b> După ce numeri marfa și finalizezi recepția, scrii cât e pe fiecare palet, cu plus între ei — <code>400 + 400 + 200</code> sau <code>3 x 400</code> — și apeși „Fă paleții și scoate etichetele”. Fiecare palet primește codul lui; eticheta se lipește pe palet. Paleții stau apoi la Scaner → Intrare, la „așteaptă raftul”, până îi pui pe un loc.",
+"<b>Poze la recepție.</b> Pe pagina recepției, la „Poze”, poți pune o poză cu marfa cum a venit, cu avizul, factura sau CMR-ul: „Fă o poză” deschide camera telefonului, „Alege din telefon sau calculator” ia una făcută mai devreme. Spui ce e în poză și apeși „Urcă pozele”. Nu sunt obligatorii, dar la o lipsă sau la marfă lovită ele sunt dovada. Se păstrează în Drive, iar pe pagină rămâne legătura spre fiecare.",
 "<b>Intrare.</b> Alegi de unde vine marfa (din producție, de la furnizor, retururi), scanezi paletul, scanezi locul, apeși <b>Efectuează</b>. ERP-ul îți propune un loc: întâi lângă același produs, apoi lângă produse din aceeași familie, apoi în zona categoriei; dedesubt sunt alte locuri libere, pe care le alegi cu o atingere. Un loc ocupat sau scos din uz e refuzat pe loc, de la scanare. Un palet lat se pune pe două sau trei locuri lipite. Un palet care are deja loc se <b>mută</b> pe cel scanat.",
 "<b>Marfa din producție fără palet</b> o găsești scanând fișa de lot sau codul produsului: scrii cât e pe palet, scanezi locul și apeși Efectuează. Paletul se face atunci, pe locul scanat, iar eticheta lui merge la tipărit. Ce n-ai pus rămâne în listă. Dacă pe palet e mai mult decât scrie la „de pus”, scrie cât e: scanerul te întreabă o dată, iar la a doua apăsare face paletul și recepția ia cantitatea de pe palet.",
 "<b>Ieșire.</b> Scanezi paletul sau locul pe care stă (ori codul produsului: îți arată paleții lui, cel mai vechi primul). Alegi unde pleacă — comandă, fulfillment, producție sau consum intern —, comanda (cele care au produsul sunt primele, cu ✓) și cât pleacă; la consum intern scrii pentru ce s-a scos și cine a cerut; dacă e mai puțin decât tot, restul rămâne pe palet, pe locul lui. Dacă există un palet mai vechi din aceeași marfă, terminalul ți-l arată și îți cere motivul.",
@@ -808,7 +812,7 @@ const GHID = [
 {
 "t":"Am scris greșit ceva la intrarea mărfii.",
 "p":[
-"Intri pe paletul respectiv și corectezi. Dacă eticheta e deja lipită, tipărește-o din nou."
+"Intri pe paletul respectiv (din hartă sau din Paleți în depozit, cu „corectează”) și mergi la <b>Corectează marfa de pe palet</b>: scrii cantitatea corectă și apeși „Salvează corectarea”. Unitatea de măsură și denumirea le completezi tu acolo unde lipsesc; dacă sunt scrise greșit, le schimbă administratorul, care poate alege și alt produs. Rămâne scris ce era, ce e, cine a corectat și când. Dacă eticheta e deja lipită, tipărește-o din nou."
 ],
 "pasi":[],
 "sfat":null

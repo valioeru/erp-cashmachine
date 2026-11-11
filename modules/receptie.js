@@ -19,6 +19,8 @@ const db = require("../lib/db");
 const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const R = require("../lib/receptie");
+const POZE = require("../lib/receptie-poze");
+const drive = require("../lib/drive");
 const { cantPusa } = require("../lib/gata-productie");
 
 const nr = (v) => Number(v || 0);
@@ -122,6 +124,162 @@ async function creeaza(date, linii) {
       );
   }
   return id;
+}
+
+// Pozele recepției: ce e urcat și formularul de adăugat (lib/receptie-poze.js).
+// Le adaugă oricine lucrează recepția, și după finalizare; le scoate doar
+// administratorul. Pe o recepție anulată se mai văd, dar nu se mai adaugă.
+async function sectiunePoze(r, user) {
+  const poze = await db
+    .prepare("SELECT id, fel, nota, link, drive_id, nume, marime, creat_de, creat_la FROM receptii_poze WHERE receptie_id = ? ORDER BY id")
+    .all(r.id)
+    .catch(() => []);
+  const eAdmin = !!user && user.rol === "admin";
+  const poateAdauga = poate(user) && r.stare !== "anulata";
+  if (!poze.length && !poateAdauga) return "";
+  const kb = (n) => (nr(n) ? ` · ${Math.max(1, Math.round(nr(n) / 1024))} KB` : "");
+  const lista = poze.length
+    ? `<ul class="rec-poze">${poze
+        .map((z) => {
+          const link = String(z.link || "");
+          const inDrive = Boolean(z.drive_id) && /^https:\/\//.test(link);
+          return `<li>
+            ${!inDrive && link.startsWith("data:image/") ? `<img src="${esc(link)}" alt="${esc(POZE.etichetaFel(z.fel))}">` : ""}
+            <span><strong>${esc(POZE.etichetaFel(z.fel))}</strong>${z.nota ? " — " + esc(z.nota) : ""}<br>
+              <span class="mic">${esc(z.creat_de || "?")} · ${esc(String(z.creat_la || "").slice(0, 16))}${kb(z.marime)}</span><br>
+              ${
+                inDrive
+                  ? `<a href="${esc(link)}" target="_blank" rel="noopener">vezi în Drive</a>`
+                  : '<span class="mic" style="color:var(--warn,#b5760b)">a rămas în baza ERP-ului, nu în Drive</span>'
+              }
+              ${
+                eAdmin
+                  ? `<form method="post" action="/depozit/receptie/${r.id}/poze/${z.id}/sterge" class="inline-form" onsubmit="return confirm('Scoți poza din recepție? În Drive merge la coș.')">
+                       <button class="link-btn danger" type="submit" style="font-size:11px">scoate</button></form>`
+                  : ""
+              }
+            </span></li>`;
+        })
+        .join("")}</ul>`
+    : `<p class="mic">Nicio poză încă.</p>`;
+  const formular = !poateAdauga
+    ? ""
+    : `<form method="post" action="/depozit/receptie/${r.id}/poze" enctype="multipart/form-data" class="form" id="forma-poze" style="max-width:820px">
+         <div style="display:grid;grid-template-columns:1fr 2fr;gap:12px">
+           <label class="field" style="margin:0"><span>Ce e în poză</span>
+             <select name="fel">${POZE.FELURI.map(([c, et]) => `<option value="${c}">${esc(et)}</option>`).join("")}</select></label>
+           <label class="field" style="margin:0"><span>Notă (dacă vrei)</span><input name="nota" maxlength="200" autocomplete="off" placeholder="ex. palet rupt la colț"></label>
+         </div>
+         <div class="rec-poze-alege">
+           <label class="btn small secondary">Fă o poză<input type="file" class="poze-fisiere" name="poze" accept="image/*" capture="environment"></label>
+           <label class="btn small secondary">Alege din telefon sau calculator<input type="file" class="poze-fisiere" name="poze" accept="image/*" multiple></label>
+           <span id="poze-stare" class="mic" role="status"></span>
+         </div>
+         <div id="poze-alese" class="rec-poze-alese"></div>
+         <div id="poze-ascunse"></div>
+         <div class="form-actions"><button class="btn small" type="submit" id="poze-trimite">Urcă pozele</button></div>
+       </form>
+       <script>
+       // Pozele se micșorează aici, înainte să plece (1600 px, JPEG): o poză de
+       // telefon are 3–5 MB, iar micșorată 200–400 KB — se urcă repede și de pe
+       // WiFi-ul din depozit. Fiecare poză pregătită pleacă într-un câmp ascuns
+       // al ei; câmpul de fișier se golește, altfel poza ar pleca de două ori.
+       // Fără JavaScript, fișierele pleacă întregi și serverul le primește la fel.
+       (function () {
+         var LATURA = 1600, CALITATE = 0.7, MAX = ${POZE.MAX_POZE};
+         var forma = document.getElementById("forma-poze");
+         if (!forma) return;
+         var ascunse = document.getElementById("poze-ascunse"), stare = document.getElementById("poze-stare");
+         var alese = document.getElementById("poze-alese"), buton = document.getElementById("poze-trimite");
+         var urmatoarea = 0, inLucru = 0, spus = "";
+         forma.querySelectorAll(".poze-fisiere").forEach(function (i) { i.style.display = "none"; });
+         function cate() { return ascunse.querySelectorAll("input").length; }
+         function arata() {
+           var n = cate();
+           stare.textContent = inLucru ? "pregătesc pozele…" : spus || (n ? (n === 1 ? "o poză pregătită" : n + " poze pregătite") + " — apasă „Urcă pozele”" : "");
+           buton.disabled = inLucru > 0;
+         }
+         function gata() { inLucru--; arata(); }
+         // Pozele rămân în ordinea în care au fost alese, chiar dacă una mică
+         // e gata înaintea uneia mari: fiecare își ia numărul când e aleasă.
+         function pune(unde, el, nr) {
+           el.setAttribute("data-nr", nr);
+           var dupa = null;
+           [].forEach.call(unde.children, function (c) { if (dupa === null && Number(c.getAttribute("data-nr")) > nr) dupa = c; });
+           unde.insertBefore(el, dupa);
+         }
+         function adauga(f) {
+           if (cate() + inLucru >= MAX) { spus = "cel mult " + MAX + " poze odată"; arata(); return; }
+           var nrPoza = urmatoarea++;
+           inLucru++;
+           arata();
+           var img = new Image();
+           img.onload = function () {
+             var s = Math.min(1, LATURA / Math.max(img.width, img.height));
+             var cv = document.createElement("canvas");
+             cv.width = Math.round(img.width * s);
+             cv.height = Math.round(img.height * s);
+             cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+             try {
+               var date = cv.toDataURL("image/jpeg", CALITATE);
+               var h = document.createElement("input");
+               h.type = "hidden";
+               h.name = "poza_date_" + nrPoza;
+               h.value = date;
+               pune(ascunse, h, nrPoza);
+               var una = document.createElement("span");
+               var mica = document.createElement("img");
+               mica.src = date;
+               mica.alt = "poză pregătită";
+               var scoate = document.createElement("button");
+               scoate.type = "button";
+               scoate.className = "link-btn danger";
+               scoate.textContent = "scoate";
+               scoate.addEventListener("click", function () { h.remove(); una.remove(); spus = ""; arata(); });
+               una.appendChild(mica);
+               una.appendChild(scoate);
+               pune(alese, una, nrPoza);
+               spus = "";
+             } catch (e) {
+               spus = "n-am putut pregăti poza — încearcă din nou";
+             }
+             URL.revokeObjectURL(img.src);
+             gata();
+           };
+           img.onerror = function () { spus = "„" + (f.name || "fișierul") + "” nu e o poză"; gata(); };
+           img.src = URL.createObjectURL(f);
+         }
+         forma.addEventListener("change", function (ev) {
+           var inp = ev.target;
+           if (!inp.classList || !inp.classList.contains("poze-fisiere")) return;
+           spus = "";
+           [].slice.call(inp.files || []).forEach(adauga);
+           inp.value = "";
+         });
+         forma.addEventListener("submit", function (ev) {
+           if (inLucru > 0) { ev.preventDefault(); return; }
+           if (!cate()) { ev.preventDefault(); spus = "fă sau alege întâi o poză"; arata(); return; }
+           buton.disabled = true;
+           stare.textContent = "urc pozele…";
+         });
+       })();
+       </script>`;
+  return `
+    <h3 id="poze" style="margin:22px 0 4px">Poze${poze.length ? ` (${poze.length})` : ""}</h3>
+    <p class="explic">Marfa cum a venit, avizul, factura, CMR-ul. Nu sunt obligatorii, dar la o lipsă sau la marfă lovită ele sunt dovada.
+      Se păstrează în Drive, în folderul recepției.</p>
+    ${lista}
+    ${formular}
+    <style>
+      .rec-poze { list-style:none; margin:0 0 12px; padding:0; display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:8px; }
+      .rec-poze li { display:flex; gap:8px; align-items:flex-start; border:1px solid var(--border); border-radius:8px; padding:8px 10px; background:#fff; font-size:13px; }
+      .rec-poze li img { height:64px; border-radius:4px; border:1px solid var(--border); }
+      .rec-poze-alege { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 6px; }
+      .rec-poze-alege label { margin:0; cursor:pointer; }
+      .rec-poze-alese { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 8px; }
+      .rec-poze-alese span { display:flex; flex-direction:column; align-items:center; gap:2px; font-size:11px; }
+      .rec-poze-alese img { height:72px; border-radius:4px; border:1px solid var(--border); }
+    </style>`;
 }
 
 // După finalizare: unde se pune marfa. Pentru fiecare rând bun, cât a venit,
@@ -269,7 +427,8 @@ function register(router) {
       .prepare(
         `SELECT r.*, p.nume AS partener, cp.numar AS comanda_productie_numar,
                 (SELECT COUNT(*) FROM receptii_linii l WHERE l.receptie_id = r.id) AS nr_linii,
-                (SELECT COUNT(*) FROM receptii_linii l WHERE l.receptie_id = r.id AND l.stare <> 'de_primit') AS nr_gata
+                (SELECT COUNT(*) FROM receptii_linii l WHERE l.receptie_id = r.id AND l.stare <> 'de_primit') AS nr_gata,
+                (SELECT COUNT(*) FROM receptii_poze z WHERE z.receptie_id = r.id) AS nr_poze
            FROM receptii r
            LEFT JOIN parteneri p ON p.id = r.partener_id
            LEFT JOIN comenzi_productie cp ON cp.id = r.comanda_productie_id
@@ -289,7 +448,8 @@ function register(router) {
         esc(r.document_extern || "—"),
         esc(r.data || "—"),
         total ? `${gata}/${total} rânduri` : '<span class="badge rosu">fără rânduri</span>',
-        STARE_ETICHETA[r.stare] || esc(r.stare),
+        (STARE_ETICHETA[r.stare] || esc(r.stare)) +
+          (Number(r.nr_poze) ? ` <a class="mic" href="/depozit/receptie/${r.id}#poze">${Number(r.nr_poze) === 1 ? "o poză" : Number(r.nr_poze) + " poze"}</a>` : ""),
       ];
     });
 
@@ -486,6 +646,7 @@ function register(router) {
       }
       ${table(["Produs", "Anunțat", "Primit", "Diferență", "Stare marfă", "Lot / de ce", ""], randuri)}
       ${await sectiuneCtPark(r, linii)}
+      ${await sectiunePoze(r, ctx.user)}
 
       ${
         inchisa
@@ -629,6 +790,76 @@ function register(router) {
       return redirect(ctx.res, x.faraReceptie ? "/depozit/receptie" : `/depozit/receptie/${id}?eroare=` + encodeURIComponent(x.eroare));
     }
     redirect(ctx.res, x.url);
+  });
+
+  // ---- Pozele recepției ------------------------------------------------------
+  // Marfa cum a venit, avizul, factura, CMR-ul (lib/receptie-poze.js). Nu sunt
+  // obligatorii și se pot adăuga și după finalizare — avizul se pozează uneori
+  // abia la birou. Se urcă în Drive; aici rămâne rândul cu legătura.
+  router.post("/depozit/receptie/:id/poze", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    if (!poate(ctx.user)) return redirect(ctx.res, "/depozit/receptie");
+    const inapoi = (k, mesaj) => redirect(ctx.res, `/depozit/receptie/${id}?${k}=${encodeURIComponent(String(mesaj).slice(0, 600))}#poze`);
+    const r = await db
+      .prepare("SELECT r.id, r.numar, r.stare, p.nume AS partener FROM receptii r LEFT JOIN parteneri p ON p.id = r.partener_id WHERE r.id = ?")
+      .get(id);
+    if (!r) return redirect(ctx.res, "/depozit/receptie");
+    if (r.stare === "anulata") return inapoi("eroare", "Recepția e anulată: nu i se mai adaugă poze.");
+    const a = POZE.adunaPoze(ctx.body);
+    if (a.eroare) return inapoi("eroare", a.eroare);
+    if (!a.poze.length) return inapoi("eroare", "N-a ajuns nicio poză. Fă sau alege una și apasă din nou „Urcă pozele”.");
+    const fel = POZE.felCurat(ctx.body.fel);
+    const nota = text(ctx.body.nota, 200);
+    const cand = POZE.acumRo();
+    let inDrive = 0;
+    let inErp = 0;
+    let duble = 0;
+    let motiv = "";
+    for (let i = 0; i < a.poze.length; i++) {
+      const rez = await POZE.pastreaza(r, a.poze[i], { fel, index: i, cand });
+      // Aceeași poză urcată a doua oară: Drive o are deja, n-o mai scriem o dată.
+      if (rez.duplicat && (await db.prepare("SELECT 1 AS x FROM receptii_poze WHERE receptie_id = ? AND drive_id = ?").get(id, rez.driveId))) {
+        duble++;
+        continue;
+      }
+      await db
+        .prepare("INSERT INTO receptii_poze (receptie_id, fel, nota, link, drive_id, nume, marime, creat_de, creat_la) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(id, fel, nota, rez.link, rez.driveId || null, rez.nume, rez.marime, ctx.user ? ctx.user.nume : null, cand);
+      if (rez.inDrive) inDrive++;
+      else {
+        inErp++;
+        motiv = rez.motiv || "";
+      }
+    }
+    const cate = (n) => (n === 1 ? "o poză" : n + " poze");
+    const bucati = [];
+    if (inDrive) bucati.push(`${cate(inDrive)} ${inDrive === 1 ? "e" : "sunt"} în Drive`);
+    if (duble) bucati.push(`${cate(duble)} ${duble === 1 ? "era" : "erau"} deja ${duble === 1 ? "urcată" : "urcate"}`);
+    if (inErp) bucati.push(`Atenție: Drive n-a răspuns (${motiv}), deci ${cate(inErp)} ${inErp === 1 ? "a rămas" : "au rămas"} în baza ERP-ului, nu în Drive`);
+    console.log(`[receptie] ${r.numar || "#" + r.id}: poze (${fel}) — ${inDrive} în Drive, ${inErp} în ERP, ${duble} duble, de ${(ctx.user && ctx.user.nume) || "?"}`);
+    return inapoi(inErp && !inDrive ? "eroare" : "ok", bucati.join("; ") + ".");
+  });
+
+  // O poză pusă din greșeală o scoate administratorul. În Drive merge la coș
+  // (de unde se mai poate lua 30 de zile); dacă Drive nu răspunde, rândul
+  // dispare oricum din recepție, iar fișierul rămâne de șters de mână.
+  router.post("/depozit/receptie/:id/poze/:pid/sterge", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const inapoi = (k, mesaj) => redirect(ctx.res, `/depozit/receptie/${id}?${k}=${encodeURIComponent(mesaj)}#poze`);
+    if (!ctx.user || ctx.user.rol !== "admin") return inapoi("eroare", "Pozele le scoate doar administratorul.");
+    const z = await db.prepare("SELECT * FROM receptii_poze WHERE id = ? AND receptie_id = ?").get(parseInt(ctx.params.pid, 10) || 0, id);
+    if (!z) return inapoi("eroare", "Poza nu mai există.");
+    let nota = "";
+    if (z.drive_id) {
+      try {
+        await drive.sterge(z.drive_id);
+      } catch (e) {
+        nota = ` Din Drive n-am putut-o muta la coș (${String(e.message || e).slice(0, 80)}): fișierul „${z.nume || ""}” a rămas acolo.`;
+      }
+    }
+    await db.prepare("DELETE FROM receptii_poze WHERE id = ?").run(z.id);
+    console.log(`[receptie] poza ${z.id} (${z.nume || ""}) scoasă din recepția ${id} de ${ctx.user.nume}`);
+    return inapoi("ok", "Poza a fost scoasă." + nota);
   });
 
   router.post("/depozit/receptie/:id/anuleaza", async (ctx) => {
@@ -1034,6 +1265,10 @@ async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, ca
   const cantitate = ceruta == null ? ramas : Math.round(ceruta * 1000) / 1000;
   const cidPlan = destinatie === "comanda" ? parseInt(comandaCeruta, 10) || r.comanda_id || null : null;
   const CT = require("./ct-park");
+  // Fără denumire nu se face palet (modules/ct-park.js, areNume).
+  if (!CT.areNume({ produs_id: l.produs_id, produs_text: l.produs_text })) {
+    return { eroare: "Rândul n-are denumirea mărfii. Scrie-o în recepție, apoi trimite marfa." };
+  }
   // De la cine e marfa: furnizorul recepției sau, la marfa din producție,
   // furnizorul ales acolo pentru material (lib/furnizor-comanda.js).
   const fz = await require("../lib/furnizor-comanda").furnizorReceptiei(r);
