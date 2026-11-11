@@ -10,7 +10,7 @@
 // hârtie.
 const db = require("../lib/db");
 const { SUB_STOC } = require("../lib/stoc");
-const { esc, layout, table, dateleInText } = require("../lib/render");
+const { esc, layout, table, numeLung, dateleInText } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { poateAccesa } = require("../lib/auth");
 const XLS = require("../lib/export-xlsx");
@@ -2253,7 +2253,8 @@ function register(router) {
 
     const cap = ["Marfă", "Cod", "Lot", "Cantitate", "Furnizor", "Intrat în stoc", "Unde stă", "Valoare"];
     const randCatre = (r) => [
-      `<strong>${esc(r.marfa)}</strong>`,
+      // Denumirea lungă pe 2–3 rânduri, ca în vederea pe produse.
+      numeLung(esc(r.marfa)),
       esc(r.cod || "—"),
       esc(r.lot || "—"),
       `${nr(r.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 3 })} ${esc(r.um)}`,

@@ -14,7 +14,7 @@
 // trimite aici tot restul.
 
 const db = require("../lib/db");
-const { esc, layout, table, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
+const { esc, layout, table, numeLung, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { poateAccesa } = require("../lib/auth");
 const SP = require("../lib/stoc-produse");
@@ -102,8 +102,9 @@ function textRezervare(z, um) {
 
 function celule(r, ctx, inapoi, poateRez) {
   const user = ctx.user;
+  // Denumirea lungă se rupe pe 2–3 rânduri (lib/render.js, numeLung).
   const produs =
-    `<strong>${esc(r.denumire)}</strong>` +
+    numeLung(esc(r.denumire)) +
     mic([r.cod ? esc(r.cod) : "", r.familie ? esc(r.familie) : ""].filter(Boolean).join(" · ") || "&nbsp;") +
     (r.loturi.length && r.loturi.length <= 3 ? mic("lot " + esc(r.loturi.join(", "))) : r.loturi.length > 3 ? mic(`${r.loturi.length} loturi`) : "") +
     // Furnizorii de pe paleți: doar pentru cine are Depozitul (rândul îi are
@@ -206,7 +207,9 @@ function celule(r, ctx, inapoi, poateRez) {
   // și rămâne la vedere și când tabelul e mai lat decât ecranul.
   return [
     produs,
-    esc(r.categorie || "—") + schimba,
+    // Valoarea pentru filtrul din capul tabelului e spusă pe față: sub text
+    // stă panoul „modifică", cu lista categoriei simple (lib/filtre-tabel.js).
+    `<span data-filtru="${esc(r.categorie || "—")}">${esc(r.categorie || "—")}</span>` + schimba,
     esc(r.tip || "—"),
     inStoc + alte,
     disponibil + (actiune ? `<div style="margin-top:4px">${actiune}</div>` : ""),
@@ -381,9 +384,18 @@ async function pagina(ctx, opt) {
     ${chipsArata}
     ${cards}
     ${panou}
+    <style>
+      /* Zece coloane pe un ecran obișnuit: capul tabelului se rupe pe două
+         rânduri unde nu e loc („Categorie nomenclator”, „Promis pe comenzi”,
+         „Urmează să intre”), în loc să împingă tabelul afară din ecran. */
+      table[data-filtre="stoc-la-zi"] th { white-space: normal; vertical-align: bottom; }
+    </style>
     ${
       vizibile.length
-        ? `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: "stoc-produse" })}</div>`
+        ? // Cheia filtrelor s-a schimbat pe 11.11.2026 („stoc-produse" →
+          // „stoc-la-zi"): un filtru ținut minte pe „Categorie nomenclator" cu
+          // valorile greșite de dinainte ar fi ascuns tot tabelul.
+          `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: "stoc-la-zi" })}</div>`
         : `<p style="margin-top:18px">${cauta || tip || arata ? "Nimic nu se potrivește cu ce ai ales." : "Depozitul e gol și nu urmează să intre nimic."}</p>`
     }
     ${scriptClienti}
@@ -417,7 +429,7 @@ async function paginaRezervari(ctx) {
     else if (r.stare === "expirata") motiv = "3 zile fără comandă";
     else if (r.stare === "anulata") motiv = esc(r.motiv || "");
     return [
-      `<strong>${esc(r.produs || "#" + r.produs_id)}</strong>${r.cod ? mic(esc(r.cod)) : ""}`,
+      `${numeLung(esc(r.produs || "#" + r.produs_id))}${r.cod ? mic(esc(r.cod)) : ""}`,
       esc(r.client || "#" + r.partener_id),
       esc(r.agent || "—"),
       `${cant(r.cantitate)}${um}`,

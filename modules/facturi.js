@@ -7,6 +7,9 @@ const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const smartbill = require("../lib/smartbill");
 const ADR = require("../lib/adresa-client");
+// Cine validează o factură: administratorul, rolul financiar și cine are bifa
+// „Facturare” (lib/auth.js, areFacturare).
+const { areFacturare } = require("../lib/auth");
 
 const STATUS_LABEL = {
   ciorna: '<span class="badge gri">ciornă</span>',
@@ -670,7 +673,7 @@ function register(router) {
                 la validare — pe care o face cineva cu drepturi pe facturare.
               </p>
               ${
-                ctx.user && ["admin", "financiar"].includes(ctx.user.rol)
+                areFacturare(ctx.user)
                   ? `<form method="post" action="/facturi/${factura.id}/valideaza" class="inline-form"
                            onsubmit="return confirm('Validezi factura? Se emite, scade stocul și pleacă în SmartBill.')">
                        <button class="btn" type="submit">Validează și emite factura</button>
@@ -834,7 +837,7 @@ function register(router) {
   // factura devine emisă, scade stocul la noi și pleacă în SmartBill.
   // De-aia o poate apăsa doar cine are drepturi pe facturare.
   router.post("/facturi/:id/valideaza", async (ctx) => {
-    if (!ctx.user || !["admin", "financiar"].includes(ctx.user.rol)) {
+    if (!areFacturare(ctx.user)) {
       return send(
         ctx.res,
         403,
