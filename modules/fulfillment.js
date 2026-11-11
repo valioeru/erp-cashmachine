@@ -1088,7 +1088,7 @@ function register(router) {
       f.marime ? Math.round(nr(f.marime) / 1024).toLocaleString("ro-RO") + " KB" : "—",
       `<span class="stare-teanc">${
         f.printat_la
-          ? `<span class="badge verde">printat ${esc(String(f.printat_la).slice(0, 16))}</span>${
+          ? `<span class="badge verde">printat ${esc(candRo(f.printat_la))}</span>${
               f.automat ? " <span style=\"color:var(--text-muted);font-size:12px\">automat</span>" : ""
             }${nr(f.exemplare) > 1 ? ` <span style="color:var(--text-muted);font-size:12px">×${nr(f.exemplare)}</span>` : ""}`
           : '<span class="badge">neprintat</span>'
@@ -1669,6 +1669,12 @@ function ziOraRo(utc) {
   return { zi: `${p.year}-${p.month}-${p.day}`, ora: `${p.hour}:${p.minute}` };
 }
 
+// „11.11.2026 10:07" — ziua și ora României, gata de arătat.
+function candRo(utc) {
+  const ro = ziOraRo(utc);
+  return `${dataRo(ro.zi)} ${ro.ora}`.trim();
+}
+
 // Căsuțele în care vin etichetele: cele care au primit deja un awbs.pdf. Până
 // vine primul, căsuțele comune.
 async function casuteAwb() {
@@ -1722,4 +1728,4 @@ async function etichetePdf(zile) {
   return out;
 }
 
-module.exports = { register, stocCurent, comenziZi, CALE, casuteAwb, oraRo, ziOraRo };
+module.exports = { register, stocCurent, comenziZi, CALE, casuteAwb, oraRo, ziOraRo, candRo };
