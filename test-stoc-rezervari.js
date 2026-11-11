@@ -487,7 +487,7 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     bine("are panoul de rezervare, cu clientul obligatoriu", h.includes('id="panou-rezervare"') && h.includes("client-obligatoriu") && r.corp.includes("__alegeClient"));
     bine("clientul restant e marcat în lista de clienți", r.corp.includes("TSR Client Restant SRL") && /Clientul are întârzieri la plată/.test(r.corp));
     bine("furnizorii nu sunt în lista de clienți", r.corp.includes("TSR Client Alt SRL") && !r.corp.includes("TSR Furnizor Comandat SRL"));
-    bine("filtre ca în Excel pe capul tabelului", h.includes('data-filtre="stoc-produse"'));
+    bine("filtre ca în Excel pe capul tabelului", h.includes('data-filtre="stoc-la-zi"'));
     bine("filtrele de categorie, cu numărul de produse", /class="subnav-link activ"[^>]*>Toate/.test(h) && h.includes("materie primă <span") && h.includes("produse finite <span"));
     bine("submeniul: „Stoc la zi” și „Rezervări”", (() => { const t = (h.match(/<div class="subnav"[^>]*>([\s\S]*?)<\/div>/) || [])[1] || ""; return [...t.matchAll(/>([^<]+)<\/a>/g)].map((m) => m[1]).join("|") === "Stoc la zi|Rezervări"; })());
     bine("„+ Intrare marfă” la vedere, inactiv", /<button type="button" class="btn secondary" disabled[^>]*>\+ Intrare marfă<\/button>/.test(h));
@@ -732,7 +732,7 @@ const fara = (s) => String(s || "").replace(/<script[\s\S]*?<\/script>/g, "");
     await Promise.all([pagina.waitForURL(/ok=/), pagina.click('#panou-rezervare button[type="submit"]')]);
     const dupa = await pagina.content();
     bine("rezervarea se face, iar pagina spune cine pentru cine", /Rezervat 4 buc din TSR Cutie B pentru TSR Client Bun SRL/.test(dupa) && /rezervat de agentul <strong>Agent Unu<\/strong> pentru clientul <strong>TSR Client Bun SRL<\/strong>: 4 buc/.test(dupa));
-    bine("filtrele din capul tabelului sunt puse", (await pagina.$$("table[data-filtre=stoc-produse] th .filtru-btn")).length >= 9);
+    bine("filtrele din capul tabelului sunt puse", (await pagina.$$("table[data-filtre=stoc-la-zi] th .filtru-btn")).length >= 9);
     // POZA=cale.png: o poză a paginii, pentru ochiul omului.
     if (process.env.POZA) await pagina.screenshot({ path: process.env.POZA, fullPage: true });
     await pagina.click('details.elibereaza summary');

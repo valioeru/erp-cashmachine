@@ -129,9 +129,11 @@ function bine(descriere, conditie, detaliu) {
 const egal = (d, a, b) => bine(d + " = " + JSON.stringify(b), JSON.stringify(a) === JSON.stringify(b), JSON.stringify(a));
 
 // ---- datele de test ------------------------------------------------------
-const A = 96201, B = 96202, C = 96203, D = 96204, E = 96205, F = 96206;
+const A = 96201, B = 96202, C = 96203, D = 96204, E = 96205, F = 96206, G = 96207;
 const PREFIX = "TSK";
-const PRODUSE = [A, B, C, D, E, F];
+const PRODUSE = [A, B, C, D, E, F, G];
+// Denumirea din poza lui Vali (11.11.2026): 170 de litere pe un singur rând.
+const NUME_LUNG = `${PREFIX} Punga curier, LDPE COEX multilayer, 45 my, inchidere cu adeziv permanent, flaps 50mm, interior negru/ exterior alb, dimensiuni 410x330+50 mm, 100% reciclat CMpungi 410x330`;
 const SC = require(path.join(RAD, "lib", "stoc-categorii.js"));
 const SP = require(path.join(RAD, "lib", "stoc-produse.js"));
 const CT = require(path.join(RAD, "modules", "ct-park.js"));
@@ -163,7 +165,7 @@ function palet(produs, cant, um, categorie, { iesit, linii } = {}) {
 const catPalet = (id) => unul(`SELECT categorie FROM ct_paleti WHERE id = ${id}`);
 const produs = (id) => q(`SELECT categorie, categorie_depozit FROM produse WHERE id = ${id}`)[0] || {};
 const jurnal = (id) => q(`SELECT camp, vechi, nou, paleti, de FROM produse_categorii_jurnal WHERE produs_id = ${id} ORDER BY id`).map((x) => [x.camp, x.vechi, x.nou, Number(x.paleti), x.de]);
-const randPagina = (html, nume) => { const i = html.indexOf(`<strong>${nume}</strong>`); if (i < 0) return ""; const a = html.lastIndexOf("<tr", i); return html.slice(a, html.indexOf("</tr>", i)); };
+const randPagina = (html, nume) => { const i = html.indexOf(`>${nume}</strong>`); if (i < 0) return ""; const a = html.lastIndexOf("<tr", i); return html.slice(a, html.indexOf("</tr>", i)); };
 const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/<details[\s\S]*?<\/details>/g, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
 
 (async () => {
@@ -330,6 +332,116 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
   egal("produs inexistent, ca JSON: 400 cu eroarea", [r.cod, JSON.parse(r.corp).eroare], [400, "Produsul nu există."]);
   r = await cer("post", CALE, ADMIN, { body: { produs_id: String(B), tip: "prostii", tip_vechi: "" } });
   bine("categorie simplă greșită: mesaj de eroare în pagină", /una din: produse finite/.test(parametri(r).eroare || ""), unde(r));
+
+  // ------------------------------------------------------------------------
+  // Vali, 11.11.2026: „la Categorie nomenclator și categorie simplă sunt
+  // aceleași filtre pe toate, chiar dacă afișează lucruri diferite în fiecare
+  // rând" și, cu poza paginii, „când denumirea e așa mare te rog să o faci pe
+  // 2-3 rânduri, că se extinde prea mult coloana și nu mai încap toate".
+  console.log("\n6. În browser: filtrele celor două categorii și denumirile lungi");
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura, categorie, activ) VALUES (${G}, 'TSK-G', '${NUME_LUNG}', 'buc', '${PREFIX} Pungi curier', 1)`);
+  palet(G, 4000, "buc", "produse finite");
+  // Fiecare produs cu altă pereche de categorii, ca listele să nu poată semăna.
+  await SC.seteaza(A, { tip: "consumabile" }, ADMIN);
+  const asteptNom = (await SP.citeste({ vedeTot: true })).filter((x) => PRODUSE.includes(x.produs_id)).map((x) => x.categorie || "—");
+  const asteptTip = (await SP.citeste({ vedeTot: true })).filter((x) => PRODUSE.includes(x.produs_id)).map((x) => x.tip || "—");
+  const numara = (l) => { const m = {}; for (const v of l) m[v] = (m[v] || 0) + 1; return Object.keys(m).sort().map((k) => `${k}=${m[k]}`); };
+  bine("datele de probă: cele două coloane chiar spun lucruri diferite", numara(asteptNom).join("|") !== numara(asteptTip).join("|") && asteptNom.includes(`${PREFIX} Pungi curier`), JSON.stringify([asteptNom, asteptTip]));
+
+  const fs = require("fs");
+  const STIL = fs.readFileSync(path.join(RAD, "public", "style.css"), "utf8");
+  const { chromium } = require("playwright");
+  const browser = await chromium.launch();
+  try {
+    const pagini = {};
+    const deschidePagina = async (ctxB, cheie, html) => {
+      pagini[cheie] = html;
+      const p = await ctxB.newPage();
+      await p.route("http://erp.test/**", (rt) => {
+        const u = rt.request().url();
+        if (u.endsWith("/style.css")) return rt.fulfill({ status: 200, contentType: "text/css", body: STIL });
+        const k = new URL(u).searchParams.get("pagina") || "";
+        return rt.fulfill({ status: 200, contentType: "text/html", body: pagini[k] || "<p>?</p>" });
+      });
+      const erori = [];
+      p.on("pageerror", (e) => erori.push(String(e.message || e)));
+      await p.goto("http://erp.test/x?pagina=" + cheie);
+      return { p, erori };
+    };
+    const coloana = (p, nume) => p.$$eval("table[data-filtre] thead th", (ths, n) => ths.findIndex((th) => th.textContent.replace("▾", "").trim() === n), nume);
+    const valoriFiltru = async (p, nume) => {
+      const i = await coloana(p, nume);
+      await p.click(`table[data-filtre] thead th:nth-child(${i + 1}) .filtru-btn`);
+      await p.waitForSelector(".filtru-pop");
+      const v = await p.$$eval(".filtru-pop .filtru-lista label", (ls) => ls.map((l) => l.querySelector(".filtru-v").textContent + "=" + l.querySelector(".filtru-n").textContent));
+      await p.keyboard.press("Escape");
+      return v.sort();
+    };
+    const vazute = (p) => p.$$eval("table[data-filtre] tbody tr", (rs) => rs.filter((r) => r.style.display !== "none" && !r.classList.contains("filtre-gol")).map((r) => r.cells[0].querySelector("strong").textContent.trim()));
+
+    const ctxB = await browser.newContext({ viewport: { width: 1536, height: 864 } });
+    pag = await cer("get", "/stocuri/ct-park/stoc", ADMIN, { query: { q: PREFIX } });
+    bine("tabelul are cheia nouă de filtre (cea veche ținea minte valorile greșite)", pag.corp.includes('data-filtre="stoc-la-zi"') && !pag.corp.includes('data-filtre="stoc-produse"'));
+    const { p, erori } = await deschidePagina(ctxB, "admin", pag.corp);
+    egal("administrator: filtrul de la „Categorie nomenclator” arată categoriile din nomenclator", await valoriFiltru(p, "Categorie nomenclator"), numara(asteptNom));
+    egal("…iar cel de la „Categorie”, pe cele simple", await valoriFiltru(p, "Categorie"), numara(asteptTip));
+    // Bifat doar „Pungi curier" la nomenclator: rămâne doar punga.
+    {
+      const i = await coloana(p, "Categorie nomenclator");
+      await p.click(`table[data-filtre] thead th:nth-child(${i + 1}) .filtru-btn`);
+      await p.waitForSelector(".filtru-pop");
+      await p.fill(".filtru-pop .filtru-cauta", "Pungi curier");
+      await p.press(".filtru-pop .filtru-cauta", "Enter");
+    }
+    egal("filtrat pe „Pungi curier”: rămâne doar punga", await vazute(p), [NUME_LUNG]);
+    await p.click('[data-filtre-pentru="stoc-la-zi"] [data-sterge]');
+    egal("…și „Șterge filtrele” le aduce pe toate înapoi", (await vazute(p)).length, asteptNom.length);
+
+    // Denumirea lungă.
+    const linii = (pg, nume) =>
+      pg.$$eval("strong.nume-lung", (els, n) => {
+        const el = els.find((e) => e.textContent.trim() === n);
+        if (!el) return null;
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        const sus = new Set([...r.getClientRects()].map((x) => Math.round(x.top)));
+        const em = parseFloat(getComputedStyle(el).fontSize);
+        return { linii: sus.size, lat: Math.round(el.getBoundingClientRect().width), em, coloana: Math.round(el.closest("td").getBoundingClientRect().width) };
+      }, nume);
+    const lung = await linii(p, NUME_LUNG);
+    bine("denumirea de 170 de litere stă pe 2–3 rânduri", lung && lung.linii >= 2 && lung.linii <= 3, JSON.stringify(lung));
+    bine("…într-o cutie de cel mult 32 de litere-m, nu cât ecranul", lung && lung.lat <= 32 * lung.em + 1 && lung.lat >= 28 * lung.em, JSON.stringify(lung));
+    const scurt = await linii(p, `${PREFIX} Folie B`);
+    bine("un nume scurt rămâne pe un rând, cu cutia cât el", scurt && scurt.linii === 1 && scurt.lat < 12 * scurt.em, JSON.stringify(scurt));
+    const incape = await p.$eval(".tabel-scroll", (d) => ({ lat: d.clientWidth, continut: d.scrollWidth }));
+    bine("tabelul încape în ecran, fără derulare în lateral", incape.continut <= incape.lat + 1, JSON.stringify(incape));
+    await p.screenshot({ path: path.join(RAD, "..", "stoc-la-zi-1536.png"), fullPage: false }).catch(() => null);
+    egal("nicio eroare de JavaScript pe pagină", erori, []);
+    await p.close();
+
+    // Pe ecran îngust cutia se strânge, dar denumirea rămâne întreagă.
+    const ctxT = await browser.newContext({ viewport: { width: 390, height: 800 } });
+    const tel = await deschidePagina(ctxT, "admin", pag.corp);
+    const lungTel = await linii(tel.p, NUME_LUNG);
+    bine("pe telefon: cutia ține cel mult 70% din ecran, iar denumirea e toată acolo", lungTel && lungTel.lat <= 0.7 * 390 + 1 && lungTel.linii > 3, JSON.stringify(lungTel));
+    await ctxT.close();
+
+    // Agentul n-are „modifică": filtrele lui trebuie să arate la fel.
+    const pagAgent = await cer("get", "/stocuri/ct-park/stoc", AGENT, { query: { q: PREFIX } });
+    const ag = await deschidePagina(ctxB, "agent", pagAgent.corp);
+    egal("agent (fără „modifică”): aceleași valori la nomenclator", await valoriFiltru(ag.p, "Categorie nomenclator"), numara(asteptNom));
+    egal("…și la categoria simplă", await valoriFiltru(ag.p, "Categorie"), numara(asteptTip));
+    await ag.p.close();
+
+    // Vederea pe paleți: aceeași denumire, aceeași rupere.
+    const pagPaleti = await cer("get", "/stocuri/ct-park/stoc", ADMIN, { query: { q: PREFIX, vedere: "paleti" } });
+    const pl = await deschidePagina(ctxB, "paleti", pagPaleti.corp);
+    const lungPaleti = await linii(pl.p, NUME_LUNG);
+    bine("vederea pe paleți: denumirea lungă tot pe 2–3 rânduri", lungPaleti && lungPaleti.linii >= 2 && lungPaleti.linii <= 3, JSON.stringify(lungPaleti));
+    await ctxB.close();
+  } finally {
+    await browser.close();
+  }
 
   curata();
   console.log(esecuri ? `\n${esecuri} verificări căzute.` : "\nToate verificările trec.");

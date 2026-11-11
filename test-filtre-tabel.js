@@ -196,6 +196,44 @@ function curata() {
     await p.click(".filtru-pop .filtru-goleste");
     egal("„Șterge filtrul” din fereastră → toate", (await vazute()).length, 5);
     await p.screenshot({ path: path.join(RAD, "..", "scan-lab", "filtre.png") }).catch(() => null);
+
+    // Vali, 11.11.2026, în Stoc la zi: „la Categorie nomenclator și categorie
+    // simplă sunt aceleași filtre pe toate, chiar dacă afișează lucruri
+    // diferite în fiecare rând". Celula avea, sub text, un panou pliat cu o
+    // listă derulantă, iar filtrul lua valoarea listei în loc de text.
+    console.log("\n7. Valoarea unei celule");
+    const R = require(path.join(RAD, "lib", "render.js"));
+    const lista = (ales) => `<select name="tip">${["—", "produse finite", "materie primă"].map((o) => `<option${o === ales ? " selected" : ""}>${o}</option>`).join("")}</select>`;
+    const pliat = (ales) => `<details><summary>modifică</summary><form>${lista(ales)}<button>Salvează</button></form></details>`;
+    const proba = R.layout({
+      title: "probă", active: "/", user: VALI,
+      body: R.table(
+        ["Text cu panou", "Lista la vedere", "Spus pe față", "Primul rând", "Doar panou"],
+        [
+          ["Plicuri" + pliat("materie primă"), lista("produse finite"), `<span data-filtru="Alfa">altceva pe ecran</span>` + pliat("materie primă"), "Întâi<div>dedesubt</div>", "<details><summary>3 comenzi</summary><p>lista lor</p></details>"],
+          ["Pungi" + pliat("materie primă"), lista("materie primă"), `<span data-filtru="Beta">altceva pe ecran</span>`, "Al doilea<br>dedesubt", "<details><summary>2 comenzi</summary><p>lista lor</p></details>"],
+          ["Plicuri" + pliat("produse finite"), `<form>${lista("produse finite")}</form>`, `<span data-filtru="Alfa">x</span>`, "Întâi", "<details><summary>3 comenzi</summary><p>alta</p></details>"],
+        ],
+        { filtre: "proba-valori" }
+      ),
+    });
+    const p2 = await ctx.newPage();
+    await p2.route("http://erp.test/**", (rt) => (rt.request().url().endsWith("/style.css") ? rt.fulfill({ status: 200, contentType: "text/css", body: STIL }) : rt.fulfill({ status: 200, contentType: "text/html", body: proba })));
+    await p2.goto("http://erp.test/proba");
+    const valoriCol = async (nume) => {
+      const i = await p2.$$eval("table[data-filtre] thead th", (ths, n) => ths.findIndex((th) => th.textContent.replace("▾", "").trim() === n), nume);
+      await p2.click(`table[data-filtre] thead th:nth-child(${i + 1}) .filtru-btn`);
+      await p2.waitForSelector(".filtru-pop");
+      const v = await p2.$$eval(".filtru-pop .filtru-lista label", (ls) => ls.map((l) => l.querySelector(".filtru-v").textContent + "=" + l.querySelector(".filtru-n").textContent));
+      await p2.keyboard.press("Escape");
+      return v;
+    };
+    egal("text + panou pliat cu listă: contează textul, nu lista din panou", await valoriCol("Text cu panou"), ["Plicuri=2", "Pungi=1"]);
+    egal("lista derulantă la vedere rămâne valoarea celulei, și dintr-un formular", await valoriCol("Lista la vedere"), ["materie primă=1", "produse finite=2"]);
+    egal("valoarea spusă pe față (data-filtru) bate orice altceva din celulă", await valoriCol("Spus pe față"), ["Alfa=2", "Beta=1"]);
+    egal("fără nimic din astea: primul rând de text, ca până acum", await valoriCol("Primul rând"), ["Al doilea=1", "Întâi=2"]);
+    egal("celula care are doar un panou pliat rămâne cu titlul lui", await valoriCol("Doar panou"), ["2 comenzi=1", "3 comenzi=2"]);
+    await p2.close();
     await ctx.close();
   } finally {
     await browser.close();
