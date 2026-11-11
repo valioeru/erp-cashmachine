@@ -14,7 +14,7 @@
 // rămâne, dar arată aceeași pagină ca cea din Procurement — două forecasturi
 // cu cifre diferite ar fi mai rele decât unul.
 const F = require("../lib/forecast-aprovizionare");
-const { esc, layout, table } = require("../lib/render");
+const { esc, money, layout, table } = require("../lib/render");
 const { send } = require("../lib/router");
 
 const nr = (v) => Number(v) || 0;
@@ -168,6 +168,21 @@ async function pagina(ctx, dinDepozit) {
        (scrie pe rând, la „Stoc”). Se îndreaptă din fișa paletului, la „Corectează marfa de pe palet”.`
     );
   }
+  if ((n.retetePeLot || []).length) {
+    const cate = n.retetePeLot.length;
+    atentionari.unshift(
+      `<strong>${cate === 1 ? "O rețetă pare scrisă" : cate + " rețete par scrise"} pe lot, nu pe bucată</strong> — costul din rețetă e de peste trei ori prețul cu care se vinde produsul.
+       Materia ${cate === 1 ? "ei" : "lor"} primă <strong>nu e socotită</strong> mai jos, ca să nu comanzi după o cifră de o mie de ori prea mare. Repar${cate === 1 ? "-o" : "ă-le"} din pagina rețetei
+       („pe câte bucăți e un bon”), apoi materia primă intră singură în socoteală:
+       <span id="fc-retete-lot">${n.retetePeLot
+         .slice(0, 12)
+         .map(
+           (x) =>
+             `<a href="/productie/retete/${x.produs_id}">${esc(x.denumire)}</a> (costul din rețetă ${money(x.cost)} față de ${money(x.pret)} ${esc(x.sursa || "preț")}, de ${Math.round(x.ori).toLocaleString("ro-RO")} ori; de făcut ${cant(x.deFacut, x.um)})`
+         )
+         .join("; ")}${cate > 12 ? `; și încă ${cate - 12}` : ""}</span>.`
+    );
+  }
   if (n.cercuri.length) {
     atentionari.push(
       `Rețete care se învârt în cerc (un produs făcut din el însuși, prin altele) — legătura a fost sărită:
@@ -239,6 +254,10 @@ async function pagina(ctx, dinDepozit) {
       r.deProdus.slice(0, 200).map((x) => [
         `<a href="/produse/${x.produs_id}">${esc(x.denumire)}</a>${x.cod ? ` <span class="mic">(${esc(x.cod)})</span>` : ""}${
           x.inactiv ? '<div class="mic" style="color:var(--warn,#b5760b)">scos din catalog</div>' : ""
+        }${
+          x.retetaPeLot
+            ? `<div class="mic" style="color:var(--danger,#b3261e)">rețetă de verificat — pare pe lot; materia primă nu e socotită · <a href="/productie/retete/${x.produs_id}">vezi rețeta</a></div>`
+            : ""
         }`,
         cant(x.consumLuna, x.um),
         x.inCurs > 0
