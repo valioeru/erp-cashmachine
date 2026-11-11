@@ -335,9 +335,9 @@ const teancuri = () => q(`SELECT a.id FROM email_atasamente a JOIN email_mesaje 
           window.print = function () { try { window.top.__printari = (window.top.__printari || []).concat([{ u: location.pathname + location.hash, t: Date.now() }]); } catch (e) {} };
         });
         const pg = await ctxB.newPage();
-        const st = { trimise: [], erori: [], incarcari: 0, notate: new Set(), cade: new Set() };
+        const st = { trimise: [], erori: [], incarcari: 0, cand: [], notate: new Set(), cade: new Set() };
         pg.on("pageerror", (e) => st.erori.push(String(e.message || e)));
-        pg.on("framenavigated", (f) => { if (f === pg.mainFrame()) st.incarcari++; });
+        pg.on("framenavigated", (f) => { if (f === pg.mainFrame()) { st.incarcari++; st.cand.push(Date.now()); } });
         let corp = pagina;
         if (pauza) corp = corp.replace('data-pauza-automat="30000"', `data-pauza-automat="${pauza}"`);
         if (reincarca) corp = corp.replace('data-reincarca-dupa="180000"', `data-reincarca-dupa="${reincarca}"`);
@@ -500,10 +500,13 @@ const teancuri = () => q(`SELECT a.id FROM email_atasamente a JOIN email_mesaje 
       await m.pg.waitForTimeout(5500);
       s = await stare(m.pg);
       egal("cu un teanc deschis de om, lista nu se reîncarcă, oricât ar trece", [m.incarcari, s.laVedere, s.cadreLaVedere], [2, true, [pdf(t4)]]);
+      const tClic = Date.now();
       await m.pg.click("#tipar-vazut-da");
       await m.pg.waitForTimeout(1200);
       egal("…și nici imediat după „Am printat”", [m.incarcari, m.trimise.slice(1)], [2, [{ id: t4, automat: 0, eroare: "" }]]);
       bine("…ci abia după ce s-a făcut liniște", await panaLa(() => m.incarcari === 3, 9000), m.incarcari);
+      // Un teanc mare se mai trimite la imprimantă câteva secunde după Print.
+      bine("…adică la cel puțin 2,5 secunde de la „Am printat”", m.cand[2] - tClic >= 2400, m.cand[2] - tClic);
       await m.ctxB.close();
 
       // --- Edge -------------------------------------------------------------
@@ -523,6 +526,15 @@ const teancuri = () => q(`SELECT a.id FROM email_atasamente a JOIN email_mesaje 
     } finally {
       await browser.close();
     }
+  }
+
+  console.log("\n7b. Când s-a printat: tot cu ora României");
+  {
+    const ultimul = ((await cer("get", "/fulfillment/etichete")).corp.match(/data-print="(\d+)"/g) || []).pop().match(/\d+/)[0];
+    rulaj(`INSERT INTO ff_printari (atasament_id, printat_la, printat_de, automat, exemplare) VALUES (${ultimul}, '2026-11-11 08:07:31', 1, 0, 1) ON CONFLICT (atasament_id) DO UPDATE SET printat_la = EXCLUDED.printat_la, exemplare = 1`);
+    const corp = (await cer("get", "/fulfillment/etichete")).corp;
+    bine("printat la 08:07 UTC apare ca 10:07, nu ca 08:07", corp.includes('<span class="badge verde">printat 11.11.2026 10:07</span>') && !corp.includes("printat 11.11.2026 08:07") && !corp.includes("printat 2026-11-11"), (corp.match(/<span class="badge verde">[^<]*<\/span>/g) || []).join(" "));
+    egal("ziua și ora, gata de arătat", [FF.candRo("2026-11-10 22:15:09"), FF.candRo(""), FF.candRo(null)], ["11.11.2026 00:15", "", ""]);
   }
 
   console.log("\n8. Fără cont și fără căsuțe");
