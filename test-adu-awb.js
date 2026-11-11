@@ -17,6 +17,10 @@
 //   • O CĂSUȚĂ SE CITEȘTE DE UN SINGUR FIR ODATĂ, dar două căsuțe diferite pot
 //     fi citite una lângă alta; sincronizarea de la 5 minute ia întâi căsuțele
 //     comune.
+//   • TIPĂRIREA ÎN EDGE (Vali, 11.11.2026: „se deschide fereastra de print,
+//     însă nu imprimă… e goală eticheta"): teancul se deschide la vedere, nu
+//     într-un cadru ascuns; se trece ca printat doar când omul spune că a
+//     ieșit; „printează singur" e oprit. În Chrome rămâne cum era.
 const path = require("path");
 const Module = require("module");
 const crypto = require("crypto");
@@ -289,7 +293,96 @@ const teancuri = () => q(`SELECT a.id FROM email_atasamente a JOIN email_mesaje 
   GMAIL.asteapta = null;
   egal("comunele înaintea celei personale, deși aceea are id-ul mai mic", ordine, [`office@${DOM}`, `sameday@${DOM}`, `om@${DOM}`]);
 
-  console.log("\n7. Fără cont și fără căsuțe");
+  console.log("\n7. În browser: tipărirea în Edge și în Chrome");
+  {
+    const pagina = (await cer("get", "/fulfillment/etichete")).corp;
+    const fs = require("fs");
+    const STIL = fs.readFileSync(path.join(RAD, "public", "style.css"), "utf8");
+    const { chromium } = require("playwright");
+    const browser = await chromium.launch();
+    try {
+      const deschide = async (agent) => {
+        const ctxB = await browser.newContext({ viewport: { width: 1400, height: 900 }, userAgent: agent });
+        // print() nu are ce tipări într-un browser fără imprimantă: îl înlocuim
+        // în fiecare cadru și ținem minte din ce cadru a fost cerut.
+        await ctxB.addInitScript(() => {
+          window.print = function () { try { window.top.__printari = (window.top.__printari || []).concat([location.pathname + location.hash]); } catch (e) {} };
+        });
+        const pg = await ctxB.newPage();
+        const trimise = [];
+        const erori = [];
+        pg.on("pageerror", (e) => erori.push(String(e.message || e)));
+        await pg.route("http://erp.test/**", async (rt) => {
+          const rq = rt.request();
+          const u = new URL(rq.url());
+          if (u.pathname.endsWith("/style.css")) return rt.fulfill({ status: 200, contentType: "text/css", body: STIL });
+          if (/\/etichete\/\d+\/pdf$/.test(u.pathname)) return rt.fulfill({ status: 200, contentType: "text/html", body: "<html><body>teanc</body></html>" });
+          if (/\/etichete\/\d+\/printat$/.test(u.pathname)) { trimise.push(Object.assign({ id: u.pathname.match(/\/(\d+)\/printat$/)[1] }, JSON.parse(rq.postData() || "{}"))); return rt.fulfill({ status: 200, contentType: "application/json", body: '{"ok":true}' }); }
+          if (u.pathname.endsWith("/noi.json")) return rt.fulfill({ status: 200, contentType: "application/json", body: '{"fisiere":[]}' });
+          return rt.fulfill({ status: 200, contentType: "text/html", body: pagina });
+        });
+        await pg.goto("http://erp.test/fulfillment/etichete");
+        return { ctxB, pg, trimise, erori };
+      };
+      const stare = (pg) => pg.evaluate(() => ({
+        laVedere: getComputedStyle(document.getElementById("tipar-vazut")).display,
+        cadruVazut: (document.getElementById("tipar-vazut-cadru").getAttribute("src") || "").replace(location.origin, ""),
+        cadruAscuns: (document.getElementById("tipar").getAttribute("src") || "").replace(location.origin, ""),
+        printari: window.__printari || [],
+        auto: { bifat: document.getElementById("auto").checked, oprit: document.getElementById("auto").disabled, text: document.getElementById("stare-auto").textContent },
+      }));
+
+      // Edge
+      const EDGE = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0";
+      const e = await deschide(EDGE);
+      await e.pg.evaluate(() => { try { localStorage.setItem("ff-print-auto", "1"); } catch (x) {} });
+      await e.pg.reload();
+      let s = await stare(e.pg);
+      egal("Edge: „printează singur” e oprit, chiar dacă fusese bifat pe calculatorul ăsta", [s.auto.bifat, s.auto.oprit, /În Edge tipărirea automată nu merge/.test(s.auto.text)], [false, true, true]);
+      egal("Edge: la deschidere fereastra de tipărit e ascunsă", s.laVedere, "none");
+      const idPrim = await e.pg.$eval("[data-print]", (b) => b.getAttribute("data-print"));
+      await e.pg.click(`[data-print="${idPrim}"]`);
+      await e.pg.waitForTimeout(1700);
+      s = await stare(e.pg);
+      egal("Edge: „Printează” deschide teancul la vedere, nu în cadrul ascuns", [s.laVedere, s.cadruVazut, s.cadruAscuns], ["flex", `/fulfillment/etichete/${idPrim}/pdf`, ""]);
+      egal("…și tipărirea se cere din fereastra la vedere", s.printari, [`/fulfillment/etichete/${idPrim}/pdf`]);
+      egal("…dar nimic nu e trecut ca printat până nu spune omul", e.trimise, []);
+      await e.pg.click("#tipar-vazut-da");
+      await e.pg.waitForTimeout(300);
+      egal("„Am printat”: abia acum se scrie că a ieșit, fără eroare", e.trimise, [{ id: idPrim, automat: 0, eroare: "" }]);
+      egal("…și fereastra se închide", (await stare(e.pg)).laVedere, "none");
+      await e.pg.waitForTimeout(1500); // pagina se reîncarcă după un teanc printat
+      const idDoi = await e.pg.$$eval("[data-print]", (bs) => bs[1].getAttribute("data-print"));
+      await e.pg.click(`[data-print="${idDoi}"]`);
+      await e.pg.waitForTimeout(300);
+      await e.pg.click("#tipar-vazut-nu");
+      await e.pg.waitForTimeout(300);
+      egal("„Nu l-am printat”: teancul nu e trecut ca printat, iar motivul se scrie", e.trimise.slice(1), [{ id: idDoi, automat: 0, eroare: "nu a fost printat" }]);
+      egal("…butonul lui spune că n-a mers și se poate apăsa din nou", await e.pg.$eval(`[data-print="${idDoi}"]`, (b) => [b.textContent, b.disabled]), ["N-a mers", false]);
+      await e.pg.waitForTimeout(1400);
+      egal("…și tipărirea nu mai e cerută după ce fereastra s-a închis", (await stare(e.pg)).printari, []);
+      egal("Edge: nicio eroare de JavaScript", e.erori, []);
+      await e.ctxB.close();
+
+      // Chrome: ca până acum.
+      const CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+      const c = await deschide(CHROME);
+      s = await stare(c.pg);
+      egal("Chrome: „printează singur” rămâne la îndemână", [s.auto.oprit, s.auto.text], [false, ""]);
+      const idC = await c.pg.$eval("[data-print]", (b) => b.getAttribute("data-print"));
+      await c.pg.click(`[data-print="${idC}"]`);
+      await c.pg.waitForTimeout(500);
+      s = await stare(c.pg);
+      egal("Chrome: tipărește din cadrul ascuns, fără fereastră", [s.laVedere, s.cadruAscuns, s.printari], ["none", `/fulfillment/etichete/${idC}/pdf#toolbar=0`, [`/fulfillment/etichete/${idC}/pdf#toolbar=0`]]);
+      egal("…și trece teancul ca printat imediat după", c.trimise, [{ id: idC, automat: 0, eroare: "" }]);
+      egal("Chrome: nicio eroare de JavaScript", c.erori, []);
+      await c.ctxB.close();
+    } finally {
+      await browser.close();
+    }
+  }
+
+  console.log("\n8. Fără cont și fără căsuțe");
   r = await cer("post", "/fulfillment/etichete/adu", { user: null });
   egal("fără cont: afară", r.locatie, "/");
   rulaj(`UPDATE email_conturi SET activ = 0 WHERE adresa LIKE '%@${DOM}'`);
