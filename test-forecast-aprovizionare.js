@@ -280,6 +280,9 @@ const celule = (tr) => (tr.match(/<td>[\s\S]*?<\/td>/g) || []).map((c) => c.repl
   r = socoteste({ produse: P7, vanzari: [{ produs_id: 1, cantitate: 90 }], stoc: [{ produs_id: null, um: "buc", stoc: 9, alteUm: [], intrari: [] }, { produs_id: null, um: "buc", stoc: 0, alteUm: [], intrari: [] }] });
   egal("marfa din depozit scrisă liber, fără produs din catalog, nu se poate lega: se numără", r.note.stocFaraProdus, 1);
 
+  r = socoteste({ produse: prod([[1, "Granula", "kg"]]), vanzari: [{ produs_id: 1, cantitate: 900 }], stoc: [stocDe(1, 100, "Kilogram", [deLaFurnizor(50, "KG", "2026-11-20")])] });
+  egal("stocul scris „Kilogram” și comanda scrisă „KG” la un produs în „kg” sunt aceeași unitate", pe(rand(r, 1), ["stoc", "vine", "stocAlteUm"]), [100, 50, []]);
+
   console.log("\n8. Când se termină stocul");
   const P8 = prod([[1, "Marfa", "buc"]]);
   const v8 = [{ produs_id: 1, cantitate: 90 }]; // 1 pe zi
@@ -326,6 +329,39 @@ const celule = (tr) => (tr.match(/<td>[\s\S]*?<\/td>/g) || []).map((c) => c.repl
   r = socoteste({ produse: prod(lung), retete: lung.slice(0, 39).map(([id]) => ({ produs_id: id, componenta_id: id + 1, cantitate: 1 })), vanzari: [{ produs_id: 1, cantitate: 90 }], stoc: [] });
   egal("un lanț de 40 de niveluri se socotește până jos", [r.deCumparat.map((x) => x.produs_id), rand(r, 40).necesar, r.deProdus.length], [[40], 30, 39]);
   egal("fără nimic: nimic", [socoteste({ produse: [] }).deCumparat, F.calculeaza(null, null).deCumparat], [[], []]);
+
+  console.log("\n10b. Rețeta scrisă pe lot, nu pe bucată");
+  // Pe datele reale, 11.11.2026: „Sac Blue PE 860*1000” avea în rețetă 125 kg
+  // de folie „pe sac” (de fapt pe un lot de 1.500 de saci) și scotea singur
+  // 958 de tone de granulă de comandat. Sacul se vinde cu 1 leu, iar rețeta
+  // lui costă 625 de lei: e semnul după care pagina rețetei îl dă „de verificat”.
+  const PL = prod([
+    [1, "Sac pe lot", "buc", undefined, { cost_reteta: 625, pret_vanzare: 1 }],
+    [2, "Sac bun", "buc", undefined, { cost_reteta: 0.4, pret_vanzare: 1 }],
+    [3, "Folie", "kg"],
+    [4, "Sac fără preț de vânzare", "buc", undefined, { cost_reteta: 625 }],
+    [5, "Sac pe lot, nevândut", "buc", undefined, { cost_reteta: 999, pret_vanzare: 1 }],
+    [6, "Sac la limită", "buc", undefined, { cost_reteta: 3, pret_vanzare: 1 }],
+  ]);
+  const RL = [
+    { produs_id: 1, componenta_id: 3, cantitate: 125 }, { produs_id: 2, componenta_id: 3, cantitate: 0.08 },
+    { produs_id: 4, componenta_id: 3, cantitate: 0.1 }, { produs_id: 5, componenta_id: 3, cantitate: 500 },
+    { produs_id: 6, componenta_id: 3, cantitate: 0.5 },
+  ];
+  const VL = [{ produs_id: 1, cantitate: 9000 }, { produs_id: 2, cantitate: 9000 }, { produs_id: 4, cantitate: 900 }, { produs_id: 6, cantitate: 900 }];
+  r = socoteste({ produse: PL, retete: RL, vanzari: VL, stoc: [] });
+  egal("folia: 3.000 de saci buni × 0,08 + 300 fără preț × 0,1 + 300 la limită × 0,5 = 420 kg — fără cele 375.000 kg ale rețetei pe lot", pe(rand(r, 3), ["necesar", "consumLuna", "deComandat"]), [420, 420, 420]);
+  egal("…și nu scrie că e pentru sacul pe lot", rand(r, 3).dinCe.map((x) => x.denumire).sort(), ["Sac bun", "Sac fără preț de vânzare", "Sac la limită"]);
+  egal("sacul pe lot rămâne la „de făcut”, cu semn", pe(facut(r, 1), ["deFacut", "retetaPeLot"]), [3000, true]);
+  egal("…cei buni n-au semn", [facut(r, 2).retetaPeLot, facut(r, 4).retetaPeLot, facut(r, 6).retetaPeLot], [false, false, false]);
+  egal("pagina află care rețetă e pe lot, cu costul, prețul și de câte ori", r.note.retetePeLot.map((x) => [x.produs_id, x.denumire, x.cost, x.pret, x.sursa, x.ori, x.deFacut, x.um]), [[1, "Sac pe lot", 625, 1, "preț de catalog", 625, 3000, "buc"]]);
+  bine("rețeta pe lot a unui produs din care nu e nimic de făcut nu e pomenită", !r.note.retetePeLot.some((x) => x.produs_id === 5));
+  r = socoteste({ produse: PL, retete: RL, vanzari: VL, stoc: [], reper: new Map([[1, { mediu: 300, linii: 4 }]]) });
+  egal("prețul mediu facturat bate prețul de catalog: la 300 de lei pe bucată, 625 nu mai e de trei ori — rețeta se desface", [rand(r, 3).necesar, r.note.retetePeLot.length, facut(r, 1).retetaPeLot], [375420, 0, false]);
+  r = socoteste({ produse: PL, retete: RL, vanzari: VL, stoc: [], reper: new Map([[2, { mediu: 0.1, linii: 2 }]]) });
+  egal("…și invers: sacul „bun” facturat cu 10 bani are rețeta de patru ori mai scumpă — nu se desface", [rand(r, 3).necesar, r.note.retetePeLot.map((x) => [x.produs_id, x.sursa]).sort()], [180, [[1, "preț de catalog"], [2, "media facturată"]]]);
+  r = socoteste({ produse: prod([[1, "Sac", "buc", undefined, { cost_reteta: 625, pret_vanzare: 1 }], [3, "Folie", "kg"]]), retete: [{ produs_id: 1, componenta_id: 3, cantitate: 125 }], vanzari: [], comenzi: [{ comanda_id: 7, numar: "C7", partener_id: 9, client: "Client", produs_id: 1, cantitate: 10000, cantitate_livrata: 0 }], stoc: [] });
+  egal("nici comenzile în curs nu trec prin rețeta pe lot: nicio folie de comandat, dar sacul e de făcut și rețeta e spusă", [rand(r, 3), pe(facut(r, 1), ["inCurs", "deFacut", "retetaPeLot"]), r.note.retetePeLot.map((x) => x.deFacut)], [undefined, [10000, 10000, true], [10000]]);
 
   // ========================================================== B. DATELE DIN BAZĂ
   console.log("\n11. Datele din bază");
@@ -458,6 +494,25 @@ const celule = (tr) => (tr.match(/<td>[\s\S]*?<\/td>/g) || []).map((c) => c.repl
   contine("alegeri care nu există: rămân cele din oficiu", pg.corp, ['<option value="30" selected>', '<option value="90" selected>']);
   pg = await cer("/depozit/forecast", ADMIN);
   contine("adresa veche din Depozit arată aceeași pagină, cu submeniul Depozitului", pg.corp, ["De cumpărat", `${PREFIX} Granula LDPE`, 'action="/depozit/forecast"', '<a href="/depozit/forecast" class="subnav-link activ">'], ["Stoc curent", "Diferență estimată"]);
+
+  console.log("\n13b. Rețeta pe lot, pe datele din bază și pe pagină");
+  // Punga se vinde cu câțiva bani; o rețetă „de un milion de lei pe pungă” e pe lot.
+  q(`UPDATE produse SET cost_reteta = 1000000 WHERE id = ${PUNGA}`);
+  const dLot = await F.citeste({ azi: AZI, fereastra: 90 });
+  bine("datele aduc costul din rețetă și prețul mediu facturat", Number(dLot.produse.find((x) => Number(x.id) === PUNGA).cost_reteta) === 1000000 && dLot.reper instanceof Map && dLot.reper.get(PUNGA) && dLot.reper.get(PUNGA).mediu > 0, JSON.stringify(dLot.reper && dLot.reper.get(PUNGA)));
+  const rLot = await F.forecast({ azi: AZI, fereastra: 90, zile: 30 });
+  egal("punga rămâne de făcut, cu semn; folia nu mai e cerută de ea", [facut(rLot, PUNGA).retetaPeLot, rLot.note.retetePeLot.map((x) => x.produs_id), (facut(rLot, FOLIE) || {}).necesar || 0], [true, [PUNGA], 0]);
+  egal("…deci granula nu mai e de comandat după rețeta aia: rămâne cerută doar de folia planificată pentru stoc (30 kg × 1,05), cât e pe stoc", pe(rand(rLot, GRANULA) || {}, ["deComandat", "inCurs", "necesar"]), [0, 31.5, 31.5]);
+  pg = await cer("/procurement/forecast", ADMIN);
+  const cl = fara(pg.corp);
+  contine("pagina spune sus că rețeta pare pe lot și că materia ei primă nu e socotită", cl, ["O rețetă pare scrisă pe lot, nu pe bucată", "nu e socotită", "pe câte bucăți e un bon"]);
+  contine("…cu produsul, legătura spre rețeta lui și de câte ori", pg.corp, [`id="fc-retete-lot"><a href="/productie/retete/${PUNGA}">${PREFIX} Punga curier</a>`, "costul din rețetă 1.000.000,00 lei față de", "media facturată"]);
+  const tp = pg.corp.slice(pg.corp.indexOf("De făcut în producție"));
+  contine("…iar la „De făcut în producție” rândul pungii are semnul și legătura", randPagina(tp, PUNGA), ["rețetă de verificat — pare pe lot; materia primă nu e socotită", `href="/productie/retete/${PUNGA}">vezi rețeta</a>`]);
+  bine("atenționarea despre rețete e prima din listă", cl.indexOf("pare scrisă pe lot") > -1 && (cl.indexOf("scrise liber, fără produs din catalog") === -1 || cl.indexOf("pare scrisă pe lot") < cl.indexOf("scrise liber, fără produs din catalog")));
+  q(`UPDATE produse SET cost_reteta = NULL WHERE id = ${PUNGA}`);
+  pg = await cer("/procurement/forecast", ADMIN);
+  contine("cu rețeta reparată, atenționarea dispare și granula e iar de comandat", pg.corp, ["67,50 kg"], ["pare scrisă pe lot", "fc-retete-lot", "rețetă de verificat"]);
 
   console.log("\n14. Comanda la furnizor pornită din forecast");
   pg = await cer("/procurement/comenzi/noua", ADMIN, { linii: `${GRANULA}:67.5;${BANDA}:230;${GRANULA}:5;999999999:3;${CUTIE}:-2;x:y;${ROLA}:;${FOLIE}:1e12;${PUNGA}:7:9`, furnizor: String(F1) });
