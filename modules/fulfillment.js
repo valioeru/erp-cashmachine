@@ -1081,29 +1081,37 @@ function register(router) {
 
     const randuri = fisiere.map((f) => [
       `<input type="checkbox" class="bif-teanc" data-id="${f.id}" data-printat="${f.printat_la ? 1 : 0}"
+              data-zi="${esc(`${dataRo(f.zi)} ${String(f.ora || "")}`.trim())}"
               aria-label="Alege teancul din ${dataRo(f.zi)}">`,
       `<strong>${dataRo(f.zi)}</strong> <span style="color:var(--text-muted)">${esc(String(f.ora || ""))}</span>`,
       `<a href="${CALE}/etichete/${f.id}/pdf" target="_blank">${esc(f.nume)}</a>`,
       f.marime ? Math.round(nr(f.marime) / 1024).toLocaleString("ro-RO") + " KB" : "—",
-      f.printat_la
-        ? `<span class="badge verde">printat ${esc(String(f.printat_la).slice(0, 16))}</span>${
-            f.automat ? " <span style=\"color:var(--text-muted);font-size:12px\">automat</span>" : ""
-          }${nr(f.exemplare) > 1 ? ` <span style="color:var(--text-muted);font-size:12px">×${nr(f.exemplare)}</span>` : ""}`
-        : '<span class="badge">neprintat</span>',
+      `<span class="stare-teanc">${
+        f.printat_la
+          ? `<span class="badge verde">printat ${esc(String(f.printat_la).slice(0, 16))}</span>${
+              f.automat ? " <span style=\"color:var(--text-muted);font-size:12px\">automat</span>" : ""
+            }${nr(f.exemplare) > 1 ? ` <span style="color:var(--text-muted);font-size:12px">×${nr(f.exemplare)}</span>` : ""}`
+          : '<span class="badge">neprintat</span>'
+      }</span>`,
       `<button class="btn secondary" type="button" data-print="${f.id}">${f.printat_la ? "Printează din nou" : "Printează"}</button>`,
     ]);
 
     const body = `
       ${subtabs(`${CALE}/etichete`)}
       ${mesaje(ctx.query)}
-      <h1 style="margin:6px 0 2px">Etichete AWB${
-        neprintate ? ` — <span style="color:var(--warn)">${neprintate} ${neprintate === 1 ? "teanc neprintat" : "teancuri neprintate"}</span>` : ""
-      }</h1>
+      <h1 style="margin:6px 0 2px">Etichete AWB<span id="cate-neprintate" style="color:var(--warn)">${
+        neprintate ? ` — ${neprintate} ${neprintate === 1 ? "teanc neprintat" : "teancuri neprintate"}` : ""
+      }</span></h1>
       <p style="margin:0 0 12px;color:var(--text-muted);font-size:13px;max-width:920px">
         Teancurile de etichete vin de la Sameday imediat după miezul nopții, câteva emailuri pe noapte, fiecare
         cu un <code>awbs.pdf</code>. Ele ajung singure în Drive; aici se vede doar ce-a ieșit la imprimantă și
         ce nu. Un teanc se printează întreg — nu se taie pe AWB-uri, ca să nu existe un al doilea loc în care
         se pot pierde etichete.
+      </p>
+      <p style="margin:0 0 12px;font-size:13px;max-width:920px">
+        <strong>Cum printezi:</strong> apeși „Printează” pe rândul teancului (sau bifezi mai multe și „Printează
+        acum…”). Teancul se deschide pe ecran împreună cu fereastra de tipărire, care rămâne deschisă: alegi
+        imprimanta de etichete, apeși Print și, după ce au ieșit, „Am printat”.
       </p>
       ${stareEmail}
       <div class="card" style="margin-bottom:14px;max-width:920px">
@@ -1112,9 +1120,11 @@ function register(router) {
         </label>
         <p style="margin:6px 0 0;font-size:13px;color:var(--text-muted)">
           Lasă fila asta deschisă pe calculatorul de lângă Zebra. Verifică din cinci în cinci minute și scoate
-          teancurile noi. Ca să nu ceară de fiecare dată imprimanta, Chrome-ul de pe acel calculator trebuie
-          pornit cu <code>--kiosk-printing</code>, iar Zebra să fie imprimanta implicită — altfel apare
-          dialogul obișnuit de print. Bifa se ține pe calculatorul ăsta, nu pe cont.
+          teancurile noi. <strong>Merge numai dacă</strong> Chrome-ul de pe acel calculator e pornit cu
+          <code>--kiosk-printing</code> și Zebra e imprimanta implicită: altfel Chrome cere de fiecare dată să
+          apeși Print, iar automatul n-are cine să apese — teancurile ar fi trecute ca printate fără să iasă.
+          Fără <code>--kiosk-printing</code> nu bifa aici; printează cu butoanele. Bifa se ține pe calculatorul
+          ăsta, nu pe cont.
         </p>
         <p style="margin:6px 0 0;font-size:13px" id="stare-auto"></p>
         <p style="margin:6px 0 0;font-size:13px;color:var(--text-muted)">
@@ -1124,8 +1134,8 @@ function register(router) {
       </div>
       ${
         neprintate && ctx.user.rol === "admin"
-          ? `<form method="post" action="${CALE}/etichete/marcheaza-tot" style="margin:-6px 0 14px">
-               <button class="btn secondary" type="submit">Marchează toate cele ${neprintate} ca făcute, fără să printezi</button>
+          ? `<form method="post" action="${CALE}/etichete/marcheaza-tot" id="marcheaza-tot" style="margin:-6px 0 14px">
+               <button class="btn secondary" type="submit">Marchează toate cele <span id="cate-de-marcat">${neprintate}</span> ca făcute, fără să printezi</button>
              </form>`
           : ""
       }
@@ -1139,6 +1149,7 @@ function register(router) {
                </span>
                <span id="cate-alese" class="cate-alese">niciun teanc ales</span>
                <button class="btn" type="button" id="printeaza-alese" disabled>Printează acum ce e selectat</button>
+               <span id="rezultat-tipar" role="status" style="font-size:13px;width:100%"></span>
              </div>
              ${table(
                [
@@ -1153,19 +1164,23 @@ function register(router) {
              )}`
           : "<p>N-a venit niciun teanc de etichete în ultimele două săptămâni.</p>"
       }
-      <iframe id="tipar" style="position:fixed;width:0;height:0;border:0;left:-9999px"></iframe>
-      <div id="tipar-vazut" role="dialog" aria-label="Teancul de etichete, de tipărit"
-           style="display:none;position:fixed;top:3vh;bottom:3vh;left:3vw;right:3vw;z-index:2000;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.35);flex-direction:column">
-        <div style="padding:10px 14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border)">
-          <strong>Teancul de etichete</strong>
-          <span style="font-size:13px;color:var(--text-muted);flex:1 1 320px">
-            Dacă fereastra de tipărire nu apare singură sau arată o pagină goală, închide-o și apasă
-            <strong>imprimanta din bara PDF-ului</strong> de mai jos. Apoi spune aici dacă a ieșit.
-          </span>
-          <button class="btn" type="button" id="tipar-vazut-da">Am printat</button>
-          <button class="btn secondary" type="button" id="tipar-vazut-nu">Nu l-am printat</button>
+      <div id="tipar-vazut" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Teancul de etichete, de tipărit"
+           data-pauza-automat="30000" data-reincarca-dupa="180000"
+           style="visibility:hidden;pointer-events:none;position:fixed;top:0;right:0;bottom:0;left:0;z-index:2000;background:rgba(0,0,0,.45);display:flex;padding:2vh 2vw;box-sizing:border-box">
+        <div style="flex:1 1 auto;display:flex;flex-direction:column;min-width:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.35);overflow:hidden">
+          <div style="padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+            <strong id="tipar-vazut-titlu">Teancul de etichete</strong>
+            <span style="font-size:13px;color:var(--text-muted);flex:1 1 300px">
+              Fereastra de tipărire se deschide singură și <strong>rămâne deschisă</strong>: alege imprimanta de
+              etichete și apasă Print. După ce au ieșit etichetele, apasă „Am printat”.
+            </span>
+            <button class="btn secondary" type="button" id="tipar-vazut-iar">Deschide iar fereastra de tipărire</button>
+            <button class="btn" type="button" id="tipar-vazut-da">Am printat</button>
+            <button class="btn secondary" type="button" id="tipar-vazut-nu">Nu l-am printat</button>
+            <button class="btn secondary" type="button" id="tipar-vazut-stop" style="display:none">Oprește aici</button>
+          </div>
+          <div id="tipar-vazut-loc" style="flex:1 1 auto;display:flex;min-height:0"></div>
         </div>
-        <iframe id="tipar-vazut-cadru" title="Teancul de etichete" style="flex:1 1 auto;width:100%;border:0"></iframe>
       </div>
       <style>
         .bara-teancuri { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:0 0 10px; }
@@ -1181,10 +1196,12 @@ function register(router) {
       </style>
       <script>
       (function () {
+        var CALE = ${JSON.stringify(CALE)};
         var sus = document.getElementById("stare-auto");
         var bifa = document.getElementById("auto");
-        var cadru = document.getElementById("tipar");
         var ocupat = false;
+        var oprit = false;
+        var ultimaTiparire = 0;
         function spune(t) { sus.textContent = t; }
         try { bifa.checked = localStorage.getItem("ff-print-auto") === "1"; } catch (e) {}
         bifa.addEventListener("change", function () {
@@ -1193,87 +1210,201 @@ function register(router) {
           if (bifa.checked) verifica();
         });
 
-        // EDGE TIPĂREȘTE CADRUL ASCUNS GOL. Vali, 11.11.2026, pe calculatorul
-        // cu Edge: „se deschide fereastra de print, însă nu imprimă… e goală
-        // eticheta". Chrome trimite la imprimantă PDF-ul din cadru; Edge
-        // trimite cadrul, adică o foaie albă. Pe Edge teancul se deschide la
-        // vedere, într-o fereastră peste pagină, și tipărirea se încearcă de
-        // acolo; dacă tot iese gol, omul apasă imprimanta din bara PDF-ului și
-        // spune el dacă a ieșit. Nimic nu se trece ca printat pe încredere.
+        // CUM SE TIPĂREȘTE UN TEANC, ȘI DE CE NIMIC NU SE MAI ÎNCHIDE SINGUR.
+        //
+        // Vali, 11.11.2026: „merge foarte rău, a doua, a treia oară printează,
+        // și doar dacă în fereastra de print apăs eu butonul. Ori lași
+        // fereastra deschisă și apăsăm print, ori fă-l să meargă."
+        //
+        // Greșeala era a paginii, nu a imprimantei. La un PDF, print() NU
+        // așteaptă: cere browserului fereastra de tipărire și se întoarce pe
+        // loc (măsurat în Chrome 141: 0 ms). Pagina credea că s-a tipărit,
+        // trecea teancul ca printat și se reîncărca după 1,2 secunde — iar
+        // reîncărcarea închide fereastra de tipărire. Ieșea ceva doar dacă
+        // omul apuca să apese Print în secunda aceea.
+        //
+        // Acum:
+        //  - teancul se deschide LA VEDERE, peste pagină, și fereastra de
+        //    tipărire se cere o dată, după ce s-a încărcat PDF-ul;
+        //  - pagina nu se mai reîncarcă și nu mai umblă la cadru: fereastra
+        //    de tipărire stă deschisă cât vrea omul;
+        //  - teancul e trecut ca printat doar când omul apasă „Am printat";
+        //  - cadrul din care s-a tipărit rămâne în pagină, neatins, și după
+        //    aceea: un teanc mare se mai trimite la imprimantă câteva secunde
+        //    după ce s-a apăsat Print, iar un cadru golit i-ar putea tăia
+        //    drumul. De-aia fiecare teanc are cadrul lui.
         var eEdge = navigator.userAgent.indexOf("Edg/") !== -1;
         var vazut = document.getElementById("tipar-vazut");
-        var cadruVazut = document.getElementById("tipar-vazut-cadru");
+        var locVazut = document.getElementById("tipar-vazut-loc");
+        var titluVazut = document.getElementById("tipar-vazut-titlu");
         var btnDa = document.getElementById("tipar-vazut-da");
         var btnNu = document.getElementById("tipar-vazut-nu");
-        function printeazaLaVedere(id) {
+        var btnIar = document.getElementById("tipar-vazut-iar");
+        var btnStop = document.getElementById("tipar-vazut-stop");
+        var rezultat = document.getElementById("rezultat-tipar");
+        var PAUZA_AUTOMAT = Number(vazut.getAttribute("data-pauza-automat")) || 30000;
+        var REINCARCA_DUPA = Number(vazut.getAttribute("data-reincarca-dupa")) || 180000;
+        var ASCUNS = "position:fixed;width:0;height:0;border:0;left:-9999px";
+        function cadruNou(stil) {
+          var c = document.createElement("iframe");
+          c.className = "cadru-teanc";
+          c.title = "Teancul de etichete";
+          c.style.cssText = stil;
+          return c;
+        }
+        function cereTiparire(c) {
+          ultimaTiparire = Date.now();
+          try { c.contentWindow.focus(); c.contentWindow.print(); return true; } catch (e) { return false; }
+        }
+        // Un cadru pus în pagină se „încarcă" o dată gol, înainte de PDF.
+        // Tipărirea cerută atunci ar scoate o foaie albă: încărcarea goală nu
+        // se pune la socoteală. (Dacă adresa nu se poate citi, mergem înainte.)
+        function eGol(c) {
+          try { return String(c.contentWindow.location.href).indexOf("/etichete/") === -1; } catch (e) { return false; }
+        }
+        function arataFereastra(da) {
+          vazut.style.visibility = da ? "visible" : "hidden";
+          vazut.style.pointerEvents = da ? "auto" : "none";
+          vazut.setAttribute("aria-hidden", da ? "false" : "true");
+        }
+        function printeazaLaVedere(id, titlu, maiSunt) {
           return new Promise(function (gata, rau) {
             var ceas = null;
-            function inchide() {
+            var c = cadruNou("flex:1 1 auto;width:100%;border:0");
+            function incheie() {
               clearTimeout(ceas);
-              vazut.style.display = "none";
-              cadruVazut.onload = null;
-              cadruVazut.src = "about:blank";
-              btnDa.onclick = null;
-              btnNu.onclick = null;
+              c.onload = null;
+              // Cadrul NU se golește și NU se scoate din pagină (vezi mai sus):
+              // se dă doar la o parte, cu PDF-ul lui cu tot.
+              c.style.cssText = ASCUNS;
+              ultimaTiparire = Date.now();
+              btnDa.onclick = btnNu.onclick = btnIar.onclick = btnStop.onclick = null;
             }
-            btnDa.onclick = function () { inchide(); gata(); };
-            btnNu.onclick = function () { inchide(); rau(new Error("nu a fost printat")); };
-            cadruVazut.onload = function () {
-              // PDF-ul se încarcă în vizualizator după ce s-a încărcat cadrul:
-              // îi lăsăm o clipă, altfel tipărirea prinde pagina goală.
-              ceas = setTimeout(function () {
-                try { cadruVazut.contentWindow.focus(); cadruVazut.contentWindow.print(); } catch (e) { /* rămâne butonul din bara PDF-ului */ }
-              }, 1200);
+            btnDa.onclick = function () { incheie(); gata(); };
+            btnNu.onclick = function () { incheie(); rau(new Error("nu a fost printat")); };
+            btnStop.onclick = function () { oprit = true; incheie(); rau(new Error("nu a fost printat")); };
+            btnIar.onclick = function () { cereTiparire(c); };
+            c.onload = function () {
+              if (eGol(c)) return;
+              // PDF-ul apare în vizualizator după ce s-a încărcat cadrul: îi
+              // lăsăm o clipă, altfel tipărirea prinde pagina goală.
+              clearTimeout(ceas);
+              ceas = setTimeout(function () { cereTiparire(c); }, 1200);
             };
-            vazut.style.display = "flex";
-            cadruVazut.src = ${JSON.stringify(CALE)} + "/etichete/" + id + "/pdf";
+            titluVazut.textContent = titlu || "Teancul de etichete";
+            btnStop.style.display = maiSunt ? "" : "none";
+            arataFereastra(true);
+            // Adresa ÎNAINTE de a-l pune în pagină: așa cadrul pornește direct
+            // cu PDF-ul.
+            c.src = CALE + "/etichete/" + id + "/pdf";
+            locVazut.appendChild(c);
+          });
+        }
+
+        // „Printează singur": fără om în față, deci din cadru ascuns. Merge
+        // doar cu Chrome pornit cu --kiosk-printing, care trimite la
+        // imprimantă fără fereastră. Și aici print() se întoarce pe loc, deci
+        // între două teancuri se așteaptă — altfel al doilea ar intra peste
+        // primul — iar lista se reîncarcă abia după câteva minute de liniște.
+        function printeazaAscuns(id) {
+          return new Promise(function (gata, rau) {
+            var c = cadruNou(ASCUNS);
+            var ceas = setTimeout(function () { c.onload = null; rau(new Error("PDF-ul nu s-a încărcat")); }, 60000);
+            c.onload = function () {
+              if (eGol(c)) return;
+              clearTimeout(ceas);
+              c.onload = null;
+              if (!cereTiparire(c)) return rau(new Error("tipărirea nu a pornit"));
+              setTimeout(gata, PAUZA_AUTOMAT);
+            };
+            c.src = CALE + "/etichete/" + id + "/pdf#toolbar=0";
+            document.body.appendChild(c);
           });
         }
         if (eEdge) {
-          // Automatul ar scoate foi goale și le-ar trece ca printate.
+          // Automatul trece teancurile ca printate fără să le vadă nimeni; în
+          // Edge n-a fost încercat, deci nu-l lăsăm să pornească pe încredere.
           bifa.checked = false;
           bifa.disabled = true;
-          spune("În Edge tipărirea automată nu merge: PDF-ul iese gol. Pentru „printează singur” deschide pagina în Chrome.");
+          spune("Tipărirea automată e făcută pentru Chrome pornit cu --kiosk-printing. În Edge n-a fost încercată, așa că aici rămâne oprită; cu butoanele se tipărește la fel ca în Chrome.");
         }
 
-        // Printarea unui teanc: se încarcă PDF-ul în cadrul ascuns, se dă
-        // print, și abia DUPĂ aceea se scrie în ERP că a ieșit. Invers, o
-        // pagină care cade între marcaj și imprimantă ar lăsa un teanc
-        // marcat printat pe care nu l-a văzut nimeni.
-        function printeaza(id) {
-          if (eEdge) return printeazaLaVedere(id);
-          return new Promise(function (gata, rau) {
-            var ceas = setTimeout(function () { rau(new Error("PDF-ul nu s-a încărcat")); }, 60000);
-            cadru.onload = function () {
-              clearTimeout(ceas);
-              try {
-                cadru.contentWindow.focus();
-                cadru.contentWindow.print();
-                gata();
-              } catch (e) { rau(e); }
-            };
-            cadru.src = ${JSON.stringify(CALE)} + "/etichete/" + id + "/pdf#toolbar=0";
-          });
+        // Scrisul în ERP se încearcă de trei ori: internetul din depozit mai
+        // cade o clipă, iar un teanc ieșit și nenotat ar fi scos a doua oară.
+        async function marcheaza(id, automat, eroare) {
+          for (var i = 0; i < 3; i++) {
+            try {
+              var r = await fetch(CALE + "/etichete/" + id + "/printat", {
+                method: "POST", credentials: "same-origin",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ automat: automat ? 1 : 0, eroare: eroare || "" }),
+              });
+              var d = r.ok ? await r.json() : null;
+              if (d && typeof d.ok === "boolean") return true;
+            } catch (e) { /* mai încercăm o dată */ }
+            if (i < 2) await new Promise(function (g) { setTimeout(g, 1500); });
+          }
+          return false;
         }
-        function marcheaza(id, automat, eroare) {
-          return fetch(${JSON.stringify(CALE)} + "/etichete/" + id + "/printat", {
-            method: "POST", credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ automat: automat ? 1 : 0, eroare: eroare || "" }),
-          });
+        function toateBifele() { return [].slice.call(document.querySelectorAll(".bif-teanc")); }
+        function bifaLui(id) { return document.querySelector('.bif-teanc[data-id="' + id + '"]'); }
+        function titluTeanc(id, i, n) {
+          var bif = bifaLui(id);
+          var zi = bif ? bif.getAttribute("data-zi") || "" : "";
+          return (n > 1 ? "Teancul " + (i + 1) + " din " + n : "Teancul de etichete") + (zi ? " · din " + zi : "");
         }
-        async function unul(id, automat) {
-          try { await printeaza(id); await marcheaza(id, automat, ""); return true; }
-          catch (e) { await marcheaza(id, automat, String(e && e.message || e)); return false; }
+        // Rândul se schimbă pe loc. Pagina NU se reîncarcă după un teanc
+        // printat: reîncărcarea ar opri ce se mai trimite încă la imprimantă.
+        function numaraNeprintate() {
+          var n = toateBifele().filter(function (b) { return b.getAttribute("data-printat") !== "1"; }).length;
+          var s = document.getElementById("cate-neprintate");
+          if (s) s.textContent = n ? " — " + n + (n === 1 ? " teanc neprintat" : " teancuri neprintate") : "";
+          var f = document.getElementById("marcheaza-tot");
+          var c = document.getElementById("cate-de-marcat");
+          if (c) c.textContent = String(n);
+          if (f && !n) f.style.display = "none";
         }
+        function treceCaPrintat(id, automat) {
+          var bif = bifaLui(id);
+          if (!bif) return;
+          var rand = bif.closest("tr");
+          bif.setAttribute("data-printat", "1");
+          bif.checked = false;
+          var stare = rand && rand.querySelector(".stare-teanc");
+          if (stare) stare.innerHTML = '<span class="badge verde">printat acum</span>' + (automat ? ' <span style="color:var(--text-muted);font-size:12px">automat</span>' : "");
+          var b = rand && rand.querySelector("[data-print]");
+          if (b) { b.disabled = false; b.textContent = "Printează din nou"; }
+          numaraNeprintate();
+          numara();
+        }
+        // Întoarce: true = a ieșit și e notat; false = n-a ieșit;
+        // "nenotat" = a ieșit, dar ERP-ul n-a putut scrie asta.
+        async function unul(id, automat, titlu, maiSunt) {
+          try {
+            if (automat) await printeazaAscuns(id); else await printeazaLaVedere(id, titlu, maiSunt);
+          } catch (e) {
+            await marcheaza(id, automat, String(e && e.message || e));
+            return false;
+          }
+          if (!(await marcheaza(id, automat, ""))) return "nenotat";
+          treceCaPrintat(id, automat);
+          return true;
+        }
+        var NENOTAT = "Etichetele au ieșit, dar ERP-ul n-a putut nota asta. Verifică internetul și reîncarcă pagina; nu scoate teancul a doua oară.";
+        function zi(t) { if (rezultat) rezultat.textContent = t; }
         document.addEventListener("click", async function (ev) {
           var b = ev.target.closest("[data-print]");
-          if (!b) return;
+          if (!b || ocupat) return;
+          ocupat = true;
+          zi("");
           b.disabled = true; b.textContent = "Se printează…";
-          var ok = await unul(b.getAttribute("data-print"), false);
-          b.textContent = ok ? "Printat" : "N-a mers";
-          if (ok) setTimeout(function () { location.reload(); }, 1200);
-          else b.disabled = false;
+          var id = b.getAttribute("data-print");
+          var ok = await unul(id, false, titluTeanc(id, 0, 1), false);
+          arataFereastra(false);
+          ocupat = false;
+          if (ok === "nenotat") { b.textContent = "Printat, dar nenotat"; zi(NENOTAT); }
+          else if (!ok) { b.textContent = "N-a mers"; b.disabled = false; }
+          numara();
         });
 
         // ---- mai multe teancuri deodată ------------------------------------
@@ -1282,16 +1413,12 @@ function register(router) {
         // venite peste noapte și le apăsa pe rând. Acum se bifează și pleacă
         // toate la imprimantă dintr-o apăsare.
         //
-        // Se printează UNUL CÂTE UNUL, nu toate deodată: print() oprește
-        // pagina până se închide dialogul imprimantei, iar șase deodată ar
-        // însemna șase dialoguri peste altul — pe calculatorul cu Zebra, unde
-        // dialogul nici nu apare, tot ar trimite PDF-urile unul peste altul în
-        // același cadru și s-ar pierde teancuri. Fiecare se marchează DUPĂ ce
-        // a ieșit, ca și la butonul de pe rând.
+        // Se printează UNUL CÂTE UNUL, fiecare în fereastra lui la vedere:
+        // următorul se deschide abia după ce omul a spus de cel dinainte că a
+        // ieșit (sau că nu). „Oprește aici" lasă restul neatinse.
         var bifaTot = document.getElementById("bif-tot");
         var cateAlese = document.getElementById("cate-alese");
         var btnAlese = document.getElementById("printeaza-alese");
-        function toateBifele() { return [].slice.call(document.querySelectorAll(".bif-teanc")); }
         function alese() { return toateBifele().filter(function (b) { return b.checked; }); }
         function numara() {
           if (!cateAlese) return;
@@ -1330,40 +1457,54 @@ function register(router) {
         }
         if (btnAlese) {
           btnAlese.addEventListener("click", async function () {
-            var lista = alese();
+            var lista = alese().map(function (b) { return b.getAttribute("data-id"); });
             if (!lista.length || ocupat) return;
-            // Cât timp scoatem teancurile alese, automatul stă deoparte:
-            // altfel ar intra peste noi în același cadru ascuns.
+            // Cât timp scoatem teancurile alese, automatul stă deoparte.
             ocupat = true;
+            oprit = false;
+            zi("");
             btnAlese.disabled = true;
-            var reusite = 0;
-            for (var i = 0; i < lista.length; i++) {
-              btnAlese.textContent = "Se printează " + (i + 1) + " din " + lista.length + "…";
-              if (await unul(lista[i].getAttribute("data-id"), false)) reusite++;
+            var reusite = 0, nenotate = 0;
+            for (var i = 0; i < lista.length && !oprit; i++) {
+              var cum = await unul(lista[i], false, titluTeanc(lista[i], i, lista.length), i < lista.length - 1);
+              if (cum === true) reusite++;
+              else if (cum === "nenotat") nenotate++;
             }
-            btnAlese.textContent = reusite === lista.length
-              ? "Gata, " + reusite + " scoase"
-              : "Au ieșit " + reusite + " din " + lista.length;
+            arataFereastra(false);
             ocupat = false;
-            setTimeout(function () { location.reload(); }, reusite === lista.length ? 1500 : 4000);
+            numara();
+            zi(nenotate
+              ? NENOTAT
+              : reusite === lista.length
+                ? "Gata, " + (reusite === 1 ? "teancul a ieșit." : "toate cele " + reusite + " teancuri au ieșit.")
+                : "Au ieșit " + reusite + " din " + lista.length + ". Cele rămase sunt tot bifate.");
           });
         }
         numara();
 
+        // Lista se reîncarcă doar după automat și doar în liniște: niciodată
+        // cu un teanc deschis și niciodată la mai puțin de câteva minute de la
+        // ultima tipărire cerută.
+        function reincarcaInLiniste() {
+          if (ocupat || Date.now() - ultimaTiparire < REINCARCA_DUPA) {
+            return setTimeout(reincarcaInLiniste, Math.min(15000, REINCARCA_DUPA));
+          }
+          location.reload();
+        }
         async function verifica() {
           if (eEdge || !bifa.checked || ocupat) return;
           ocupat = true;
           try {
-            var r = await fetch(${JSON.stringify(CALE)} + "/etichete/noi.json", { credentials: "same-origin", cache: "no-store" });
+            var r = await fetch(CALE + "/etichete/noi.json", { credentials: "same-origin", cache: "no-store" });
             var d = await r.json();
             if (!d.fisiere || !d.fisiere.length) {
               spune("Nimic nou. Ultima verificare " + new Date().toLocaleTimeString("ro-RO") + ".");
             } else {
-              spune(d.fisiere.length + " teancuri noi, le scot la imprimantă…");
+              spune(d.fisiere.length + " teancuri noi, le trimit la imprimantă…");
               var n = 0;
-              for (var i = 0; i < d.fisiere.length; i++) { if (await unul(d.fisiere[i].id, true)) n++; }
-              spune("Am printat " + n + " din " + d.fisiere.length + " la " + new Date().toLocaleTimeString("ro-RO") + ".");
-              setTimeout(function () { location.reload(); }, 2500);
+              for (var i = 0; i < d.fisiere.length; i++) { if ((await unul(d.fisiere[i].id, true)) === true) n++; }
+              spune("Am trimis la imprimantă " + n + " din " + d.fisiere.length + " la " + new Date().toLocaleTimeString("ro-RO") + ".");
+              setTimeout(reincarcaInLiniste, REINCARCA_DUPA);
             }
           } catch (e) {
             spune("Nu pot verifica: " + (e && e.message || e));
@@ -1516,6 +1657,18 @@ function oraRo(utc) {
   return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])).toLocaleTimeString("ro-RO", { timeZone: "Europe/Bucharest", hour: "2-digit", minute: "2-digit" });
 }
 
+// Ziua și ora României dintr-un timp ținut în UTC. Teancurile vin imediat după
+// miezul nopții: citite în UTC ar apărea cu ziua de ieri, pe la 22.
+function ziOraRo(utc) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(utc || ""));
+  if (!m) return { zi: String(utc || "").slice(0, 10), ora: "" };
+  const p = {};
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Bucharest", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])))
+    .forEach((x) => { p[x.type] = x.value; });
+  return { zi: `${p.year}-${p.month}-${p.day}`, ora: `${p.hour}:${p.minute}` };
+}
+
 // Căsuțele în care vin etichetele: cele care au primit deja un awbs.pdf. Până
 // vine primul, căsuțele comune.
 async function casuteAwb() {
@@ -1563,10 +1716,10 @@ async function etichetePdf(zile) {
   for (const r of randuri) {
     if (vazute.has(r.drive_id)) continue;
     vazute.add(r.drive_id);
-    const d = String(r.data || "");
-    out.push({ ...r, zi: d.slice(0, 10), ora: d.slice(11, 16) });
+    const ro = ziOraRo(r.data);
+    out.push({ ...r, zi: ro.zi, ora: ro.ora });
   }
   return out;
 }
 
-module.exports = { register, stocCurent, comenziZi, CALE, casuteAwb, oraRo };
+module.exports = { register, stocCurent, comenziZi, CALE, casuteAwb, oraRo, ziOraRo };
