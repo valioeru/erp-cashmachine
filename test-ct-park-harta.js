@@ -176,7 +176,7 @@ function curata() {
     const a = loc(2, 3, 1), b2 = loc(2, 3, 2);
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-HARTA", cantitate: "100", um: "buc", paleti: "1", locuri: "2", locuri_alese: a + "," + b2 },
+      body: { produs_text: "TEST-HARTA", pret_unitar: "2", cantitate: "100", um: "buc", paleti: "1", locuri: "2", locuri_alese: a + "," + b2 },
     });
     // „Adaugă marfă" (Vali, 30.10.2026): cu locul ales, nu mai e nimic de
     // confirmat — se pune și se merge la etichete.
@@ -193,7 +193,7 @@ function curata() {
     const trei = [loc(1, 1, 1), loc(1, 1, 2), loc(1, 1, 3)];
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-HARTA", cantitate: "90", um: "buc", paleti: "1", locuri: "3", locuri_alese: trei.join(",") },
+      body: { produs_text: "TEST-HARTA", pret_unitar: "2", cantitate: "90", um: "buc", paleti: "1", locuri: "3", locuri_alese: trei.join(",") },
     });
     const ids = paletiDin(p);
     bine("trei lipite ies ca un singur palet", ids.length === 1, ids.join(","));
@@ -203,7 +203,7 @@ function curata() {
     const doua = [loc(1, 2, 3), loc(1, 3, 1)];
     const p2 = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-HARTA", cantitate: "60", um: "buc", paleti: "2", locuri: "2", locuri_alese: doua.join(",") },
+      body: { produs_text: "TEST-HARTA", pret_unitar: "2", cantitate: "60", um: "buc", paleti: "2", locuri: "2", locuri_alese: doua.join(",") },
     });
     const ids2 = paletiDin(p2);
     bine("două din câmpuri diferite ies doi paleți", ids2.length === 2, ids2.join(","));
@@ -221,7 +221,7 @@ function curata() {
 
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-HARTA", cantitate: "50", um: "buc", paleti: "2", locuri: "1", locuri_alese: a + "," + b2 },
+      body: { produs_text: "TEST-HARTA", pret_unitar: "2", cantitate: "50", um: "buc", paleti: "2", locuri: "1", locuri_alese: a + "," + b2 },
     });
     bine("nu se pune direct: se arată ce nu merge", p.cod === 200);
     bine("se spune că un loc nu e liber", /nu e liber/.test(p.corp), (p.corp.match(/nu e liber[^<]*/) || [])[0]);

@@ -197,13 +197,17 @@ function curata() {
 
   console.log("\n4. Alt produs pe palet: după codul vostru, apoi scris liber");
   {
+    // Și marfa adăugată intră cu preț (11.11.2026): fără el, și fără cost pe
+    // produs, „alt produs" e refuzat.
     let r = await cer("post", "/stocuri/ct-park/palet/:id/adauga", { id: String(palet) }, { nou_produs: "tst-pas-2", nou_cantitate: "20" });
+    bine("„alt produs” fără preț nicăieri: refuzat, cu ce e de făcut", /scrie și prețul: ERP-ul nu-l știe/.test(locatie(r)) && linii().length === 1, locatie(r));
+    r = await cer("post", "/stocuri/ct-park/palet/:id/adauga", { id: String(palet) }, { nou_produs: "tst-pas-2", nou_cantitate: "20", nou_pret: "3" });
     let L = linii();
     const nou = L.find((x) => Number(x.produs_id) === p2);
     bine("găsit după cod (și cu litere mici), legat de produs", !!nou && Number(nou.cantitate) === 20 && nou.um === "kg", JSON.stringify(L));
     const p = P();
     bine("paletul devine mixt: 170 kg, „2 produse”", Number(p.cantitate) === 170 && p.produs_id === null && /^2 produse: TEST-PAS Folie, TEST-PAS Bandă/.test(p.produs_text || ""), JSON.stringify([p.cantitate, p.produs_id, p.produs_text]));
-    r = await cer("post", "/stocuri/ct-park/palet/:id/adauga", { id: String(palet) }, { nou_produs: "ceva scris liber", nou_cantitate: "3", nou_um: "kg" });
+    r = await cer("post", "/stocuri/ct-park/palet/:id/adauga", { id: String(palet) }, { nou_produs: "ceva scris liber", nou_cantitate: "3", nou_um: "kg", nou_pret: "1,5" });
     L = linii();
     bine("ce nu se găsește rămâne scris liber", L.some((x) => x.produs_id === null && x.produs_text === "ceva scris liber" && Number(x.cantitate) === 3), JSON.stringify(L));
     bine("mesajul spune că e scris liber", /scris liber/.test(locatie(r)), locatie(r));

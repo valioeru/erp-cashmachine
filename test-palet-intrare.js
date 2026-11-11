@@ -187,6 +187,9 @@ const primit = (lid) => Number(unul(`SELECT cantitate_primita FROM receptii_lini
   q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES
        (${PF}, '${PREFIX}-F', '${PREFIX} Folie stretch jumbo 17my', 'kg'), (${PP}, '${PREFIX}-P', '${PREFIX} Pungă curier', 'buc'),
        (${PC}, '${PREFIX}-C', '${PREFIX} Bandă adezivă', 'buc'), (${PV}, '${PREFIX}-V', '${PREFIX} Carton vechi', 'buc')`);
+  // Prețul e obligatoriu la intrarea în depozit (11.11.2026; test-pret-intrare.js):
+  // produsele de probă au un cost, ca paleții lor să intre.
+  q(`UPDATE produse SET pret_achizitie = 2 WHERE id IN (${PF}, ${PP}, ${PC}, ${PV})`);
   const R_F = receptie("REC-F", "furnizor", "finalizata");
   const LF = linie(R_F, PF, 1000, 1000, "kg", "primita", "bun");
   const R_P = receptie("REC-P", "productie", "finalizata");
@@ -330,7 +333,7 @@ const primit = (lid) => Number(unul(`SELECT cantitate_primita FROM receptii_lini
   egal("…și a scris-o", [primit(LA), miscari().map((x) => x[0])], [135, [12.5, 7.5, 15]]);
   // Un rând fără produs din catalog (marfă scrisă ca text): recepția urcă, dar n-are ce mișcare de stoc să scrie.
   const LT = Number(unul(`INSERT INTO receptii_linii (receptie_id, produs_text, cantitate_asteptata, cantitate_primita, um, stare, conditie) VALUES (${R_A}, '${PREFIX} marfă scrisă', 5, 5, 'buc', 'primita', 'bun') RETURNING id`));
-  await pune({ produs_text: `${PREFIX} marfă scrisă`, um: "buc", receptie_id: R_A, receptie_linie_id: LT }, 8);
+  await pune({ produs_text: `${PREFIX} marfă scrisă`, um: "buc", pret_unitar: "2", receptie_id: R_A, receptie_linie_id: LT }, 8);
   egal("marfa scrisă ca text: recepția urcă la 8, fără mișcare de stoc", [primit(LT), Number(unul(`SELECT COUNT(*) FROM miscari_stoc WHERE document_ref = '${PREFIX}-REC-A'`))], [8, 3]);
 
   curata();

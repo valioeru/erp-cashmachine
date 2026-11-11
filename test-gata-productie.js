@@ -191,6 +191,9 @@ const ziPlus = (n) => new Date(Date.parse(azi() + "T00:00:00Z") + n * 86400000).
 
   q(`INSERT INTO parteneri (id, tip, nume) VALUES (${CLIENT}, 'client', '${PREFIX} Client SRL'), (${FURNIZOR}, 'furnizor', '${PREFIX} Furnizor SRL')`);
   q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${P1}, 'TGP-1', '${PREFIX} Folie manuala 12my', 'buc'), (${P2}, 'TGP-2', '${PREFIX} Pungă curier', 'buc'), (${P3}, 'TGP-3', '${PREFIX} Bandă', 'buc')`);
+  // Prețul e obligatoriu la intrarea în depozit (11.11.2026; test-pret-intrare.js):
+  // produsele de probă au un cost, ca paleții lor să intre.
+  q(`UPDATE produse SET cost_reteta = 1.5, cost_reteta_lipsa = 0 WHERE id IN (${P1}, ${P2}, ${P3})`);
   q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD}, ${CLIENT}, '${PREFIX}-1', '${azi()}', 'productie_finalizata')`);
   q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${CMD}, ${P2}, 20, 1)`);
   q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD_LIVRATA}, ${CLIENT}, '${PREFIX}-2', '2026-10-01', 'livrata')`);

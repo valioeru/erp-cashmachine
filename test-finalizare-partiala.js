@@ -186,6 +186,9 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
 
   q(`INSERT INTO parteneri (id, tip, nume) VALUES (${CLIENT}, 'client', '${PREFIX} Client SRL')`);
   q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${P1}, 'TFP-1', '${PREFIX} Punga curier', 'buc'), (${P2}, 'TFP-2', '${PREFIX} Folie', 'kg')`);
+  // Prețul e obligatoriu la intrarea în depozit (11.11.2026; test-pret-intrare.js):
+  // produsele de probă au un cost, ca paleții lor să intre.
+  q(`UPDATE produse SET cost_reteta = 1.5, cost_reteta_lipsa = 0 WHERE id IN (${P1}, ${P2})`);
   q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD}, ${CLIENT}, '${PREFIX}-1', '${azi()}', 'in_productie')`);
   q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${CMD}, ${P1}, 10000, 1), (${CMD}, ${P2}, 500, 1)`);
   q(`INSERT INTO aprovizionari (id, comanda_id, produs_id, cantitate, sursa, status, creata_la) VALUES (${A_CERERE}, ${CMD}, ${P1}, 10000, 'productie', 'confirmata', '${azi()}')`);

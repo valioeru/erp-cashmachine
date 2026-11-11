@@ -182,6 +182,9 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
        (${D}, 'TSK-D', '${PREFIX} Granule D', 'kg', '${PREFIX} Granule', 1),
        (${E}, 'TSK-E', '${PREFIX} Nou E', 'buc', NULL, 1),
        (${F}, 'TSK-F', '${PREFIX} Jumbo F', 'kg', NULL, 1)`);
+  // Prețul e obligatoriu la intrarea în depozit (11.11.2026; test-pret-intrare.js):
+  // produsele de probă au un cost, ca paleții lor să intre.
+  q(`UPDATE produse SET pret_achizitie = 2 WHERE id IN (${A}, ${B}, ${C}, ${D}, ${E}, ${F})`);
   const PA1 = palet(A, 100, "buc", null);
   const PA2 = palet(A, 50, "buc", null);
   const PA_IESIT = palet(A, 30, "buc", null, { iesit: true });
@@ -296,7 +299,8 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
   let pag = await cer("get", "/stocuri/ct-park/stoc", ADMIN, { query: { q: PREFIX } });
   const cap = (pag.corp.match(/<thead>[\s\S]*?<\/thead>/) || [""])[0].split(/<th(?:\s[^>]*)?>/).slice(1).map((c) => c.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().replace(/ ▾$/, ""));
   egal("capul tabelului: categoria din nomenclator e a doua coloană", cap.slice(0, 4).map((c) => c.replace(/\s*[▾▴▼▲⇅↕].*$/, "")), ["Produs", "Categorie nomenclator", "Categorie", "În stoc"]);
-  egal("…și nu mai e la coadă", [cap.length, /Sosire/.test(cap[cap.length - 1])], [10, true]);
+  // Cine are Depozitul vede și prețul de intrare, după „În stoc" (11.11.2026).
+  egal("…și nu mai e la coadă", [cap.length, cap[4].replace(/\s*[▾▴▼▲⇅↕].*$/, ""), /Sosire/.test(cap[cap.length - 1])], [11, "Preț intrare", true]);
   let rb = randPagina(pag.corp, `${PREFIX} Folie B`);
   egal("rândul foliei: nomenclatorul al doilea, categoria simplă a treia", celuleRand(rb).slice(1, 3), ["TSK Folie stretch", "produse intermediare"]);
   bine("administratorul are „modifică”, cu cele două câmpuri completate", rb.includes('class="stoc-cat"') && rb.includes('action="/stocuri/ct-park/stoc/categorii"') && rb.includes(`name="produs_id" value="${B}"`) && rb.includes('name="categorie" list="categorii-nomenclator" value="TSK Folie stretch"') && rb.includes('<option value="produse intermediare" selected>') && rb.includes('name="tip_vechi" value="produse intermediare"'), rb.slice(rb.indexOf("stoc-cat"), rb.indexOf("stoc-cat") + 700));
@@ -381,7 +385,7 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
 
     const ctxB = await browser.newContext({ viewport: { width: 1536, height: 864 } });
     pag = await cer("get", "/stocuri/ct-park/stoc", ADMIN, { query: { q: PREFIX } });
-    bine("tabelul are cheia nouă de filtre (cea veche ținea minte valorile greșite)", pag.corp.includes('data-filtre="stoc-la-zi"') && !pag.corp.includes('data-filtre="stoc-produse"'));
+    bine("tabelul are cheia nouă de filtre (cea veche ținea minte valorile greșite)", pag.corp.includes('data-filtre="stoc-la-zi-pret"') && !pag.corp.includes('data-filtre="stoc-produse"'));
     const { p, erori } = await deschidePagina(ctxB, "admin", pag.corp);
     egal("administrator: filtrul de la „Categorie nomenclator” arată categoriile din nomenclator", await valoriFiltru(p, "Categorie nomenclator"), numara(asteptNom));
     egal("…iar cel de la „Categorie”, pe cele simple", await valoriFiltru(p, "Categorie"), numara(asteptTip));
@@ -394,7 +398,7 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
       await p.press(".filtru-pop .filtru-cauta", "Enter");
     }
     egal("filtrat pe „Pungi curier”: rămâne doar punga", await vazute(p), [NUME_LUNG]);
-    await p.click('[data-filtre-pentru="stoc-la-zi"] [data-sterge]');
+    await p.click('[data-filtre-pentru="stoc-la-zi-pret"] [data-sterge]');
     egal("…și „Șterge filtrele” le aduce pe toate înapoi", (await vazute(p)).length, asteptNom.length);
 
     // Denumirea lungă.
@@ -414,6 +418,8 @@ const celuleRand = (tr) => tr.split(/<td[^>]*>/).slice(1).map((c) => c.replace(/
     const scurt = await linii(p, `${PREFIX} Folie B`);
     bine("un nume scurt rămâne pe un rând, cu cutia cât el", scurt && scurt.linii === 1 && scurt.lat < 12 * scurt.em, JSON.stringify(scurt));
     const incape = await p.$eval(".tabel-scroll", (d) => ({ lat: d.clientWidth, continut: d.scrollWidth }));
+    // Lățimea fiecărei coloane, la nevoie: ARATA_COLOANE=1
+    if (process.env.ARATA_COLOANE) console.log("  coloane: " + (await p.$$eval("table[data-filtre] thead th", (ths) => ths.map((th) => th.textContent.replace("▾", "").trim().slice(0, 16) + "=" + Math.round(th.getBoundingClientRect().width)))).join(" | "));
     bine("tabelul încape în ecran, fără derulare în lateral", incape.continut <= incape.lat + 1, JSON.stringify(incape));
     await p.screenshot({ path: path.join(RAD, "..", "stoc-la-zi-1536.png"), fullPage: false }).catch(() => null);
     egal("nicio eroare de JavaScript pe pagină", erori, []);

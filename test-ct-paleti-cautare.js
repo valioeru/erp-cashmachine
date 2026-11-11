@@ -216,7 +216,9 @@ async function ruleaza() {
   const carduri = (html) => [...html.matchAll(/<div class="label">([^<]*)<\/div><div class="value">([^<]*)<\/div>/g)].map((m) => [m[1], m[2]]);
   const valoare = (html) => ((html.match(/<div class="label">Valoarea lor<\/div>\s*<div class="value">([^<]*)</) || [])[1] || "").replace(/\s+/g, " ");
   egal("„tcp ladita”: 2 paleți găsiți", carduri(await cauta("tcp ladita"))[0], ["Paleți găsiți, în depozit", "2"]);
-  egal("…cu valoarea lor (200 × 5; paletul mixt n-are preț pe rezumat)", valoare(await cauta("tcp ladita")), "1.000,00 lei");
+  // Din 11.11.2026 valoarea unui palet se socotește din liniile lui: paletul
+  // mixt n-are preț pe rezumat, dar liniile lui au (10 × 2 + 20 × 5).
+  egal("…cu valoarea lor: 200 × 5, plus paletul mixt socotit din liniile lui", valoare(await cauta("tcp ladita")), "1.120,00 lei");
   bine("fără căutare, eticheta rămâne „Paleți în depozit”", /<div class="label">Paleți în depozit<\/div>/.test(tot) && /<div class="label">Valoarea stocului<\/div>/.test(tot));
 
   console.log("\n7. În browser: filtrarea pe loc");

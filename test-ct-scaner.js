@@ -239,6 +239,9 @@ async function ruleaza() {
        (${P1}, '${PREFIX}-P1', '${PREFIX} Folie stretch 23my', 'kg'),
        (${P2}, '${PREFIX}-P2', '${PREFIX} Pungă curier', 'buc'),
        (${P3}, '${PREFIX}-P3', '${PREFIX} Bandă adezivă', 'buc')`);
+  // Prețul e obligatoriu la intrarea în depozit (11.11.2026; test-pret-intrare.js):
+  // produsele de probă au un cost, ca paleții lor să intre.
+  q(`UPDATE produse SET pret_achizitie = 2 WHERE id IN (${P1}, ${P2}, ${P3})`);
   q(`INSERT INTO comenzi (id, partener_id, numar, data, status) VALUES (${CMD}, ${CLIENT}, '${PREFIX}-CMD-1', '${azi()}', 'confirmata'), (${CMD2}, ${CLIENT}, '${PREFIX}-CMD-2', '${azi()}', 'confirmata')`);
   q(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${CMD}, ${P1}, 700, 123.45), (${CMD2}, ${P2}, 10, 1)`);
   q(`INSERT INTO ct_randuri (id, numar, eticheta, niveluri, campuri, locuri_pe_camp, activ) VALUES (${RAND}, ${NUMAR_RAND}, '${PREFIX}', 2, 2, 3, 1)`);
@@ -681,6 +684,7 @@ async function ruleaza() {
   egal("după ieșirea parțială de 50 kg din paletul făcut la recepție, rândul recepției nu reapare ca „de pus”",
     [await SC.randDeAsezat(`r${RL_F}`), (await GP.receptiiFurnizori()).filter((x) => x.id === RL_F).length], [null, 0]);
   q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${P4}, '${PREFIX}-P4', '${PREFIX} Sac menaj', 'buc')`);
+  q(`UPDATE produse SET pret_achizitie = 2 WHERE id = ${P4}`);
   const receptieNoua = (numar, sursa, stare) => Number(unul(`INSERT INTO receptii (numar, sursa, partener_id, data, stare, finalizata_la) VALUES ('${PREFIX}-${numar}', '${sursa}', ${sursa === "furnizor" ? FURNIZOR : "NULL"}, '${azi()}', '${stare}', ${stare === "finalizata" ? "'" + azi() + " 09:00:00'" : "NULL"}) RETURNING id`));
   const linieNoua = (rid, anuntat, primit) => Number(unul(`INSERT INTO receptii_linii (receptie_id, produs_id, cantitate_asteptata, cantitate_primita, um, stare, conditie) VALUES (${rid}, ${P4}, ${anuntat}, ${primit == null ? "NULL" : primit}, 'buc', '${primit == null ? "de_primit" : "primita"}', ${primit == null ? "NULL" : "'bun'"}) RETURNING id`));
   const paletiRand = (lid) => q(`SELECT cantitate, cantitate_intrare FROM ct_paleti WHERE receptie_linie_id = ${lid} ORDER BY id`).map((p) => [Number(p.cantitate), Number(p.cantitate_intrare)]);

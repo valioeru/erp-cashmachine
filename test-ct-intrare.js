@@ -254,7 +254,7 @@ function bine(descriere, conditie, detaliu) {
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
       body: {
-        produs_text: "TEST-INTRARE scris", um: "buc",
+        produs_text: "TEST-INTRARE scris", um: "buc", pret_unitar: "2",
         "loc_ids[]": "", "loc_rand[]": String(rand), "loc_nivel[]": "2", "loc_camp[]": "1", "loc_pozitie[]": "2",
         "loc_latime[]": "1", "loc_paleti[]": "1", "loc_cantitate[]": "12,5",
       },
@@ -265,12 +265,12 @@ function bine(descriere, conditie, detaliu) {
 
     const ocupat = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-INTRARE ocupat", "loc_ids[]": "", "loc_rand[]": String(rand), "loc_nivel[]": "2", "loc_camp[]": "1", "loc_pozitie[]": "2", "loc_latime[]": "1", "loc_paleti[]": "1", "loc_cantitate[]": "5" },
+      body: { produs_text: "TEST-INTRARE ocupat", pret_unitar: "2", "loc_ids[]": "", "loc_rand[]": String(rand), "loc_nivel[]": "2", "loc_camp[]": "1", "loc_pozitie[]": "2", "loc_latime[]": "1", "loc_paleti[]": "1", "loc_cantitate[]": "5" },
     });
     bine("același loc, acum ocupat: nu se pune, se spune de ce", ocupat.cod === 200 && /TI-2-1-2/.test(ocupat.corp) && /nu e liber/.test(ocupat.corp));
     const jumatate = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
-      body: { produs_text: "TEST-INTRARE jumatate", "loc_ids[]": "", "loc_rand[]": String(rand), "loc_nivel[]": "1", "loc_camp[]": "", "loc_pozitie[]": "", "loc_latime[]": "1", "loc_paleti[]": "1", "loc_cantitate[]": "5" },
+      body: { produs_text: "TEST-INTRARE jumatate", pret_unitar: "2", "loc_ids[]": "", "loc_rand[]": String(rand), "loc_nivel[]": "1", "loc_camp[]": "", "loc_pozitie[]": "", "loc_latime[]": "1", "loc_paleti[]": "1", "loc_cantitate[]": "5" },
     });
     bine("loc scris pe jumătate: se cere tot, nu se ghicește", jumatate.cod === 200 && /toate patru/.test(jumatate.corp));
   }
@@ -280,7 +280,7 @@ function bine(descriere, conditie, detaliu) {
     const p = await cer("/stocuri/ct-park/intrare", {
       metoda: "post",
       body: {
-        produs_text: "TEST-INTRARE mixt", um: "kg",
+        produs_text: "TEST-INTRARE mixt", um: "kg", pret_unitar: "2,4",
         "loc_ids[]": ["", ""], "loc_rand[]": [String(rand), String(rand)],
         "loc_nivel[]": ["1", ""], "loc_camp[]": ["1", ""], "loc_pozitie[]": ["1", ""],
         "loc_latime[]": ["1", "1"], "loc_paleti[]": ["1", "2"], "loc_cantitate[]": ["7", "9"],
@@ -296,7 +296,10 @@ function bine(descriere, conditie, detaliu) {
     const corp = {};
     for (const [k, v] of grupuri) corp[k] = v;
     for (const [k, v] of cant) corp[k] = v;
-    Object.assign(corp, { produs_text: "TEST-INTRARE mixt", um: "kg" });
+    // Prețul e obligatoriu la intrare (11.11.2026): pagina de confirmare îl
+    // duce mai departe, ca un câmp ascuns.
+    bine("pagina de confirmare duce prețul mai departe", p.corp.includes('<input type="hidden" name="pret_unitar" value="2,4">'));
+    Object.assign(corp, { produs_text: "TEST-INTRARE mixt", um: "kg", pret_unitar: "2,4" });
     let o;
     try { o = await cer("/stocuri/ct-park/ocupa", { metoda: "post", body: corp }); } catch (e) { o = { eroare: e.message }; }
     bine("„Adaugă marfă” de pe confirmare nu mai cade", o && !o.eroare && o.cod === 302, o && (o.eroare || o.cod));
@@ -310,7 +313,7 @@ function bine(descriere, conditie, detaliu) {
   {
     const l = loc(2, 2, 1);
     let o;
-    try { o = await cer("/stocuri/ct-park/ocupa", { metoda: "post", body: { grup_0: String(l), cantitate_palet: "3", produs_text: "TEST-INTRARE vechi", um: "buc" } }); } catch (e) { o = { eroare: e.message }; }
+    try { o = await cer("/stocuri/ct-park/ocupa", { metoda: "post", body: { grup_0: String(l), cantitate_palet: "3", produs_text: "TEST-INTRARE vechi", um: "buc", pret_unitar: "2" } }); } catch (e) { o = { eroare: e.message }; }
     bine("nu mai cade cu „cuFurnizorLaIntrare is not defined”", o && !o.eroare && o.cod === 302, o && (o.eroare || o.cod));
     const ids = o && !o.eroare ? paletiDin(o) : [];
     bine("paletul e pus, cu 3 bucăți", ids.length === 1 && Number(palet(ids[0]).cantitate) === 3 && JSON.stringify(ocupateDe(ids[0])) === JSON.stringify([l]));
