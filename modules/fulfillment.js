@@ -1154,6 +1154,19 @@ function register(router) {
           : "<p>N-a venit niciun teanc de etichete în ultimele două săptămâni.</p>"
       }
       <iframe id="tipar" style="position:fixed;width:0;height:0;border:0;left:-9999px"></iframe>
+      <div id="tipar-vazut" role="dialog" aria-label="Teancul de etichete, de tipărit"
+           style="display:none;position:fixed;top:3vh;bottom:3vh;left:3vw;right:3vw;z-index:2000;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.35);flex-direction:column">
+        <div style="padding:10px 14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+          <strong>Teancul de etichete</strong>
+          <span style="font-size:13px;color:var(--text-muted);flex:1 1 320px">
+            Dacă fereastra de tipărire nu apare singură sau arată o pagină goală, închide-o și apasă
+            <strong>imprimanta din bara PDF-ului</strong> de mai jos. Apoi spune aici dacă a ieșit.
+          </span>
+          <button class="btn" type="button" id="tipar-vazut-da">Am printat</button>
+          <button class="btn secondary" type="button" id="tipar-vazut-nu">Nu l-am printat</button>
+        </div>
+        <iframe id="tipar-vazut-cadru" title="Teancul de etichete" style="flex:1 1 auto;width:100%;border:0"></iframe>
+      </div>
       <style>
         .bara-teancuri { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:0 0 10px; }
         .bif-grup { display:flex; gap:6px; flex-wrap:wrap; }
@@ -1180,11 +1193,55 @@ function register(router) {
           if (bifa.checked) verifica();
         });
 
+        // EDGE TIPĂREȘTE CADRUL ASCUNS GOL. Vali, 11.11.2026, pe calculatorul
+        // cu Edge: „se deschide fereastra de print, însă nu imprimă… e goală
+        // eticheta". Chrome trimite la imprimantă PDF-ul din cadru; Edge
+        // trimite cadrul, adică o foaie albă. Pe Edge teancul se deschide la
+        // vedere, într-o fereastră peste pagină, și tipărirea se încearcă de
+        // acolo; dacă tot iese gol, omul apasă imprimanta din bara PDF-ului și
+        // spune el dacă a ieșit. Nimic nu se trece ca printat pe încredere.
+        var eEdge = navigator.userAgent.indexOf("Edg/") !== -1;
+        var vazut = document.getElementById("tipar-vazut");
+        var cadruVazut = document.getElementById("tipar-vazut-cadru");
+        var btnDa = document.getElementById("tipar-vazut-da");
+        var btnNu = document.getElementById("tipar-vazut-nu");
+        function printeazaLaVedere(id) {
+          return new Promise(function (gata, rau) {
+            var ceas = null;
+            function inchide() {
+              clearTimeout(ceas);
+              vazut.style.display = "none";
+              cadruVazut.onload = null;
+              cadruVazut.src = "about:blank";
+              btnDa.onclick = null;
+              btnNu.onclick = null;
+            }
+            btnDa.onclick = function () { inchide(); gata(); };
+            btnNu.onclick = function () { inchide(); rau(new Error("nu a fost printat")); };
+            cadruVazut.onload = function () {
+              // PDF-ul se încarcă în vizualizator după ce s-a încărcat cadrul:
+              // îi lăsăm o clipă, altfel tipărirea prinde pagina goală.
+              ceas = setTimeout(function () {
+                try { cadruVazut.contentWindow.focus(); cadruVazut.contentWindow.print(); } catch (e) { /* rămâne butonul din bara PDF-ului */ }
+              }, 1200);
+            };
+            vazut.style.display = "flex";
+            cadruVazut.src = ${JSON.stringify(CALE)} + "/etichete/" + id + "/pdf";
+          });
+        }
+        if (eEdge) {
+          // Automatul ar scoate foi goale și le-ar trece ca printate.
+          bifa.checked = false;
+          bifa.disabled = true;
+          spune("În Edge tipărirea automată nu merge: PDF-ul iese gol. Pentru „printează singur” deschide pagina în Chrome.");
+        }
+
         // Printarea unui teanc: se încarcă PDF-ul în cadrul ascuns, se dă
         // print, și abia DUPĂ aceea se scrie în ERP că a ieșit. Invers, o
         // pagină care cade între marcaj și imprimantă ar lăsa un teanc
         // marcat printat pe care nu l-a văzut nimeni.
         function printeaza(id) {
+          if (eEdge) return printeazaLaVedere(id);
           return new Promise(function (gata, rau) {
             var ceas = setTimeout(function () { rau(new Error("PDF-ul nu s-a încărcat")); }, 60000);
             cadru.onload = function () {
@@ -1294,7 +1351,7 @@ function register(router) {
         numara();
 
         async function verifica() {
-          if (!bifa.checked || ocupat) return;
+          if (eEdge || !bifa.checked || ocupat) return;
           ocupat = true;
           try {
             var r = await fetch(${JSON.stringify(CALE)} + "/etichete/noi.json", { credentials: "same-origin", cache: "no-store" });
