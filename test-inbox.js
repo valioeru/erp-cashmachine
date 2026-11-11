@@ -71,14 +71,18 @@ process.env.GOOGLE_DRIVE_FOLDER = "FOLDER-TEST";
 // Se pun ÎNAINTE de a încărca modulul, prin Module._load: modulul cere
 // „../lib/gmail" și „../lib/drive" la încărcare, iar dacă i-am înlocui
 // funcțiile după aceea ar rămâne cu cele adevărate.
-const GMAIL = { mesaje: new Map(), listate: [], atasamente: new Map() };
+const GMAIL = { mesaje: new Map(), listate: [], atasamente: new Map(), cade: new Set() };
 const DRIVE = { fisiere: [], foldere: [], erori: new Set() };
 
 const gmailFals = {
   listeazaDupaCautare: async () => GMAIL.listate,
   listeazaDupaIstoric: async () => ({ iduri: GMAIL.listate, historyId: "999", pierdut: false }),
   profil: async (casuta) => ({ adresa: casuta, mesaje: 10, fire: 5, historyId: "999" }),
-  mesaj: async (casuta, id) => GMAIL.mesaje.get(id),
+  // Un id din GMAIL.cade dă eroare (Gmail căzut); unul necunoscut nu mai există.
+  mesaj: async (casuta, id) => {
+    if (GMAIL.cade.has(id)) throw new Error("Gmail a răspuns 500");
+    return GMAIL.mesaje.get(id);
+  },
   atasament: async (casuta, mid, aid) => GMAIL.atasamente.get(aid) || Buffer.from("continut " + aid),
   // astea sunt funcții pure din lib/gmail.js, le luăm pe cele adevărate
   adresa: null, adrese: null, domeniu: null,
@@ -353,6 +357,63 @@ function mesajFals(id, x) {
   egal("a doua sincronizare nu aduce nimic nou", r2.noi, 0);
   egal("și le recunoaște pe toate ca deja aduse", r2.sarite, 6);
   egal("nu s-au dublat mesajele", Number(q("SELECT COUNT(*) AS n FROM email_mesaje WHERE cont_id = " + office.id)[0].n), 6);
+
+  // ---- 7b. un mesaj dispărut din Gmail nu blochează căsuța -----------------
+  // 11.11.2026: 11 căsuțe, printre ele sameday@, au rămas blocate cu „Google
+  // zice «nu găsesc» (Requested entity was not found.)". Istoricul Gmail dădea
+  // id-ul unui mesaj șters între timp; cerut, răspundea 404, sincronizarea se
+  // oprea acolo și se lovea de el la fiecare 5 minute. AWB-urile de noapte,
+  // venite după el, n-au mai intrat.
+  console.log("\nun mesaj dispărut din Gmail");
+  const contAcum = () => q("SELECT * FROM email_conturi WHERE adresa = 'office@test-inbox.ro'")[0];
+  rulaj(`UPDATE email_conturi SET history_id = '500' WHERE id = ${office.id}`);
+  mesajFals("m7", { de_la: "Ionel <ionel@acme-plastic.ro>", catre: "office@test-inbox.ro", subiect: "AWB-uri venite dupa mesajul disparut", text: "…" });
+  // „sters1" e în istoric, dar nu mai e în Gmail: mesaj() întoarce nimic.
+  GMAIL.listate = ["m1", "sters1", "m7"];
+  const r3 = await inbox.sincronizeazaCont(contAcum());
+  egal("mesajul dispărut e sărit, fără eroare", r3.eroare, "null");
+  egal("…e numărat ca dispărut", r3.disparute, 1);
+  egal("…iar mesajul venit DUPĂ el intră", [r3.noi, q("SELECT COUNT(*) AS n FROM email_mesaje WHERE gmail_id = 'm7'")[0].n].join(","), "1,1");
+  egal("punctul din istoric înaintează, deci nu se mai lovește de el", contAcum().history_id, "999");
+  egal("…și căsuța nu rămâne cu eroare", contAcum().ultima_eroare, "null");
+
+  // Mesajul care chiar cade (nu 404): restul intră, el se reia, istoricul stă.
+  console.log("\nun mesaj care nu se poate salva");
+  rulaj(`UPDATE email_conturi SET history_id = '500' WHERE id = ${office.id}`);
+  GMAIL.cade.add("bum");
+  mesajFals("m8", { de_la: "Ionel <ionel@acme-plastic.ro>", catre: "office@test-inbox.ro", subiect: "Dupa mesajul cazut", text: "…" });
+  GMAIL.listate = ["bum", "m8"];
+  const r4 = await inbox.sincronizeazaCont(contAcum());
+  egal("mesajul de după cel căzut a intrat", [r4.noi, r4.esuate, q("SELECT COUNT(*) AS n FROM email_mesaje WHERE gmail_id = 'm8'")[0].n].join(","), "1,1,1");
+  if (/^1 mesaj nu s-a putut salva; celelalte au intrat, iar acesta se reia la următoarea sincronizare\. Gmail a răspuns 500/.test(String(r4.eroare))) ok("eroarea spune câte au căzut, că restul a intrat și de ce a căzut");
+  else rau("textul erorii", String(r4.eroare));
+  egal("punctul din istoric NU înaintează: mesajul căzut se cere din nou", contAcum().history_id, "500");
+  egal("…iar eroarea se vede pe căsuță", String(contAcum().ultima_eroare) === String(r4.eroare), true);
+  // Data viitoare mesajul merge: intră doar el, eroarea dispare, istoricul înaintează.
+  mesajFals("bum", { de_la: "Ionel <ionel@acme-plastic.ro>", catre: "office@test-inbox.ro", subiect: "Acum merge", text: "…" });
+  GMAIL.cade.clear();
+  const r5 = await inbox.sincronizeazaCont(contAcum());
+  egal("la reluare intră doar mesajul căzut", [r5.noi, r5.sarite, r5.esuate, String(r5.eroare)].join(","), "1,1,0,null");
+  egal("…eroarea dispare și istoricul înaintează", [String(contAcum().ultima_eroare), contAcum().history_id].join(","), "null,999");
+  egal("…fără dubluri", Number(q("SELECT COUNT(*) AS n FROM email_mesaje WHERE cont_id = " + office.id)[0].n), 9);
+
+  // Citirea adevărată din Gmail (lib/gmail.js), cu răspunsurile Google puse de mână.
+  console.log("\ncitirea unui mesaj din Gmail");
+  const gmailAdevarat = orig.apply(Module, [path.join(RAD, "lib", "gmail.js"), module]);
+  const cerereVeche = google.cerere, tokenVechi = google.tokenGmail;
+  google.tokenGmail = async () => "token-test";
+  google.cerere = async () => ({ cod: 404, json: { error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" } } });
+  egal("404 de la Gmail = mesajul nu mai există, nu o eroare", await gmailAdevarat.mesaj("office@test-inbox.ro", "sters1"), "null");
+  google.cerere = async () => ({ cod: 500, json: { error: { code: 500, message: "Backend Error" } } });
+  let aruncat = null;
+  try { await gmailAdevarat.mesaj("office@test-inbox.ro", "x"); } catch (e) { aruncat = String(e.message || e); }
+  if (aruncat && /Backend Error/.test(aruncat)) ok("orice altă eroare de la Gmail rămâne eroare");
+  else rau("eroarea 500", String(aruncat));
+  google.cerere = async () => ({ cod: 200, json: { id: "abc", threadId: "t1", internalDate: "1794323448000", payload: { headers: [{ name: "Subject", value: "Salut" }] } } });
+  const citit = await gmailAdevarat.mesaj("office@test-inbox.ro", "abc");
+  egal("un mesaj care există se citește ca înainte", [citit.id, citit.firId, citit.subiect].join("|"), "abc|t1|Salut");
+  google.cerere = cerereVeche;
+  google.tokenGmail = tokenVechi;
 
   // ---- 8. drepturile ------------------------------------------------------
   const agentCont = q("SELECT * FROM email_conturi WHERE adresa = 'agent@test-inbox.ro'")[0];
