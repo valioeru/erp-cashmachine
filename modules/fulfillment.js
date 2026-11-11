@@ -1054,6 +1054,30 @@ function register(router) {
     if (!ctx.user) return redirect(ctx.res, "/");
     const fisiere = await etichetePdf(14);
     const neprintate = fisiere.filter((f) => !f.printat_la).length;
+    const casute = await casuteAwb();
+    const blocate = casute.filter((c) => c.ultima_eroare);
+    const ultima = casute.map((c) => String(c.ultima_sincronizare || "")).sort().pop() || "";
+    const stareEmail = `
+      <div class="card" style="margin-bottom:14px;max-width:920px${blocate.length ? ";border-left:4px solid var(--danger)" : ""}">
+        <form method="post" action="${CALE}/etichete/adu" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0">
+          <button class="btn" type="submit" id="adu-awb">Adu AWB-urile acum</button>
+          <span style="font-size:13px;color:var(--text-muted)">
+            ${
+              casute.length
+                ? `Emailul se citește singur la 5 minute${ultima ? `; ultima dată la <strong>${esc(oraRo(ultima))}</strong>` : ""}
+                   (${casute.map((c) => esc(c.adresa)).join(", ")}). Dacă lipsesc teancurile de azi-noapte, apasă butonul.`
+                : `Nu e nicio căsuță de email pornită din care să vină etichete — vezi <a href="/email/conturi">Email → Căsuțe</a>.`
+            }
+          </span>
+        </form>
+        ${blocate
+          .map(
+            (c) => `<p style="margin:8px 0 0;font-size:13px;color:var(--danger)" role="alert">
+              <strong>${esc(c.adresa)} nu se citește:</strong> ${esc(String(c.ultima_eroare).slice(0, 260))}
+              Cât scrie asta, etichetele noi din căsuța ei nu ajung aici.</p>`
+          )
+          .join("")}
+      </div>`;
 
     const randuri = fisiere.map((f) => [
       `<input type="checkbox" class="bif-teanc" data-id="${f.id}" data-printat="${f.printat_la ? 1 : 0}"
@@ -1081,6 +1105,7 @@ function register(router) {
         ce nu. Un teanc se printează întreg — nu se taie pe AWB-uri, ca să nu existe un al doilea loc în care
         se pot pierde etichete.
       </p>
+      ${stareEmail}
       <div class="card" style="margin-bottom:14px;max-width:920px">
         <label style="display:flex;align-items:center;gap:8px;font-weight:600">
           <input type="checkbox" id="auto"> Printează singur ce apare
@@ -1299,6 +1324,47 @@ function register(router) {
   // PDF-ul, servit de pe acelasi domeniu. Nu se trimite omul pe Drive: un
   // link de Drive se deschide in vizualizatorul lor, pe alt domeniu, de unde
   // pagina asta nu mai poate da print fara ca cineva sa apese.
+  // „Adu AWB-urile acum" — Vali, 11.11.2026: „să le sincronizez iar dimineața,
+  // dacă nu a rulat sincronizarea noaptea: în Fulfillment să am buton «adu
+  // AWB-uri» și să se populeze manual atunci, ca să le pot imprima apoi".
+  //
+  // Citește pe loc căsuțele în care vin etichetele, fără să aștepte rândul de
+  // la 5 minute (modules/inbox.js, sincronizeazaConturi). Așteaptă cel mult
+  // ADU_ASTEPT_MS: o căsuță cu multe mesaje de recuperat poate dura minute,
+  // iar cererea din browser nu ține atât. Ce nu s-a terminat merge mai departe
+  // în fundal; pagina spune să fie reîncărcată.
+  router.post(`${CALE}/etichete/adu`, async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/");
+    const inapoi = (cheie, text) => redirect(ctx.res, `${CALE}/etichete?${cheie}=${encodeURIComponent(text)}`);
+    const casute = await casuteAwb();
+    if (!casute.length) return inapoi("eroare", "Nu e nicio căsuță de email pornită din care să vină etichete. Vezi Email → Căsuțe.");
+    const inainte = new Set((await etichetePdf(14)).map((f) => f.drive_id));
+    const lucru = require("./inbox").sincronizeazaConturi(casute.map((c) => c.id));
+    // Dacă rămâne în fundal, eroarea lui nu trebuie să doboare procesul.
+    lucru.catch((e) => console.error("[fulfillment] aducerea AWB-urilor:", e && e.message));
+    let ceas;
+    const rez = await Promise.race([lucru, new Promise((r) => { ceas = setTimeout(() => r(null), ADU_ASTEPT_MS); })]).catch((e) => ({ cazut: String((e && e.message) || e) }));
+    clearTimeout(ceas);
+    if (rez && rez.cazut) return inapoi("eroare", `Emailul nu s-a putut citi: ${rez.cazut.slice(0, 300)}`);
+    const noi = (await etichetePdf(14)).filter((f) => !inainte.has(f.drive_id));
+    const spuneNoi = noi.length
+      ? `${noi.length === 1 ? "A venit un teanc nou" : "Au venit " + noi.length + " teancuri noi"} de etichete.`
+      : "";
+    if (!rez) {
+      return inapoi("ok", `${spuneNoi ? spuneNoi + " " : ""}Emailul se mai citește încă — sunt multe mesaje de recuperat. Reîncarcă pagina peste un minut.`.trim());
+    }
+    const erori = rez.filter((x) => x.eroare);
+    if (erori.length) {
+      return inapoi("eroare", `${spuneNoi ? spuneNoi + " " : ""}${erori[0].adresa} nu s-a citit: ${String(erori[0].eroare).slice(0, 300)}`.trim());
+    }
+    if (noi.length) return inapoi("ok", spuneNoi);
+    if (rez.length && rez.every((x) => x.ocupat)) {
+      return inapoi("ok", "Emailul se citea deja chiar acum. Reîncarcă pagina peste un minut.");
+    }
+    const ultim = (await etichetePdf(14))[0];
+    return inapoi("ok", `Am citit emailul: nu a venit niciun teanc nou.${ultim ? ` Ultimul e din ${dataRo(ultim.zi)}, ${oraRo(ultim.data)}.` : ""}`);
+  });
+
   router.get(`${CALE}/etichete/:id/pdf`, async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
     const a = await db
@@ -1383,6 +1449,38 @@ function register(router) {
   });
 }
 
+// Cât așteaptă cererea din browser la „Adu AWB-urile acum".
+const ADU_ASTEPT_MS = 25000;
+
+// Ora României dintr-un timp ținut în UTC („2026-11-11 07:24:48").
+function oraRo(utc) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(utc || ""));
+  if (!m) return "";
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])).toLocaleTimeString("ro-RO", { timeZone: "Europe/Bucharest", hour: "2-digit", minute: "2-digit" });
+}
+
+// Căsuțele în care vin etichetele: cele care au primit deja un awbs.pdf. Până
+// vine primul, căsuțele comune.
+async function casuteAwb() {
+  const cu = await db
+    .prepare(
+      `SELECT c.id, c.adresa, c.ultima_sincronizare, c.ultima_eroare,
+              (SELECT COUNT(*) FROM email_mesaje m WHERE m.cont_id = c.id) AS mesaje
+         FROM email_conturi c
+        WHERE c.activ = 1
+          AND EXISTS (SELECT 1 FROM email_mesaje m JOIN email_atasamente a ON a.mesaj_id = m.id
+                       WHERE m.cont_id = c.id AND a.nume ILIKE 'awbs%.pdf')
+        ORDER BY mesaje, c.id`
+    )
+    .all()
+    .catch(() => []);
+  if (cu.length) return cu;
+  return db
+    .prepare("SELECT id, adresa, ultima_sincronizare, ultima_eroare FROM email_conturi WHERE activ = 1 AND tip = 'comun' ORDER BY id")
+    .all()
+    .catch(() => []);
+}
+
 // Teancurile de etichete din ultimele `zile` zile, cu starea lor de printare.
 //
 // Acelasi fisier ajunge in doua casute (Sameday@ si office@ sunt amandoua pe
@@ -1414,4 +1512,4 @@ async function etichetePdf(zile) {
   return out;
 }
 
-module.exports = { register, stocCurent, comenziZi, CALE };
+module.exports = { register, stocCurent, comenziZi, CALE, casuteAwb, oraRo };

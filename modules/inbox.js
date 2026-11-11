@@ -303,7 +303,28 @@ function mesajul(e) {
   return String(e);
 }
 
+// O căsuță se citește de un singur fir odată. Sincronizarea de la 5 minute și
+// cea cerută de om (Fulfillment → „Adu AWB-urile acum") pot porni în același
+// timp; pe aceeași căsuță ar cere aceleași mesaje de două ori. Pe căsuțe
+// diferite merg una lângă alta — tocmai de-aia zăvorul e pe căsuță, nu pe tot:
+// pe 11.11.2026 căsuța sameday@ era ultima la rând, în spatele a zece căsuțe
+// cu sute de mesaje de recuperat fiecare.
+const inLucru = new Set();
+
 async function sincronizeazaCont(cont) {
+  const cheie = Number(cont && cont.id);
+  if (inLucru.has(cheie)) {
+    return { adresa: cont.adresa, noi: 0, sarite: 0, blocate: 0, disparute: 0, esuate: 0, atasamente: 0, eroare: null, ocupat: true };
+  }
+  inLucru.add(cheie);
+  try {
+    return await citesteCont(cont);
+  } finally {
+    inLucru.delete(cheie);
+  }
+}
+
+async function citesteCont(cont) {
   const rezumat = { adresa: cont.adresa, noi: 0, sarite: 0, blocate: 0, disparute: 0, esuate: 0, atasamente: 0, eroare: null };
   try {
     let iduri = [];
@@ -381,7 +402,10 @@ async function sincronizeazaTot() {
     // blocat un expeditor acum cinci minute, de la sincronizarea asta nu mai
     // intră.
     await listaBlocate({ proaspat: true });
-    const conturi = await db.prepare("SELECT * FROM email_conturi WHERE activ = 1 ORDER BY id").all();
+    // Căsuțele comune întâi: în ele vin comenzile și etichetele AWB, de care
+    // depinde lucrul de azi. O căsuță personală cu sute de mesaje de recuperat
+    // nu le mai ține la coadă.
+    const conturi = await db.prepare("SELECT * FROM email_conturi WHERE activ = 1 ORDER BY CASE WHEN tip = 'comun' THEN 0 ELSE 1 END, id").all();
     const rezultate = [];
     for (const c of conturi) rezultate.push(await sincronizeazaCont(c));
 
@@ -399,6 +423,17 @@ async function sincronizeazaTot() {
   } finally {
     ruleaza = false;
   }
+}
+
+// Câteva căsuțe, la cererea omului, fără să aștepte rândul de la 5 minute.
+// Întoarce rezumatul fiecăreia; `ocupat` = căsuța se citea deja.
+async function sincronizeazaConturi(iduri) {
+  const rezultate = [];
+  for (const id of iduri || []) {
+    const c = await db.prepare("SELECT * FROM email_conturi WHERE id = ? AND activ = 1").get(Number(id));
+    if (c) rezultate.push(await sincronizeazaCont(c));
+  }
+  return rezultate;
 }
 
 function porneste() {
@@ -1307,6 +1342,7 @@ module.exports = {
   blocEmailuri,
   sincronizeazaTot,
   sincronizeazaCont,
+  sincronizeazaConturi,
   salveazaMesaj,
   leaga,
   numereDinText,
