@@ -100,7 +100,11 @@ function textRezervare(z, um) {
   )}, până la ${esc(RA.dataOra(z.expira_la))}${z.observatii ? ` <span style="color:var(--text-muted)">· ${esc(z.observatii)}</span>` : ""}`;
 }
 
-function celule(r, ctx, inapoi, poateRez) {
+// „7,35", „0,0167": prețul pe unitate, cu câte zecimale are nevoie.
+const pretRo = (v) => (Number(v) || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: (Number(v) || 0) < 1 ? 4 : 2 });
+const leiRo = (v) => (Number(v) || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
+
+function celule(r, ctx, inapoi, poateRez, vedeTot) {
   const user = ctx.user;
   // Denumirea lungă se rupe pe 2–3 rânduri (lib/render.js, numeLung).
   const produs =
@@ -118,6 +122,19 @@ function celule(r, ctx, inapoi, poateRez) {
         }`
       : `0${r.um ? " " + esc(r.um) : ""}`;
   const alte = r.alteUm.length ? mic("și " + r.alteUm.map((a) => cu(a.cantitate, a.um)).join(", ") + " (altă unitate, separat)") : "";
+
+  // Prețul de intrare al produsului (Vali, 11.11.2026: „și afișează și la
+  // stoc la zi preț la fiecare produs"): media ponderată a mărfii din stoc și
+  // valoarea ei. Doar pentru cine are Depozitul — agentul nu vede coloana.
+  const laPaletiFaraPret = `/stocuri/ct-park/paleti?fara_pret=1&q=${encodeURIComponent(String(r.denumire || "").slice(0, 80))}`;
+  const pret =
+    r.stoc <= SP.EPS
+      ? "—"
+      : r.pret
+        ? `${pretRo(r.pret)} lei${r.um ? " / " + esc(r.um) : ""}${mic("valoare " + leiRo(r.valoare))}${
+            r.faraPret > SP.EPS ? mic(`${cu(r.faraPret, r.um)} fără preț — <a href="${esc(laPaletiFaraPret)}">pune-l</a>`, "color:var(--warn,#b5760b)") : ""
+          }`
+        : `<span class="badge galben">fără preț</span>${mic(`<a href="${esc(laPaletiFaraPret)}">pune prețul pe paleți</a>`)}`;
 
   const promis = r.promis > SP.EPS
     ? cu(r.promis, r.um) +
@@ -212,6 +229,7 @@ function celule(r, ctx, inapoi, poateRez) {
     `<span data-filtru="${esc(r.categorie || "—")}">${esc(r.categorie || "—")}</span>` + schimba,
     esc(r.tip || "—"),
     inStoc + alte,
+    ...(vedeTot ? [pret] : []),
     disponibil + (actiune ? `<div style="margin-top:4px">${actiune}</div>` : ""),
     stare,
     promis,
@@ -279,6 +297,17 @@ async function pagina(ctx, opt) {
         <div class="ct-sub"><a href="${REZERVARI}">vezi toate rezervările</a></div></div>
       <div class="card"><div class="label">Urmează să intre</div><div class="value">${toate.filter(ARATA.intra.potrivit).length}</div>
         <div class="ct-sub">produse comandate sau în producție</div></div>
+      ${
+        // Valoarea, la preț de intrare — doar pentru cine are Depozitul.
+        vedeTot
+          ? `<div class="card" id="card-valoare"><div class="label">Valoarea stocului</div><div class="value">${leiRo(cuStoc.reduce((s, r) => s + r.valoare, 0))}</div>
+               <div class="ct-sub">la preț de intrare${
+                 cuStoc.some((r) => r.faraPret > SP.EPS)
+                   ? ` · <a href="/stocuri/ct-park/paleti?fara_pret=1">${cuStoc.filter((r) => r.faraPret > SP.EPS).length} produse au marfă fără preț</a>, nu intră în sumă`
+                   : ""
+               }</div></div>`
+          : ""
+      }
     </div>`;
 
   // Panoul de rezervare: unul singur pe pagină, umplut de butonul „Rezervă"
@@ -344,8 +373,8 @@ async function pagina(ctx, opt) {
       </script>`;
   }
 
-  const cap = ["Produs", "Categorie nomenclator", "Categorie", "În stoc", "Disponibil", "Stare", "Promis pe comenzi", "Rezervat", "Urmează să intre", "Sosire"];
-  const randuri = vizibile.map((r) => celule(r, ctx, inapoi, poateRez));
+  const cap = ["Produs", "Categorie nomenclator", "Categorie", "În stoc", ...(vedeTot ? ["Preț intrare"] : []), "Disponibil", "Stare", "Promis pe comenzi", "Rezervat", "Urmează să intre", "Sosire"];
+  const randuri = vizibile.map((r) => celule(r, ctx, inapoi, poateRez, vedeTot));
   // Lista din care se alege categoria din nomenclator: cele folosite deja.
   const listaCategorii = poateCategorii(user)
     ? `<datalist id="categorii-nomenclator">${(await SC.categoriiNomenclator()).map((c) => `<option value="${esc(c)}">`).join("")}</datalist>`
@@ -388,14 +417,20 @@ async function pagina(ctx, opt) {
       /* Zece coloane pe un ecran obișnuit: capul tabelului se rupe pe două
          rânduri unde nu e loc („Categorie nomenclator”, „Promis pe comenzi”,
          „Urmează să intre”), în loc să împingă tabelul afară din ecran. */
-      table[data-filtre="stoc-la-zi"] th { white-space: normal; vertical-align: bottom; }
+      table[data-filtre^="stoc-la-zi"] th { white-space: normal; vertical-align: bottom; }
+      /* Cele două categorii se pot rupe pe două rânduri („produse
+         intermediare”): fac loc coloanei de preț fără să împingă tabelul
+         afară din ecran. */
+      table[data-filtre^="stoc-la-zi"] td:nth-child(2), table[data-filtre^="stoc-la-zi"] td:nth-child(3) { white-space: normal; min-width: 92px; }
     </style>
     ${
       vizibile.length
         ? // Cheia filtrelor s-a schimbat pe 11.11.2026 („stoc-produse" →
           // „stoc-la-zi"): un filtru ținut minte pe „Categorie nomenclator" cu
           // valorile greșite de dinainte ar fi ascuns tot tabelul.
-          `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: "stoc-la-zi" })}</div>`
+          // Cu coloana de preț, tabelul are altă cheie: filtrele ținute minte
+          // merg pe numărul coloanei, iar o coloană în plus le-ar muta.
+          `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: vedeTot ? "stoc-la-zi-pret" : "stoc-la-zi" })}</div>`
         : `<p style="margin-top:18px">${cauta || tip || arata ? "Nimic nu se potrivește cu ce ai ales." : "Depozitul e gol și nu urmează să intre nimic."}</p>`
     }
     ${scriptClienti}

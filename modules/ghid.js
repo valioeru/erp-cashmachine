@@ -298,12 +298,14 @@ const GHID = [
 "p":[
 "Când vine marfă în depozit, o înregistrezi aici. Spui ce e, câtă e, din ce lot, și câte locuri de palet ocupă. Sistemul îți dă adresa liberă și îți tipărește eticheta.",
 "Eticheta se lipește pe palet. Pe ea scrie mare adresa — după aia nu mai cauți marfa, o găsești.",
+"<b>Prețul de intrare e obligatoriu.</b> Dacă ERP-ul îl știe — de pe rândul recepției sau de pe produs (rețeta, costul de producție, prețul de achiziție) — vine gata scris și îl poți schimba; dacă nu, îl scrii de pe factura sau avizul furnizorului, în lei pe unitatea de măsură. Sub total vezi și valoarea intrării: dacă pare uriașă, prețul e probabil pe mia de bucăți, iar marfa e numărată în bucăți. Fără preț nu intră decât marfa care pleacă direct la client, fără raft.",
+"Paleții care sunt deja în depozit fără preț se găsesc în <b>Paleți în depozit</b>, la „arată-i și pune prețurile”: scrii prețul pe rândul paletului și apeși „Pune”; bifa de lângă îl pune pe toți paleții cu aceeași marfă. Un preț deja pus îl schimbă doar administratorul, cu „modifică”, iar schimbarea rămâne scrisă în fișa paletului.",
 "Sus, în <b>Gata din producție — de alocat</b>, stă marfa terminată în producție și cererile marcate „intrată în stoc” care n-au încă palet. De la fiecare rând o pui pe raft (Intrarea se completează singură) sau o trimiți direct în fulfillment ori la livrare pe comanda clientului.",
 "Dedesubt, în <b>Recepționat de la furnizori — de alocat</b>, apare marfa de la furnizori și retururile, imediat ce recepția lor e finalizată, cu aceleași butoane. Mai jos sunt <b>paleții cu etichetă, fără loc pe raft</b>: îi pui pe raft cu „Pune pe raft”. Dacă a venit mai mult decât scrie pe rând, la „Alocă pe cantități” bifezi „a venit mai mult” și scrii cât e: se salvează cantitatea scrisă de tine."
 ],
 "pasi":[
 "Apeși „+ Intrare marfă”.",
-"Alegi produsul și scrii cantitatea și lotul.",
+"Alegi produsul și scrii cantitatea, lotul și prețul de intrare (vine propus, dacă ERP-ul îl știe).",
 "Spui câte locuri ocupă paletul (unele ocupă 2–3).",
 "Salvezi. Primești adresa și eticheta, o tipărești și o lipești."
 ],
@@ -386,6 +388,7 @@ const GHID = [
 "<b>Stoc la zi</b> arată CT-Park pe produse și e deschisă oricui are cont în ERP. Pentru fiecare produs vezi cât e în stoc, cât e deja <b>promis</b> (comenzile deschise ale clienților și marfa făcută în producție pentru un anume client), cât e <b>rezervat</b> de agenți și cât e <b>liber</b>.",
 "Coloana <b>Urmează să intre</b> spune ce vine: comenzile trimise la furnizori, cu data cerută, și producția, cu termenul și clientul pentru care se face. Ce se face pentru un client nu e liber când intră.",
 "Agenții și administratorii pot <b>rezerva</b> marfa liberă pentru un client, 3 zile. Clienții cu facturi trecute de scadență nu pot primi rezervări. Când clientul pune comanda cu produsul, rezervarea se închide singură; fără comandă, se eliberează după 3 zile.",
+"Cine are Depozitul vede și coloana <b>Preț intrare</b>: prețul mediu al mărfii din stoc, valoarea ei și cât din ea n-are încă preț. Agenții nu văd prețurile.",
 "Vederea veche, pe paleți — cu lotul, locul, furnizorul și prețul —, e la clicul <b>Pe paleți</b>.",
 "Lângă produs sunt cele două categorii: <b>Categorie nomenclator</b> (a produsului) și <b>Categorie</b> (produse finite, produse intermediare, consumabile, materie primă). Administratorul le schimbă cu „modifică”; categoria simplă se scrie și pe paleții din stoc, iar paleții noi o moștenesc."
 ],

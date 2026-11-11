@@ -315,7 +315,9 @@ function register(router) {
         iesire_comanda_id: cid || "",
       },
       [[]],
-      a.ramas
+      a.ramas,
+      // Pleacă direct, fără raft: lipsa prețului nu oprește livrarea.
+      { faraPret: true }
     );
     if (!ids.length) return inapoi(ctx, "gata_eroare", "Paletul pentru livrare nu s-a putut face.");
     const q = new URLSearchParams({
@@ -386,7 +388,8 @@ function register(router) {
             iesire_comanda_id: dest === "comanda" ? cid : "",
           },
           [[]],
-          q
+          q,
+          { faraPret: true }
         );
         if (!ids.length) return { eroare: "Paletul nu s-a putut face." };
         const qs = new URLSearchParams({ palet: String(ids[0]), destinatie: dest, ...(dest === "comanda" ? { comanda_id: String(cid) } : {}), motiv: `livrare directă din ${a.numar}` });

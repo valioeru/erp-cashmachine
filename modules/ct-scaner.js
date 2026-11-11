@@ -39,6 +39,8 @@ const GP = require("../lib/gata-productie");
 const SCAN = require("../lib/scan");
 const CPL = require("../lib/ct-palet-linii");
 const codbare = require("../lib/codbare");
+// Cerut la apel: modules/ct-park.js cere la rândul lui modulul ăsta.
+const ctPark = () => require("./ct-park");
 
 // „CALE": numele pe care îl caută testele care citesc rutele din sursă.
 const CALE = "/stocuri/ct-park/scaner";
@@ -463,7 +465,11 @@ function register(router) {
     let loc = ids(qy.loc).slice(0, 3);
     const cate = Math.min(3, Math.max(1, parseInt(qy.lat, 10) || 1, loc.length));
     const cantScrisa = qy.cant !== undefined && String(qy.cant).trim() !== "" ? String(qy.cant).slice(0, 80) : String(r.ramas).replace(".", ",");
-    const stare = () => ({ sursa: sursa === "toate" ? "" : sursa, lat: cate === 1 ? "" : cate, loc: loc.join(","), cant: qy.cant !== undefined ? cantScrisa : "" });
+    // Prețul de intrare: dacă ERP-ul îl știe (recepție sau produs), doar se
+    // arată; dacă nu, se cere aici, o dată, și se ține minte între scanări.
+    const pretStiut = await SC.pretRand(r.cheie);
+    const pretScris = qy.pret !== undefined ? String(qy.pret).slice(0, 20) : "";
+    const stare = () => ({ sursa: sursa === "toate" ? "" : sursa, lat: cate === 1 ? "" : cate, loc: loc.join(","), cant: qy.cant !== undefined ? cantScrisa : "", pret: pretStiut ? "" : pretScris });
     const aici = (extra) => `${CALE}/intrare/rand/${r.cheie}${q(Object.assign(stare(), extra))}`;
     const cod = SC.curat(qy.cod);
     if (cod) {
@@ -501,6 +507,17 @@ function register(router) {
         <label class="sc-f">Cât e pe palet${r.um ? " (" + esc(r.um) + ")" : ""}
           <input name="cant" data-tine="cant" inputmode="decimal" value="${esc(cantScrisa)}" autocomplete="off">
         </label>
+        ${
+          pretStiut
+            ? `<div class="sc-mic" id="sc-pret-stiut">Preț de intrare: <strong>${esc(ctPark().scriePret(pretStiut.pret))} lei${r.um ? " / " + esc(r.um) : ""}</strong> — ${esc(pretStiut.sursa)}</div>`
+            : r.sursa === "productie"
+              ? // Marfa făcută de noi, fără cost pe produs: prețul nu se cere
+                // (modules/ct-park.js, regula prețului de intrare).
+                `<label class="sc-f">Preț de intrare (lei${r.um ? " / " + esc(r.um) : ""}) — produsul n-are cost în ERP; scrie-l doar dacă îl știi
+                   <input name="pret" data-tine="pret" inputmode="decimal" value="${esc(pretScris)}" autocomplete="off"></label>`
+              : `<label class="sc-f">Preț de intrare (lei${r.um ? " / " + esc(r.um) : ""}) — ERP-ul nu-l știe, scrie-l de pe factură sau aviz
+                   <input name="pret" data-tine="pret" inputmode="decimal" value="${esc(pretScris)}" autocomplete="off" required></label>`
+        }
         <div class="sc-mic">Mai mulți paleți, fără loc deocamdată: scrie cât e pe fiecare, cu plus între ei — „400 + 400 + 200” sau „3 x 400” — și apasă butonul de jos.</div>
         <button class="sc-ok" type="submit" name="actiune" value="loc"${alese.length ? "" : " disabled"}>${alese.length ? `EFECTUEAZĂ — pune pe ${esc(alese.map((l) => l.adresa).join(" + "))}` : "Scanează sau alege locul"}</button>
         <button class="sc-btn" type="submit" name="actiune" value="paleti" style="width:100%;margin-top:10px">Fă doar paleții și etichetele (fără loc)</button>
@@ -521,12 +538,12 @@ function register(router) {
     const cuLoc = String(b.actiune || "loc") !== "paleti";
     const loc = cuLoc ? ids(b.locuri) : [];
     const inapoi = (eroare, peste) =>
-      redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { lat: nr(b.lat) > 1 ? nr(b.lat) : "", loc: ids(b.locuri).join(","), cant: String(b.cant || "").slice(0, 80), eroare, peste: peste ? String(peste) : "" }))}`);
+      redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { lat: nr(b.lat) > 1 ? nr(b.lat) : "", loc: ids(b.locuri).join(","), cant: String(b.cant || "").slice(0, 80), pret: String(b.pret || "").slice(0, 20), eroare, peste: peste ? String(peste) : "" }))}`);
     const cantitati = SC.cantitatiDinText(b.cant);
     if (!cantitati.length || cantitati.some((x) => !(x > 0))) return inapoi("Scrie cât e pe palet: un număr mai mare ca zero (sau mai multe, cu plus între ele: 400 + 400 + 200).");
     if (cuLoc && !loc.length) return inapoi("Scanează locul de pe raft sau alege unul din cele propuse.");
     if (cuLoc && cantitati.length > 1) return inapoi("Pe locul ales se pune un singur palet. Scrie o singură cantitate, sau apasă „Fă doar paleții și etichetele”.");
-    const r = await SC.faPaleti(ctx.user, cheie, cantitati, loc, { confirmaPeste: b.confirma_peste });
+    const r = await SC.faPaleti(ctx.user, cheie, cantitati, loc, { confirmaPeste: b.confirma_peste, pret: b.pret });
     // Mai mult decât era de pus: pagina se întoarce cu întrebarea și ține
     // minte suma, ca a doua apăsare s-o confirme.
     if (r.eroare) {
@@ -1148,8 +1165,8 @@ function registerHartii(router) {
         erori.push(`„${scris.slice(0, 40)}” nu e o listă de cantități.`);
         continue;
       }
-      const r = await SC.faPaleti(u, "r" + l.id, cantitati, [], { peste: String(b.peste || "") === "1" });
-      if (r.eroare) erori.push(r.peste ? `${r.eroare} Dacă a venit mai mult, bifează „pe paleți e mai mult decât s-a numărat” și trimite din nou.` : r.eroare);
+      const r = await SC.faPaleti(u, "r" + l.id, cantitati, [], { peste: String(b.peste || "") === "1", pret: b["pret_" + l.id] });
+      if (r.eroare) erori.push(r.peste ? `${r.eroare} Dacă a venit mai mult, bifează „pe paleți e mai mult decât s-a numărat” și trimite din nou.` : r.faraPret ? `„${scris.slice(0, 40)}”: ${r.eroare} Scrie-l în căsuța de preț a rândului.` : r.eroare);
       if (r.ids && r.ids.length) facute.push(...r.ids);
     }
     if (!facute.length) return inapoi("eroare", erori.length ? erori.join(" ") : "Scrie cât e pe fiecare palet, la rândurile pentru care faci paleți.");

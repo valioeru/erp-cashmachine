@@ -159,7 +159,7 @@ async function sectiuneCtPark(r, linii) {
     // plecat între timp dintr-un palet nu se întoarce la „de pus".
     const pus = ale.reduce((s, p) => s + nr(p.pusa), 0);
     const ramas = Math.round((nr(l.cantitate_primita) - pus) * 1000) / 1000;
-    if (ramas > R.EPS && !l.ct_inchis_la) faraPaleti.push({ id: Number(l.id), nume: l.produs_denumire || l.produs_text || "—", ramas, um: l.um || l.unitate_masura || "" });
+    if (ramas > R.EPS && !l.ct_inchis_la) faraPaleti.push({ id: Number(l.id), produs_id: l.produs_id, nume: l.produs_denumire || l.produs_text || "—", ramas, um: l.um || l.unitate_masura || "" });
     const um = esc(l.um || l.unitate_masura || "");
     const unde = ale.length
       ? ale
@@ -208,6 +208,12 @@ async function sectiuneCtPark(r, linii) {
       actiuni,
     ];
   });
+  // Prețul de intrare e obligatoriu (Vali, 11.11.2026; modules/ct-park.js,
+  // pretDeIntrare). Unde ERP-ul nu-l știe — nici pe rândul recepției, nici
+  // pe produs — rândul primește o căsuță de preț.
+  for (const x of faraPaleti) {
+    x.pret = await require("./ct-park").pretStiut({ receptie_linie_id: x.id, produs_id: x.produs_id }).catch(() => null);
+  }
   // „La recepție marfă să te asiguri că se generează etichete pentru fiecare
   // palet — se lipește pe palet, apoi se scanează și se pun pe rafturi."
   // Un singur formular pentru toate rândurile: câte un palet cu tot ce a
@@ -223,7 +229,15 @@ async function sectiuneCtPark(r, linii) {
          ${faraPaleti
            .map(
              (x) => `<label class="field"><span>${esc(x.nume)} — de pus <strong>${fmt(x.ramas)} ${esc(x.um)}</strong></span>
-               <input name="paleti_${x.id}" value="${esc(String(x.ramas).replace(".", ","))}" inputmode="text" autocomplete="off" placeholder="ex. 400 + 400 + 200 sau 3 x 400 — gol = fără paleți acum"></label>`
+               <input name="paleti_${x.id}" value="${esc(String(x.ramas).replace(".", ","))}" inputmode="text" autocomplete="off" placeholder="ex. 400 + 400 + 200 sau 3 x 400 — gol = fără paleți acum"></label>
+               ${
+                 x.pret
+                   ? ""
+                   : `<label class="field" style="max-width:420px"><span>Preț de intrare (lei / ${esc(x.um || "UM")}) — ${
+                       r.sursa === "productie" ? "produsul n-are cost în ERP; scrie-l doar dacă îl știi" : "ERP-ul nu-l știe, scrie-l de pe factură sau aviz"
+                     }</span>
+                        <input name="pret_${x.id}" inputmode="decimal" autocomplete="off" placeholder="ex. 7,35"></label>`
+               }`
            )
            .join("")}
          <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin:4px 0 0">
@@ -1040,7 +1054,10 @@ async function livrareDirecta(user, id, lid, destinatieCeruta, comandaCeruta, ca
       iesire_comanda_id: cidPlan || "",
     },
     [[]],
-    cantitate
+    cantitate,
+    // Pleacă direct, fără raft: prețul se ia dacă ERP-ul îl știe, dar lipsa
+    // lui nu oprește livrarea (modules/ct-park.js, pretDeIntrare).
+    { faraPret: true }
   );
   if (!ids.length) return { eroare: "Paletul pentru livrare nu s-a putut face." };
   const cid = cidPlan || "";
