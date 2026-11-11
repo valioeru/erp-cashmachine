@@ -1026,7 +1026,7 @@ async function comandaZilei(zi, userSauId, deUnde) {
         numar: "Sameday " + dataRo(zi),
         observatii: `Comanda zilnică de consumabile Sameday pentru ${dataRo(zi)}, făcută de ERP din raportul de comenzi. Dacă ziua se urcă din nou, se pune la zi singură cât timp e „nouă”.`,
         agent_id: (ultima && ultima.agent_id) || partener.agent_id || (user && user.id) || null,
-        data_livrare_ceruta: zi,
+        data_livrare_ceruta: ziuaLivrarii(zi),
         livrare_partiala: (ultima && ultima.livrare_partiala) || "da",
         sursa: "sameday",
         linii: plan.linii,
@@ -1287,6 +1287,16 @@ function vineriDacaWeekend(zi) {
   if (z === 6) return ziPlus(zi, -1); // sâmbătă
   if (z === 0) return ziPlus(zi, -2); // duminică
   return zi;
+}
+
+// Marfa unei zile pleacă în următoarea zi lucrătoare: eticheta tipărită pe
+// 09.10 duce comanda zilei de 08.10, iar Gabi scria pe comenzile ei tot ziua
+// următoare (vinerea — luni). Asta e data cerută pe comanda zilei. Sărbătorile
+// legale nu le știe; data se schimbă din comandă.
+function ziuaLivrarii(zi) {
+  let z = ziPlus(zi, 1);
+  while (ziuaSaptamanii(z) === 6 || ziuaSaptamanii(z) === 0) z = ziPlus(z, 1);
+  return z;
 }
 
 // Cele două perioade ale unei luni, fiecare cu data ei de facturare.
@@ -1651,11 +1661,18 @@ async function sugestiiLegare(consumabile) {
 }
 
 function formularLegare(consumabile, date) {
+  const dupaId = new Map((date.nomenclator || []).map((p) => [Number(p.id), p]));
+  const numeProdus = (p) => `${esc(p.denumire)}${p.cod ? ` [${esc(p.cod)}]` : ""}`;
   const randuri = consumabile.map((c) => {
     const sug = date.sugestii.get(Number(c.id)) || [];
+    // Produsul legat se spune pe nume și când nu e între cele opt sugestii —
+    // până pe 11.11.2026 apărea doar ca „#3449”, de neverificat cu ochii.
+    const legat = c.produs_id ? dupaId.get(Number(c.produs_id)) : null;
     const legatNesugerat =
       c.produs_id && !sug.some((x) => Number(x.p.id) === Number(c.produs_id))
-        ? `<option value="${c.produs_id}" selected>produsul legat acum (#${c.produs_id})</option>`
+        ? `<option value="${c.produs_id}" selected>${
+            legat ? numeProdus(legat) + " — legat acum" : `produsul #${Number(c.produs_id)}, legat acum — nu mai e activ în nomenclator`
+          }</option>`
         : "";
     const opt = sug
       .map(
@@ -1674,7 +1691,8 @@ function formularLegare(consumabile, date) {
     return [
       esc(c.denumire),
       money(c.pret),
-      `<select name="l_${c.id}" style="max-width:420px"><option value="">— nelegat —</option>${legatNesugerat}${opt}</select>`,
+      `<select name="l_${c.id}" style="max-width:420px"><option value="">— nelegat —</option>${legatNesugerat}${opt}</select>
+       <input name="alt_${c.id}" list="lista-nomenclator" autocomplete="off" placeholder="alt produs: scrie numele sau codul și alege-l" style="display:block;width:100%;max-width:420px;margin-top:4px;font-size:12px">`,
       // Un cost mai mare decât prețul de vânzare trece de plasa de 5× dar e
       // aproape sigur o legătură greșită: plicul AWB C5 se vinde la 9 bani, iar
       // un cost de 19 bani ar da marjă negativă fără să pară o eroare. Se vede.
@@ -1685,6 +1703,7 @@ function formularLegare(consumabile, date) {
     ];
   });
   return `<form method="post" action="${CALE}/legare" class="form">
+    <datalist id="lista-nomenclator">${(date.nomenclator || []).map((p) => `<option value="#${Number(p.id)} · ${numeProdus(p)}">`).join("")}</datalist>
     ${table(["Produs din comandă", "Preț vânzare", "Produsul din nomenclator", "Cost rezultat", "Temei"], randuri)}
     <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
       <button class="btn" type="submit">Leagă și recalculează costurile</button>
@@ -1693,9 +1712,10 @@ function formularLegare(consumabile, date) {
       </label>
     </div>
     <p style="font-size:12px;color:var(--text-muted);margin-top:8px">
-      Lista arată doar produsele care seamănă la nume. Dacă cel potrivit nu e între ele, caută-l în
-      <a href="/produse/fuziune">nomenclator</a> — de multe ori există sub două-trei coduri și merită
-      unificat înainte de legare.
+      Lista arată întâi produsele care seamănă la nume. Dacă cel potrivit nu e între ele, scrie-i numele sau codul
+      în caseta de dedesubt și alege-l din lista care apare — caseta are întâietate față de listă. Același produs
+      există de multe ori sub două-trei coduri (vezi <a href="/produse/fuziune">nomenclatorul</a>): alege-l pe cel
+      pe care stă stocul, fiindcă el ajunge pe comanda zilei.
     </p>
   </form>`;
 }
@@ -1889,7 +1909,9 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       <h2>Adaugă sau corectează o zi</h2>
       ${formularZi(produse, ziForm, cantitati)}
 
-      <h2>Costul, luat din nomenclator</h2>
+      <h2 id="legare">Legăturile la nomenclator — comanda zilei și costul</h2>
+      ${ctx.query.legare_eroare ? `<div class="flash flash-rosu" role="alert">${esc(String(ctx.query.legare_eroare))}</div>` : ""}
+      ${ctx.query.legare_ok ? `<div class="flash">${esc(String(ctx.query.legare_ok))}</div>` : ""}
       <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px">
         Legătura spune <strong>ce produs din nomenclator intră pe comanda zilei</strong> — fără ea, produsul din raport
         nu poate ajunge pe comandă. Tot de la ea vine și costul, acolo unde n-ai scris tu unul: <strong>din rețetă</strong>
@@ -2106,15 +2128,30 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     const b = ctx.body || {};
     const produse = await db.prepare("SELECT id, denumire, produs_id FROM consumabile_produse").all();
     const legaturi = [];
+    const refuzate = [];
     for (const p of produse) {
       // Doar ce a venit în formular. Produsele scoase din listă (activ = 0) nu
       // apar pe pagină, iar un câmp care lipsește nu înseamnă „dezleagă-l”:
       // până pe 11.11.2026 orice salvare le rupea legătura.
-      if (!Object.prototype.hasOwnProperty.call(b, `l_${p.id}`)) continue;
-      const brut = String(b[`l_${p.id}`] == null ? "" : b[`l_${p.id}`]).trim();
+      const alt = String(b[`alt_${p.id}`] == null ? "" : b[`alt_${p.id}`]).trim();
+      if (!alt && !Object.prototype.hasOwnProperty.call(b, `l_${p.id}`)) continue;
+      // Caseta „alt produs” are întâietate față de listă. Vine ca
+      // „#3449 · Plicuri autoadezive…”; numărul de după # e produsul. Fără #
+      // nu se ia: un nume scris de mână care începe cu o cifră („108846 - Plic
+      // H18…”) ar lega alt produs decât cel citit de om.
+      const brut = alt ? ((alt.match(/^#\s*(\d+)\b/) || [])[1] || "x") : String(b[`l_${p.id}`] == null ? "" : b[`l_${p.id}`]).trim();
       const id = brut === "" ? null : Number(brut);
       const nou = Number.isFinite(id) && id > 0 ? id : null;
       const vechi = Number(p.produs_id) > 0 ? Number(p.produs_id) : null;
+      if (!alt && nou === vechi) continue;
+      if (nou || alt) {
+        // Produsul trebuie să existe; cel scris în casetă, să fie și activ.
+        const n = nou ? await db.prepare("SELECT id, COALESCE(activ, 1) AS activ, fuzionat_in FROM produse WHERE id = ?").get(nou).catch(() => null) : null;
+        if (!n || (alt && (!Number(n.activ) || n.fuzionat_in))) {
+          refuzate.push(`${p.denumire} („${(alt || brut).slice(0, 60)}”)`);
+          continue;
+        }
+      }
       if (nou === vechi) continue;
       await db.prepare("UPDATE consumabile_produse SET produs_id = ? WHERE id = ?").run(nou, p.id);
       legaturi.push(`${p.denumire}: ${vechi ? "#" + vechi : "nelegat"} → ${nou ? "#" + nou : "nelegat"}`);
@@ -2128,7 +2165,9 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     console.log(
       `[comenzi-zi] costuri recalculate: ${r.cu_cost}/${r.produse} produse cu cost, ${r.fara_cost} fără; linii umplute: ${umplut.linii} + ${umplut.linii_awb} pe AWB`
     );
-    return redirect(ctx.res, `${CALE}?legare=1`);
+    const q = new URLSearchParams({ legare: "1", legare_ok: legaturi.length ? `Salvat: ${legaturi.join("; ")}.`.slice(0, 1500) : "Nicio legătură schimbată." });
+    if (refuzate.length) q.set("legare_eroare", `N-am găsit în nomenclator produsul ales la: ${refuzate.join(", ")}. Scrie numele sau codul și alege-l din lista care apare. A rămas legătura de dinainte.`.slice(0, 1500));
+    return redirect(ctx.res, `${CALE}?${q.toString()}#legare`);
   });
 
   // Fișa clientului de pe AWB. Aici stau adresa, agenția, ce cumpără și
@@ -2362,5 +2401,5 @@ module.exports = {
   poateUrca,
   // Expuse pentru teste: recunoașterea produsului e piesa de care atârnă jobul
   // de noapte, iar ea se verifică pe cele 419 etichete reale, nu din priviri.
-  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, textComandaZi, azi: null },
+  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, ziuaLivrarii, textComandaZi, azi: null },
 };
