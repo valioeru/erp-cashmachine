@@ -363,6 +363,27 @@ const celule = (tr) => (tr.match(/<td>[\s\S]*?<\/td>/g) || []).map((c) => c.repl
   r = socoteste({ produse: prod([[1, "Sac", "buc", undefined, { cost_reteta: 625, pret_vanzare: 1 }], [3, "Folie", "kg"]]), retete: [{ produs_id: 1, componenta_id: 3, cantitate: 125 }], vanzari: [], comenzi: [{ comanda_id: 7, numar: "C7", partener_id: 9, client: "Client", produs_id: 1, cantitate: 10000, cantitate_livrata: 0 }], stoc: [] });
   egal("nici comenzile în curs nu trec prin rețeta pe lot: nicio folie de comandat, dar sacul e de făcut și rețeta e spusă", [rand(r, 3), pe(facut(r, 1), ["inCurs", "deFacut", "retetaPeLot"]), r.note.retetePeLot.map((x) => x.deFacut)], [undefined, [10000, 10000, true], [10000]]);
 
+  // Produsul nevândut încă și fără preț în catalog: reperul e cât valorează o
+  // bucată pe comanda care îl cere. Așa era sacul din 11.11.2026 — o comandă de
+  // producție de 10.000 de bucăți la 1,17 lei, cu o rețetă de 2.029 lei „pe bucată”.
+  const PN = prod([[1, "Sac nou", "buc", undefined, { cost_reteta: 2029.25 }], [3, "Folie", "kg"]]);
+  const RN = [{ produs_id: 1, componenta_id: 3, cantitate: 125 }];
+  const cmdSac = (extra) => Object.assign({ comanda_id: 7, numar: "C7", partener_id: 9, client: "Client", produs_id: 1, cantitate: 10000, cantitate_livrata: 0, pret_unitar: 1.17, moneda: "RON" }, extra || {});
+  r = socoteste({ produse: PN, retete: RN, comenzi: [cmdSac()], stoc: [] });
+  egal("fără vânzări și fără preț de catalog, linia comenzii de 1,17 lei arată că rețeta de 2.029 lei e pe lot", [rand(r, 3), r.note.retetePeLot.map((x) => [x.produs_id, x.pret, x.sursa, Math.round(x.ori)])], [undefined, [[1, 1.17, "valoarea comenzii", 1734]]]);
+  r = socoteste({ produse: PN, retete: RN, stoc: [stocDe(1, 0, "buc", [productie(10000, "buc", "noua", { client: "Cargus", cheieClient: "p:5", pret: 1.17 })])] });
+  egal("la fel valoarea pe bucată a comenzii de producție", [rand(r, 3), pe(facut(r, 1), ["deFacut", "retetaPeLot"]), r.note.retetePeLot.map((x) => [x.produs_id, x.sursa])], [undefined, [10000, true], [[1, "valoarea comenzii"]]]);
+  r = socoteste({ produse: PN, retete: RN, comenzi: [cmdSac({ pret_unitar: 0.3, moneda: "EUR" })], stoc: [] });
+  egal("prețul în euro nu e reper: rețeta rămâne nejudecată și se desface", [rand(r, 3).necesar, r.note.retetePeLot.length], [1250000, 0]);
+  r = socoteste({ produse: PN, retete: RN, comenzi: [cmdSac({ pret_unitar: 0 })], stoc: [] });
+  egal("…la fel linia fără preț", [rand(r, 3).necesar, r.note.retetePeLot.length], [1250000, 0]);
+  r = socoteste({ produse: PN, retete: RN, comenzi: [cmdSac(), cmdSac({ comanda_id: 8, numar: "C8", cantitate: 1, pret_unitar: 1000 })], stoc: [] });
+  egal("dintre mai multe comenzi se ia prețul cel mai mare: la 1.000 de lei bucata, rețeta nu mai pare pe lot", r.note.retetePeLot.length, 0);
+  r = socoteste({ produse: PN, retete: RN, comenzi: [cmdSac({ comanda_id: 8, numar: "C8", cantitate: 1, pret_unitar: 1000 }), cmdSac()], stoc: [] });
+  egal("…oricare ar fi ordinea comenzilor", r.note.retetePeLot.length, 0);
+  r = socoteste({ produse: prod([[1, "Sac nou", "buc", undefined, { cost_reteta: 2029.25, pret_vanzare: 900 }], [3, "Folie", "kg"]]), retete: RN, comenzi: [cmdSac()], stoc: [] });
+  egal("prețul de catalog are întâietate față de cel de pe comandă", r.note.retetePeLot.length, 0);
+
   // ========================================================== B. DATELE DIN BAZĂ
   console.log("\n11. Datele din bază");
   curata();
@@ -490,6 +511,7 @@ const celule = (tr) => (tr.match(/<td>[\s\S]*?<\/td>/g) || []).map((c) => c.repl
   pg = await cer("/procurement/forecast", ADMIN, { zile: "60", istoric: "180", toate: "1" });
   contine("alegerile se țin: 60 de zile, 180 de istoric, cu toate articolele", pg.corp, ['<option value="60" selected>', '<option value="180" selected>', 'name="toate" value="1" checked', "consumul pe 60 de zile", "De comandat (60 zile)"]);
   contine("…și apare serviciul, cu semn", randPagina(pg.corp, SERVICIU), ["fără categorie și fără gestiune — poate fi un serviciu"]);
+  bine("…iar cifrele sunt ale istoricului ales (cu factura din 13.08), nu ale celui din oficiu", !celule(randPagina(pg.corp, GRANULA))[3].startsWith("315 kg") && /kg$/.test(celule(randPagina(pg.corp, GRANULA))[3]), celule(randPagina(pg.corp, GRANULA))[3]);
   pg = await cer("/procurement/forecast", ADMIN, { zile: "7", istoric: "abc" });
   contine("alegeri care nu există: rămân cele din oficiu", pg.corp, ['<option value="30" selected>', '<option value="90" selected>']);
   pg = await cer("/depozit/forecast", ADMIN);
@@ -513,6 +535,19 @@ const celule = (tr) => (tr.match(/<td>[\s\S]*?<\/td>/g) || []).map((c) => c.repl
   q(`UPDATE produse SET cost_reteta = NULL WHERE id = ${PUNGA}`);
   pg = await cer("/procurement/forecast", ADMIN);
   contine("cu rețeta reparată, atenționarea dispare și granula e iar de comandat", pg.corp, ["67,50 kg"], ["pare scrisă pe lot", "fc-retete-lot", "rețetă de verificat"]);
+  // Folia nu se vinde și n-are preț de catalog: singurul ei reper e comanda de producție (30 kg, 60 de lei).
+  q(`UPDATE comenzi_productie SET valoare_estimata = 60 WHERE id = ${CP3}`);
+  q(`UPDATE produse SET cost_reteta = 500 WHERE id = ${FOLIE}`);
+  const dDoc = await F.citeste({ azi: AZI, fereastra: 90 });
+  const intrFolie = (dDoc.stoc.find((x) => Number(x.produs_id) === FOLIE) || { intrari: [] }).intrari.find((i) => i.fel === "productie") || {};
+  egal("datele aduc valoarea pe bucată a comenzii de producție (60 lei / 30 kg)", [intrFolie.document, intrFolie.pret], [`${PREFIX}-CP3`, 2]);
+  bine("…și prețul cu moneda de pe liniile comenzilor de client", dDoc.comenzi.some((c) => Number(c.comanda_id) === O1 && Number(c.pret_unitar) === 1 && c.moneda === "RON"), JSON.stringify(dDoc.comenzi.find((c) => Number(c.comanda_id) === O1)));
+  const rDoc = await F.forecast({ azi: AZI, fereastra: 90, zile: 30 });
+  egal("folia cu rețetă de 500 de lei pe kg, la o comandă de 2 lei pe kg: pe lot, după valoarea comenzii", rDoc.note.retetePeLot.map((x) => [x.produs_id, x.pret, x.sursa, x.ori]), [[FOLIE, 2, "valoarea comenzii", 250]]);
+  egal("…deci granula nu mai e cerută de nimic", rand(rDoc, GRANULA), undefined);
+  q(`UPDATE comenzi_productie SET valoare_estimata = NULL WHERE id = ${CP3}`);
+  egal("fără valoarea comenzii nu mai e cu ce compara: rețeta se desface iar", (await F.forecast({ azi: AZI, fereastra: 90, zile: 30 })).note.retetePeLot.length, 0);
+  q(`UPDATE produse SET cost_reteta = NULL WHERE id = ${FOLIE}`);
 
   console.log("\n14. Comanda la furnizor pornită din forecast");
   pg = await cer("/procurement/comenzi/noua", ADMIN, { linii: `${GRANULA}:67.5;${BANDA}:230;${GRANULA}:5;999999999:3;${CUTIE}:-2;x:y;${ROLA}:;${FOLIE}:1e12;${PUNGA}:7:9`, furnizor: String(F1) });
