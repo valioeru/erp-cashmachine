@@ -45,6 +45,7 @@ const { send, redirect } = require("../lib/router");
 const mail = require("../lib/mail");
 const L = require("../lib/comenzi-furnizor-logica");
 const PDF = require("../lib/comanda-furnizor-pdf");
+const PZ = require("../lib/prezentare");
 
 // Adresa de pe care pleacă, cerută explicit. Rămâne schimbabilă din formular
 // pentru cine are și alte căsuțe — lib/mail verifică singur dacă are voie.
@@ -224,6 +225,255 @@ async function citesteIstoric(comandaId) {
     .prepare("SELECT * FROM comenzi_furnizor_istoric WHERE comanda_id = ? ORDER BY id DESC LIMIT 300")
     .all(comandaId)
     .catch(() => []);
+}
+
+// ---------------------------------------------------------------------------
+// Marfa primită intră în depozit.
+//
+// Vali, 13.11.2026: „La recepție marfă să se scrie și prezentarea mărfii, nr.
+// de paleți și buc. pe paleți, iar apoi marfa să aștepte alocarea pe rafturi în
+// depozit, ca și marfa venită din producție, în aceeași listă."
+//
+// Până atunci „Recepție" de pe comandă scria doar cât s-a primit: marfa nu
+// ajungea nici pe stoc, nici în Depozit → Intrare marfă, iar depozitul o băga
+// de mână. Acum, ce vine la o recepție (cât s-a primit acum peste ce era scris)
+// face o recepție în depozit legată de comandă, cu prezentarea fiecărui rând
+// (câți paleți, cât pe un palet plin — lib/prezentare.js). Recepția e numărată
+// pe loc: ce scrie omul aici e ce a venit. Marfa stă apoi în lista „De alocat
+// pe raft" (lib/gata-productie.js), de unde se fac paleții și etichetele
+// dintr-o apăsare.
+//
+// Comenzile recepționate înainte (de la DE_LA_DEPOZIT încoace) primesc pe
+// pagină „Trimite în depozit", cu paleții care poate sunt deja ei pe raft.
+const EPS_CANT = 0.0005;
+const DE_LA_DEPOZIT = "2026-11-13";
+const rot3 = (v) => Math.round(nr(v) * 1000) / 1000;
+const cantRo = (v) => nr(v).toLocaleString("ro-RO", { maximumFractionDigits: 3 });
+
+// Cât din fiecare linie a comenzii a intrat deja în depozit, prin recepțiile
+// legate de ea (cele anulate nu contează).
+async function trimiseInDepozit(comandaId) {
+  const r = await db
+    .prepare(
+      `SELECT rl.comanda_furnizor_linie_id AS linie_id, SUM(COALESCE(rl.cantitate_primita, rl.cantitate_asteptata, 0)) AS cant
+         FROM receptii r JOIN receptii_linii rl ON rl.receptie_id = r.id
+        WHERE r.comanda_furnizor_id = ? AND r.stare <> 'anulata' AND rl.comanda_furnizor_linie_id IS NOT NULL
+        GROUP BY rl.comanda_furnizor_linie_id`
+    )
+    .all(comandaId)
+    .catch(() => []);
+  return new Map(r.map((x) => [Number(x.linie_id), nr(x.cant)]));
+}
+
+// Recepția în depozit pentru ce s-a primit acum pe comandă. `randuri`:
+// [{ l: linia comenzii, cant, p: prezentarea citită }]. Se finalizează pe
+// loc (modules/receptie.js): stocul se scrie, iar rândurile intră în lista
+// „De alocat pe raft". Prețul de intrare e în lei pe UM: prețul comenzii ori
+// cursul ei (sau BNR-ul zilei comenzii, ca pe pagină); fără curs rămâne gol și
+// depozitul îl scrie la paleți.
+async function inDepozit(user, c, randuri, data) {
+  const deTrimis = (randuri || []).filter((x) => nr(x.cant) > EPS_CANT);
+  if (!deTrimis.length) return null;
+  const REC = require("./receptie");
+  const ef = await cursulEfectiv(c);
+  const curs = nr(ef.curs) > 0 ? nr(ef.curs) : null;
+  const linii = deTrimis.map((x) => ({
+    produs_id: x.l.produs_id || null,
+    produs_text: x.l.produs_id ? null : x.l.denumire,
+    cantitate: rot3(x.cant),
+    um: x.l.um || "",
+    pret_unitar: x.l.pret_unitar === null || x.l.pret_unitar === undefined || x.l.pret_unitar === "" || !curs ? null : Math.round(nr(x.l.pret_unitar) * curs * 1e6) / 1e6,
+    paleti_nr: x.p ? x.p.nr : null,
+    paleti_pe: x.p ? x.p.pe : null,
+    comanda_furnizor_linie_id: Number(x.l.id),
+  }));
+  const id = Number(
+    await REC.creeaza(
+      {
+        sursa: "furnizor",
+        partener_id: c.furnizor_id || null,
+        document_extern: c.numar || `comanda #${c.id}`,
+        data: eData(data) ? data : azi(),
+        anuntata_de: (user && user.nume) || "",
+        observatii: `Recepția comenzii ${c.numar || "#" + c.id} din Procurement`,
+        comanda_furnizor_id: c.id,
+      },
+      linii
+    )
+  );
+  await REC.primesteTot(id);
+  const f = await REC.finalizeaza(id, user);
+  const rec = await db.prepare("SELECT numar FROM receptii WHERE id = ?").get(id).catch(() => null);
+  const numar = (rec && rec.numar) || "#" + id;
+  if (f.eroare) console.error(`[comenzi-furnizor] recepția ${numar} a comenzii ${c.numar} n-a putut fi finalizată: ${f.eroare}`);
+  else console.log(`[comenzi-furnizor] ${numar}: ${linii.length} rând(uri) din comanda ${c.numar} au intrat în depozit (${(user && user.nume) || "?"})`);
+  return {
+    id,
+    numar,
+    eroare: f.eroare || null,
+    descriere: deTrimis.map((x) => `${cantRo(x.cant)} ${x.l.um || ""} ${x.l.denumire}${x.p ? ` (${PZ.text(x.p, "")})` : ""}`.replace(/\s+/g, " ").trim()).join("; "),
+  };
+}
+
+// Marfa primită pe comandă care n-a intrat încă în depozit: a comenzilor
+// recepționate de la DE_LA_DEPOZIT încoace sau care au deja o recepție în
+// depozit. Cele de dinainte au intrat de mână, pe vremea când drumul ăsta nu
+// exista — oferite aici, s-ar dubla.
+async function deTrimisInDepozit(c, linii) {
+  if (!c || c.status === "anulata") return [];
+  const trimise = await trimiseInDepozit(c.id);
+  if (!(String(c.data_receptie || "").slice(0, 10) >= DE_LA_DEPOZIT) && !trimise.size) return [];
+  return (linii || [])
+    .map((l) => {
+      const primit = nr(l.cantitate_primita);
+      const trimis = trimise.get(Number(l.id)) || 0;
+      return { l, primit, trimis, rest: rot3(primit - trimis) };
+    })
+    .filter((x) => x.rest > EPS_CANT);
+}
+
+// Paleții intrați în CT-Park de câteva zile înainte de recepție încoace, fără
+// legătură cu comanda asta, care seamănă cu marfa ei: același produs sau
+// cel puțin jumătate din cuvintele denumirii. Poate e chiar marfa asta, pusă
+// de mână pe raft — de văzut înainte de „Trimite în depozit".
+const faraSemne = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const cuvinte = (t) => [...new Set(faraSemne(t).split(/[^a-z0-9]+/).filter((w) => w.length >= 4))];
+function seamana(denumireLinie, denumirePalet) {
+  const w = cuvinte(denumireLinie);
+  if (!w.length) return false;
+  const t = faraSemne(denumirePalet);
+  const gasite = w.filter((x) => t.includes(x)).length;
+  return gasite >= 2 && gasite / w.length >= 0.5;
+}
+// „Trimite în depozit" pe pagina comenzii: ce e primit și n-a intrat încă în
+// depozit, cu prezentarea de scris și paleții care poate sunt deja ei.
+function sectiuneInDepozit(c, randuri) {
+  const zi = (d) => String(d || "").slice(0, 10).split("-").reverse().join(".");
+  const randurile = randuri
+    .map((x) => {
+      const um = esc(x.l.um || "");
+      const poate =
+        x.poate && x.poate.length
+          ? `<tr class="poate-pe-raft"><td colspan="6" style="font-size:12px;background:#fffaf0;white-space:normal">
+               <strong>Poate e deja pe raft</strong> — intrați în CT-Park din ${esc(zi(x.poateDe))}, cu marfă asemănătoare:
+               ${x.poate
+                 .map(
+                   (p) =>
+                     `<a href="/stocuri/ct-park/palet/${p.id}">${esc(p.cod || "#" + p.id)}</a> ${esc(cantRo(p.intrat))} ${esc(p.um || "")} · ${esc(String(p.denumire || "").slice(0, 60))}${
+                       p.adrese ? " · " + esc(p.adrese) : ""
+                     } (${esc(zi(p.data_intrare))})`
+                 )
+                 .join("; ")}.
+               Dacă e marfa asta, n-o mai trimite (sau trimite doar ce lipsește).
+             </td></tr>`
+          : "";
+      return `<tr data-prez data-mod="delta">
+          <td>${esc(x.l.denumire)}<div class="mic" data-hint style="color:var(--text-muted)"></div></td>
+          <td>${esc(cantRo(x.primit))} ${um}</td>
+          <td>${x.trimis > EPS_CANT ? esc(cantRo(x.trimis)) + " " + um : '<span style="color:var(--text-muted)">nimic</span>'}</td>
+          <td><input type="hidden" name="linie_id[]" value="${x.l.id}">
+              <input name="cant[]" data-cant inputmode="decimal" autocomplete="off" value="${esc(String(x.rest).replace(".", ","))}" style="width:110px" aria-label="Cât trimiți în depozit"> ${um}</td>
+          <td><input name="paleti_nr[]" data-nr inputmode="numeric" autocomplete="off" style="width:64px" placeholder="paleți" aria-label="Câți paleți"></td>
+          <td><input name="paleti_pe[]" data-pe inputmode="decimal" autocomplete="off" style="width:96px" placeholder="${um || "UM"} / palet" aria-label="Cât e pe un palet plin"></td>
+        </tr>${poate}`;
+    })
+    .join("");
+  return `
+      <h2 style="margin-top:28px" id="in-depozit">Trimite în depozit</h2>
+      <div class="detail-box" style="max-width:980px;border-left:4px solid var(--warn,#c07018)">
+        <p style="margin:0 0 8px;font-size:13px">
+          Marfa de mai jos e primită pe comandă, dar n-a intrat încă în depozit. Scrie prezentarea — câți paleți și cât e pe
+          un palet plin — și apasă „Trimite în depozit”: se face recepția în depozit, iar marfa așteaptă alocarea pe raft în
+          Depozit → Intrare marfă, la „De alocat pe raft”. <strong>Dacă marfa e deja pe raft</strong> (pusă de mână din
+          Intrare marfă), n-o mai trimite: stocul s-ar dubla. La rândurile pe care nu le trimiți, șterge cantitatea.
+        </p>
+        <form method="post" action="/procurement/comenzi/${c.id}/in-depozit" data-prez-form
+              data-confirma="Marfa intră în depozit și pe stoc. Ai verificat că nu e deja pe raft?">
+          <div class="tabel-scroll"><table class="tabel">
+            <thead><tr><th>Poziție</th><th>Primit</th><th>Intrat deja în depozit</th><th>Trimit acum</th><th>Paleți</th><th>Pe un palet plin</th></tr></thead>
+            <tbody>${randurile}</tbody>
+          </table></div>
+          <div class="form-actions" style="margin-top:8px"><button class="btn" type="submit">Trimite în depozit →</button></div>
+        </form>
+      </div>`;
+}
+
+// Verificarea prezentării pe pagină, înainte de trimitere (aceleași reguli ca
+// lib/prezentare.js; serverul verifică oricum): pe fiecare rând pe care vine
+// ceva, paleții sunt obligatorii, iar sub denumire se vede cum a înțeles
+// pagina — „3 paleți × 400" sau ce nu se potrivește. Fără backslash-uri și
+// fără interpolări: textul ajunge ca atare în pagină.
+const SCRIPT_PREZENTARE = `<script>
+(function () {
+  function num(v) { var s = String(v == null ? "" : v).trim().replace(",", "."); if (!s) return null; var n = Number(s); return isFinite(n) ? n : NaN; }
+  function fmt(v) { return Number(v).toLocaleString("ro-RO", { maximumFractionDigits: 3 }); }
+  function verifica(tr, form) {
+    var tot = form.querySelector("[data-tot]");
+    var cant = tr.querySelector("[data-cant]"), nrI = tr.querySelector("[data-nr]"), peI = tr.querySelector("[data-pe]"), hint = tr.querySelector("[data-hint]");
+    if (!cant || !nrI || !peI) return true;
+    var total = tr.getAttribute("data-mod") === "total";
+    var inainte = Number(tr.getAttribute("data-inainte") || 0);
+    var v;
+    if (total && tot && tot.checked) v = Number(tr.getAttribute("data-comandat") || 0);
+    else { v = num(cant.value); if (v === null) v = total ? inainte : 0; }
+    var acum = Math.round((total ? v - inainte : v) * 1000) / 1000;
+    var mesaj = "", rau = false;
+    if (acum > 0.0005) {
+      nrI.required = true; peI.required = true;
+      var n = num(nrI.value), pe = num(peI.value);
+      if (n === null || pe === null) { mesaj = "vin acum " + fmt(acum) + ": scrie câți paleți și cât e pe unul"; rau = true; }
+      else if (isNaN(n) || isNaN(pe) || n < 1 || Math.round(n) !== n || !(pe > 0)) { mesaj = "paleții: un număr întreg; pe palet: mai mult ca zero"; rau = true; }
+      else if (acum > n * pe + 0.0005) { mesaj = "pe " + n + " × " + fmt(pe) + " încap " + fmt(n * pe) + ", dar vin " + fmt(acum); rau = true; }
+      else if (n > 1 && (n - 1) * pe >= acum - 0.0005) { mesaj = fmt(acum) + " încap pe " + (n - 1) + " paleți: unul ar rămâne gol"; rau = true; }
+      else {
+        var ultim = Math.round((acum - (n - 1) * pe) * 1000) / 1000;
+        mesaj = n === 1 ? "un palet cu " + fmt(acum) : Math.abs(ultim - pe) < 0.0005 ? n + " paleți × " + fmt(pe) : n + " paleți: " + (n - 1) + " × " + fmt(pe) + " + " + fmt(ultim);
+      }
+    } else { nrI.required = false; peI.required = false; }
+    if (hint) { hint.textContent = mesaj; hint.style.color = rau ? "var(--danger,#b91c1c)" : "var(--text-muted)"; }
+    tr.setAttribute("data-rau", rau ? "1" : "");
+    return !rau;
+  }
+  document.querySelectorAll("form[data-prez-form]").forEach(function (form) {
+    var randuri = form.querySelectorAll("tr[data-prez]");
+    function toate() { var ok = true; randuri.forEach(function (tr) { if (!verifica(tr, form)) ok = false; }); return ok; }
+    form.addEventListener("input", toate);
+    form.addEventListener("change", toate);
+    form.addEventListener("submit", function (e) {
+      if (!toate()) { e.preventDefault(); var r = form.querySelector('tr[data-rau="1"] [data-nr]'); if (r) r.focus(); return; }
+      var q = form.getAttribute("data-confirma");
+      if (q && !window.confirm(q)) e.preventDefault();
+    });
+    toate();
+  });
+})();
+</script>`;
+
+async function poateDejaPeRaft(c, randuri) {
+  if (!randuri.length) return randuri;
+  const rec = String(c.data_receptie || "").slice(0, 10);
+  const comanda = String(c.data || "").slice(0, 10);
+  let de = eData(rec) ? new Date(new Date(rec + "T12:00:00Z").getTime() - 3 * 86400000).toISOString().slice(0, 10) : comanda;
+  if (eData(comanda) && de < comanda) de = comanda;
+  if (!eData(de)) return randuri;
+  const paleti = await db
+    .prepare(
+      `SELECT p.id, p.cod, COALESCE(p.cantitate_intrare, p.cantitate) AS intrat, p.um, p.data_intrare, p.produs_id,
+              COALESCE(pr.denumire, p.produs_text) AS denumire,
+              (SELECT string_agg(lo.adresa, ' + ') FROM ct_ocupari o JOIN ct_locuri lo ON lo.id = o.loc_id WHERE o.palet_id = p.id) AS adrese
+         FROM ct_paleti p
+         LEFT JOIN produse pr ON pr.id = p.produs_id
+         LEFT JOIN receptii r ON r.id = p.receptie_id
+        WHERE p.data_intrare >= ? AND (r.id IS NULL OR r.comanda_furnizor_id IS NULL OR r.comanda_furnizor_id <> ?)
+        ORDER BY p.id LIMIT 800`
+    )
+    .all(de, c.id)
+    .catch(() => []);
+  for (const x of randuri) {
+    x.poate = paleti.filter((p) => (x.l.produs_id && Number(p.produs_id) === Number(x.l.produs_id)) || seamana(x.l.denumire, p.denumire)).slice(0, 12);
+    x.poateDe = de;
+  }
+  return randuri;
 }
 
 // Ultimul preț plătit pe fiecare produs, din liniile comenzilor de dinainte.
@@ -1654,6 +1904,12 @@ function register(router) {
     };
     const flash = MESAJE[text(q.ok)] || null;
     const eroareTrimitere = text(q.eroare);
+    // Recepția și „Trimite în depozit": ce s-a întâmplat, cu drumul spre
+    // recepția din depozit și spre lista unde așteaptă marfa.
+    const okReceptie = text(q.ok_receptie);
+    const eroareReceptie = text(q.eroare_receptie);
+    const recDepozit = parseInt(q.rec, 10) || 0;
+    const deTrimis = poateTrimite(ctx.user) ? await poateDejaPeRaft(c, await deTrimisInDepozit(c, linii)) : [];
 
     const body = `
       <div class="toolbar" style="flex-wrap:wrap">
@@ -1668,6 +1924,16 @@ function register(router) {
       ${
         eroareTrimitere
           ? `<div class="flash flash-rosu">${esc(eroareTrimitere === "destinatar" ? "Emailul n-a plecat: alege cel puțin un destinatar." : "Emailul n-a plecat: " + eroareTrimitere)}</div>`
+          : ""
+      }
+      ${eroareReceptie ? `<div class="flash flash-rosu" id="receptie-eroare" role="alert">${esc(eroareReceptie)}</div>` : ""}
+      ${
+        okReceptie
+          ? `<div class="flash" id="receptie-ok">${esc(okReceptie)}${
+              recDepozit
+                ? ` <a href="/depozit/receptie/${recDepozit}">Recepția din depozit</a> · <a href="/stocuri/ct-park/intrare#gata-productie">De alocat pe raft</a>`
+                : ""
+            }</div>`
           : ""
       }
 
@@ -1738,34 +2004,43 @@ function register(router) {
       ${
         eDeschisa && poateTrimite(ctx.user)
           ? `
-      <h2 style="margin-top:28px">Recepție</h2>
-      <form class="form" method="post" action="/procurement/comenzi/${c.id}/receptie" style="max-width:860px">
+      <h2 style="margin-top:28px" id="receptie">Recepție</h2>
+      <form class="form" method="post" action="/procurement/comenzi/${c.id}/receptie" style="max-width:980px" data-prez-form>
         <p style="font-size:13px;color:var(--text-muted);margin-top:0">
-          Scrie cât a intrat efectiv din fiecare poziție. Starea comenzii se calculează din cantități:
-          „primită" doar când e acoperită fiecare linie.
+          Scrie cât a intrat efectiv din fiecare poziție (totalul primit până acum). Starea comenzii se calculează din
+          cantități: „primită" doar când e acoperită fiecare linie.
         </p>
+        <p style="font-size:13px;margin-top:0">
+          Pentru ce vine acum scrie și <strong>prezentarea</strong>: câți paleți și cât e pe un palet plin (ultimul poate fi
+          mai gol) — de exemplu 3 paleți × 400 pentru 1.000 buc. La salvare marfa intră în depozit și așteaptă alocarea pe
+          raft în Depozit → Intrare marfă, la „De alocat pe raft”, de unde se fac paleții și etichetele dintr-o apăsare.
+        </p>
+        <div class="tabel-scroll">
         <table class="tabel">
-          <thead><tr><th>Poziție</th><th>Comandat</th><th>Primit până acum</th><th>Primit acum (total)</th></tr></thead>
+          <thead><tr><th>Poziție</th><th>Comandat</th><th>Primit până acum</th><th>Primit acum (total)</th><th>Paleți (acum)</th><th>Pe un palet plin</th></tr></thead>
           <tbody>
             ${linii
               .map(
-                (l) => `<tr>
-                  <td>${esc(l.denumire)}</td>
+                (l) => `<tr data-prez data-mod="total" data-inainte="${esc(String(nr(l.cantitate_primita)))}" data-comandat="${esc(String(nr(l.cantitate)))}">
+                  <td>${esc(l.denumire)}<div class="mic" data-hint style="color:var(--text-muted)"></div></td>
                   <td>${esc(nr(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 3 }))} ${esc(l.um || "")}</td>
                   <td>${esc(nr(l.cantitate_primita).toLocaleString("ro-RO", { maximumFractionDigits: 3 }))}</td>
                   <td>
                     <input type="hidden" name="linie_id[]" value="${l.id}">
-                    <input type="number" step="0.001" name="primit[]" value="${esc(nr(l.cantitate_primita) || "")}" style="width:120px" placeholder="${esc(String(nr(l.cantitate)))}">
+                    <input type="number" step="0.001" name="primit[]" data-cant value="${esc(nr(l.cantitate_primita) || "")}" style="width:120px" placeholder="${esc(String(nr(l.cantitate)))}">
                   </td>
+                  <td><input name="paleti_nr[]" data-nr inputmode="numeric" autocomplete="off" style="width:64px" placeholder="paleți" aria-label="Câți paleți au venit acum"></td>
+                  <td><input name="paleti_pe[]" data-pe inputmode="decimal" autocomplete="off" style="width:96px" placeholder="${esc(l.um || "UM")} / palet" aria-label="Cât e pe un palet plin"></td>
                 </tr>`
               )
               .join("")}
           </tbody>
         </table>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 2fr;gap:12px;margin-top:10px">
           <label class="field"><span>Data recepției</span><input type="date" name="data_receptie" value="${esc(String(c.data_receptie || azi()).slice(0, 10))}"></label>
           <label class="field"><span>&nbsp;</span>
-            <label style="font-weight:400"><input type="checkbox" name="tot" value="1"> a intrat tot ce era comandat</label>
+            <label style="font-weight:400"><input type="checkbox" name="tot" value="1" data-tot> a intrat tot ce era comandat</label>
           </label>
         </div>
         <div class="form-actions">
@@ -1779,6 +2054,9 @@ function register(router) {
       </form>`
           : ""
       }
+
+      ${deTrimis.length ? sectiuneInDepozit(c, deTrimis) : ""}
+      ${SCRIPT_PREZENTARE}
 
       <h2 style="margin-top:32px">Istoric — cine a modificat ce și când</h2>
       <p style="margin:-6px 0 8px;color:var(--text-muted);font-size:13px">
@@ -1841,20 +2119,27 @@ function register(router) {
   });
 
   // ---- recepția -----------------------------------------------------------
+  // Cât s-a primit (totalul, pe fiecare linie) și, pentru ce vine acum,
+  // prezentarea: câți paleți și cât pe un palet plin. Întâi se citește și se
+  // verifică tot; dacă un rând e greșit nu se salvează nimic, ca recepția să
+  // nu rămână pe jumătate. Apoi ce a venit acum intră în depozit (inDepozit).
   router.post("/procurement/comenzi/:id/receptie", async (ctx) => {
     const id = parseInt(ctx.params.id, 10);
     if (!poateTrimite(ctx.user)) return redirect(ctx.res, `/procurement/comenzi/${id}`);
     const b = ctx.body || {};
     const ids = asArray(b["linie_id[]"]);
     const primite = asArray(b["primit[]"]);
+    const paletiNr = asArray(b["paleti_nr[]"]);
+    const paletiPe = asArray(b["paleti_pe[]"]);
     const tot = text(b.tot) === "1";
-    const inainte = await db.prepare("SELECT status, data_receptie FROM comenzi_furnizor WHERE id = ?").get(id);
-    if (!inainte) return redirect(ctx.res, "/procurement/comenzi");
+    const c = await comandaCuFurnizor(id);
+    if (!c) return redirect(ctx.res, "/procurement/comenzi");
+    const inainte = { status: c.status, data_receptie: c.data_receptie };
 
     const linii = await liniile(id);
     const dupaId = new Map(linii.map((l) => [String(l.id), l]));
-    const schimbari = [];
-
+    const plan = [];
+    const erori = [];
     for (let i = 0; i < ids.length; i++) {
       const l = dupaId.get(String(ids[i]));
       if (!l) continue;
@@ -1870,16 +2155,34 @@ function register(router) {
         if (!Number.isFinite(n) || n < 0) continue;
         v = n;
       }
-      await db.prepare("UPDATE comenzi_furnizor_linii SET cantitate_primita = ? WHERE id = ?").run(v, l.id);
-      if (!L.acelasiNumar(nr(l.cantitate_primita), v)) {
+      // Ce vine acum: cât e peste ce era scris. Pentru asta se cere
+      // prezentarea, și asta intră în depozit.
+      const vineAcum = rot3(v - nr(l.cantitate_primita));
+      let p = null;
+      if (vineAcum > EPS_CANT) {
+        p = PZ.citeste(paletiNr[i], paletiPe[i], vineAcum);
+        if (p.gol) erori.push(`${l.denumire}: scrie câți paleți au venit acum (${cantRo(vineAcum)}${l.um ? " " + l.um : ""}) și cât e pe un palet plin.`);
+        else if (p.eroare) erori.push(`${l.denumire}: ${p.eroare}`);
+      }
+      plan.push({ l, v, vineAcum, p });
+    }
+    if (erori.length) {
+      return redirect(ctx.res, `/procurement/comenzi/${id}?eroare_receptie=${encodeURIComponent(("Recepția nu s-a salvat. " + erori.join(" ")).slice(0, 900))}`);
+    }
+
+    const schimbari = [];
+    for (const x of plan) {
+      const l = x.l;
+      await db.prepare("UPDATE comenzi_furnizor_linii SET cantitate_primita = ? WHERE id = ?").run(x.v, l.id);
+      if (!L.acelasiNumar(nr(l.cantitate_primita), x.v)) {
         const um = l.um ? " " + l.um : "";
         schimbari.push({
           ce: "Primit · " + l.denumire,
           vechi: nr(l.cantitate_primita).toLocaleString("ro-RO", { maximumFractionDigits: 3 }) + um,
-          nou: v.toLocaleString("ro-RO", { maximumFractionDigits: 3 }) + um,
+          nou: x.v.toLocaleString("ro-RO", { maximumFractionDigits: 3 }) + um,
         });
       }
-      l.cantitate_primita = v;
+      l.cantitate_primita = x.v;
     }
 
     const status = L.statusDupaReceptie(linii, "trimisa");
@@ -1891,8 +2194,92 @@ function register(router) {
     if ((status === "primita" || status === "partial") && String(inainte.data_receptie || "").slice(0, 10) !== dataRec) {
       schimbari.push({ ce: "Data recepției", vechi: String(inainte.data_receptie || "").slice(0, 10), nou: dataRec });
     }
+
+    // Ce a venit acum intră în depozit. Dacă asta cade, cantitățile de pe
+    // comandă rămân scrise, iar „Trimite în depozit" de pe pagină o reia.
+    const deTrimis = plan.filter((x) => x.vineAcum > EPS_CANT).map((x) => ({ l: x.l, cant: x.vineAcum, p: x.p }));
+    let dus = null;
+    if (deTrimis.length) {
+      try {
+        dus = await inDepozit(ctx.user, c, deTrimis, dataRec);
+      } catch (e) {
+        console.error(`[comenzi-furnizor] comanda ${c.numar}: marfa n-a intrat în depozit:`, e.message);
+        dus = { eroare: e.message };
+      }
+      if (dus && dus.id) schimbari.push({ ce: "Intrată în depozit", vechi: "", nou: `recepția ${dus.numar}: ${dus.descriere}` });
+    }
     await scrieIstoric(id, ctx.user, schimbari);
-    redirect(ctx.res, `/procurement/comenzi/${id}`);
+
+    const scazute = plan.filter((x) => x.vineAcum < -EPS_CANT);
+    const spune = [];
+    if (dus && dus.id && !dus.eroare) spune.push(`Recepția s-a salvat, iar marfa a intrat în depozit pe recepția ${dus.numar}. Acum așteaptă alocarea pe raft în Depozit → Intrare marfă, la „De alocat pe raft”.`);
+    else if (dus && dus.id) spune.push(`Recepția s-a salvat. Recepția din depozit ${dus.numar} s-a făcut, dar n-a putut fi finalizată: ${dus.eroare} Deschide-o în depozit și finalizeaz-o.`);
+    else if (dus) spune.push(`Recepția s-a salvat, dar marfa n-a intrat în depozit (${dus.eroare}). Trimite-o de mai jos, cu „Trimite în depozit”.`);
+    else spune.push("Recepția s-a salvat.");
+    if (scazute.length) {
+      spune.push(
+        `Ai scăzut cantitatea primită la ${scazute.map((x) => x.l.denumire).join(", ")}. Ce intrase deja în depozit nu se schimbă singur: dacă a venit mai puțin, spune depozitului să corecteze paleții.`
+      );
+    }
+    redirect(
+      ctx.res,
+      `/procurement/comenzi/${id}?${dus && dus.eroare && !dus.id ? "eroare_receptie" : "ok_receptie"}=${encodeURIComponent(spune.join(" ").slice(0, 900))}${dus && dus.id ? "&rec=" + dus.id : ""}`
+    );
+  });
+
+  // Marfa primită înainte ca recepția de aici s-o trimită singură în depozit
+  // (sau dacă trimiterea a căzut): cât se trimite acum, cu prezentarea.
+  // Totul se socotește din nou aici — pagina poate fi veche.
+  router.post("/procurement/comenzi/:id/in-depozit", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10) || 0;
+    if (!poateTrimite(ctx.user)) return redirect(ctx.res, `/procurement/comenzi/${id}`);
+    const c = await comandaCuFurnizor(id);
+    if (!c) return redirect(ctx.res, "/procurement/comenzi");
+    const inapoi = (cheie, mesaj, extra) => redirect(ctx.res, `/procurement/comenzi/${id}?${cheie}=${encodeURIComponent(String(mesaj).slice(0, 900))}${extra || ""}`);
+    const rest = await deTrimisInDepozit(c, await liniile(id));
+    const dupaId = new Map(rest.map((x) => [String(x.l.id), x]));
+    const b = ctx.body || {};
+    const ids = asArray(b["linie_id[]"]);
+    const cant = asArray(b["cant[]"]);
+    const pn = asArray(b["paleti_nr[]"]);
+    const pp = asArray(b["paleti_pe[]"]);
+    const randuri = [];
+    const erori = [];
+    for (let i = 0; i < ids.length; i++) {
+      const x = dupaId.get(String(ids[i]));
+      if (!x) continue;
+      const s = text(cant[i]).replace(",", ".");
+      if (s === "") continue;
+      const q = Number(s);
+      if (!Number.isFinite(q) || q < 0) {
+        erori.push(`${x.l.denumire}: cât trimiți se scrie ca număr.`);
+        continue;
+      }
+      if (!(q > EPS_CANT)) continue;
+      if (q > x.rest + EPS_CANT) {
+        erori.push(`${x.l.denumire}: au rămas de trimis doar ${cantRo(x.rest)}${x.l.um ? " " + x.l.um : ""}.`);
+        continue;
+      }
+      const p = PZ.citeste(pn[i], pp[i], q);
+      if (p.gol) erori.push(`${x.l.denumire}: scrie câți paleți și cât e pe un palet plin.`);
+      else if (p.eroare) erori.push(`${x.l.denumire}: ${p.eroare}`);
+      else randuri.push({ l: x.l, cant: rot3(q), p });
+    }
+    if (erori.length) return inapoi("eroare_receptie", "Nu s-a trimis nimic în depozit. " + erori.join(" "));
+    if (!randuri.length) {
+      return inapoi("eroare_receptie", rest.length ? "Scrie cât trimiți în depozit, la fiecare rând." : "Toată marfa primită pe comanda asta a intrat deja în depozit.");
+    }
+    const dataRec = String(c.data_receptie || "").slice(0, 10) || azi();
+    let dus;
+    try {
+      dus = await inDepozit(ctx.user, c, randuri, dataRec);
+    } catch (e) {
+      console.error(`[comenzi-furnizor] comanda ${c.numar}: „Trimite în depozit" a căzut:`, e.message);
+      return inapoi("eroare_receptie", `Marfa n-a intrat în depozit: ${e.message}`);
+    }
+    await scrieIstoric(id, ctx.user, [{ ce: "Trimisă în depozit", vechi: "", nou: `recepția ${dus.numar}: ${dus.descriere}` }]);
+    if (dus.eroare) return inapoi("ok_receptie", `Recepția din depozit ${dus.numar} s-a făcut, dar n-a putut fi finalizată: ${dus.eroare} Deschide-o în depozit și finalizeaz-o.`, "&rec=" + dus.id);
+    return inapoi("ok_receptie", `Marfa a intrat în depozit pe recepția ${dus.numar}. Acum așteaptă alocarea pe raft în Depozit → Intrare marfă, la „De alocat pe raft”.`, "&rec=" + dus.id);
   });
 
   // Anularea nu șterge: comanda rămâne în istoric, dar iese din totaluri și

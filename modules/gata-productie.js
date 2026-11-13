@@ -1,8 +1,19 @@
 "use strict";
-// „Gata din producție — de alocat": lista din Depozit → Intrare marfă și
-// butoanele ei. Datele și regulile sunt în lib/gata-productie.js; aici e ce
-// vede depozitul și ce se întâmplă la fiecare buton:
+// „De alocat pe raft": lista din Depozit → Intrare marfă și butoanele ei —
+// marfa gata din producție și cea recepționată de la furnizori, împreună
+// (Vali, 13.11.2026: „marfa să aștepte alocarea pe rafturi în depozit ca și
+// marfa venită din producție, în aceeași listă"). Datele și regulile sunt în
+// lib/gata-productie.js; aici e ce vede depozitul și ce se întâmplă la fiecare
+// buton:
 //
+//   Fă paleții și etichetele
+//                    → toți paleții rândului dintr-o apăsare, fiecare cu
+//                      eticheta lui, fără loc (lib/ct-scaner.js, faPaleti).
+//                      Căsuța vine completată din prezentarea scrisă la
+//                      recepție („3 x 400" = trei paleți de câte 400); fără
+//                      prezentare, un singur palet cu tot ce a rămas. Paleții
+//                      apar apoi mai jos, „fără loc pe raft", fiecare cu locul
+//                      propus lângă marfa la fel.
 //   Pune pe raft     → Intrarea marfă se deschide completată (produs, cât mai
 //                      e de pus, UM, furnizorul la marfa de la terți), iar
 //                      paletul rămâne legat de recepție sau de cerere.
@@ -27,15 +38,16 @@
 // (modules/receptie.js, primesteTot + finalizeaza) — exact ce ar fi făcut
 // omul apăsând „Finalizează" fără să schimbe cifrele.
 //
-// Tot aici, sub lista din producție (Vali, 10.11.2026: „la fel ca și comenzile
-// intrate din producție, în lista de sus apar și altele, de la furnizori,
-// imediat după ce au fost recepționate, ca să poată fi alocate pe raft"):
+// În aceeași listă (Vali, 10.11.2026: „la fel ca și comenzile intrate din
+// producție, în lista de sus apar și altele, de la furnizori, imediat după ce
+// au fost recepționate, ca să poată fi alocate pe raft"): rândurile recepțiilor
+// finalizate de la furnizori (și ale retururilor) a căror marfă n-are încă
+// palet, cu aceleași butoane. Recepția de la furnizor nenumărată nu apare:
+// întâi se numără. Până pe 13.11.2026 stăteau într-un tabel separat, sub cel
+// din producție.
 //
-//   Recepționat de la furnizori — de alocat
-//                    → rândurile recepțiilor finalizate de la furnizori (și ale
-//                      retururilor) a căror marfă n-are încă palet, cu aceleași
-//                      butoane. Recepția de la furnizor nenumărată nu apare:
-//                      întâi se numără.
+// Dedesubt:
+//
 //   Paleți cu etichetă, fără loc pe raft
 //                    → paleții făcuți la recepție („Paleți și etichete"), cu
 //                      eticheta lipită, care încă n-au loc. Marfa lor are deja
@@ -56,10 +68,31 @@ function linkDaca(user, href, text) {
   return poateAccesa(user, href) ? `<a href="${esc(href)}">${esc(text)}</a>` : esc(text);
 }
 
+// Ce e de alocat, într-o singură listă: întâi recepțiile — din producție și de
+// la furnizori, în ordinea în care au venit —, apoi cererile depozitului
+// (cele vechi „intrată în stoc" la urmă).
+async function deAlocat() {
+  const dinLista = await GP.lista().catch(() => []);
+  const furnizori = await GP.receptiiFurnizori().catch(() => []);
+  const receptii = dinLista
+    .filter((x) => x.fel === "receptie")
+    .concat(furnizori)
+    .sort((a, b) => String(a.data || "").localeCompare(String(b.data || "")) || a.receptie_id - b.receptie_id || a.id - b.id);
+  return receptii.concat(dinLista.filter((x) => x.fel !== "receptie"));
+}
+
 // Secțiunea de pe Intrare marfă. Goală când nu e nimic de alocat.
 async function sectiune(user, query) {
-  const lista = await GP.lista().catch(() => []);
-  const furnizori = await GP.receptiiFurnizori().catch(() => []);
+  const lista = await deAlocat();
+  // Prețul de intrare: unde ERP-ul nu-l știe, rândul primește o căsuță de preț
+  // lângă „Fă paleții și etichetele" (modules/ct-park.js, pretDeIntrare). Marfa
+  // făcută de noi intră și fără el.
+  const CT = require("./ct-park");
+  for (const x of lista) {
+    const dinProductie = x.fel === "receptie" ? !x.sursa : x.sursa === "productie";
+    const pret = await CT.pretStiut({ receptie_linie_id: x.fel === "receptie" ? x.id : null, produs_id: x.produs_id }).catch(() => null);
+    x.cerePret = !pret && !dinProductie;
+  }
   // Paleții cu etichetă care așteaptă raftul (lib/ct-scaner.js, faraLoc): cei
   // pregătiți pentru o ieșire directă sunt mai jos, la „Pregătite pentru ieșire".
   const faraLoc = await require("../lib/ct-scaner").faraLoc("toate").catch(() => []);
@@ -68,7 +101,7 @@ async function sectiune(user, query) {
   const mesaj =
     (q.gata_ok ? `<div class="detail-box" style="border-left:4px solid var(--success,#15803d);margin:6px 0">${esc(String(q.gata_ok))}</div>` : "") +
     (q.gata_eroare ? `<div class="detail-box" role="alert" style="border-left:4px solid var(--danger,#b91c1c);margin:6px 0"><strong>${esc(String(q.gata_eroare))}</strong></div>` : "");
-  if (!lista.length && !furnizori.length && !faraLoc.length && !gata.length) return mesaj;
+  if (!lista.length && !faraLoc.length && !gata.length) return mesaj;
   const comenzi = await db
     .prepare(
       `SELECT c.id, c.numar, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
@@ -86,7 +119,15 @@ async function sectiune(user, query) {
     const baza = `/stocuri/ct-park/gata/${x.fel}/${x.id}`;
     const de = x.fel === "receptie"
       ? `recepția ${linkDaca(user, `/depozit/receptie/${x.receptie_id}`, x.receptie_numar)}${x.productie_numar ? ` · producția ${linkDaca(user, `/productie/${x.productie_id}`, x.productie_numar)}` : ""}${
-          x.sursa_text ? ` · ${esc(x.sursa_text)}${x.partener ? " <strong>" + esc(x.partener) + "</strong>" : ""}${x.document ? ` · ${esc(x.document)}` : ""}` : ""
+          x.sursa_text
+            ? ` · ${esc(x.sursa_text)}${x.partener ? " <strong>" + esc(x.partener) + "</strong>" : ""}${
+                x.comanda_furnizor_id
+                  ? ` · comanda ${linkDaca(user, `/procurement/comenzi/${x.comanda_furnizor_id}`, x.comanda_furnizor_numar || "#" + x.comanda_furnizor_id)}`
+                  : x.document
+                    ? ` · ${esc(x.document)}`
+                    : ""
+              }`
+            : ""
         }`
       : `cererea #${x.id} · ${x.sursa === "productie" ? `producție${x.productie_numar ? " " + linkDaca(user, `/productie/${x.productie_id}`, x.productie_numar) : ""}` : `terț${x.furnizor ? " " + esc(x.furnizor) : ""}`}`;
     const pentru = x.comanda_id
@@ -98,10 +139,20 @@ async function sectiune(user, query) {
     // derulează în lateral, iar ce ai de apăsat trebuie să se vadă fără asta.
     // „Alocă pe cantități" și „Nu mai e de alocat" se deschid la clic, ca
     // rândul să rămână scurt.
+    // „Fă paleții și etichetele" e primul: căsuța vine completată din
+    // prezentarea de la recepție, deci de obicei e doar de apăsat.
+    const um = esc(x.um || "UM");
     const actiuni = `
+      <form method="post" action="${baza}/paleti" class="gata-paleti" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0 0">
+        <input name="paleti" value="${esc(x.paleti_propusi || String(x.ramas).replace(".", ","))}" required autocomplete="off"
+               aria-label="Cât e pe fiecare palet" title="Cât e pe fiecare palet: 3 x 400, 2 x 400 + 200 sau 400 + 400 + 200" style="width:150px">
+        ${x.cerePret ? `<input name="pret" inputmode="decimal" autocomplete="off" required placeholder="preț lei / ${um}" aria-label="Preț de intrare, lei pe ${um}" style="width:120px">` : ""}
+        <button class="btn small" type="submit">Fă paleții și etichetele →</button>
+        <label class="mic" style="display:inline-flex;gap:4px;align-items:center;margin:0;color:var(--text-muted)"><input type="checkbox" name="peste" value="1"> a venit mai mult</label>
+      </form>
       <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;margin-top:6px">
         <form method="post" action="${baza}/raft" class="inline-form" style="margin:0">
-          <button class="btn small" type="submit">Pune pe raft →</button>
+          <button class="btn small secondary" type="submit" title="Un singur palet, cu locul ales de tine în Intrare marfă">Pune pe raft →</button>
         </form>
         <details class="gata-aloca">
           <summary class="btn small secondary" style="list-style:none;cursor:pointer;display:inline-flex;align-items:center">Alocă pe cantități…</summary>
@@ -129,7 +180,9 @@ async function sectiune(user, query) {
       </div>`;
     return `<tr>
         <td style="min-width:220px"><strong>${esc(x.denumire)}</strong>${x.cod ? ` <span class="mic" style="color:var(--text-muted)">${esc(x.cod)}</span>` : ""}${actiuni}</td>
-        <td><strong>${cant(x.ramas)} ${esc(x.um)}</strong>${x.pus > GP.EPS ? `<div class="mic" style="color:var(--text-muted)">din ${cant(x.cantitate)}; alocat deja ${cant(x.pus)}</div>` : ""}</td>
+        <td><strong>${cant(x.ramas)} ${esc(x.um)}</strong>${x.pus > GP.EPS ? `<div class="mic" style="color:var(--text-muted)">din ${cant(x.cantitate)}; alocat deja ${cant(x.pus)}</div>` : ""}${
+          x.prezentare_text ? `<div class="mic prezentare" style="margin-top:2px">a venit: <strong>${esc(x.prezentare_text)}</strong></div>` : ""
+        }</td>
         <td style="white-space:normal;min-width:200px">${de}<div class="mic" style="margin-top:2px">${x.comanda_id || x.client ? "pentru " : ""}${pentru}</div></td>
         <td style="white-space:normal"><span class="badge ${x.veche ? "rosu" : "galben"}">${esc(x.stare)}</span>${x.data ? `<div class="mic" style="color:var(--text-muted)">${esc(x.data.split("-").reverse().join("."))}</div>` : ""}</td>
       </tr>`;
@@ -176,22 +229,23 @@ async function sectiune(user, query) {
         }</td>
       </tr>`;
 
-  // Ce mai e în casetă, sub lista din producție: se vede de sus, ca marfa de
-  // la furnizori să nu stea ascunsă sub o listă lungă.
+  // Ce mai e în casetă, sub listă: se vede de sus, ca paleții fără loc să nu
+  // stea ascunși sub o listă lungă.
   const maiJos = [
-    furnizori.length ? `<a href="#de-la-furnizori">de la furnizori (${furnizori.length})</a>` : "",
     faraLoc.length ? `<a href="#fara-loc">paleți fără loc pe raft (${faraLoc.length})</a>` : "",
     gata.length ? `<a href="#pregatite">pregătite pentru ieșire (${gata.length})</a>` : "",
   ].filter(Boolean);
 
   return `${mesaj}
     <section class="detail-box" id="gata-productie" style="border-left:4px solid var(--warn,#c07018);margin:0 0 16px">
-      <h2 style="margin:0 0 4px;font-size:17px">Gata din producție — de alocat <span class="badge galben">${lista.length}</span></h2>
+      <h2 style="margin:0 0 4px;font-size:17px">De alocat pe raft — din producție și de la furnizori <span class="badge galben">${lista.length}</span></h2>
       <p style="margin:0 0 8px;font-size:13px;color:var(--text-muted);max-width:900px">
-        Marfa terminată în producție (comanda de producție pusă pe „Finalizată”) și cererile marcate „intrată în stoc”
-        care n-au loc în CT-Park. Pune-o toată pe raft sau împarte-o pe cantități: o parte la client, o parte în
-        fulfillment, o parte pe raft — ce nu aloci rămâne aici. Ce vine din producție se ia cu cantitatea anunțată;
-        dacă a venit altceva, deschide recepția și numără.
+        Marfa terminată în producție (comanda de producție pusă pe „Finalizată”), marfa recepționată de la furnizori și
+        cererile marcate „intrată în stoc” care n-au loc în CT-Park. <strong>Fă paleții și etichetele</strong> face toți
+        paleții rândului odată, după prezentarea de la recepție (<code>3 x 400</code> = trei paleți de câte 400); îi lipești
+        eticheta și îi pui pe raft de mai jos, cu locul propus lângă marfa la fel. Poți și să împarți pe cantități: o parte
+        la client, o parte în fulfillment, o parte pe raft — ce nu aloci rămâne aici. Ce vine din producție se ia cu
+        cantitatea anunțată; dacă a venit altceva, deschide recepția și numără.
       </p>
       ${maiJos.length ? `<p class="gata-mai-jos" style="margin:0 0 8px;font-size:13px">Tot aici, mai jos: ${maiJos.join(" · ")}.</p>` : ""}
       ${
@@ -201,19 +255,6 @@ async function sectiune(user, query) {
         <tbody>${lista.map(rand).join("")}</tbody>
       </table></div>`
           : '<p style="margin:0;font-size:13px">Nimic de alocat acum.</p>'
-      }
-      ${
-        furnizori.length
-          ? `<h3 id="de-la-furnizori" style="margin:16px 0 4px;font-size:15px">Recepționat de la furnizori — de alocat <span class="badge galben">${furnizori.length}</span></h3>
-      <p style="margin:0 0 8px;font-size:13px;color:var(--text-muted);max-width:900px">
-        Marfa de la furnizori și retururile apar aici imediat ce recepția lor e finalizată. Se alocă la fel ca marfa din
-        producție: toată pe raft sau pe cantități. Un rând iese din listă când toată cantitatea lui are palet.
-      </p>
-      <div class="tabel-scroll"><table class="table">
-        <thead><tr><th>Produs</th><th>De alocat</th><th>De unde / pentru</th><th>Stare</th></tr></thead>
-        <tbody>${furnizori.map(rand).join("")}</tbody>
-      </table></div>`
-          : ""
       }
       ${
         faraLoc.length
@@ -425,6 +466,42 @@ function register(router) {
     );
   });
 
+  // Toți paleții unui rând dintr-o apăsare, fiecare cu eticheta lui, fără loc
+  // (lib/ct-scaner.js, faPaleti — aceeași funcție ca la recepție și la
+  // scaner). Căsuța vine completată din prezentarea de la recepție. Paleții
+  // apar apoi la „Paleți cu etichetă, fără loc pe raft", de unde se pun pe raft
+  // cu locul propus lângă marfa la fel; până atunci marfa lor nu mai e „de
+  // alocat" (are palet).
+  router.post("/stocuri/ct-park/gata/:fel/:id/paleti", async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/stocuri/ct-park");
+    const fel = String(ctx.params.fel || "");
+    const id = parseInt(ctx.params.id, 10) || 0;
+    if ((fel !== "receptie" && fel !== "cerere") || !(id > 0)) return inapoi(ctx, "gata_eroare", "Rândul nu există.");
+    const b = ctx.body || {};
+    const SC = require("../lib/ct-scaner");
+    const scris = String(b.paleti == null ? "" : b.paleti).trim();
+    const cantitati = SC.cantitatiDinText(scris);
+    if (!cantitati.length || cantitati.some((x) => !(x > 0))) {
+      return inapoi(
+        ctx,
+        "gata_eroare",
+        scris
+          ? `„${scris.slice(0, 40)}” nu e o listă de cantități. Scrie cât e pe fiecare palet: 3 x 400, 2 x 400 + 200 sau 400 + 400 + 200.`
+          : "Scrie cât e pe fiecare palet: 3 x 400, 2 x 400 + 200 sau 400 + 400 + 200."
+      );
+    }
+    const r = await SC.faPaleti(ctx.user, (fel === "receptie" ? "r" : "c") + id, cantitati, [], { peste: String(b.peste || "") === "1", pret: b.pret });
+    if (r.eroare) {
+      const spune = r.peste
+        ? `${r.eroare} Dacă a venit mai mult, bifează „a venit mai mult” și trimite din nou.`
+        : r.faraPret
+          ? `${r.eroare} Scrie-l în căsuța de preț a rândului.`
+          : r.eroare;
+      return inapoi(ctx, "gata_eroare", spune);
+    }
+    redirect(ctx.res, `/stocuri/ct-park/etichete?paleti=${r.ids.join(",")}&de_la=intrare`);
+  });
+
   router.post("/stocuri/ct-park/gata/palet/:id/renunta", async (ctx) => {
     if (!poate(ctx.user)) return redirect(ctx.res, "/stocuri/ct-park");
     const x = await GP.renunta(ctx.params.id);
@@ -444,4 +521,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, sectiune, receptiaGata };
+module.exports = { register, sectiune, receptiaGata, deAlocat };

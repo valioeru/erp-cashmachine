@@ -5861,7 +5861,13 @@ function register(router) {
         ${ctx.query.eroare ? `<div style="color:#b3261e;font-weight:600;margin-bottom:6px">${esc(String(ctx.query.eroare))}</div>` : ""}
         <strong>${esc(descriere)}</strong> —
         <button onclick="window.print()">Tipărește</button>
-        <a href="/stocuri/ct-park">înapoi la depozit</a>
+        ${
+          // Din lista „De alocat pe raft": înapoi acolo, la paleții fără loc,
+          // de unde se pun pe raft (modules/gata-productie.js).
+          String(ctx.query.de_la || "") === "intrare"
+            ? `<a href="/stocuri/ct-park/intrare#fara-loc">înapoi la Intrare marfă — pune paleții pe raft</a>`
+            : `<a href="/stocuri/ct-park">înapoi la depozit</a>`
+        }
       </div>
       ${etichete}
       </body></html>`;

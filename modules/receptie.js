@@ -15,7 +15,14 @@
 // reclama.
 //
 // Regulile de validare NU stau aici, stau în lib/receptie.js, cu teste.
+//
+// PREZENTAREA (Vali, 13.11.2026: „la recepție marfă să se scrie și prezentarea
+// mărfii, nr. de paleți și buc. pe paleți"): pe fiecare rând, câți paleți au
+// venit și cât e pe un palet plin (lib/prezentare.js). Obligatorie la marfa
+// bună de la furnizor; din ea se propun paleții și etichetele, aici jos și în
+// lista „De alocat pe raft" din Intrare marfă.
 const db = require("../lib/db");
+const PZ = require("../lib/prezentare");
 const { esc, money, layout, table, subnavDepozit } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const R = require("../lib/receptie");
@@ -83,8 +90,9 @@ async function creeaza(date, linii) {
   const ins = await db
     .prepare(
       `INSERT INTO receptii (numar, sursa, partener_id, depozit_id, aprovizionare_id, comanda_productie_id,
-                             comanda_id, iesire_id, document_extern, data, stare, anuntata_de, observatii, creata_la, partiala)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'asteptata', ?, ?, ?, ?) RETURNING id`
+                             comanda_id, iesire_id, document_extern, data, stare, anuntata_de, observatii, creata_la, partiala,
+                             comanda_furnizor_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'asteptata', ?, ?, ?, ?, ?) RETURNING id`
     )
     .run(
       numar,
@@ -102,14 +110,18 @@ async function creeaza(date, linii) {
       acum(),
       // Finalizare parțială din producție: comanda ei rămâne în lucru
       // (lib/stadiu-comanda.js, finalizeazaPartial).
-      d.partiala ? 1 : 0
+      d.partiala ? 1 : 0,
+      // Recepția făcută din Procurement, pe comanda la furnizor
+      // (modules/comenzi-furnizor.js, inDepozit).
+      Number(d.comanda_furnizor_id) || null
     );
   const id = ins.lastInsertRowid;
   for (const l of linii || []) {
     await db
       .prepare(
-        `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare, productie_linie_id)
-         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?)`
+        `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare, productie_linie_id,
+                                     paleti_nr, paleti_pe, comanda_furnizor_linie_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -120,7 +132,11 @@ async function creeaza(date, linii) {
         l.pret_unitar == null ? null : nr(l.pret_unitar),
         // Linia comenzii de producție din care vine rândul, la finalizările
         // parțiale: după ea se știe cât a mai rămas de făcut pe fiecare produs.
-        Number(l.productie_linie_id) || null
+        Number(l.productie_linie_id) || null,
+        // Prezentarea mărfii (lib/prezentare.js) și linia comenzii la furnizor.
+        Number(l.paleti_nr) > 0 ? Math.round(Number(l.paleti_nr)) : null,
+        Number(l.paleti_pe) > 0 ? Number(l.paleti_pe) : null,
+        Number(l.comanda_furnizor_linie_id) || null
       );
   }
   return id;
@@ -317,7 +333,20 @@ async function sectiuneCtPark(r, linii) {
     // plecat între timp dintr-un palet nu se întoarce la „de pus".
     const pus = ale.reduce((s, p) => s + nr(p.pusa), 0);
     const ramas = Math.round((nr(l.cantitate_primita) - pus) * 1000) / 1000;
-    if (ramas > R.EPS && !l.ct_inchis_la) faraPaleti.push({ id: Number(l.id), produs_id: l.produs_id, nume: l.produs_denumire || l.produs_text || "—", ramas, um: l.um || l.unitate_masura || "" });
+    // Prezentarea de la recepție propune paleții: „3 x 400" pentru tot rândul,
+    // sau restul la fel de plin, dacă o parte e deja pe paleți.
+    const prez = PZ.dinRand(l, nr(l.cantitate_primita));
+    const propus = ramas > R.EPS ? (pus > R.EPS ? PZ.pentruRest(prez ? prez.pe : null, ramas) : prez) : null;
+    if (ramas > R.EPS && !l.ct_inchis_la) {
+      faraPaleti.push({
+        id: Number(l.id),
+        produs_id: l.produs_id,
+        nume: l.produs_denumire || l.produs_text || "—",
+        ramas,
+        um: l.um || l.unitate_masura || "",
+        propus: propus ? PZ.pentruFormular(propus) : String(ramas).replace(".", ","),
+      });
+    }
     const um = esc(l.um || l.unitate_masura || "");
     const unde = ale.length
       ? ale
@@ -360,7 +389,7 @@ async function sectiuneCtPark(r, linii) {
           : '<span class="badge verde">tot pus</span>';
     return [
       esc(l.produs_denumire || l.produs_text || "—") + (l.lot ? `<br><span class="mic">lot ${esc(l.lot)}</span>` : ""),
-      `${fmt(nr(l.cantitate_primita))} ${um}`,
+      `${fmt(nr(l.cantitate_primita))} ${um}${prez ? `<div class="mic">${esc(PZ.text(prez, l.um || l.unitate_masura || ""))}</div>` : ""}`,
       unde,
       ramas > R.EPS && !inchis ? `<strong>${fmt(ramas)} ${um}</strong>` : "—",
       actiuni,
@@ -380,14 +409,15 @@ async function sectiuneCtPark(r, linii) {
     ? `<form method="post" action="/depozit/receptie/${r.id}/paleti" class="form" style="max-width:860px;margin:10px 0 16px;border-left:4px solid var(--primary)">
          <strong>Paleți și etichete</strong>
          <p class="explic" style="margin:0">
-           Scrie cât e pe fiecare palet, cu plus între ei: <code>400 + 400 + 200</code>, sau <code>3 x 400</code>. Lăsat așa, se face un singur palet cu tot rândul.
+           Scrie cât e pe fiecare palet, cu plus între ei: <code>400 + 400 + 200</code>, sau <code>3 x 400</code>. Căsuța vine completată din
+           prezentarea scrisă la recepție; fără ea, se face un singur palet cu tot rândul.
            Fiecare palet primește codul lui și o etichetă cu cod de bare. O lipești pe palet, iar pe raft îl pui cu
            <a href="/stocuri/ct-park/scaner">scanerul</a>: scanezi paletul, scanezi locul, Efectuează.
          </p>
          ${faraPaleti
            .map(
              (x) => `<label class="field"><span>${esc(x.nume)} — de pus <strong>${fmt(x.ramas)} ${esc(x.um)}</strong></span>
-               <input name="paleti_${x.id}" value="${esc(String(x.ramas).replace(".", ","))}" inputmode="text" autocomplete="off" placeholder="ex. 400 + 400 + 200 sau 3 x 400 — gol = fără paleți acum"></label>
+               <input name="paleti_${x.id}" value="${esc(x.propus)}" inputmode="text" autocomplete="off" placeholder="ex. 400 + 400 + 200 sau 3 x 400 — gol = fără paleți acum"></label>
                ${
                  x.pret
                    ? ""
@@ -565,21 +595,35 @@ function register(router) {
     const produse = await db.prepare("SELECT id, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
     const retur = R.esteRetur(r.sursa);
     const inchisa = r.stare === "finalizata" || r.stare === "anulata";
+    // Prezentarea mărfii: câți paleți și cât pe un palet plin. La stocul
+    // inițial marfa e deja pe raft, n-are ce prezentare să aibă.
+    const cuPrezentare = r.sursa !== "inventar_initial";
 
     const randuri = linii.map((l) => {
       const denumire = l.produs_denumire || l.produs_text || "—";
       const asteptata = nr(l.cantitate_asteptata);
       const primita = l.cantitate_primita == null ? null : nr(l.cantitate_primita);
       const lipsa = primita == null ? null : Math.round((asteptata - primita) * 1000) / 1000;
+      const prez = primita == null ? null : PZ.dinRand(l, primita);
       return [
         esc(denumire) + (l.lot ? `<br><span style="font-size:11px;color:var(--text-muted)">lot ${esc(l.lot)}</span>` : ""),
         `${asteptata} ${esc(l.um || l.unitate_masura || "")}`,
         inchisa
           ? primita == null
             ? "—"
-            : `<strong>${primita}</strong>`
+            : `<strong>${primita}</strong>${prez ? `<div class="mic">${esc(PZ.text(prez, l.um || l.unitate_masura || ""))}</div>` : ""}`
           : `<input form="lin-${l.id}" name="cantitate_primita" type="number" step="any" min="0"
-                    value="${primita == null ? "" : primita}" style="width:92px" placeholder="cât a venit">`,
+                    value="${primita == null ? "" : primita}" style="width:92px" placeholder="cât a venit">${
+              cuPrezentare
+                ? `<div class="prezentare" style="display:flex;gap:4px;align-items:center;margin-top:4px;font-size:12px;white-space:nowrap">
+                     <input form="lin-${l.id}" name="paleti_nr" inputmode="numeric" autocomplete="off" value="${l.paleti_nr == null ? "" : esc(String(l.paleti_nr))}"
+                            style="width:46px" placeholder="paleți" aria-label="Câți paleți au venit" title="Câți paleți au venit">
+                     <span>×</span>
+                     <input form="lin-${l.id}" name="paleti_pe" inputmode="decimal" autocomplete="off" value="${l.paleti_pe == null ? "" : esc(String(l.paleti_pe).replace(".", ","))}"
+                            style="width:72px" placeholder="pe palet" aria-label="Cât e pe un palet plin" title="Cât e pe un palet plin; ultimul poate fi mai gol">
+                   </div>`
+                : ""
+            }`,
         primita == null
           ? "—"
           : lipsa > R.EPS
@@ -642,6 +686,15 @@ function register(router) {
       ${
         linii.length
           ? `<p style="color:var(--text-muted)">${z.gata} din ${z.total} rânduri făcute${z.cuLipsa ? ` · <strong>${z.cuLipsa}</strong> cu lipsă` : ""}${z.stricate ? ` · <strong>${z.stricate}</strong> cu marfă stricată` : ""}</p>`
+          : ""
+      }
+      ${
+        !inchisa && cuPrezentare
+          ? `<p style="font-size:13px;color:var(--text-muted);max-width:860px;margin:0 0 6px">
+               Sub „Primit” scrie și <strong>prezentarea</strong>: câți paleți au venit × cât e pe un palet plin (ultimul poate fi mai
+               gol) — de exemplu 3 × 400 pentru 1.000 buc pe paleți de câte 400.${r.sursa === "furnizor" ? " La marfa de la furnizor e obligatorie." : ""}
+               Din ea se fac apoi, dintr-o apăsare, paleții și etichetele.
+             </p>`
           : ""
       }
       ${table(["Produs", "Anunțat", "Primit", "Diferență", "Stare marfă", "Lot / de ce", ""], randuri)}
@@ -718,6 +771,26 @@ function register(router) {
     if (v.eroare) {
       return redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(v.eroare.slice(0, 220)));
     }
+    // Prezentarea mărfii (lib/prezentare.js): obligatorie la marfa bună de la
+    // furnizor, oricând se poate scrie la celelalte. La zero primit nu contează.
+    let paletiNr = null;
+    let paletiPe = null;
+    if (r.sursa !== "inventar_initial" && nr(v.cantitate_primita) > R.EPS) {
+      const b = ctx.body || {};
+      const p = PZ.citeste(b.paleti_nr, b.paleti_pe, v.cantitate_primita);
+      if (p.eroare) return redirect(ctx.res, `/depozit/receptie/${id}?eroare=` + encodeURIComponent(("Prezentarea: " + p.eroare).slice(0, 300)));
+      if (p.gol && r.sursa === "furnizor" && v.vandabila) {
+        return redirect(
+          ctx.res,
+          `/depozit/receptie/${id}?eroare=` +
+            encodeURIComponent("Scrie și prezentarea: câți paleți au venit și cât e pe un palet plin (ultimul poate fi mai gol). Din ea se fac paleții și etichetele.")
+        );
+      }
+      if (!p.gol) {
+        paletiNr = p.nr;
+        paletiPe = p.pe;
+      }
+    }
     // Un palet lat sta pe mai multe locuri. Cand receptia a fost deschisa
     // din harta, locurile sunt deja alese si se pun pe fiecare rand — omul
     // le-a aratat cu degetul o data, n-are de ce sa le mai caute in lista.
@@ -725,10 +798,10 @@ function register(router) {
     const locuri = dinHarta.length ? dinHarta : v.loc_id ? [v.loc_id] : [];
     await db
       .prepare(
-        `UPDATE receptii_linii SET cantitate_primita = ?, loc_id = ?, lot = ?, conditie = ?, motiv = ?, stare = ?
+        `UPDATE receptii_linii SET cantitate_primita = ?, loc_id = ?, lot = ?, conditie = ?, motiv = ?, stare = ?, paleti_nr = ?, paleti_pe = ?
           WHERE id = ? AND receptie_id = ?`
       )
-      .run(v.cantitate_primita, locuri[0] || v.loc_id, v.lot, v.conditie, v.motiv, v.stare, lid, id);
+      .run(v.cantitate_primita, locuri[0] || v.loc_id, v.lot, v.conditie, v.motiv, v.stare, paletiNr, paletiPe, lid, id);
     await db.prepare("DELETE FROM receptii_linii_locuri WHERE linie_id = ?").run(lid).catch(() => {});
     for (const locId of locuri) {
       await db

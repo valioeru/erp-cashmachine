@@ -2283,7 +2283,7 @@ function register(router) {
       ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:820px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
       ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:820px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
       <p style="max-width:820px;color:var(--text-muted)">
-        Scrie cât s-a terminat până acum. Partea asta pleacă în depozit, la „Gata din producție — de alocat”, de unde se pune
+        Scrie cât s-a terminat până acum. Partea asta pleacă în depozit, la „De alocat pe raft”, de unde se pune
         pe raft, în fulfillment sau direct la livrare. Comanda rămâne în producție până o pui pe „Finalizată”; atunci pleacă
         doar ce a mai rămas. Dacă s-a făcut mai mult decât era comandat, scrie cât s-a făcut: cantitatea din comandă nu e o limită.
         La „Plecat până acum” se vede ce a primit depozitul, nu ce s-a anunțat.

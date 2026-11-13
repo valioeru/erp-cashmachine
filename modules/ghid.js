@@ -302,8 +302,8 @@ const GHID = [
 "Paleții care sunt deja în depozit fără preț se găsesc în <b>Paleți în depozit</b>, la „arată-i și pune prețurile”: scrii prețul pe rândul paletului și apeși „Pune”; bifa de lângă îl pune pe toți paleții cu aceeași marfă. Un preț deja pus îl schimbă doar administratorul, cu „modifică”, iar schimbarea rămâne scrisă în fișa paletului.",
 "<b>Și denumirea e obligatorie.</b> Alegi produsul din catalog sau, dacă nu e acolo, scrii denumirea. Fără una din două, marfa nu intră: un palet fără denumire nu se mai găsește în stoc.",
 "<b>Ai greșit ceva la intrare?</b> Deschizi paletul (din hartă sau din Paleți în depozit, cu „corectează”) și mergi la <b>Corectează marfa de pe palet</b>. Cantitatea o corectează oricine face intrări. Denumirea și unitatea de măsură le completează oricine acolo unde lipsesc; odată scrise, le schimbă doar administratorul, care poate alege și alt produs din catalog. Fiecare corectare rămâne scrisă în fișa paletului: ce era, ce e, cine a schimbat și când. După corectare, tipărește din nou eticheta. Corectarea e pentru o cifră sau o denumire scrisă greșit; marfa care a venit sau a plecat se trece cu „Adaugă” și „Scoate”.",
-"Sus, în <b>Gata din producție — de alocat</b>, stă marfa terminată în producție și cererile marcate „intrată în stoc” care n-au încă palet. De la fiecare rând o pui pe raft (Intrarea se completează singură) sau o trimiți direct în fulfillment ori la livrare pe comanda clientului.",
-"Dedesubt, în <b>Recepționat de la furnizori — de alocat</b>, apare marfa de la furnizori și retururile, imediat ce recepția lor e finalizată, cu aceleași butoane. Mai jos sunt <b>paleții cu etichetă, fără loc pe raft</b>: îi pui pe raft cu „Pune pe raft”. Dacă a venit mai mult decât scrie pe rând, la „Alocă pe cantități” bifezi „a venit mai mult” și scrii cât e: se salvează cantitatea scrisă de tine."
+"Sus, în <b>De alocat pe raft</b>, stă la un loc marfa terminată în producție, marfa recepționată de la furnizori (și retururile) și cererile marcate „intrată în stoc” care n-au încă palet. La fiecare rând, <b>Fă paleții și etichetele</b> face toți paleții odată, după prezentarea scrisă la recepție: <code>3 x 400</code> înseamnă trei paleți de câte 400, <code>2 x 400 + 200</code> când ultimul e mai gol. Fiecare palet primește eticheta lui. Poți și să pui un singur palet pe raft (Intrarea se completează singură) sau s-o trimiți direct în fulfillment ori la livrare pe comanda clientului.",
+"Mai jos sunt <b>paleții cu etichetă, fără loc pe raft</b>: lipești eticheta și îi pui pe raft cu „Pune pe raft”, unde ERP-ul îți propune locul lângă marfa la fel. Dacă a venit mai mult decât scrie pe rând, bifezi „a venit mai mult” și scrii cât e: se salvează cantitatea scrisă de tine."
 ],
 "pasi":[
 "Apeși „+ Intrare marfă”.",
@@ -423,7 +423,9 @@ const GHID = [
 {
 "t":"Achiziții",
 "p":[
-"Facturile primite de la furnizori, cu ce s-a cumpărat pe fiecare. De aici se vede costul real al mărfii."
+"Facturile primite de la furnizori, cu ce s-a cumpărat pe fiecare. De aici se vede costul real al mărfii.",
+"<b>Recepția pe comanda la furnizor</b> (Procurement → Comenzi la furnizor, pe pagina comenzii): scrii cât a venit din fiecare poziție și <b>prezentarea</b> — câți paleți și cât e pe un palet plin (ultimul poate fi mai gol). La salvare marfa intră în depozit, pe o recepție legată de comandă, și așteaptă alocarea pe raft în Depozit → Intrare marfă, la „De alocat pe raft”, de unde se fac paleții și etichetele dintr-o apăsare.",
+"Dacă marfa primită pe o comandă n-a intrat în depozit (a fost recepționată înainte să meargă singură, sau trimiterea a căzut), pe pagina comenzii apare <b>Trimite în depozit</b>. Dedesubt sunt paleții intrați de mână în CT-Park care seamănă cu marfa ei: dacă e chiar marfa asta, n-o mai trimite — stocul s-ar dubla."
 ],
 "pasi":[],
 "sfat":null
@@ -442,7 +444,7 @@ const GHID = [
 "Asta e lista de comenzi a firmei, aceeași pe care o țineam în Excel, cu <b>exact aceleași coloane</b>: nr. comandă, client, reprezentant, produs, caracteristici, cantitate, UM, tip ambalare, data plasării, data livrării, stare, DoC, fișă tehnică, facturat, rețetă, observații.",
 "Tabelul se derulează lateral (are șaisprezece coloane) și <b>orice coloană se sortează</b> cu un click pe capul ei. Sus sunt cifrele: câte sunt în producție, câte finalizate, câte facturate și câte au trecut de termenul de livrare — alea din urmă apar cu data pe roșu.",
 "Mai jos, sub tabel, e <b>„Comenzi spre alocare”</b>: ce e deschis și n-a fost încă pus pe nicio mașină. Aia e întrebarea de dimineață — nu „ce lucrăm”, ci „ce n-are încă cine și pe ce să lucreze”.",
-"Când o parte din comandă e gata înaintea restului, alege la stare <b>„Finalizată parțial…”</b> și scrie cât s-a terminat. Partea aceea pleacă în depozit, la „Gata din producție — de alocat”, iar comanda rămâne în producție până o pui pe „Finalizată”; atunci pleacă doar restul. Sub stare scrie cât a plecat deja. Cantitatea din comandă nu e o limită: dacă s-a făcut mai mult, scrie cât s-a făcut. „Plecat până acum” arată ce a primit depozitul.",
+"Când o parte din comandă e gata înaintea restului, alege la stare <b>„Finalizată parțial…”</b> și scrie cât s-a terminat. Partea aceea pleacă în depozit, la „De alocat pe raft”, iar comanda rămâne în producție până o pui pe „Finalizată”; atunci pleacă doar restul. Sub stare scrie cât a plecat deja. Cantitatea din comandă nu e o limită: dacă s-a făcut mai mult, scrie cât s-a făcut. „Plecat până acum” arată ce a primit depozitul.",
 "Pe pagina comenzii, în caseta <b>„Materia primă”</b>, alegi din ce se face comanda: din stocul CT-Park, din catalog sau scris de mână. Dedesubt e furnizorul materialului, care se completează singur când materia e pe stoc de la un singur furnizor.",
 "La <b>„Alocă pe un utilaj”</b> scrii totalul de ore, iar ERP-ul îl împarte pe zilele libere ale utilajului, după „ore pe zi” și după ce e deja alocat pe el. Împărțirea se vede înainte să salvezi."
 ],
