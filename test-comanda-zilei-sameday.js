@@ -423,11 +423,22 @@ function puneZi(data, linii) {
   rz = await cere("post", D, GABI, { body: { zi: "azi" } });
   egal("fără zi: spune că lipsește", [rz.cod, /Lipsește ziua/.test(rz.corp)], [400, true]);
   rz = await cere("post", D, GABI, { body: { zi: Z2, comanda: String(deMana.id) } });
-  egal("ziua veche: legătura nu se mai schimbă", [rz.cod, /doar pentru ultimele 7 zile/.test(rz.corp), legataDe(Z2)], [422, true, Number(deMana.id)]);
+  egal("ziua veche: legătura nu se mai schimbă", [rz.cod, /doar pentru ultimele 3 zile/.test(rz.corp), legataDe(Z2)], [422, true, Number(deMana.id)]);
+  // Șapte zile în urmă: în fereastra lui „Fă comanda” (7), dar nu și a lui „nu e a zilei” (3).
+  // 229 de lei față de 69,93 ai zilei: n-are valoarea zilei, deci butonul lipsește doar din cauza vechimii.
+  const veche = scrieDeMana("comandă străină, ziua de acum 7 zile", "2097-05-02 09:17:00", "2097-05-14", [[P2, 10, 22.9]]);
+  puneZi("2097-05-14", [["TSTSD1", 777, 0.09]]);
+  exec(`UPDATE consumabile_zile SET comanda_id = ${veche} WHERE data = '2097-05-14'`);
+  pg = await cere("get", C0, GABI, { query: { luna: "2097-05" } });
+  egal("ziua de acum 7 zile, legată de o comandă străină: fără butonul „nu e a zilei”", [randul(pg.corp, "2097-05-14").includes(`href="/comenzi/${veche}"`), randul(pg.corp, "2097-05-14").includes("nu-e-a-zilei")], [true, false]);
+  rz = await cere("post", D, GABI, { body: { zi: "2097-05-14", comanda: String(veche) } });
+  egal("…și nici cererea trimisă de mână n-o dezleagă", [rz.cod, /doar pentru ultimele 3 zile/.test(rz.corp), /una nouă ar dubla-o/.test(rz.corp), legataDe("2097-05-14")], [422, true, true, veche]);
+  const ZD2 = CZ.__test.ziDeDesfacut;
+  egal("fereastra lui „nu e a zilei”: azi, ultimele 3 zile și mâine", [ZD2("2097-05-18", AZI_DESFA), ZD2("2097-05-17", AZI_DESFA), ZD2("2097-05-22", AZI_DESFA), ZD2("2097-05-23", AZI_DESFA), ZD2("x", AZI_DESFA)], [true, false, true, false, false]);
   rz = await cere("post", D, GABI, { body: { zi: "2097-05-22" } });
   egal("ziua care nu e în raport", [rz.cod, /nu e în raport/.test(rz.corp)], [404, true]);
-  exec(`UPDATE consumabile_zile SET comanda_id = NULL WHERE data = '${ZB}'`);
-  rz = await cere("post", D, GABI, { body: { zi: ZB } });
+  exec(`UPDATE consumabile_zile SET comanda_id = NULL WHERE data = '${ZD}'`);
+  rz = await cere("post", D, GABI, { body: { zi: ZD } });
   egal("ziua fără comandă legată: n-are ce dezlega", [rz.cod, /n-are nicio comandă legată/.test(rz.corp)], [409, true]);
   const aErp = legataDe(ZF);
   rz = await cere("post", D, GABI, { body: { zi: ZF, comanda: String(aErp) } });
@@ -453,6 +464,8 @@ function puneZi(data, linii) {
   exec(`UPDATE consumabile_zile SET comanda_id = NULL WHERE data = '${ZE}'`);
   let re = await CZ.comandaZilei(ZE, GABI, "comenzile aprobate");
   egal("comanda cu valoarea zilei e luată iar drept a zilei", [re.actiune, legataDe(ZE)], ["adoptata", aproape]);
+  pg = await cere("get", C0, GABI, { query: { luna: "2097-05" } });
+  egal("lângă comanda scrisă de mână cu valoarea zilei nu e butonul „nu e a zilei” (ar dubla comanda)", [randul(pg.corp, ZE).includes(`href="/comenzi/${aproape}"`), randul(pg.corp, ZE).includes("nu-e-a-zilei")], [true, false]);
   rz = await cere("post", D, GABI, { body: { zi: ZE, comanda: String(aproape) } });
   const nouaE = comenziClient().filter((c) => c.numar === "Sameday 19.05.2097");
   egal("…dar după „nu e a zilei” nu mai e luată înapoi: ERP-ul face alta", [rz.cod, nouaE.length, legataDe(ZE) === Number(nouaE[0] && nouaE[0].id), /Am făcut comanda zilei 19\.05\.2097/.test(rz.corp)], [200, 1, true, true]);
