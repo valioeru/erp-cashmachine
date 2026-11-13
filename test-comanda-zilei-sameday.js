@@ -16,6 +16,11 @@
 //   • COMANDA SE PUNE LA ZI DOAR CÂT E „NOUĂ". Una confirmată nu o rescrie un
 //     import; una scrisă de mână e adoptată, nu dublată și nu rescrisă.
 //   • PRODUSUL NELEGAT LA NOMENCLATOR NU DISPARE TĂCUT — se spune pe nume.
+//   • COMANDA SCRISĂ DE MÂNĂ E ADOPTATĂ DOAR DACĂ E CHIAR A ZILEI (12.11.2026):
+//     scrisă în ziua raportului (sau a doua zi) și cu valoarea zilei. Pe 12.11
+//     ziua a luat drept a ei comanda #40 — o folie scrisă pe 03.11, cu livrare
+//     pe 12.11 — și comanda zilei n-a mai ieșit deloc. O comandă adoptată
+//     greșit se dezleagă din raport („nu e a zilei”) și ERP-ul o face pe a lui.
 //   • COMANDA ZILEI SE VEDE ÎN RAPORT ȘI SE POATE CERE DIN BUTON (11.11.2026:
 //     „Avem aici o problemă la import care mergea dar nu mai merge” — comanda
 //     zilei nu s-a făcut, fiindcă niciun produs nu era legat la nomenclator).
@@ -90,6 +95,7 @@ warehouse.register({ get: (p, h) => { if (!ruteDepozit.get[p]) ruteDepozit.get[p
 let rele = 0;
 const ok = (e) => console.log("  ok       " + e);
 const rau = (e, d) => { console.log("  PROBLEMĂ " + e + (d ? ": " + d : "")); rele++; };
+const bine2 = (eticheta, conditie, detaliu) => (conditie ? ok(eticheta) : rau(eticheta, detaliu));
 function egal(eticheta, avut, asteptat) {
   const a = JSON.stringify(avut), b = JSON.stringify(asteptat);
   if (a !== b) rau(eticheta, "am " + a + ", așteptam " + b); else ok(eticheta + " = " + b);
@@ -105,6 +111,8 @@ const P1 = 97341, P2 = 97342;
 const Z1 = "2097-05-05", Z2 = "2097-05-06", Z3 = "2097-05-07", Z4 = "2097-05-08";
 // Pentru butonul din raport: „azi” e 10.05.2097, deci 09.05 e proaspătă, 01.05 e veche.
 const AZI_TEST = "2097-05-10", Z5 = "2097-05-09", Z6 = "2097-05-01", Z7 = "2097-05-10";
+// Pentru adoptare și „nu e a zilei”: „azi” e 21.05.2097.
+const AZI_DESFA = "2097-05-21", ZA = "2097-05-15", ZB = "2097-05-16", ZC = "2097-05-17", ZD = "2097-05-18", ZE = "2097-05-19", ZF = "2097-05-20", ZG = "2097-05-21";
 
 function curata() {
   for (const s of [
@@ -126,6 +134,13 @@ function curata() {
 }
 // Următoarea zi lucrătoare, socotită aici pe altă cale decât în modul.
 const ziLucratoareDupa = (zi) => { const d = new Date(zi + "T12:00:00Z"); do { d.setUTCDate(d.getUTCDate() + 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6); return d.toISOString().slice(0, 10); };
+// O comandă scrisă de mână: numărul, când a fost scrisă, livrarea cerută, liniile [produs, cantitate, preț].
+function scrieDeMana(numar, data, livrare, linii, stare) {
+  exec(`INSERT INTO comenzi (partener_id, numar, data, data_livrare_ceruta, status, agent_id) VALUES (${PARTENER}, '${numar}', '${data}', ${livrare ? "'" + livrare + "'" : "NULL"}, '${stare || "noua"}', 97322)`);
+  const c = q("SELECT id FROM comenzi WHERE partener_id = ? AND numar = ?", [PARTENER, numar])[0];
+  for (const [produs, cant, pret] of linii || []) exec(`INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (${c.id}, ${produs}, ${cant}, ${pret})`);
+  return Number(c.id);
+}
 const comenziClient = () => q("SELECT id, status, sursa, numar, agent_id, data_livrare_ceruta FROM comenzi WHERE partener_id = ? ORDER BY id", [PARTENER]);
 const liniiComanda = (id) => q("SELECT produs_id, cantitate, pret_unitar, um FROM comenzi_linii WHERE comanda_id = ? ORDER BY produs_id", [id]).map((l) => [Number(l.produs_id), Number(l.cantitate), Number(l.pret_unitar)]);
 const ziua = (data) => q("SELECT id, comanda_id FROM consumabile_zile WHERE client = 'Sameday' AND data = ?", [data])[0];
@@ -215,7 +230,8 @@ function puneZi(data, linii) {
   egal("liniile au rămas", liniiComanda(c1[0].id), [[P1, 9000, 0.09]]);
 
   console.log("\nComanda scrisă de mână pentru o zi e adoptată, nu dublată:");
-  exec(`INSERT INTO comenzi (partener_id, numar, data_livrare_ceruta, status, agent_id) VALUES (${PARTENER}, 'scrisă de Gabi', '${Z2}', 'noua', ${GABI.id})`);
+  // Cum scria Gabi: în ziua raportului, cu livrarea a doua zi și cu valoarea zilei (500 × 0,09 = 45 lei).
+  scrieDeMana("scrisă de Gabi", `${Z2} 15:49:00`, Z3, [[P1, 500, 0.09]]);
   const deMana = comenziClient().find((c) => c.numar === "scrisă de Gabi");
   puneZi(Z2, [["TSTSD1", 500, 0.09]]);
   const r5 = await CZ.comandaZilei(Z2, GABI, "comenzile aprobate");
@@ -235,13 +251,63 @@ function puneZi(data, linii) {
   egal("agentul vine de pe ultima comandă a clientului", Number(pentruZ3[0].agent_id), GABI.id);
 
   console.log("\nO comandă de mână ANULATĂ nu se adoptă; agentul nu e cine urcă:");
-  exec(`INSERT INTO comenzi (partener_id, numar, data_livrare_ceruta, status, agent_id) VALUES (${PARTENER}, 'anulată de Gabi', '${Z4}', 'anulata', ${GABI.id})`);
+  scrieDeMana("anulată de Gabi", `${Z4} 15:10:00`, Z4, [[P2, 10, 3.3]], "anulata");
   puneZi(Z4, [["TSTSD2", 10, 3.3]]);
   const r7 = await CZ.comandaZilei(Z4, ADMIN, "AWB-urile");
   egal("acțiunea", r7.actiune, "creeaza");
   const pentruZ4 = comenziClient().filter((c) => c.numar === "Sameday 08.05.2097" && c.status !== "anulata");
   egal("comanda nouă, nu cea anulată, e a zilei", [pentruZ4.length, Number(ziua(Z4).comanda_id)], [1, Number(pentruZ4[0] && pentruZ4[0].id)]);
   egal("agentul: de pe ultima comandă (Gabi), nu Vali care a urcat", Number(pentruZ4[0] && pentruZ4[0].agent_id), GABI.id);
+
+  console.log("\nCe comandă scrisă de mână e chiar a zilei (12.11.2026: ziua a luat comanda #40, o folie cu livrare în ziua aia):");
+  const EZ = CZ.__test.eComandaZilei;
+  egal("aceeași valoare, sau la un leu / 2% de ea: e a zilei; altfel nu",
+    [EZ(45, 45), EZ(45.36, 45), EZ(46.5, 45), EZ(13630.65, 13630.65), EZ(13800, 13630.65), EZ(14000, 13630.65), EZ(229, 9675.5), EZ(1180223.4, 7659.39)],
+    [true, true, false, true, true, false, false, false]);
+  egal("fără valoare de o parte sau de alta nu e nimic de comparat", [EZ(0, 0), EZ(0, 45), EZ(45, 0), EZ(null, undefined)], [false, false, false, false]);
+  egal("la sume mici ține leul, nu procentul: 10,80 față de 10 e a zilei, 11,50 nu", [EZ(10.8, 10), EZ(11.5, 10), EZ(9.2, 10), EZ(8.5, 10)], [true, false, true, false]);
+  const cate = () => comenziClient().length;
+  // Cazul din 12.11: comandă veche, cu altă marfă, care doar are livrarea cerută în ziua raportului.
+  const folie = scrieDeMana("folie veche, livrare în ziua raportului", "2097-04-20 09:17:00", ZA, [[P2, 10, 22.9]]);
+  puneZi(ZA, [["TSTSD1", 1000, 0.09]]);
+  let nA = cate();
+  let ra = await CZ.comandaZilei(ZA, GABI, "comenzile aprobate");
+  egal("comanda cu livrarea în ziua raportului, dar scrisă altă dată și cu altă valoare, NU e luată drept a zilei", [ra.actiune, cate(), Number(ziua(ZA).comanda_id) === folie], ["creeaza", nA + 1, false]);
+  egal("…ERP-ul face comanda zilei", comenziClient().filter((c) => c.numar === "Sameday 15.05.2097").map((c) => liniiComanda(c.id)), [[[P1, 1000, 0.09]]]);
+  // Comanda mare a clientului, scrisă chiar în ziua raportului (ca #62, de 1,18 milioane).
+  const mare = scrieDeMana("comanda mare din ziua raportului", `${ZB} 15:08:00`, "2097-05-30", [[P1, 756700, 0.09], [P2, 5000, 3.3]]);
+  puneZi(ZB, [["TSTSD1", 1000, 0.09]]);
+  nA = cate();
+  ra = await CZ.comandaZilei(ZB, GABI, "comenzile aprobate");
+  egal("comanda scrisă în ziua raportului, dar cu altă valoare, nu e a zilei", [ra.actiune, cate(), Number(ziua(ZB).comanda_id) === mare], ["creeaza", nA + 1, false]);
+  // Scrisă a doua zi dimineață, cu valoarea zilei: e a zilei.
+  const aDouaZi = scrieDeMana("scrisă a doua zi", `${ZD} 08:05:00`, ZD, [[P1, 2000, 0.09]]);
+  puneZi(ZC, [["TSTSD1", 2000, 0.09]]);
+  nA = cate();
+  ra = await CZ.comandaZilei(ZC, GABI, "comenzile aprobate");
+  egal("comanda scrisă a doua zi, cu valoarea zilei, e adoptată", [ra.actiune, cate(), Number(ziua(ZC).comanda_id)], ["adoptata", nA, aDouaZi]);
+  // Scrisă cu două zile mai târziu: nu.
+  scrieDeMana("scrisă peste două zile", `${ZF} 08:05:00`, ZF, [[P1, 3000, 0.09]]);
+  puneZi(ZD, [["TSTSD1", 3000, 0.09]]);
+  nA = cate();
+  ra = await CZ.comandaZilei(ZD, GABI, "comenzile aprobate");
+  egal("…cea scrisă peste două zile, nu", [ra.actiune, cate()], ["creeaza", nA + 1]);
+  // Aproape aceeași valoare (un rând în plus de 1,50 lei la 99 de lei, adică sub 2%): tot a zilei. La 3% diferență, nu.
+  const aproape = scrieDeMana("aproape valoarea zilei", `${ZE} 15:00:00`, ZF, [[P2, 30, 3.3], [P1, 30, 0.05]]);
+  puneZi(ZE, [["TSTSD2", 30, 3.3]]);
+  ra = await CZ.comandaZilei(ZE, GABI, "comenzile aprobate");
+  egal("la 1,50 lei de valoarea zilei (99 de lei): tot a zilei", [ra.actiune, Number(ziua(ZE).comanda_id)], ["adoptata", aproape]);
+  exec(`UPDATE comenzi SET data = '${ZF} 15:00:00' WHERE numar = 'scrisă peste două zile'`);
+  puneZi(ZF, [["TSTSD1", 3100, 0.09]]);
+  nA = cate();
+  ra = await CZ.comandaZilei(ZF, GABI, "comenzile aprobate");
+  egal("la 3% de valoarea zilei (270 față de 279): nu e a zilei", [ra.actiune, cate()], ["creeaza", nA + 1]);
+
+  // Valoarea zilei are și produsele nelegate la nomenclator: comanda lui Gabi le avea pe toate.
+  const cuNelegat = scrieDeMana("cu tot cu produsul nelegat", "2097-05-23 15:30:00", "2097-05-24", [[P1, 1000, 0.09], [P2, 20, 0.5]]);
+  puneZi("2097-05-23", [["TSTSD1", 1000, 0.09], ["TSTSD3", 20, 0.5]]);
+  ra = await CZ.comandaZilei("2097-05-23", GABI, "comenzile aprobate");
+  egal("valoarea zilei se socotește cu tot cu produsele nelegate (90 + 10 lei)", [ra.actiune, Number(ziua("2097-05-23").comanda_id)], ["adoptata", cuNelegat]);
 
   console.log("\nPagina raportului se deschide, cu perioadele de facturare ale lui Vali (29.10):");
   const ruteZi = { get: {}, post: {} };
@@ -334,6 +400,64 @@ function puneZi(data, linii) {
   egal("comanda anulată se vede ca anulată, fără buton", [/făcută de ERP, anulată/.test(randul(pg.corp, Z5)), randul(pg.corp, Z5).includes("fa-comanda")], [true, false]);
   rz = await cere("post", C0 + "/comanda-zilei", GABI, { body: { zi: Z5 } });
   egal("…și cererea n-o reface", [comenziClient().filter((c) => c.numar === "Sameday 09.05.2097").length, /a fost anulată/.test(rz.corp)], [1, true]);
+  CZ.__test.azi = null;
+
+  console.log("\n„Nu e a zilei”: comanda adoptată greșit se dezleagă din raport, iar ERP-ul o face pe a lui:");
+  CZ.__test.azi = AZI_DESFA;
+  // Starea lăsată pe live de regula veche: ziua legată de o comandă care n-are legătură cu ea.
+  const straina = scrieDeMana("folie pentru altceva", "2097-05-03 09:17:00", ZG, [[P2, 10, 22.9]]);
+  puneZi(ZG, [["TSTSD1", 4000, 0.09]]);
+  exec(`UPDATE consumabile_zile SET comanda_id = ${straina} WHERE data = '${ZG}'`);
+  pg = await cere("get", C0, GABI, { query: { luna: "2097-05" } });
+  const rg0 = randul(pg.corp, ZG);
+  egal("ziua legată de o comandă scrisă de mână are butonul „nu e a zilei”, cu ziua, comanda și întrebarea",
+    [rg0.includes(`href="/comenzi/${straina}"`), rg0.includes(`action="${C0}/comanda-zilei/desfa"`), rg0.includes(`name="zi" value="${ZG}"`), rg0.includes(`name="comanda" value="${straina}"`), />nu e a zilei<\/button>/.test(rg0),
+     new RegExp(`onsubmit="return confirm\\('Comanda #${straina} nu e comanda zilei 21\\.05\\.2097\\?`).test(rg0)],
+    [true, true, true, true, true, true]);
+  egal("ziua cu comanda făcută de ERP nu-l are; nici ziua veche cu comandă scrisă de mână", [randul(pg.corp, ZA).includes("nu-e-a-zilei"), randul(pg.corp, Z2).includes("nu-e-a-zilei"), randul(pg.corp, Z2).includes("scrisă de mână")], [false, false, true]);
+  egal("cine n-are voie să urce ziua nu-l vede", (await cere("get", C0, FARA, { query: { luna: "2097-05" } })).corp.includes("nu-e-a-zilei"), false);
+  const D = C0 + "/comanda-zilei/desfa";
+  const legataDe = (zi) => Number(ziua(zi).comanda_id) || null;
+  rz = await cere("post", D, FARA, { body: { zi: ZG, comanda: String(straina) } });
+  egal("cine n-are voie e trimis înapoi, iar legătura rămâne", [rz.cod, rz.antet.Location, legataDe(ZG)], [302, C0, straina]);
+  rz = await cere("post", D, GABI, { body: { zi: "azi" } });
+  egal("fără zi: spune că lipsește", [rz.cod, /Lipsește ziua/.test(rz.corp)], [400, true]);
+  rz = await cere("post", D, GABI, { body: { zi: Z2, comanda: String(deMana.id) } });
+  egal("ziua veche: legătura nu se mai schimbă", [rz.cod, /doar pentru ultimele 7 zile/.test(rz.corp), legataDe(Z2)], [422, true, Number(deMana.id)]);
+  rz = await cere("post", D, GABI, { body: { zi: "2097-05-22" } });
+  egal("ziua care nu e în raport", [rz.cod, /nu e în raport/.test(rz.corp)], [404, true]);
+  exec(`UPDATE consumabile_zile SET comanda_id = NULL WHERE data = '${ZB}'`);
+  rz = await cere("post", D, GABI, { body: { zi: ZB } });
+  egal("ziua fără comandă legată: n-are ce dezlega", [rz.cod, /n-are nicio comandă legată/.test(rz.corp)], [409, true]);
+  const aErp = legataDe(ZF);
+  rz = await cere("post", D, GABI, { body: { zi: ZF, comanda: String(aErp) } });
+  egal("comanda făcută de ERP nu se dezleagă: e chiar a zilei", [rz.cod, /e făcută de ERP din raport/.test(rz.corp), legataDe(ZF)], [422, true, aErp]);
+  rz = await cere("post", D, GABI, { body: { zi: ZG, comanda: String(aErp) } });
+  egal("dacă între timp ziua are altă comandă decât cea de pe pagină, nu se atinge nimic", [rz.cod, /a primit altă comandă/.test(rz.corp), legataDe(ZG)], [409, true, straina]);
+
+  const jurnalD = [];
+  const scrieD = console.log;
+  console.log = (...a) => { jurnalD.push(a.join(" ")); };
+  try { rz = await cere("post", D, GABI, { body: { zi: ZG, comanda: String(straina) } }); } finally { console.log = scrieD; }
+  const nouaG = comenziClient().filter((c) => c.numar === "Sameday 21.05.2097");
+  egal("dezlegată, ziua își primește comanda făcută din raport", [rz.cod, nouaG.length, nouaG[0] && liniiComanda(nouaG[0].id), legataDe(ZG) === Number(nouaG[0] && nouaG[0].id)], [200, 1, [[P1, 4000, 0.09]], true]);
+  egal("…iar comanda dezlegată rămâne neatinsă", [q("SELECT status, numar FROM comenzi WHERE id = ?", [straina]).map((c) => [c.status, c.numar]), liniiComanda(straina)], [[["noua", "folie pentru altceva"]], [[P2, 10, 22.9]]]);
+  egal("pagina spune ce a dezlegat și ce a făcut", [rz.corp.includes(`Am dezlegat comanda <a href="/comenzi/${straina}">#${straina}</a> de ziua 21.05.2097`), /Comanda a rămas neatinsă/.test(rz.corp), /Am făcut comanda zilei 21\.05\.2097\./.test(rz.corp), rz.corp.includes(`href="/comenzi/${nouaG[0] && nouaG[0].id}"`)], [true, true, true, true]);
+  bine2("jurnalul spune cine a dezlegat ce", jurnalD.some((x) => x.includes(`Gabriela Tecuceanu a dezlegat comanda #${straina} de ziua ${ZG}`)), jurnalD.join(" | ").slice(0, 200));
+  const istG = q("SELECT nou FROM comenzi_istoric WHERE comanda_id = ? ORDER BY id LIMIT 1", [nouaG[0].id])[0] || {};
+  egal("…iar istoricul comenzii noi spune de unde vine", new RegExp(`după ce comanda #${straina} a fost dezlegată de zi`).test(istG.nou || ""), true);
+  rz = await cere("post", D, GABI, { body: { zi: ZG, comanda: String(straina) } });
+  egal("a doua apăsare nu mai are ce dezlega", [rz.cod, legataDe(ZG) === Number(nouaG[0].id), comenziClient().filter((c) => c.numar === "Sameday 21.05.2097").length], [409, true, 1]);
+
+  // Comanda care chiar seamănă cu a zilei (scrisă în ziua ei, aceeași valoare), dar despre care omul spune că nu e.
+  exec(`UPDATE consumabile_zile SET comanda_id = NULL WHERE data = '${ZE}'`);
+  let re = await CZ.comandaZilei(ZE, GABI, "comenzile aprobate");
+  egal("comanda cu valoarea zilei e luată iar drept a zilei", [re.actiune, legataDe(ZE)], ["adoptata", aproape]);
+  rz = await cere("post", D, GABI, { body: { zi: ZE, comanda: String(aproape) } });
+  const nouaE = comenziClient().filter((c) => c.numar === "Sameday 19.05.2097");
+  egal("…dar după „nu e a zilei” nu mai e luată înapoi: ERP-ul face alta", [rz.cod, nouaE.length, legataDe(ZE) === Number(nouaE[0] && nouaE[0].id), /Am făcut comanda zilei 19\.05\.2097/.test(rz.corp)], [200, 1, true, true]);
+  re = await CZ.comandaZilei(ZE, GABI, "AWB-urile");
+  egal("…iar următoarea urcare o lasă pe cea făcută de ERP", [re.actiune, comenziClient().filter((c) => c.numar === "Sameday 19.05.2097").length], ["lasa", 1]);
   CZ.__test.azi = null;
 
   console.log("\nCine are voie la raportul Sameday:");
