@@ -885,8 +885,9 @@ async function importaComenziAprobate(randuri, opt) {
 //     locul comenzilor aprobate) → aceeași comandă, cu liniile puse la zi —
 //     dar numai cât timp e „nouă". Una confirmată deja n-o mai rescrie un
 //     import: se spune, și atât;
-//   • o comandă scrisă de mână pentru ziua aia (cum făcea Gabi până acum) e
-//     adoptată, nu dublată, și nu se rescrie;
+//   • comanda scrisă de mână chiar pentru ziua aia (cum făcea Gabi până pe
+//     11.11.2026: scrisă în ziua raportului, cu valoarea zilei) e adoptată, nu
+//     dublată, și nu se rescrie — vezi eComandaZilei;
 //   • un produs al raportului fără legătură la nomenclator nu poate intra pe
 //     o comandă — se spune pe nume, cu valoarea care lipsește.
 const PARTENER_SAMEDAY = "DELIVERY SOLUTIONS%";
@@ -950,11 +951,38 @@ function planComandaZi(o) {
   return plan("creeaza");
 }
 
+// E comanda asta, scrisă de mână, chiar comanda zilei?
+//
+// Până pe 12.11.2026 ajungea ca o comandă a clientului să aibă livrarea cerută
+// în ziua raportului (sau să fie scrisă în ziua aia) ca ERP-ul s-o ia drept
+// comanda zilei și să nu mai facă alta. Pe 12.11 ziua a „adoptat” așa comanda
+// #40 — o folie stretch scrisă pe 03.11, cu livrare pe 12.11 — și comanda
+// zilei n-a mai ieșit deloc, fără ca cineva să fi scris alta: Gabi nu le mai
+// scrie de mână din 11.11. Clientul are și alte comenzi, mari, cu termene
+// oarecare; data livrării nu spune nimic despre ele.
+//
+// Comanda zilei scrisă de mână se recunoaște după două lucruri pe care le
+// aveau toate ale lui Gabi: e scrisă în ziua raportului (sau a doua zi
+// dimineață) și are valoarea zilei — la ban sau aproape (#82: 13.630,65 lei,
+// cât ziua de 10.11; #44: 62.527,02, cât ziua de 03.11). Altfel nu e a zilei
+// și ERP-ul o face pe a lui: o comandă în plus se vede și se anulează, una
+// care lipsește nu se vede până nu pleacă marfa.
+const TOLERANTA_ADOPTARE = 0.02;
+function eComandaZilei(totalComanda, totalZi) {
+  const z = Number(totalZi) || 0;
+  const c = Number(totalComanda) || 0;
+  if (!(z > 0) || !(c > 0)) return false;
+  return Math.abs(c - z) <= Math.max(1, TOLERANTA_ADOPTARE * z);
+}
+
 // Comanda zilei: o face, o pune la zi sau spune de ce n-o atinge.
 // Nu aruncă niciodată: raportul s-a scris deja, iar o comandă care nu iese nu
 // are voie să strice urcarea zilei. Ce n-a mers se întoarce cu motivul.
-async function comandaZilei(zi, userSauId, deUnde) {
+// opt.nuAdopta — comanda scrisă de mână despre care omul a spus că NU e a
+// zilei (butonul „nu e a zilei”): nu se mai ia înapoi, orice valoare ar avea.
+async function comandaZilei(zi, userSauId, deUnde, opt) {
   try {
+    const nuAdopta = Number(opt && opt.nuAdopta) || 0;
     let user = userSauId && typeof userSauId === "object" ? userSauId : null;
     if (!user && userSauId) user = await db.prepare("SELECT id, nume, email FROM utilizatori WHERE id = ?").get(userSauId).catch(() => null);
     const ziRand = await db.prepare("SELECT id, comanda_id FROM consumabile_zile WHERE client = ? AND data = ?").get(CLIENT, zi);
@@ -974,22 +1002,28 @@ async function comandaZilei(zi, userSauId, deUnde) {
       )
       .all(ziRand.id);
 
-    // Comanda deja legată de zi — sau una scrisă de mână pentru aceeași zi,
-    // pe același client, încă nelegată de altă zi: aia se adoptă.
+    // Comanda deja legată de zi — sau cea scrisă de mână chiar pentru ziua
+    // asta (vezi eComandaZilei), încă nelegată de altă zi: aia se adoptă.
     let existenta = null;
     if (ziRand.comanda_id) {
       existenta = await db.prepare("SELECT id, status, sursa FROM comenzi WHERE id = ?").get(ziRand.comanda_id);
     }
     if (!existenta) {
-      const deMana = await db
+      // Valoarea zilei: toate rândurile ei, și cele nelegate la nomenclator —
+      // comanda scrisă de mână le avea pe toate.
+      const totalZi = linii.reduce((t, l) => t + nr(l.cantitate) * nr(l.pret), 0);
+      const scrise = await db
         .prepare(
-          `SELECT id, status, sursa FROM comenzi
-            WHERE partener_id = ? AND status <> 'anulata' AND COALESCE(sursa, '') <> 'sameday'
-              AND (data_livrare_ceruta = ? OR SUBSTR(COALESCE(data, ''), 1, 10) = ?)
-              AND id NOT IN (SELECT comanda_id FROM consumabile_zile WHERE comanda_id IS NOT NULL)
-            ORDER BY id LIMIT 1`
+          `SELECT c.id, c.status, c.sursa,
+                  (SELECT COALESCE(SUM(cl.cantitate * cl.pret_unitar), 0) FROM comenzi_linii cl WHERE cl.comanda_id = c.id) AS total
+             FROM comenzi c
+            WHERE c.partener_id = ? AND c.status <> 'anulata' AND COALESCE(c.sursa, '') <> 'sameday'
+              AND SUBSTR(COALESCE(c.data, ''), 1, 10) IN (?, ?)
+              AND c.id NOT IN (SELECT comanda_id FROM consumabile_zile WHERE comanda_id IS NOT NULL)
+            ORDER BY c.id`
         )
-        .get(partener.id, zi, zi);
+        .all(partener.id, zi, ziPlus(zi, 1));
+      const deMana = scrise.find((c) => Number(c.id) !== nuAdopta && eComandaZilei(c.total, totalZi));
       if (deMana) {
         const leg = await db
           .prepare("UPDATE consumabile_zile SET comanda_id = ? WHERE id = ? AND comanda_id IS NULL RETURNING id")
@@ -1451,10 +1485,20 @@ const aziComanda = () => (module.exports.__test && module.exports.__test.azi) ||
 // fișierul a doua oară.
 function celulaComanda(z, az, opt) {
   if (z.comanda_id) {
-    const fel = z.comanda_sursa === "sameday" ? "făcută de ERP" : "scrisă de mână";
-    return `<a class="comanda-zilei" href="/comenzi/${Number(z.comanda_id)}">#${Number(z.comanda_id)}</a> <span style="font-size:12px;color:var(--text-muted)">${fel}${
+    const aErp = z.comanda_sursa === "sameday";
+    const fel = aErp ? "făcută de ERP" : "scrisă de mână";
+    const legatura = `<a class="comanda-zilei" href="/comenzi/${Number(z.comanda_id)}">#${Number(z.comanda_id)}</a> <span style="font-size:12px;color:var(--text-muted)">${fel}${
       z.comanda_status === "anulata" ? ", anulată" : ""
     }</span>`;
+    // Comanda scrisă de mână, luată drept a zilei, poate să nu fie a zilei.
+    // Cine poate urca ziua o dezleagă de aici, iar ERP-ul face comanda din
+    // raport. Doar pe zilele proaspete, ca la „Fă comanda”.
+    if (aErp || !(opt && opt.poateFace) || !ziDeComanda(z.data, az)) return legatura;
+    return `${legatura}
+    <form method="post" action="${CALE}/comanda-zilei/desfa" style="display:inline;margin:0 0 0 6px" onsubmit="return confirm('Comanda #${Number(z.comanda_id)} nu e comanda zilei ${dataRo(z.data)}? O dezleg de zi — comanda rămâne neatinsă — și fac comanda zilei din raport.')">
+      <input type="hidden" name="zi" value="${esc(z.data)}"><input type="hidden" name="comanda" value="${Number(z.comanda_id)}">
+      <button class="btn secondary nu-e-a-zilei" type="submit" style="padding:2px 8px;font-size:12px">nu e a zilei</button>
+    </form>`;
   }
   if (!(opt && opt.poateFace) || !ziDeComanda(z.data, az)) return '<span style="color:var(--text-muted)">—</span>';
   return `<form method="post" action="${CALE}/comanda-zilei" style="margin:0" onsubmit="return confirm('Fac comanda pentru DELIVERY SOLUTIONS pe ziua ${dataRo(z.data)}, cu produsele din raport?')">
@@ -2122,6 +2166,43 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     );
   });
 
+  // „Nu e a zilei”: comanda scrisă de mână, luată drept comanda zilei, se
+  // dezleagă de zi (rămâne neatinsă), iar ERP-ul face comanda din raport.
+  router.post(`${CALE}/comanda-zilei/desfa`, async (ctx) => {
+    if (!poateUrca(ctx.user)) return redirect(ctx.res, CALE);
+    const b = ctx.body || {};
+    const zi = String(b.zi || "").slice(0, 10);
+    const pagina = (stare, corp) => send(ctx.res, stare, rapoarte.pagina(ctx, "Comanda zilei", CALE, corp));
+    if (!eData(zi)) return pagina(400, `<p><a href="${CALE}">← Comenzi consumabile la zi</a></p><p>Lipsește ziua.</p>`);
+    const cap = `<p><a href="${CALE}?perioada=custom&de=${zi}&pana=${zi}">← Ziua ${dataRo(zi)} în raport</a></p><h1 style="margin-top:0">Comanda zilei — ${dataRo(zi)}</h1>`;
+    const refuz = (stare, text) => pagina(stare, `${cap}<div class="flash flash-rosu" role="alert">${text}</div>`);
+    if (!ziDeComanda(zi, aziComanda())) {
+      return refuz(422, `Legătura dintre zi și comandă se schimbă doar pentru ultimele ${ZILE_COMANDA} zile. Ziua ${dataRo(zi)} e mai veche: marfa ei a plecat demult.`);
+    }
+    const ziRand = await db.prepare("SELECT id, comanda_id FROM consumabile_zile WHERE client = ? AND data = ?").get(CLIENT, zi);
+    if (!ziRand) return refuz(404, `Ziua ${dataRo(zi)} nu e în raport.`);
+    if (!ziRand.comanda_id) return refuz(409, `Ziua ${dataRo(zi)} n-are nicio comandă legată. Apasă „Fă comanda” pe rândul ei.`);
+    const cerut = Number(b.comanda) || 0;
+    const legata = Number(ziRand.comanda_id);
+    if (cerut && cerut !== legata) return refuz(409, `Între timp ziua a primit altă comandă (#${legata}). Deschide raportul din nou.`);
+    const c = await db.prepare("SELECT id, sursa FROM comenzi WHERE id = ?").get(legata);
+    if (c && c.sursa === "sameday") {
+      return refuz(422, `Comanda <a href="/comenzi/${legata}">#${legata}</a> e făcută de ERP din raport: e chiar comanda zilei. Dacă nu mai e bună, anuleaz-o din Comenzi.`);
+    }
+    const dez = await db
+      .prepare("UPDATE consumabile_zile SET comanda_id = NULL WHERE id = ? AND comanda_id = ? RETURNING id")
+      .run(ziRand.id, legata)
+      .catch(() => ({ changes: 0 }));
+    if (!dez.changes) return refuz(409, "Legătura s-a schimbat între timp. Deschide raportul din nou.");
+    console.log(`[comenzi-zi] ${ctx.user.nume || "?"} a dezlegat comanda #${legata} de ziua ${zi}: nu era comanda zilei`);
+    const r = await comandaZilei(zi, ctx.user, `butonul din raport, după ce comanda #${legata} a fost dezlegată de zi`, { nuAdopta: legata });
+    return pagina(
+      200,
+      `${cap}<div class="flash">Am dezlegat comanda <a href="/comenzi/${legata}">#${legata}</a> de ziua ${dataRo(zi)}. Comanda a rămas neatinsă.</div>
+       ${textComandaZi(r) || '<div class="flash">Nimic de făcut.</div>'}`
+    );
+  });
+
   // Legarea la nomenclator + recalculul costurilor, într-un singur drum.
   router.post(`${CALE}/legare`, async (ctx) => {
     if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, CALE);
@@ -2401,5 +2482,5 @@ module.exports = {
   poateUrca,
   // Expuse pentru teste: recunoașterea produsului e piesa de care atârnă jobul
   // de noapte, iar ea se verifică pe cele 419 etichete reale, nu din priviri.
-  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, ziuaLivrarii, textComandaZi, azi: null },
+  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, ziuaLivrarii, eComandaZilei, textComandaZi, azi: null },
 };
