@@ -1136,6 +1136,7 @@ async function peZi(deLa, panaLa) {
   return db
     .prepare(
       `SELECT z.data, z.sursa, z.comanda_id, c.status AS comanda_status, c.sursa AS comanda_sursa,
+              (SELECT COALESCE(SUM(cl.cantitate * cl.pret_unitar), 0) FROM comenzi_linii cl WHERE cl.comanda_id = z.comanda_id) AS comanda_total,
               SUM(l.cantitate * l.pret) AS venit,
               SUM(CASE WHEN l.cost IS NULL THEN 0 ELSE l.cantitate * l.cost END) AS cost,
               SUM(CASE WHEN l.cost IS NULL THEN l.cantitate * l.pret ELSE 0 END) AS venit_fara_cost,
@@ -1477,6 +1478,13 @@ function randFacturare(zileleP, p) {
 // pe ea ar face a doua comandă pentru aceeași marfă.
 const ZILE_COMANDA = 7;
 const ziDeComanda = (zi, az) => eData(zi) && zi >= ziPlus(az || azi(), -ZILE_COMANDA) && zi <= ziPlus(az || azi(), 1);
+// „Nu e a zilei” se poate apăsa doar pe zilele de-abia urcate: azi și ultimele
+// trei zile (cât să treacă un weekend). Pe o zi mai veche, comanda pusă greșit
+// lângă ea a fost de regulă înlocuită de una scrisă de mână, iar marfa a plecat
+// deja; o comandă făcută acum din raport ar dubla-o. Pe 13.11.2026 butonul
+// apărea și lângă 06.11 și 09.11, legate cu regula veche de comenzi altor zile.
+const ZILE_DESFACERE = 3;
+const ziDeDesfacut = (zi, az) => eData(zi) && zi >= ziPlus(az || azi(), -ZILE_DESFACERE) && zi <= ziPlus(az || azi(), 1);
 // Azi, pentru butonul comenzii. Testele îl fixează (lucrează pe zile din 2097).
 const aziComanda = () => (module.exports.__test && module.exports.__test.azi) || azi();
 
@@ -1493,7 +1501,10 @@ function celulaComanda(z, az, opt) {
     // Comanda scrisă de mână, luată drept a zilei, poate să nu fie a zilei.
     // Cine poate urca ziua o dezleagă de aici, iar ERP-ul face comanda din
     // raport. Doar pe zilele proaspete, ca la „Fă comanda”.
-    if (aErp || !(opt && opt.poateFace) || !ziDeComanda(z.data, az)) return legatura;
+    // Doar unde comanda chiar nu pare a zilei: altă valoare decât ziua (vezi
+    // eComandaZilei). Lângă comanda cu valoarea zilei — cum erau ale lui Gabi —
+    // butonul ar fi doar o cale de a face a doua comandă pentru aceeași marfă.
+    if (aErp || !(opt && opt.poateFace) || !ziDeDesfacut(z.data, az) || eComandaZilei(z.comanda_total, z.venit)) return legatura;
     return `${legatura}
     <form method="post" action="${CALE}/comanda-zilei/desfa" style="display:inline;margin:0 0 0 6px" onsubmit="return confirm('Comanda #${Number(z.comanda_id)} nu e comanda zilei ${dataRo(z.data)}? O dezleg de zi — comanda rămâne neatinsă — și fac comanda zilei din raport.')">
       <input type="hidden" name="zi" value="${esc(z.data)}"><input type="hidden" name="comanda" value="${Number(z.comanda_id)}">
@@ -2176,8 +2187,8 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     if (!eData(zi)) return pagina(400, `<p><a href="${CALE}">← Comenzi consumabile la zi</a></p><p>Lipsește ziua.</p>`);
     const cap = `<p><a href="${CALE}?perioada=custom&de=${zi}&pana=${zi}">← Ziua ${dataRo(zi)} în raport</a></p><h1 style="margin-top:0">Comanda zilei — ${dataRo(zi)}</h1>`;
     const refuz = (stare, text) => pagina(stare, `${cap}<div class="flash flash-rosu" role="alert">${text}</div>`);
-    if (!ziDeComanda(zi, aziComanda())) {
-      return refuz(422, `Legătura dintre zi și comandă se schimbă doar pentru ultimele ${ZILE_COMANDA} zile. Ziua ${dataRo(zi)} e mai veche: marfa ei a plecat demult.`);
+    if (!ziDeDesfacut(zi, aziComanda())) {
+      return refuz(422, `Legătura dintre zi și comandă se schimbă doar pentru ultimele ${ZILE_DESFACERE} zile. Ziua ${dataRo(zi)} e mai veche: marfa ei a plecat, de regulă pe o comandă scrisă de mână; una nouă ar dubla-o.`);
     }
     const ziRand = await db.prepare("SELECT id, comanda_id FROM consumabile_zile WHERE client = ? AND data = ?").get(CLIENT, zi);
     if (!ziRand) return refuz(404, `Ziua ${dataRo(zi)} nu e în raport.`);
@@ -2482,5 +2493,5 @@ module.exports = {
   poateUrca,
   // Expuse pentru teste: recunoașterea produsului e piesa de care atârnă jobul
   // de noapte, iar ea se verifică pe cele 419 etichete reale, nu din priviri.
-  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, ziuaLivrarii, eComandaZilei, textComandaZi, azi: null },
+  __test: { cheieExpeditie, grupeazaColete, cheieText, felProdus, codProdus, semnatura, indexeazaProduse, potrivesteProdus, scorPotrivire, costPlauzibil, eCostManual, ziDeComanda, ziDeDesfacut, ziuaLivrarii, eComandaZilei, textComandaZi, azi: null },
 };
