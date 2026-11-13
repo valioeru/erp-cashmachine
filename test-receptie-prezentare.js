@@ -102,6 +102,7 @@ const PZ = require(path.join(RAD, "lib", "prezentare.js"));
 const SC = require(path.join(RAD, "lib", "ct-scaner.js"));
 const GPM = require(path.join(RAD, "modules", "gata-productie.js"));
 const REC = require(path.join(RAD, "modules", "receptie.js"));
+const CFM = require(path.join(RAD, "modules", "comenzi-furnizor.js"));
 
 function res() {
   const o = { cod: 0, antet: {}, corp: "" };
@@ -308,21 +309,40 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   egal("…cu bifa „a venit mai mult”, îi face", q(`SELECT cantitate FROM ct_paleti WHERE receptie_linie_id = ${lidC} ORDER BY id`).map((p) => Number(p.cantitate)), [100, 100]);
 
   // ------------------------------------------------------------------------
-  console.log("\n7. „Trimite în depozit”, la comenzile primite înainte");
+  console.log("\n7. Paleții care „poate sunt deja pe raft”: ce seamănă și ce nu");
+  // Denumirile de pe live, 13.11.2026: comenzile CF-2026-0017, -0012, -0002 și paleții puși de mână.
+  const { seamana, trasaturi } = CFM.__test;
+  const L17 = "FJVAT1550T · Jumbo Virgin Automată Transparent 15 microni 50 kg Teraplast";
+  const L12 = "FJVAN2350T · Jumbo Virgin Automată Negru 23 microni 50 kg Teraplast";
+  const L2 = "Folie stretch Super Power 17my 50kg TR";
+  const SP17 = "Jumbo Virgin Automată SuperPower Transparent 17 microni 50 kg Teraplast";
+  egal("grosimea, greutatea rolei și culoarea se citesc din denumire („17my”, „50kg”, „TR”)", [trasaturi(L2).gros, trasaturi(L2).kg, trasaturi(L2).culoare, trasaturi(SP17).gros, trasaturi(SP17).kg, trasaturi(SP17).fel], [17, 50, "transparent", 17, 50, "virgin"]);
+  bine("SuperPower de 17 microni seamănă cu „Super Power 17my 50kg” (aceeași grosime și rolă)", seamana(L2, SP17));
+  bine("…și cu „Folie stretch jumbo 17my Super Power 50kg”", seamana(L2, "Folie stretch jumbo 17my Super Power 50kg ROT"));
+  bine("dar nu cu jumbo-ul de 15 microni: altă grosime, oricâte cuvinte ar avea în comun", !seamana(L17, SP17));
+  bine("negru nu e transparent, chiar dacă restul e la fel", !seamana(L12, "Jumbo Virgin Automată Transparent 23 microni 50 kg Teraplast"));
+  bine("virgin nu e reciclat", !seamana(L12, "Jumbo Reciclat Automată Negru 23 microni 50 kg"));
+  bine("rola de 16 kg nu e rola de 50 kg", !seamana(L12, "Jumbo Virgin Automată Negru 23 microni 16 kg"));
+  bine("același jumbo, scris altfel, seamănă", seamana(L12, "Jumbo Virgin Negru 23my 50kg"));
+  bine("un singur cuvânt comun nu ajunge", !seamana("Bandă adezivă Fragil 48x60", "Bandă adezivă transparentă"));
+
+  // ------------------------------------------------------------------------
+  console.log("\n8. „Trimite în depozit”, la comenzile primite înainte");
   const O2 = comanda("CF-2", { status: "primita", data: "2026-11-09", dataReceptie: "2026-11-13" });
   const LC = linieCf(O2, P2, `${PREFIX} Banda Fragil 48x60`, 500, "buc", 3, 500);
   const O3 = comanda("CF-3", { status: "primita", data: "2026-11-01", dataReceptie: "2026-11-10" });
   linieCf(O3, P3, `${PREFIX} Granula`, 700, "kg", 4, 700);
   // Un palet pus de mână pe 12.11, cu aceeași bandă: poate e chiar ea.
   const palMana = Number(unul(`INSERT INTO ct_paleti (cod, produs_id, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-MANA', ${P2}, 120, 120, 'buc', '2026-11-12') RETURNING id`));
-  // …și unul vechi, de dinainte: nu.
+  // …și unul vechi, de dinainte: nu. Nici cel de cu două zile înaintea recepției.
   q(`INSERT INTO ct_paleti (cod, produs_id, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-VECHI', ${P2}, 50, 50, 'buc', '2026-11-02')`);
+  q(`INSERT INTO ct_paleti (cod, produs_id, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-ALALTAIERI', ${P2}, 30, 30, 'buc', '2026-11-11')`);
   // …și una cu alt produs, care are în comun doar „bandă": nu.
   q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-ALTA', '${PREFIX} Bandă transparentă', 40, 40, 'buc', '2026-11-12')`);
   pag = await cer("get", `/procurement/comenzi/${O2}`, DEP);
   const sd = bucata(pag.corp, "in-depozit", "Istoric — cine a modificat");
   bine("comanda primită pe 13.11 are „Trimite în depozit”, cu ce a rămas: 500", sd.includes(`action="/procurement/comenzi/${O2}/in-depozit"`) && sd.includes(`value="${LC}"`) && sd.includes('name="cant[]" data-cant inputmode="decimal" autocomplete="off" value="500"'), sd.slice(0, 500));
-  bine("…cu paletul pus de mână după comandă, nu și cu cel vechi sau cu alta marfă", sd.includes("Poate e deja pe raft") && sd.includes(`/stocuri/ct-park/palet/${palMana}`) && sd.includes(`${PREFIX}-PAL-MANA`) && !sd.includes(`${PREFIX}-PAL-VECHI`) && !sd.includes(`${PREFIX}-PAL-ALTA`), (sd.match(/Poate e deja pe raft[\s\S]{0,400}/) || ["lipsește"])[0]);
+  bine("…cu paletul pus de mână după comandă, nu și cu cel vechi sau cu alta marfă", sd.includes("Poate e deja pe raft") && sd.includes(`/stocuri/ct-park/palet/${palMana}`) && sd.includes(`${PREFIX}-PAL-MANA`) && !sd.includes(`${PREFIX}-PAL-VECHI`) && !sd.includes(`${PREFIX}-PAL-ALALTAIERI`) && !sd.includes(`${PREFIX}-PAL-ALTA`), (sd.match(/Poate e deja pe raft[\s\S]{0,400}/) || ["lipsește"])[0]);
   bine("…și întrebarea înainte de trimitere", sd.includes('data-confirma="Marfa intră în depozit și pe stoc. Ai verificat că nu e deja pe raft?"'));
   pag = await cer("get", `/procurement/comenzi/${O3}`, DEP);
   bine("comanda recepționată înainte de 13.11 nu-l are (a intrat de mână, s-ar dubla)", pag.cod === 200 && !pag.corp.includes('id="in-depozit"'));
@@ -350,7 +370,7 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   bine("a doua oară nu mai trimite nimic", /a intrat deja în depozit/.test(parametri(r).eroare_receptie || "") && receptiiCf(O2).length === 2, parametri(r).eroare_receptie);
 
   // ------------------------------------------------------------------------
-  console.log("\n8. Recepția din depozit");
+  console.log("\n9. Recepția din depozit");
   const RF = Number(await REC.creeaza({ sursa: "furnizor", partener_id: FURNIZOR, numar: `${PREFIX}-REC-F`, document_extern: "AVIZ 7" }, [{ produs_id: P2, cantitate: 100, um: "buc" }, { produs_id: P2, cantitate: 10, um: "buc" }]));
   const [lf, lf0] = liniiRec(RF).map((x) => Number(x.id));
   pag = await cer("get", `/depozit/receptie/${RF}`, DEP);
