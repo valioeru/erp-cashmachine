@@ -12,9 +12,11 @@
 //     retururilor), primite în stare bună, cât timp marfa lor n-are palet. Nu:
 //     recepția încă nenumărată, marfa deteriorată sau respinsă, rândul pus tot
 //     pe paleți, rândul scos din listă cu motiv.
-//   • PAGINA: titlul „Recepționat de la furnizori — de alocat", furnizorul și
-//     documentul pe fiecare rând, aceleași butoane ca la producție; lista din
-//     producție rămâne cum era, cu trimitere spre ce e mai jos.
+//   • PAGINA: din 13.11.2026 în aceeași listă cu marfa din producție, „De alocat
+//     pe raft — din producție și de la furnizori" (Vali: „marfa să aștepte
+//     alocarea pe rafturi în depozit ca și marfa venită din producție, în
+//     aceeași listă"), în ordinea în care a venit; furnizorul și documentul pe
+//     fiecare rând, aceleași butoane ca la producție.
 //   • PE RAFT: Intrarea se deschide completată, cu furnizorul recepției.
 //   • RECEPȚIA DE LA FURNIZOR NENUMĂRATĂ NU SE IA PE CUVÂNT: butonul n-o
 //     finalizează singur, cum face cu cea din producție.
@@ -242,31 +244,34 @@ const randul = (html, lid) => { const i = html.indexOf(`/gata/receptie/${lid}/ra
   console.log("\n2. Pagina Intrare marfă");
   let pag = (await cer("get", "/stocuri/ct-park/intrare", DEP)).corp;
   let sec = sectiunea(pag);
-  const nFz = (await GP.receptiiFurnizori()).length;
-  bine("titlul listei de la furnizori, cu numărul de rânduri", sec.includes(`Recepționat de la furnizori — de alocat <span class="badge galben">${nFz}</span>`), (sec.match(/Recepționat de la furnizori[^<]*<span[^>]*>\d+<\/span>/) || ["lipsește"])[0]);
-  bine("…și explicația: apar imediat ce recepția e finalizată", /apar aici imediat ce recepția lor e finalizată/.test(sec));
-  bine("lista din producție e tot prima, cu titlul ei", sec.indexOf("Gata din producție — de alocat") >= 0 && sec.indexOf("Gata din producție — de alocat") < sec.indexOf('id="de-la-furnizori"'));
-  bine("…și trimite spre ce e mai jos", new RegExp(`Tot aici, mai jos: <a href="#de-la-furnizori">de la furnizori \\(${nFz}\\)</a>`).test(sec) && /<a href="#fara-loc">paleți fără loc pe raft \(\d+\)<\/a>/.test(sec), (sec.match(/Tot aici, mai jos:[^<]*(<a[^>]*>[^<]*<\/a>[^<]*)*/) || ["lipsește"])[0]);
-  const furn = bucata(sec, "de-la-furnizori", "fara-loc");
-  let r1 = randul(furn, L1);
+  const GPM = require(path.join(RAD, "modules", "gata-productie.js"));
+  const nToate = (await GPM.deAlocat()).length;
+  egal("o singură listă: ce e din producție, de la furnizori și cererile", nToate, (await GP.lista()).length + (await GP.receptiiFurnizori()).length);
+  bine("titlul listei comune, cu numărul de rânduri", sec.includes(`De alocat pe raft — din producție și de la furnizori <span class="badge galben">${nToate}</span>`), (sec.match(/De alocat pe raft[^<]*<span[^>]*>\d+<\/span>/) || ["lipsește"])[0]);
+  bine("…și explicația spune că e și marfa de la furnizori", /marfa recepționată de la furnizori/.test(sec));
+  bine("nu mai e o listă separată pentru furnizori", !sec.includes('id="de-la-furnizori"') && !sec.includes("Recepționat de la furnizori — de alocat"));
+  bine("…iar sus trimite doar spre ce e dedesubt", /Tot aici, mai jos: <a href="#fara-loc">paleți fără loc pe raft \(\d+\)<\/a>/.test(sec) && !sec.includes('href="#de-la-furnizori"'), (sec.match(/Tot aici, mai jos:[^<]*(<a[^>]*>[^<]*<\/a>[^<]*)*/) || ["lipsește"])[0]);
+  const lista = bucata(sec, "gata-productie", "fara-loc");
+  let r1 = randul(lista, L1);
   bine("rândul cartonului: produsul, codul și cât e de alocat", r1.includes(`<strong>${PREFIX} Carton CO3</strong>`) && r1.includes("TIF-1") && r1.includes("<strong>400 buc</strong>") && r1.includes("din 480; alocat deja 80"), r1.slice(0, 300));
   bine("…de unde: recepția, „de la furnizor”, numele lui și documentul", r1.includes(`/depozit/receptie/${R_FIN}`) && r1.includes(`de la furnizor <strong>${PREFIX} Furnizor Carton SRL</strong>`) && r1.includes("FACT 123"), r1.slice(r1.indexOf("recepția"), r1.indexOf("recepția") + 260));
   bine("…pentru cine: comanda clientului de pe recepție", r1.includes(`/comenzi/${CMD}`) && r1.includes(`${PREFIX} Client SRL`));
   bine("…cu aceleași butoane ca la producție", r1.includes(`action="/stocuri/ct-park/gata/receptie/${L1}/raft"`) && r1.includes(`action="/stocuri/ct-park/gata/receptie/${L1}/aloca"`) && r1.includes(`action="/stocuri/ct-park/gata/receptie/${L1}/inchide"`) && r1.includes("Pune pe raft →"));
+  bine("…și cu „Fă paleții și etichetele”, fără prezentare cu tot restul pe un palet", r1.includes(`action="/stocuri/ct-park/gata/receptie/${L1}/paleti"`) && r1.includes('name="paleti" value="400"') && r1.includes("Fă paleții și etichetele →"), (r1.match(/<form[^>]*\/paleti"[\s\S]{0,400}/) || ["lipsește"])[0]);
   bine("…și starea „recepționată, de alocat”", r1.includes("recepționată, de alocat"));
-  bine("returul scrie de unde vine", randul(furn, L6).includes(`retur de la client <strong>${PREFIX} Client SRL</strong>`), randul(furn, L6).slice(0, 200));
+  bine("returul scrie de unde vine", randul(lista, L6).includes(`retur de la client <strong>${PREFIX} Client SRL</strong>`), randul(lista, L6).slice(0, 200));
   bine("recepția nefinalizată și rândul scos din listă nu apar nicăieri în casetă", !sec.includes(`/gata/receptie/${L5}/`) && !sec.includes(`/gata/receptie/${L5B}/`) && !sec.includes(`/gata/receptie/${L7}/`) && !sec.includes(`/gata/receptie/${L2}/`) && !sec.includes(`/gata/receptie/${L3}/`));
-  bine("recepția din producție e în lista ei, nu la furnizori", randul(bucata(sec, "gata-productie", "de-la-furnizori"), L8).includes("gata în producție") && !furn.includes(`/gata/receptie/${L8}/`));
+  const unde1 = (id) => lista.indexOf(`/gata/receptie/${id}/raft`);
+  bine("recepția din producție e în aceeași listă, după ordinea în care au venit", randul(lista, L8).includes("gata în producție") && unde1(L1) >= 0 && unde1(L1) < unde1(L6) && unde1(L6) < unde1(L8), [unde1(L1), unde1(L6), unde1(L8)].join());
 
-  // Fără nimic din producție, caseta tot apare: marfa de la furnizori nu
-  // depinde de lista de deasupra ei.
+  // Fără nimic din producție, caseta tot apare, cu marfa de la furnizori.
   const [listaVeche, pregatiteVechi] = [GP.lista, GP.pregatite];
   GP.lista = async () => [];
   GP.pregatite = async () => [];
   const faraProductie = sectiunea((await cer("get", "/stocuri/ct-park/intrare", DEP)).corp);
   GP.lista = listaVeche;
   GP.pregatite = pregatiteVechi;
-  bine("fără nimic din producție, lista de la furnizori și paleții fără loc tot apar", faraProductie.includes('id="de-la-furnizori"') && faraProductie.includes(`/gata/receptie/${L1}/raft`) && faraProductie.includes('id="fara-loc"') && /Nimic de alocat acum/.test(faraProductie), faraProductie.slice(0, 200) || "caseta lipsește");
+  bine("fără nimic din producție, marfa de la furnizori și paleții fără loc tot apar", faraProductie.includes(`/gata/receptie/${L1}/raft`) && faraProductie.includes('id="fara-loc"') && !/Nimic de alocat acum/.test(faraProductie), faraProductie.slice(0, 200) || "caseta lipsește");
 
   // ------------------------------------------------------------------------
   console.log("\n3. Paleții cu etichetă, fără loc pe raft");

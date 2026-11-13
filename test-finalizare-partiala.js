@@ -217,7 +217,7 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   bine("se deschide, cu cele două produse", pag.cod === 200 && pag.corp.includes(`${PREFIX} Punga curier`) && pag.corp.includes(`${PREFIX} Folie`), pag.cod);
   bine("fiecare produs are câmpul lui, cu cât e comandat și cât a rămas alături", pag.corp.includes(`name="cant_${L1}"`) && pag.corp.includes(`name="cant_${L2}"`) && pag.corp.includes("10.000 buc") && pag.corp.includes("500 kg"));
   bine("…fără limită pe câmp: cantitatea comenzii nu e plafon", !/name="cant_\d+"[^>]*\smax=/.test(pag.corp), (pag.corp.match(/name="cant_\d+"[^>]*>/) || [])[0]);
-  bine("spune ce se întâmplă cu partea gata și cu comanda", /Gata din producție — de alocat/.test(pag.corp) && /rămâne în producție până o pui pe „Finalizată”/.test(pag.corp));
+  bine("spune ce se întâmplă cu partea gata și cu comanda", /la „De alocat pe raft”/.test(pag.corp) && /rămâne în producție până o pui pe „Finalizată”/.test(pag.corp));
   bine("…și că se poate scrie mai mult decât era comandat", /cantitatea din comandă nu e o limită/.test(pag.corp) && /ce a primit depozitul, nu ce s-a anunțat/.test(pag.corp));
   bine("ține minte unde se întoarce", pag.corp.includes('name="inapoi" value="/productie?status=in_productie"'));
   pag = await cer("get", `/productie/${CP_LINII}/partial`, MIHAI, { query: { inapoi: "https://rau.example/x" } });
@@ -243,7 +243,7 @@ const cp = (id) => q(`SELECT status, receptie_id, trimisa_depozit_la, data_final
   bine("agentul află din istoricul clientului", Number(unul(`SELECT COUNT(*) FROM interactiuni WHERE partener_id = ${CLIENT} AND subiect LIKE '%o parte din marfă e gata%' AND descriere LIKE '%3.000 buc%'`)) === 1);
   let lista = await GP.lista();
   const xl = lista.find((x) => x.fel === "receptie" && x.receptie_id === Number(pr[0].id)) || {};
-  egal("e în lista „Gata din producție — de alocat”: 3.000 buc, pentru client", [xl.ramas, xl.stare, xl.productie_numar, xl.client], [3000, "gata în producție", "TFP-CP-1", "TFP Client SRL"]);
+  egal("e în lista „De alocat pe raft”: 3.000 buc, pentru client", [xl.ramas, xl.stare, xl.productie_numar, xl.client], [3000, "gata în producție", "TFP-CP-1", "TFP Client SRL"]);
   let s = await STADIU.situatiePartiala(q(`SELECT * FROM comenzi_productie WHERE id = ${CP_LINII}`)[0]);
   egal("situația: 3.000 plecat și 7.000 rămas la pungi; folia neatinsă", s.linii.map((l) => [l.cheie, l.comandat, l.trimis, l.rest]), [[String(L1), 10000, 3000, 7000], [String(L2), 500, 0, 500]]);
 

@@ -256,7 +256,8 @@ const ziPlus = (n) => new Date(Date.parse(azi() + "T00:00:00Z") + n * 86400000).
   const xr = lista.find((x) => x.fel === "receptie" && x.receptie_id === rNou) || {};
   egal("rândul recepției: 50 buc, gata în producție, producția TGP-CP-1, pentru Sameday", [xr.ramas, xr.stare, xr.productie_numar, xr.client], [50, "gata în producție", "TGP-CP-1", "SAMEDAY COURIER"]);
   let pag = await cer("get", "/stocuri/ct-park/intrare", DEP);
-  bine("pagina Intrare marfă are secțiunea, cu numărul de rânduri", /id="gata-productie"/.test(pag.corp) && /Gata din producție — de alocat <span class="badge galben">\d+<\/span>/.test(pag.corp), pag.cod);
+  // Din 13.11.2026 lista se numește „De alocat pe raft" și ține și marfa de la furnizori.
+  bine("pagina Intrare marfă are secțiunea, cu numărul de rânduri", /id="gata-productie"/.test(pag.corp) && /De alocat pe raft — din producție și de la furnizori <span class="badge galben">\d+<\/span>/.test(pag.corp), pag.cod);
   bine("…cu butoanele rândului de recepție", pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lid}/raft"`) && pag.corp.includes(`action="/stocuri/ct-park/gata/receptie/${lid}/aloca"`));
   bine("…„Nu mai e de alocat” doar la cererile vechi", pag.corp.includes(`action="/stocuri/ct-park/gata/cerere/${A_VECHE}/inchide"`) && !pag.corp.includes(`action="/stocuri/ct-park/gata/cerere/${A_GATA}/inchide"`));
   const formG = (() => { const i = pag.corp.indexOf(`action="/stocuri/ct-park/gata/cerere/${A_GATA}/aloca"`); return i < 0 ? "" : pag.corp.slice(i, pag.corp.indexOf("</form>", i)); })();

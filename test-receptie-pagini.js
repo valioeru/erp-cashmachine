@@ -251,7 +251,7 @@ function curata() {
     );
     const li = Number(unul("SELECT id FROM receptii_linii WHERE receptie_id = " + rid));
     await cer("/depozit/receptie/:id/linie/:lid", {
-      metoda: "post", params: { id: String(rid), lid: String(li) }, body: { cantitate_primita: "20", loc_id: String(loc) },
+      metoda: "post", params: { id: String(rid), lid: String(li) }, body: { cantitate_primita: "20", loc_id: String(loc), paleti_nr: "1", paleti_pe: "20" },
     });
     await cer("/depozit/receptie/:id/finalizeaza", { metoda: "post", params: { id: String(rid) } });
     bine("aprovizionarea trece în „primită”", unul("SELECT status FROM aprovizionari WHERE id = " + ap) === "primita");

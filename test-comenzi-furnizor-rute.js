@@ -12,6 +12,8 @@
 //     furnizor, o comandă pierdută.
 //   • RECEPȚIA PARȚIALĂ NU ȘTERGE CE ERA. Dacă completezi o singură linie,
 //     celelalte rămân cum erau — un câmp gol înseamnă „nu schimb", nu „zero".
+//     Ce vine are prezentarea scrisă (câți paleți, cât pe unul); restul despre
+//     ea și despre recepția din depozit e în test-receptie-prezentare.js.
 //   • COMANDA ANULATĂ IESE DIN ISTORICUL DE PREȚ. Un preț dintr-o comandă
 //     anulată n-a fost niciodată plătit.
 //   • FURNIZORUL CARE EXISTĂ DEJA CA CLIENT NU SE DUBLEAZĂ — devine „ambele".
@@ -107,6 +109,9 @@ const PRODUS = 97501;
 
 function curata() {
   for (const s of [
+    // Recepția din Procurement face și recepția din depozit, cu stocul ei.
+    "DELETE FROM receptii WHERE comanda_furnizor_id IN (SELECT id FROM comenzi_furnizor WHERE numar LIKE 'CF-2099-%' OR furnizor_id BETWEEN 97401 AND 97499 OR furnizor_id IN (SELECT id FROM parteneri WHERE nume LIKE 'CFTEST%'))",
+    "DELETE FROM miscari_stoc WHERE produs_id BETWEEN 97501 AND 97599",
     "DELETE FROM comenzi_furnizor_linii WHERE comanda_id IN (SELECT id FROM comenzi_furnizor WHERE numar LIKE 'CF-2099-%' OR furnizor_id BETWEEN 97401 AND 97499)",
     "DELETE FROM comenzi_furnizor WHERE numar LIKE 'CF-2099-%' OR furnizor_id BETWEEN 97401 AND 97499",
     // Furnizorul creat din pagină primește un id dat de bază, nu unul din
@@ -202,7 +207,7 @@ function curata() {
   await cer("/procurement/comenzi/:id/receptie", {
     metoda: "post",
     params: { id: String(id1) },
-    body: { "linie_id[]": liniiId, "primit[]": ["800", ""], data_receptie: "2099-03-25" },
+    body: { "linie_id[]": liniiId, "primit[]": ["800", ""], "paleti_nr[]": ["2", ""], "paleti_pe[]": ["400", ""], data_receptie: "2099-03-25" },
   });
   const dupa1 = q("SELECT status, data_receptie FROM comenzi_furnizor WHERE id = ?", [id1])[0];
   egal("comanda e parțială", dupa1.status, "partial");
@@ -215,7 +220,7 @@ function curata() {
   await cer("/procurement/comenzi/:id/receptie", {
     metoda: "post",
     params: { id: String(id1) },
-    body: { "linie_id[]": liniiId, "primit[]": ["", "500"], data_receptie: "2099-03-28" },
+    body: { "linie_id[]": liniiId, "primit[]": ["", "500"], "paleti_nr[]": ["", "1"], "paleti_pe[]": ["", "500"], data_receptie: "2099-03-28" },
   });
   const lin2 = q("SELECT cantitate_primita FROM comenzi_furnizor_linii WHERE comanda_id = ? ORDER BY id", [id1]);
   egal("primele 800 au rămas", Number(lin2[0].cantitate_primita), 800);
@@ -225,7 +230,7 @@ function curata() {
   console.log("\n„A intrat tot” acoperă fiecare linie:");
   await cer("/procurement/comenzi/:id/receptie", {
     metoda: "post", params: { id: String(id1) },
-    body: { "linie_id[]": liniiId, "primit[]": ["", ""], tot: "1", data_receptie: "2099-04-02" },
+    body: { "linie_id[]": liniiId, "primit[]": ["", ""], "paleti_nr[]": ["3", ""], "paleti_pe[]": ["400", ""], tot: "1", data_receptie: "2099-04-02" },
   });
   egal("acum e primită", q("SELECT status FROM comenzi_furnizor WHERE id = ?", [id1])[0].status, "primita");
 

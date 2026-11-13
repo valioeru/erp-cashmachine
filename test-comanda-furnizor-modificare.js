@@ -116,6 +116,9 @@ const PRODUS = 97611;
 
 function curata() {
   for (const s of [
+    // Recepția din Procurement face și recepția din depozit, cu stocul ei.
+    "DELETE FROM receptii WHERE comanda_furnizor_id IN (SELECT id FROM comenzi_furnizor WHERE numar LIKE 'CF-2098-%' OR furnizor_id BETWEEN 97601 AND 97609)",
+    "DELETE FROM miscari_stoc WHERE produs_id BETWEEN 97611 AND 97619",
     "DELETE FROM comenzi_furnizor_linii WHERE comanda_id IN (SELECT id FROM comenzi_furnizor WHERE numar LIKE 'CF-2098-%' OR furnizor_id BETWEEN 97601 AND 97609)",
     "DELETE FROM comenzi_furnizor WHERE numar LIKE 'CF-2098-%' OR furnizor_id BETWEEN 97601 AND 97609",
     "DELETE FROM interactiuni WHERE partener_id BETWEEN 97601 AND 97609",
@@ -361,11 +364,11 @@ const liniiDe = (id) => q("SELECT * FROM comenzi_furnizor_linii WHERE comanda_id
   console.log("\nPoziția cu marfă intrată nu se șterge:");
   await cer("/procurement/comenzi/:id/receptie", {
     metoda: "post", params: { id: String(id1) },
-    body: { "linie_id[]": [String(lin2[0].id), String(lin2[1].id)], "primit[]": ["30", "5"], data_receptie: "2098-03-22" },
+    body: { "linie_id[]": [String(lin2[0].id), String(lin2[1].id)], "primit[]": ["30", "5"], "paleti_nr[]": ["1", "1"], "paleti_pe[]": ["30", "5"], data_receptie: "2098-03-22" },
   });
   egal("recepția completă → primită", comanda(id1).status, "primita");
-  const hRec = istoric(id1).slice(-4).map((x) => x.ce);
-  egal("recepția e în istoric, linie cu linie, cu starea", hRec, ["Primit · Packtape acrylic 48mm*60m", "Primit · CFM1 · CFMTEST bandă acrilică 48x60", "Stare", "Data recepției"]);
+  const hRec = istoric(id1).slice(-5).map((x) => x.ce);
+  egal("recepția e în istoric, linie cu linie, cu starea și intrarea în depozit", hRec, ["Primit · Packtape acrylic 48mm*60m", "Primit · CFM1 · CFMTEST bandă acrilică 48x60", "Stare", "Data recepției", "Intrată în depozit"]);
   const lin3 = liniiDe(id1);
   const corpCu2 = (extra) =>
     corpMod(Object.assign({

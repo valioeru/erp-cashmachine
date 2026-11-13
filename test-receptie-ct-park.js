@@ -138,7 +138,7 @@ function curata() {
   console.log("\n1. Rândul se confirmă fără locul din lista veche");
   let pag = await cer("get", "/depozit/receptie/:id", DEP, { id: String(rid) });
   bine("nu mai e coloana „Loc” cu lista veche", !pag.corp.includes('name="loc_id"') && !/<th[^>]*>Loc<\/th>/.test(pag.corp));
-  let r = await cer("post", "/depozit/receptie/:id/linie/:lid", DEP, { id: String(rid), lid: String(lid) }, { cantitate_primita: "100", conditie: "bun", lot: "L-77" });
+  let r = await cer("post", "/depozit/receptie/:id/linie/:lid", DEP, { id: String(rid), lid: String(lid) }, { cantitate_primita: "100", conditie: "bun", lot: "L-77", paleti_nr: "1", paleti_pe: "100" });
   egal("rândul e primit", unul(`SELECT stare FROM receptii_linii WHERE id = ${lid}`), "primita");
   bine("încă nu se cere locul (secțiunea CT-Park apare după finalizare)", !(await cer("get", "/depozit/receptie/:id", DEP, { id: String(rid) })).corp.includes("Unde pui marfa"));
   r = await cer("post", "/depozit/receptie/:id/linie/:lid/livrare", DEP, { id: String(rid), lid: String(lid) }, { destinatie: "fulfillment" });
