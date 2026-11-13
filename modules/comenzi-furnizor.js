@@ -332,18 +332,46 @@ async function deTrimisInDepozit(c, linii) {
     .filter((x) => x.rest > EPS_CANT);
 }
 
-// Paleții intrați în CT-Park de câteva zile înainte de recepție încoace, fără
+// Paleții intrați în CT-Park din ziua dinaintea recepției încoace, fără
 // legătură cu comanda asta, care seamănă cu marfa ei: același produs sau
-// cel puțin jumătate din cuvintele denumirii. Poate e chiar marfa asta, pusă
+// mai mult de jumătate din ce spune denumirea. Poate e chiar marfa asta, pusă
 // de mână pe raft — de văzut înainte de „Trimite în depozit".
+//
+// Grosimea, greutatea rolei, culoarea și „virgin/reciclat" se citesc separat:
+// „17my" și „17 microni" sunt același lucru, iar o grosime sau o culoare
+// diferită înseamnă altă marfă, oricâte cuvinte ar avea în comun. Pe 13.11.2026,
+// fără asta, paleții de Jumbo Virgin SuperPower de 17 microni (marfa comenzii
+// CF-2026-0002) ieșeau „poate" la comenzile de 15 și de 23 de microni, și nu la
+// a lor.
 const faraSemne = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const cuvinte = (t) => [...new Set(faraSemne(t).split(/[^a-z0-9]+/).filter((w) => w.length >= 4))];
+const GROSIME = /(\d{1,3})\s*(?:my|µm?|microni|micron)(?![a-z])/g;
+const GREUTATE = /(\d{1,4}(?:[.,]\d+)?)\s*kg(?![a-z])/g;
+function trasaturi(denumire) {
+  const t = faraSemne(denumire);
+  const gros = [...t.matchAll(GROSIME)].map((m) => Number(m[1]));
+  const kg = [...t.matchAll(GREUTATE)].map((m) => Number(m[1].replace(",", ".")));
+  const rest = t.replace(GROSIME, " ").replace(GREUTATE, " ");
+  return {
+    gros: gros.length ? gros[0] : null,
+    kg: kg.length ? kg[0] : null,
+    culoare: /(^|[^a-z])(negru|neagra|black)/.test(t) ? "negru" : /(^|[^a-z])(transparent|transparenta|tr)([^a-z]|$)/.test(t) ? "transparent" : null,
+    fel: /(^|[^a-z])reciclat/.test(t) ? "reciclat" : /(^|[^a-z])virgin/.test(t) ? "virgin" : null,
+    cuvinte: [...new Set(rest.split(/[^a-z0-9]+/).filter((w) => w.length >= 4))],
+    text: t,
+  };
+}
 function seamana(denumireLinie, denumirePalet) {
-  const w = cuvinte(denumireLinie);
-  if (!w.length) return false;
-  const t = faraSemne(denumirePalet);
-  const gasite = w.filter((x) => t.includes(x)).length;
-  return gasite >= 2 && gasite / w.length >= 0.5;
+  const a = trasaturi(denumireLinie);
+  const b = trasaturi(denumirePalet);
+  if (a.gros != null && b.gros != null && a.gros !== b.gros) return false;
+  if (a.kg != null && b.kg != null && Math.abs(a.kg - b.kg) > 0.001) return false;
+  if (a.culoare && b.culoare && a.culoare !== b.culoare) return false;
+  if (a.fel && b.fel && a.fel !== b.fel) return false;
+  const total = a.cuvinte.length + (a.gros != null ? 1 : 0) + (a.kg != null ? 1 : 0);
+  if (!total) return false;
+  const gasite =
+    a.cuvinte.filter((w) => b.text.includes(w)).length + (a.gros != null && b.gros === a.gros ? 1 : 0) + (a.kg != null && b.kg != null && Math.abs(a.kg - b.kg) <= 0.001 ? 1 : 0);
+  return gasite >= 2 && gasite / total > 0.5;
 }
 // „Trimite în depozit" pe pagina comenzii: ce e primit și n-a intrat încă în
 // depozit, cu prezentarea de scris și paleții care poate sunt deja ei.
@@ -453,7 +481,7 @@ async function poateDejaPeRaft(c, randuri) {
   if (!randuri.length) return randuri;
   const rec = String(c.data_receptie || "").slice(0, 10);
   const comanda = String(c.data || "").slice(0, 10);
-  let de = eData(rec) ? new Date(new Date(rec + "T12:00:00Z").getTime() - 3 * 86400000).toISOString().slice(0, 10) : comanda;
+  let de = eData(rec) ? new Date(new Date(rec + "T12:00:00Z").getTime() - 86400000).toISOString().slice(0, 10) : comanda;
   if (eData(comanda) && de < comanda) de = comanda;
   if (!eData(de)) return randuri;
   const paleti = await db
@@ -2298,4 +2326,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, EXPEDITOR, MONEDE, UNITATI, poateModifica, citesteFormular };
+module.exports = { register, EXPEDITOR, MONEDE, UNITATI, poateModifica, citesteFormular, __test: { seamana, trasaturi } };
