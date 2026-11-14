@@ -571,6 +571,25 @@ const GHID = [
 ],
 "pasi":[],
 "sfat":null
+},
+{
+"t":"Etichete produs",
+"p":[
+"Etichetele de pus pe cutii, role sau baxuri, pe loturi: sigla și datele firmei, denumirea și caracteristicile produsului, lotul, data producției, cantitatea pe ambalaj și ce mai bifezi. Jos e <b>codul de bare al produsului</b>: la urcarea pe raft, scanerul din CT-Park îl recunoaște și găsește marfa de pus. Pe 100×150 poate fi și codul lotului.",
+"Grafica e mereu aceeași: fiecare câmp are locul lui pe etichetă, iar un câmp nebifat își lasă locul gol, fără să mute restul. De la o tipărire la alta se schimbă doar numărul etichetei, data tipăririi și ce scrii altfel atunci.",
+"Pornești dintr-o comandă de producție (butonul „Etichete produs” de pe comandă, sau lista de pe pagină): produsul, clientul, caracteristicile și lotul vin completate. Lotul comenzii e codul fișei ei de lot, pe care scanerul îl știe deja. Fără comandă, alegi produsul din nomenclator și lotul vine propus (L, ziua, numărul).",
+"Fiecare lot ține minte <b>fiecare tipărire</b>: când, cine, ce numere și de ce. <b>Suplimentar</b> scoate etichete noi, cu numerotarea mai departe. <b>Din nou</b> scoate aceleași numere, pentru etichete rupte sau pierdute, cu motivul scris. Pentru o singură tipărire poți scrie altă cantitate (ultima cutie), alt operator sau altă dată, fără să schimbi lotul.",
+"Când comanda de producție trimite marfa în depozit, rândul recepției ia lotul etichetelor ei, iar paleții din CT-Park îl poartă mai departe.",
+"Administratorul schimbă din <b>Setări</b> datele firmei de pe etichetă, sigla (PNG, JPG sau SVG) și câmpurile bifate implicit la fiecare format."
+],
+"pasi":[
+"Producție → Etichete produs → alegi comanda de producție sau produsul → Continuă.",
+"Alegi formatul (100×150 sau 100×50) și bifezi ce apare pe etichetă; în dreapta vezi eticheta cum iese.",
+"Verifici lotul și completezi cantitatea pe ambalaj, greutatea, operatorul sau ce mai trebuie.",
+"Scrii câte etichete tipărești și apeși „Salvează lotul și tipărește”, apoi „Tipărește”.",
+"Mai târziu, din pagina lotului: „Suplimentar” sau „Din nou”."
+],
+"sfat":"La tipărire alege imprimanta Zebra, hârtia cât eticheta (100×150 sau 100×50 mm), marginile „Niciuna” și scara 100% (nu „Potrivește în pagină”): așa codul de bare iese la mărimea lui și se scanează din prima."
 }
 ]
 },

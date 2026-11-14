@@ -2024,6 +2024,7 @@ function register(router) {
         </h1>
         <p style="margin:-4px 0 12px">
           <a class="btn small" href="/productie/${c.id}/pdf" target="_blank">Fișă de lot — de printat</a>
+          <a class="btn small secondary" href="/productie/etichete/noua?productie=${c.id}" title="Etichete de produs pe lotul comenzii, cu cod de bare, 100×150 sau 100×50">Etichete produs</a>
           <span style="font-size:12px;color:var(--text-muted);margin-left:8px">
             operațiile, codurile de scanat la fiecare post, parametrii de măsurat
           </span>

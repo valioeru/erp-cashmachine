@@ -120,8 +120,8 @@ async function creeaza(date, linii) {
     await db
       .prepare(
         `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare, productie_linie_id,
-                                     paleti_nr, paleti_pe, comanda_furnizor_linie_id)
-         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?, ?, ?, ?)`
+                                     paleti_nr, paleti_pe, comanda_furnizor_linie_id, lot)
+         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -136,7 +136,10 @@ async function creeaza(date, linii) {
         // Prezentarea mărfii (lib/prezentare.js) și linia comenzii la furnizor.
         Number(l.paleti_nr) > 0 ? Math.round(Number(l.paleti_nr)) : null,
         Number(l.paleti_pe) > 0 ? Number(l.paleti_pe) : null,
-        Number(l.comanda_furnizor_linie_id) || null
+        Number(l.comanda_furnizor_linie_id) || null,
+        // Lotul etichetelor de produs, la marfa din producție
+        // (lib/stadiu-comanda.js, cuLotEtichete).
+        text(l.lot, 60)
       );
   }
   return id;

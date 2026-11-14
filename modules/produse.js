@@ -627,6 +627,7 @@ function register(router) {
         <div class="toolbar" style="margin-top:10px">
           <a href="/produse/${produs.id}/editare" class="btn secondary small">Editează datele</a>
           <a href="/produse/${produs.id}/eticheta" class="btn secondary small" target="_blank">Etichetă cu cod de bare</a>
+          ${poateAccesa(ctx.user, "/productie/etichete") ? `<a href="/productie/etichete/noua?produs_id=${produs.id}" class="btn secondary small">Etichete pe lot…</a>` : ""}
         </div>
       </div>
 
