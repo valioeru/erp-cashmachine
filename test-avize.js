@@ -237,6 +237,11 @@ function refaContor() {
   r = await cer("get", "/avize/:id", { user: GABI, params: { id: idManual } });
   const foaie = r.corp;
   contine("foaia: titlul, seria, data, furnizorul", foaie, ["AVIZ DE ÎNSOȚIRE", "Seria TST nr. 5003", "Data (zi/luna/an): " + AV.dataAviz(avize.aziRo()), "CASH MACHINE S.R.L.", "J2010002107232", "RO27244210"]);
+  // 14.11.2026, Vali: „Da, pune și acolo la fel, și email de asemenea" — telefonul
+  // și emailul de office, ca pe etichetele de produs; fără fax.
+  contine("foaia: telefonul și emailul de office, fără fax", foaie, ["Tel.: +40 (741) 162 460", "Email: office@cashmachine.ro"], ["4046404046", "Fax:"]);
+  const vechi = AV.pagina({ serie: "TST", numar: "1", data: "2026-11-01", furnizor: JSON.stringify(Object.assign({}, AV.FURNIZOR, { telefon: "+4046404046", fax: "+4046404046" })), client_nume: "X" }, []);
+  contine("un aviz emis înainte rămâne cu datele de la emitere", vechi, ["Tel.: +4046404046", "Fax: +4046404046"]);
   contine("foaia: clientul și comanda", foaie, ["Client: CLIENT AVIZ TEST SRL", "CIF: RO97101", "Str. Test 1, Loc. Voluntari, Jud. Ilfov", "Comanda nr.: CMD-EXT-9"]);
   contine("foaia: tabelul și liniile", foaie, ["Nr. crt", "Denumirea produselor sau a serviciilor", "U.M.", "Cant.", "Cutii tip III 250X150X50 TEST", "150", "2,5", "Paleți EURO"]);
   contine("foaia: delegatul, transportul, observațiile, întocmit de", foaie, ["Numele delegatului: Ion Delegat", "Mijloc transport: B 12 ABC", "Observații: fragil", "Întocmit de: Gabi Test", "Semnătura de primire"]);

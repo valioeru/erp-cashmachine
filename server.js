@@ -61,6 +61,9 @@ require("./modules/cashflow").register(router);
 require("./modules/costuri").register(router);
 require("./modules/import").register(router);
 require("./modules/punte").register(router);
+// Etichetele de produs (/productie/etichete…) tot INAINTEA productiei, din
+// acelasi motiv ca utilajele si retetele de mai jos.
+require("./modules/etichete-produs").register(router);
 // Utilajele se inregistreaza INAINTE de productie: rutele se potrivesc in
 // ordinea inregistrarii, iar "/productie/:id" din productie.js ar inghiti
 // "/productie/utilaje" daca ar veni primul.
