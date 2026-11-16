@@ -21,6 +21,7 @@ const costuri = require("./costuri");
 const { ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
 const rez121 = require("../lib/rezultat-121");
+const IB = require("../lib/indicatori-bilant");
 const { esc, money, layout, table, dataRo, dateleInText } = require("../lib/render");
 const { chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
@@ -598,70 +599,12 @@ function analizeazaBalanta(conturi, zile) {
   const control = rez121.verificarePeCapitaluri(conturi);
   const nepotrivireProfit = are121 ? control.diferenta : 0;
 
-  const totalActiv = F.activeImob + F.activeCirc;
-  const totalDatorii = F.datoriiTL + F.datoriiCurente;
-  const datoriiFin = F.datoriiTL + F.credite519;
-  const datorieNeta = datoriiFin - F.cash;
-
-  // EBITDA construit de jos în sus, din profitul net: singurul mod sigur când
-  // contabilitatea închide lunar clasele de venituri și cheltuieli.
-  const ebitda = profit + impozit + dobanzi + amortizare;
-  const ebit = profit + impozit + dobanzi;
-  const factorAn = zile && zile > 0 ? 365 / zile : 1;
-  const ebitdaAnual = ebitda * factorAn;
-
-  // Rotația stocurilor pe stoc MEDIU (inițial + final) / 2 — un stoc cumpărat
-  // în ultima zi a perioadei n-ar trebui să strice rotația întregii perioade.
-  const stocMediu = (F.stocuri + I.stocuri) / 2;
-  const zileStoc = consumStocuri > 0 && zile ? (stocMediu / consumStocuri) * zile : null;
-
-  // Cash flow, metoda indirectă. Creanțele = activele circulante fără cash și
-  // fără stocuri; datoriile de exploatare = datoriile curente fără creditul pe
-  // termen scurt.
-  const creanteF = F.activeCirc - F.cash - F.stocuri;
-  const creanteI = I.activeCirc - I.cash - I.stocuri;
-  const explF = F.datoriiCurente - F.credite519;
-  const explI = I.datoriiCurente - I.credite519;
-  const cfo = profit + amortizare - (creanteF - creanteI) - (F.stocuri - I.stocuri) + (explF - explI);
-  // investițiile brute = creșterea netă a imobilizărilor + amortizarea anului
-  const cfi = -((F.activeImob - I.activeImob) + amortizare);
-  const cff = F.datoriiTL - I.datoriiTL + (F.credite519 - I.credite519) + (F.capitaluri - profit - I.capitaluri);
-  const variatieCash = F.cash - I.cash;
-
-  return {
-    zile: zile || null,
-    capitaluri: F.capitaluri,
-    datoriiTL: F.datoriiTL,
-    credite519: F.credite519,
-    datoriiFin,
-    datorieNeta,
-    datoriiCurente: F.datoriiCurente,
-    activeImob: F.activeImob,
-    activeCirc: F.activeCirc,
-    stocuri: F.stocuri,
-    cash: F.cash,
-    stocInitial: I.stocuri,
-    stocMediu,
-    ca, profit, profitSold, nepotrivireProfit, cheltuieli, amortizare, dobanzi, impozit, consumStocuri, dividende,
-    ebitda, ebit, ebitdaAnual,
-    totalActiv, totalDatorii,
-    capitalLucru: F.activeCirc - F.datoriiCurente,
-    marja: ca > 0 ? (profit / ca) * 100 : null,
-    marjaEbitda: ca > 0 ? (ebitda / ca) * 100 : null,
-    lichiditate: F.datoriiCurente > 0 ? F.activeCirc / F.datoriiCurente : null,
-    indatorare: totalActiv > 0 ? (totalDatorii / totalActiv) * 100 : null,
-    equityRatio: totalActiv > 0 ? (F.capitaluri / totalActiv) * 100 : null,
-    leverage: F.capitaluri > 0 ? totalDatorii / F.capitaluri : null,
-    gearing: F.capitaluri > 0 ? (datorieNeta / F.capitaluri) * 100 : null,
-    datorieNetaEbitda: ebitdaAnual > 0 ? datorieNeta / ebitdaAnual : null,
-    acoperireDobanda: dobanzi > 0 ? ebit / dobanzi : null,
-    zileStoc,
-    rotatieStoc: zileStoc && zileStoc > 0 ? 365 / zileStoc : null,
-    cfo, cfi, cff, variatieCash,
-    // cât de bine se leagă fluxurile cu variația reală de cash. Dacă nu se
-    // leagă, o spun în raport — nu netezesc diferența.
-    nepotrivireCash: cfo + cfi + cff - variatieCash,
-  };
+  // Indicatorii (EBITDA, structura, rotația stocurilor, cash flow-ul) se
+  // socotesc în lib/indicatori-bilant.js, cu aceleași formule pe care le
+  // folosește și estimarea de final de an.
+  return Object.assign(IB.indicatoriDin(F, I, { ca, profit, amortizare, dobanzi, impozit, consumStocuri }, zile), {
+    profitSold, nepotrivireProfit, cheltuieli, dividende,
+  });
 }
 
 async function balanteAnalizate() {
@@ -759,8 +702,6 @@ const RANDURI_BILANT = [
   { cheie: "variatieCash", nume: "Variația de cash în perioadă", fmt: "semn", sens: 1, tinta: "—" },
 ];
 
-const CHEI_BILANT = RANDURI_BILANT.filter((r) => r.cheie).map((r) => r.cheie);
-
 const GOL = '<span style="color:var(--text-muted)">—</span>';
 
 // Semaforul unui indicator. „sus" = mai mult e mai bine, „jos" = mai puțin e
@@ -814,49 +755,37 @@ function deltaBilant(nou, vechi, r) {
   return `<span style="color:${culoare}">${semn}${p.toFixed(1)}%</span>`;
 }
 
-// Estimarea anului în curs.
+// Estimarea anului în curs: IB.estimeazaAnul (lib/indicatori-bilant.js). Din
+// 16.11.2026 are toți indicatorii, nu doar rezultatele — regula e scrisă acolo.
 //
-// Nu o fac liniar (realizat ÷ luni × 12): firma nu vinde egal în fiecare lună,
-// iar liniarul minte exact în lunile în care contează. Mă uit în anii trecuți
-// cât din anul întreg se făcuse până la ACEEAȘI lună și aplic media raportului
-// pe realizatul de acum. Dacă n-am cu ce compara (nu există aceeași lună în
-// niciun an încheiat), cad pe liniar și o spun pe față.
-//
-// Profitul nu-l extrapolez cu raportul lui — un profit mic la jumătate de an
-// dă factori aberanți. Îl socotesc ca cifră estimată × marja realizată până
-// acum. Capitalurile proprii de la final de an = cele de la luna închisă plus
-// profitul rămas de făcut (rezultatul intră oricum în capitaluri).
-function estimeazaAnul(ref, finaluri, inchise) {
-  if (!ref) return null;
-  const factori = [];
-  for (const f of finaluri) {
-    const ytd = inchise.find((a) => a.an === f.an && a.luna === ref.luna);
-    if (ytd && ytd.ca > 0 && f.ca > 0) factori.push({ an: f.an, factor: f.ca / ytd.ca });
-  }
-  const liniar = 12 / Math.max(1, Number(ref.luna));
-  const factor = factori.length ? factori.reduce((s, x) => s + x.factor, 0) / factori.length : liniar;
-  const ca = ref.ca * factor;
-  const marja = ref.ca > 0 ? ref.profit / ref.ca : 0;
-  const profit = ca * marja;
-  const ebitda = ref.ebitda * factor;
-  const est = {
-    estimat: true,
-    an: ref.an,
-    factor,
-    aniFactor: factori.map((x) => x.an),
-    liniar: factori.length === 0,
-    ca,
-    profit,
-    ebitda,
-    marja: ca > 0 ? (profit / ca) * 100 : null,
-    marjaEbitda: ca > 0 ? (ebitda / ca) * 100 : null,
-    capitaluri: ref.capitaluri + (profit - ref.profit),
-  };
-  // Restul sunt fotografii la o dată sau se sprijină pe ele. Nu se
-  // extrapolează — un sold de furnizori la 31 decembrie nu se deduce din cel
-  // de la august, iar un „leverage estimat" ar fi o cifră inventată.
-  for (const cheie of CHEI_BILANT) if (!(cheie in est)) est[cheie] = null;
-  return est;
+// Nota de sub tabelul de final de an spune cum s-a făcut fiecare parte a
+// coloanei estimate, cu sumele ei. Fără ea, coloana ar arăta ca o balanță
+// adevărată, iar banca ar citi-o ca atare.
+function notaEstimare(e, ref) {
+  const factor = e.liniar
+    ? `12 ÷ ${Number(ref.luna)} luni — pro-rata liniară, fiindcă n-am aceeași lună în niciun an încheiat cu care să măsor sezonul`
+    : `factorul mediu de sezon ${e.factor.toFixed(2)}, măsurat pe ${esc(e.aniFactor.join(" și "))} (cât din anul întreg se făcuse până la aceeași lună)`;
+  const marja = (ref.ca > 0 ? (ref.profit / ref.ca) * 100 : 0).toFixed(1);
+  const miscari = [
+    e.profitRamas >= 0
+      ? `profitul rămas de făcut până la 31 decembrie (${money(e.profitRamas)}) intră în capitaluri`
+      : `pierderea estimată pe restul anului (${money(-e.profitRamas)}) scade capitalurile`,
+  ];
+  if (e.amortizareRamasa > 0.005) miscari.push(`amortizarea rămasă (${money(e.amortizareRamasa)}) scade imobilizările`);
+  const generat = e.profitRamas + e.amortizareRamasa;
+  miscari.push(
+    generat >= 0
+      ? `banii făcuți așa (${money(generat)}) se socotesc folosiți la plata datoriilor curente${
+          e.inCash > 0.005 ? `, până la ${money(e.platit)}; restul de ${money(e.inCash)} rămâne în cash` : ""
+        }`
+      : `ce lipsește (${money(-generat)}) se socotește acoperit din datorii curente`
+  );
+  const ultima = miscari.pop();
+  return `<p style="font-size:12px;color:var(--text-muted)">Estimarea ${e.an}. <strong>Fluxurile anului</strong> — cifra de afaceri, EBITDA, profitul, dobânzile, amortizarea, consumul de stocuri — sunt cele realizate până la ${esc(
+    etichetaLuna(ref.pana)
+  )} (cifra de afaceri ${money(ref.ca)}) × ${factor}. Profitul păstrează deci marja realizată până acum (${marja}%). <strong>Bilanțul</strong> rămâne cel de la ${esc(
+    dataRo(ref.pana)
+  )}: activele nu mai cresc anul ăsta, iar creditele, stocurile, creanțele și cash-ul rămân cum sunt. Se mișcă doar ce trebuie ca bilanțul să se închidă: ${miscari.join(", ")}, iar ${ultima}. Indicatorii de structură și cash flow-ul ies din bilanțul ăsta, cu aceleași formule ca pe balanțele reale.</p>`;
 }
 
 // ===========================================================================
@@ -2657,7 +2586,7 @@ function register(router) {
 
     // Finalurile de an: ultimii trei încheiați, cel mai nou primul, plus
     // estimarea anului în curs.
-    const estimare = refLuna && !finaluri.some((f) => f.an === refLuna.an) ? estimeazaAnul(refLuna, finaluri, inchise) : null;
+    const estimare = refLuna && !finaluri.some((f) => f.an === refLuna.an) ? IB.estimeazaAnul(refLuna, finaluri, inchise) : null;
     const coloaneAn = finaluri.slice(-3).reverse();
 
     const indicatori = [
@@ -2868,17 +2797,7 @@ function register(router) {
         [...(estimare ? [`${estimare.an} estimat`] : []), ...coloaneAn.map((c) => String(c.an))],
         [...(estimare ? [estimare] : []), ...coloaneAn]
       )}
-      ${
-        estimare
-          ? `<p style="font-size:12px;color:var(--text-muted)">Estimarea ${estimare.an}: cifra realizată până la ${esc(etichetaLuna(refLuna.pana))} (${money(refLuna.ca)}) × ${
-              estimare.liniar
-                ? `12 ÷ ${Number(refLuna.luna)} luni — pro-rata liniară, fiindcă n-am aceeași lună în niciun an încheiat cu care să măsor sezonul`
-                : `factorul mediu de sezon ${estimare.factor.toFixed(2)}, măsurat pe ${esc(estimare.aniFactor.join(" și "))} (cât din anul întreg se făcuse până la aceeași lună)`
-            }. Profitul estimat = cifra estimată × marja realizată până acum (${(refLuna.ca > 0 ? (refLuna.profit / refLuna.ca) * 100 : 0).toFixed(1)}%). Capitalurile = cele de la ${esc(
-              etichetaLuna(refLuna.pana)
-            )} plus profitul rămas de făcut. Restul pozițiilor de bilanț sunt fotografii la o dată — nu se extrapolează, de-aia sunt goale.</p>`
-          : ""
-      }`
+      ${estimare ? notaEstimare(estimare, refLuna) : ""}`
       : "";
 
     // Evoluția lunară a anului în curs — cerută separat, ca detaliu.
