@@ -513,7 +513,8 @@ function puneZi(data, linii) {
   })();
   if (dupa.includes("✓ Comandat") && dupa.includes("background:var(--success)")) ok("după comandă: butonul verde „✓ Comandat”");
   else rau("butonul nu și-a schimbat culoarea după comandă");
-  if (dupa.includes("comandat 300 de la terț")) ok("dedesubt scrie ce s-a comandat");
+  // De la 16.11.2026 nota spune și unitatea cererii (lib/um-cerere.js): a liniei, aici „buc”.
+  if (dupa.includes("comandat 300 buc de la terț")) ok("dedesubt scrie ce s-a comandat, cu unitatea");
   else rau("nu scrie ce s-a comandat");
   if (/onsubmit="return confirm\('Pentru linia asta ai comandat deja 300/.test(dupa)) ok("a doua apăsare întreabă înainte");
   else rau("a doua comandă pe aceeași linie pleacă fără întrebare");
@@ -524,7 +525,7 @@ function puneZi(data, linii) {
     await ruteDepozit.get["/depozit/comanda/:id"]({ user: DEPOZIT, params: { id: String(cmd) }, query: {}, body: {}, res: r, req: { url: "/" } });
     return r.corp;
   })();
-  if (/ai comandat deja 1\.550\. Mai comanzi/.test(doua) && doua.includes("comandat 1.250 din producție")) ok("două cereri: întrebarea spune totalul (1.550)");
+  if (/ai comandat deja 1\.550\. Mai comanzi/.test(doua) && doua.includes("comandat 1.250 buc din producție")) ok("două cereri: întrebarea spune totalul (1.550)");
   else rau("totalul cererilor de pe linie e greșit în întrebare");
   exec(`UPDATE aprovizionari SET status = 'anulata' WHERE comanda_id = ${cmd}`);
   const anulat = await (async () => {
