@@ -1724,7 +1724,9 @@ function register(router) {
     const rezervareActiva = stoc.linii.find((l) => l.rezervare);
     const aprovizionari = await db
       .prepare(
-        `SELECT a.*, p.denumire AS produs FROM aprovizionari a JOIN produse p ON p.id = a.produs_id
+        `SELECT a.*, p.denumire AS produs, ${require("../lib/um-cerere").SQL_UM} AS um_cerere
+           FROM aprovizionari a JOIN produse p ON p.id = a.produs_id
+           ${require("../lib/um-cerere").JOIN_UM}
          WHERE a.comanda_id = ? ORDER BY a.id DESC`
       )
       .all(comanda.id);
@@ -1892,7 +1894,8 @@ function register(router) {
                ["Produs", "Cantitate", "Sursă", "Termen cerut", "Termen confirmat", "Status"],
                aprovizionari.map((a) => [
                  esc(a.produs),
-                 a.cantitate,
+                 // Cu unitatea cererii (a liniei comenzii), ca să nu se citească altfel.
+                 esc([a.cantitate, a.um_cerere].filter((x) => x != null && String(x).trim() !== "").join(" ")),
                  a.sursa === "productie" ? "producție" : "terț",
                  esc(a.termen_cerut || "—"),
                  esc(a.termen_confirmat || "—"),

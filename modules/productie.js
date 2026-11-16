@@ -24,6 +24,8 @@ const STARI = require("../lib/comenzi-stari");
 // cererea depozitului, recepția „de preluat din producție". Una singură,
 // folosită de listă, de fișă și de alocarea pe utilaje.
 const STADIU = require("../lib/stadiu-comanda");
+// Unitatea cererii din depozit (16.11.2026): a liniei din comanda clientului.
+const UMC = require("../lib/um-cerere");
 const COST = require("../lib/cost");
 // Furnizorul materialului, ales la alocarea materialului (06.11.2026).
 const FC = require("../lib/furnizor-comanda");
@@ -990,10 +992,11 @@ function register(router) {
   router.get("/productie/cereri", async (ctx) => {
     const cereri = await db
       .prepare(
-        `SELECT a.*, p.denumire AS produs, p.unitate_masura, c.numar AS comanda_numar, cl.nume AS client,
+        `SELECT a.*, p.denumire AS produs, ${UMC.SQL_UM} AS unitate_masura, c.numar AS comanda_numar, cl.nume AS client,
                 c.data_livrare_promisa, c.data_livrare_ceruta
          FROM aprovizionari a
          JOIN produse p ON p.id = a.produs_id
+         ${UMC.JOIN_UM}
          LEFT JOIN comenzi c ON c.id = a.comanda_id
          LEFT JOIN parteneri cl ON cl.id = c.partener_id
          WHERE a.sursa = 'productie'
@@ -1104,6 +1107,14 @@ function register(router) {
     // linia comenzii de productie se nastea cu produs_id gol. Acelasi fel de
     // greseala fusese deja prins o data pe randul parinte (vezi mai jos).
     const produs = await db.prepare("SELECT id, denumire, unitate_masura FROM produse WHERE id = ?").get(a.produs_id);
+    // Unitatea în care s-a cerut: a cererii, altfel a liniei din comanda
+    // clientului, abia apoi a produsului. Vali, 16.11.2026, comanda #107:
+    // „Dacă a cerut kg, în comandă de ce apare în producție 160 rolă?" —
+    // aici se lua mereu unitatea din nomenclator (lib/um-cerere.js).
+    const linieClient = a.linie_id
+      ? await db.prepare("SELECT um FROM comenzi_linii WHERE id = ?").get(a.linie_id).catch(() => null)
+      : null;
+    const umCerere = UMC.umCerere(a, linieClient, produs);
     const comanda = a.comanda_id
       ? await db
           .prepare("SELECT c.numar, c.partener_id, c.agent_id, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
@@ -1148,7 +1159,7 @@ function register(router) {
         comanda ? comanda.client : null,
         produs ? produs.denumire : null,
         String(a.cantitate),
-        produs ? produs.unitate_masura || "buc" : "buc",
+        umCerere,
         valoareEstimata,
         azi(),
         a.termen_cerut || null,
@@ -1188,7 +1199,7 @@ function register(router) {
       // ala, deci nu are niciuna — lista goala, nu o variabila care nu
       // exista in acest scop. Asa cum era, handlerul arunca
       // „completate is not defined" si confirmarea nu mergea deloc.
-      { produs, cantitate: String(a.cantitate), um: produs.unitate_masura || "buc", completate: [] },
+      { produs, cantitate: String(a.cantitate), um: umCerere, completate: [] },
     ]);
     redirect(ctx.res, `/productie/${ins.lastInsertRowid}`);
   });

@@ -27,6 +27,9 @@ const T = require("../lib/termene");
 const livrare = require("../lib/livrare-partiala");
 const stari = require("../lib/comenzi-stari");
 const STADIU = require("../lib/stadiu-comanda");
+// Unitatea cererii de aprovizionare (16.11.2026): a liniei din comanda
+// clientului, nu a produsului din nomenclator.
+const UMC = require("../lib/um-cerere");
 
 const REZERVARE_ORE = 24;
 
@@ -233,10 +236,11 @@ async function marfaDePreluat() {
   }
   const cereri = await db
     .prepare(
-      `SELECT a.id AS aprovizionare_id, a.comanda_id, a.cantitate, a.termen_confirmat, p.denumire AS produs, p.unitate_masura,
+      `SELECT a.id AS aprovizionare_id, a.comanda_id, a.cantitate, a.termen_confirmat, p.denumire AS produs, ${UMC.SQL_UM} AS unitate_masura,
               cp.id AS comanda_productie_id, cp.numar AS productie_numar, co.numar AS comanda_numar, pa.nume AS client
          FROM aprovizionari a
          JOIN produse p ON p.id = a.produs_id
+         ${UMC.JOIN_UM}
          LEFT JOIN comenzi_productie cp ON cp.aprovizionare_id = a.id
          LEFT JOIN comenzi co ON co.id = a.comanda_id
          LEFT JOIN parteneri pa ON pa.id = co.partener_id
@@ -385,8 +389,9 @@ function register(router) {
     const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 2000").all();
     const aprov = await db
       .prepare(
-        `SELECT a.*, p.denumire AS produs, f.nume AS furnizor
+        `SELECT a.*, p.denumire AS produs, f.nume AS furnizor, ${UMC.SQL_UM} AS um_cerere
          FROM aprovizionari a JOIN produse p ON p.id = a.produs_id
+         ${UMC.JOIN_UM}
          LEFT JOIN parteneri f ON f.id = a.furnizor_id
          WHERE a.comanda_id = ? ORDER BY a.id DESC`
       )
@@ -420,7 +425,7 @@ function register(router) {
         ? `<div style="font-size:12px;color:var(--success);margin-top:3px">${cerute
             .map(
               (a) =>
-                `comandat ${esc(String(nr(a.cantitate)))} ${a.sursa === "productie" ? "din producție" : "de la terț"}${a.furnizor ? " · " + esc(a.furnizor) : ""} · ${esc(String(a.status || ""))}${a.creata_la ? " · " + esc(String(a.creata_la).slice(0, 16)) : ""}${a.cerut_de ? " · " + esc(a.cerut_de) : ""}`
+                `comandat ${esc(String(nr(a.cantitate)))}${a.um_cerere ? " " + esc(a.um_cerere) : ""} ${a.sursa === "productie" ? "din producție" : "de la terț"}${a.furnizor ? " · " + esc(a.furnizor) : ""} · ${esc(String(a.status || ""))}${a.creata_la ? " · " + esc(String(a.creata_la).slice(0, 16)) : ""}${a.cerut_de ? " · " + esc(a.cerut_de) : ""}`
             )
             .join("<br>")}</div>`
         : "";
@@ -449,7 +454,8 @@ function register(router) {
           : notaCerute;
       return [
         esc(l.denumire) + require("../lib/furnizor-comanda").randFurnizor(l),
-        `${nr(l.cerut)} ${esc(l.unitate_masura || "")}`,
+        // Unitatea liniei din comanda clientului; a produsului doar dacă linia n-are.
+        `${nr(l.cerut)} ${esc(String(l.um || "").trim() || l.unitate_masura || "")}`,
         nr(l.livrat),
         nr(l.fizic),
         nr(l.blocat),
@@ -733,14 +739,17 @@ function register(router) {
     }
     await db
       .prepare(
-        `INSERT INTO aprovizionari (comanda_id, linie_id, produs_id, cantitate, sursa, furnizor_id, termen_cerut, status, cerut_de, creata_la)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'ceruta', ?, ?)`
+        `INSERT INTO aprovizionari (comanda_id, linie_id, produs_id, cantitate, um, sursa, furnizor_id, termen_cerut, status, cerut_de, creata_la)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ceruta', ?, ?)`
       )
       .run(
         id,
         linieId,
         linie.produs_id,
         cantitate,
+        // Cât lipsește din linie se cere în unitatea liniei (kg, rolă, buc),
+        // nu în cea a produsului din nomenclator (lib/um-cerere.js).
+        UMC.umCerere(null, linie, await db.prepare("SELECT unitate_masura FROM produse WHERE id = ?").get(linie.produs_id).catch(() => null)),
         sursa,
         // Furnizorul se pastra DOAR cand sursa era „tert", iar formularul
         // lasa sa alegi „din productie" SI un furnizor — care se arunca in
@@ -769,10 +778,11 @@ function register(router) {
   router.get("/depozit/aprovizionare", async (ctx) => {
     const aprov = await db
       .prepare(
-        `SELECT a.*, p.denumire AS produs, p.unitate_masura, f.nume AS furnizor, c.numar AS comanda_numar,
+        `SELECT a.*, p.denumire AS produs, ${UMC.SQL_UM} AS unitate_masura, f.nume AS furnizor, c.numar AS comanda_numar,
                 cl.nume AS client, c.data_livrare_promisa, c.data_livrare_ceruta
          FROM aprovizionari a
          JOIN produse p ON p.id = a.produs_id
+         ${UMC.JOIN_UM}
          LEFT JOIN parteneri f ON f.id = a.furnizor_id
          LEFT JOIN comenzi c ON c.id = a.comanda_id
          LEFT JOIN parteneri cl ON cl.id = c.partener_id
@@ -954,12 +964,14 @@ function register(router) {
     const sursa = b.sursa === "productie" ? "productie" : "tert";
     await db
       .prepare(
-        `INSERT INTO aprovizionari (comanda_id, linie_id, produs_id, cantitate, sursa, furnizor_id, termen_cerut, status, cerut_de, creata_la, observatii)
-         VALUES (NULL, NULL, ?, ?, ?, ?, ?, 'ceruta', ?, ?, ?)`
+        `INSERT INTO aprovizionari (comanda_id, linie_id, produs_id, cantitate, um, sursa, furnizor_id, termen_cerut, status, cerut_de, creata_la, observatii)
+         VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, 'ceruta', ?, ?, ?)`
       )
       .run(
         produsId,
         cantitate,
+        // Pentru stoc: unitatea produsului din nomenclator.
+        UMC.umCerere(null, null, await db.prepare("SELECT unitate_masura FROM produse WHERE id = ?").get(produsId).catch(() => null)),
         sursa,
         sursa === "tert" ? parseInt(b.furnizor_id, 10) || null : null,
         termenStoc.termen,
