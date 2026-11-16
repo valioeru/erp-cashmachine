@@ -578,12 +578,14 @@ const GHID = [
 "Etichetele de pus pe cutii, role sau baxuri, pe loturi: sigla și datele firmei, denumirea și caracteristicile produsului, lotul, data producției, cantitatea pe ambalaj și ce mai bifezi. Jos e <b>codul de bare al produsului</b>: la urcarea pe raft, scanerul din CT-Park îl recunoaște și găsește marfa de pus. Pe 100×150 poate fi și codul lotului.",
 "Grafica e mereu aceeași: fiecare câmp are locul lui pe etichetă, iar un câmp nebifat își lasă locul gol, fără să mute restul. De la o tipărire la alta se schimbă doar numărul etichetei, data tipăririi și ce scrii altfel atunci.",
 "Pornești dintr-o comandă de producție (butonul „Etichete produs” de pe comandă, sau lista de pe pagină): produsul, clientul, caracteristicile și lotul vin completate. Lotul comenzii e codul fișei ei de lot, pe care scanerul îl știe deja. Fără comandă, alegi produsul din nomenclator și lotul vine propus (L, ziua, numărul).",
+"Poți porni și din <b>comanda clientului</b>: butonul „Etichete produs” de pe pagina comenzii (sau „Din comanda clientului” din lista de aici) arată liniile ei, fiecare cu loturile de etichete făcute deja. La „Etichete →” vin completate produsul, clientul și numărul comenzii. Linia care are comandă de producție ia lotul fișei ei de lot; celelalte primesc un lot nou, propus. Lotul ține minte comanda, iar pe butonul de pe comandă scrie câte loturi are.",
+"Generatorul îl vede oricine are Producția. Cine trebuie să facă doar etichete, fără restul Producției (de exemplu omul de la livrări), primește bifa <b>„Etichete produs (doar generatorul)”</b> din Utilizatori: butonul Producție îl duce direct la etichete, iar comenzile de producție apar doar cu numărul, fără link.",
 "Fiecare lot ține minte <b>fiecare tipărire</b>: când, cine, ce numere și de ce. <b>Suplimentar</b> scoate etichete noi, cu numerotarea mai departe. <b>Din nou</b> scoate aceleași numere, pentru etichete rupte sau pierdute, cu motivul scris. Pentru o singură tipărire poți scrie altă cantitate (ultima cutie), alt operator sau altă dată, fără să schimbi lotul.",
 "Când comanda de producție trimite marfa în depozit, rândul recepției ia lotul etichetelor ei, iar paleții din CT-Park îl poartă mai departe.",
 "Administratorul schimbă din <b>Setări</b> datele firmei de pe etichetă, sigla (PNG, JPG sau SVG) și câmpurile bifate implicit la fiecare format."
 ],
 "pasi":[
-"Producție → Etichete produs → alegi comanda de producție sau produsul → Continuă.",
+"Producție → Etichete produs → alegi comanda clientului, comanda de producție sau produsul → Continuă. Din pagina unei comenzi: „Etichete produs” → „Etichete →” pe linia dorită.",
 "Alegi formatul (100×150 sau 100×50) și bifezi ce apare pe etichetă; în dreapta vezi eticheta cum iese.",
 "Verifici lotul și completezi cantitatea pe ambalaj, greutatea, operatorul sau ce mai trebuie.",
 "Scrii câte etichete tipărești și apeși „Salvează lotul și tipărește”, apoi „Tipărește”.",

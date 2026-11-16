@@ -857,6 +857,38 @@ DE CE NE PUTEM PERMITE RAMBURSAREA
   },
 ];
 
+// VÂNZĂRILE DE ACTIVE NU SUNT CLIENȚI. Vali, 16.11.2026: „Scoate din top
+// clienți BCR și Negru, sunt vânzări de active spot.” Activele vândute firmelor
+// astea (BCR Leasing, Negru & Negru) au factură de vânzare, deci intrau în
+// topul clienților și în concentrare. Dar nu sunt clienți care cumpără din nou:
+// în dosarul de credit ar arăta un portofoliu mai împărțit decât e. Administratorul îi trece pe lista asta din pagină; ei
+// ies din top și din bazele procentelor, iar sub tabel se spune cine a ieșit și
+// cu ce sumă — banca vede de ce lipsesc, nu pare că i-am ascuns.
+const CHEIE_ACTIVE = "banca_vanzari_active";
+
+async function parteneriVanzariActive() {
+  const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = ?").get(CHEIE_ACTIVE).catch(() => null);
+  let v = [];
+  try {
+    v = JSON.parse((r && r.valoare) || "[]");
+  } catch (e) {
+    v = [];
+  }
+  return Array.isArray(v) ? [...new Set(v.map((x) => parseInt(x, 10)).filter((x) => x > 0))] : [];
+}
+
+// Numele venite din importuri vechi au uneori entitățile HTML scrise ca text
+// („NEGRU &amp; NEGRU BIO”), iar esc() le mai scapă o dată. În rapoartele
+// pentru bancă numele apare curat.
+function numeCurat(v) {
+  return String(v == null ? "" : v)
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 async function citesteTexteBanca() {
   const iesire = {};
   for (const t of TEXTE_BANCA) {
@@ -2507,17 +2539,30 @@ function register(router) {
     const datoriiFurnizori = Number(sA.sold);
 
     // Concentrarea clienților — primul lucru la care se uită analistul de credit.
-    const topClienti = await db
-      .prepare(
-        `SELECT p.nume, COALESCE(SUM(n.net),0) AS net FROM (SELECT * FROM facturi WHERE activ = 1) f
-         JOIN parteneri p ON p.id = f.partener_id
-         JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
-         WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
-         GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
-      )
-      .all(deLaAnul);
-    const top1 = topClienti.length && vanzariNetAn > 0 ? (Number(topClienti[0].net) / vanzariNetAn) * 100 : 0;
-    const top5 = vanzariNetAn > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariNetAn) * 100 : 0;
+    // Vânzările de active (parteneriVanzariActive) nu intră: nici în top, nici
+    // în baza procentelor. Cei cincisprezece de sus sunt și lista din care
+    // administratorul alege ce scoate.
+    const excluse = await parteneriVanzariActive();
+    const vanzariClienti = (conditie) =>
+      db
+        .prepare(
+          `SELECT p.id, p.nume, COALESCE(SUM(n.net),0) AS net FROM (SELECT * FROM facturi WHERE activ = 1) f
+           JOIN parteneri p ON p.id = f.partener_id
+           JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
+           WHERE f.directie = 'vanzare' AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ?
+             ${conditie}
+           GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 15`
+        )
+        .all(deLaAnul);
+    const topClienti15 = await vanzariClienti(excluse.length ? `AND f.partener_id NOT IN (${excluse.join(",")})` : "");
+    const vanzariActive = excluse.length ? await vanzariClienti(`AND f.partener_id IN (${excluse.join(",")})`) : [];
+    for (const c of topClienti15.concat(vanzariActive)) c.nume = numeCurat(c.nume);
+    const topClienti = topClienti15.slice(0, 5);
+    const totalActive = vanzariActive.reduce((s, c) => s + Number(c.net), 0);
+    // Baza procentelor: vânzările comerciale (fără vânzările de active).
+    const vanzariComerciale = vanzariNetAn - totalActive;
+    const top1 = topClienti.length && vanzariComerciale > 0 ? (Number(topClienti[0].net) / vanzariComerciale) * 100 : 0;
+    const top5 = vanzariComerciale > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariComerciale) * 100 : 0;
 
     // Concentrarea pe furnizori — partea cealaltă a aceluiași risc. Banca se
     // uită și aici: dacă marfa vine de la un singur om, o ceartă cu el oprește
@@ -2532,6 +2577,7 @@ function register(router) {
           GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 5`
       )
       .all(deLaAnul);
+    for (const c of topFurnizori) c.nume = numeCurat(c.nume);
     const furn1 = topFurnizori.length && achizitiiNetAn > 0 ? (Number(topFurnizori[0].net) / achizitiiNetAn) * 100 : 0;
     const furn5 = achizitiiNetAn > 0 ? (topFurnizori.reduce((s, c) => s + Number(c.net), 0) / achizitiiNetAn) * 100 : 0;
 
@@ -2907,12 +2953,21 @@ function register(router) {
       )}`;
 
     const tabelTopuri = `
-      <h2>Top 5 clienți în ${anCurent} (concentrarea riscului)</h2>
+      <h2 id="topuri">Top 5 clienți în ${anCurent} (concentrarea riscului)</h2>
       ${table(
-        [`Client`, `Vânzări ${anCurent} (net)`, "% din total"],
-        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariNetAn > 0 ? ((Number(c.net) / vanzariNetAn) * 100).toFixed(1) + "%" : "—"]),
+        [`Client`, `Vânzări ${anCurent} (net)`, vanzariActive.length ? "% din vânzările comerciale" : "% din total"],
+        topClienti.map((c) => [esc(c.nume), money(c.net), vanzariComerciale > 0 ? ((Number(c.net) / vanzariComerciale) * 100).toFixed(1) + "%" : "—"]),
         { total: ["<strong>Top 5</strong>", `<strong>${money(topClienti.reduce((s, c) => s + Number(c.net), 0))}</strong>`, `<strong>${top5.toFixed(1)}%</strong>`] }
       )}
+      ${
+        vanzariActive.length
+          ? `<p style="font-size:12px;color:var(--text-muted)">Scoase din topul clienților, ca vânzări de active (spot), nu clienți comerciali: ${vanzariActive
+              .map((c) => `${esc(c.nume)} (${money(c.net)})`)
+              .join(", ")}. Procentele clienților sunt din vânzările comerciale: ${money(vanzariComerciale)} = total vânzări ${money(vanzariNetAn)} minus ${money(
+              totalActive
+            )} vânzări de active.</p>`
+          : ""
+      }
 
       <h2>Top 5 furnizori în ${anCurent} (concentrarea aprovizionării)</h2>
       ${table(
@@ -2956,6 +3011,32 @@ function register(router) {
     const sectiuneConcluzie = texte.concluzie ? `<h2>Ce cerem băncii</h2>${textLiber(texte.concluzie)}` : "";
 
     // Editorul apare doar în ERP, nu în dosarul tipărit.
+    // Lista vânzărilor de active, ținută de administrator. Stă doar în pagina din
+    // ERP, nu și în dosarul tipărit: în dosar rămâne doar ce s-a scos și de ce.
+    const numeExcluse = excluse.length
+      ? await db.prepare(`SELECT id, nume FROM parteneri WHERE id IN (${excluse.join(",")}) ORDER BY nume`).all().catch(() => [])
+      : [];
+    const editorActive = `
+      <div style="max-width:900px;margin:4px 0 20px;padding:10px 14px;border:1px dashed var(--border,#d8dce3);border-radius:8px">
+        <div style="font-weight:600;font-size:14px;margin-bottom:4px">Vânzări de active (spot), scoase din topul clienților</div>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Clientul trecut aici iese din top și din procentele de concentrare: o vânzare de active nu e un client care cumpără din nou. Sub tabel se spune cine a ieșit și cu ce sumă. Doar administratorul vede lista asta.</p>
+        ${numeExcluse
+          .map(
+            (p) => `<form method="post" action="/rapoarte/indicatori/active" class="inline-form" style="margin:0 0 6px">
+            <input type="hidden" name="actiune" value="pune"><input type="hidden" name="partener_id" value="${Number(p.id)}">
+            <strong>${esc(numeCurat(p.nume))}</strong> <button class="btn small secondary" type="submit">Pune înapoi în top</button></form>`
+          )
+          .join("")}
+        ${
+          topClienti15.length
+            ? `<form method="post" action="/rapoarte/indicatori/active" class="inline-form">
+            <input type="hidden" name="actiune" value="scoate">
+            <select name="partener_id">${topClienti15.map((c) => `<option value="${Number(c.id)}">${esc(c.nume)} · ${money(c.net)}</option>`).join("")}</select>
+            <button class="btn small" type="submit">Scoate din top: vânzare de active</button></form>`
+            : ""
+        }
+      </div>`;
+
     const editorTexte = `
       <h2>Partea scrisă a dosarului</h2>
       <p style="color:var(--text-muted);font-size:13px;max-width:900px;margin:-4px 0 12px">
@@ -2977,7 +3058,7 @@ function register(router) {
 
     return {
       sectiuneBilant, carduri, tabelIndicatori, tabelTopuri, blocSugestii,
-      sectiunePrezentare, blocComentariu, sectiuneMasuri, sectiuneConcluzie, editorTexte,
+      sectiunePrezentare, blocComentariu, sectiuneMasuri, sectiuneConcluzie, editorTexte, editorActive,
       refLuna, estimare, aziStr,
       perioada: refLuna ? etichetaLuna(refLuna.pana) : "",
       deLa: refLuna ? refLuna.deLa : null,
@@ -2993,10 +3074,31 @@ function register(router) {
         <a class="link-btn" href="/rapoarte/indicatori/raport-banca" target="_blank" rel="noopener">Generează raport pentru bancă</a>
       </div>
       <p style="font-size:12px;color:var(--text-muted);margin:-8px 0 16px">Butonul deschide aceleași cifre ca o singură pagină de tipărit — antet cu firma și perioada, toate tabelele, fără meniuri și fără butoane. Din ea salvezi PDF-ul pe care îl trimiți la bancă.</p>
-      ${r.sectiuneBilant}${r.carduri}${r.tabelIndicatori}${r.tabelTopuri}${r.blocSugestii}
+      ${r.sectiuneBilant}${r.carduri}${r.tabelIndicatori}${r.tabelTopuri}${ctx.user && ctx.user.rol === "admin" ? r.editorActive : ""}${r.blocSugestii}
       ${r.blocComentariu}
       ${ctx.user && ctx.user.rol === "admin" ? r.editorTexte : ""}`;
     send(ctx.res, 200, pagina(ctx, "Indicatori financiari — ochii băncii", "/rapoarte/indicatori", continut));
+  });
+
+  // Vânzările de active scoase din topul clienților (vezi CHEIE_ACTIVE): doar
+  // administratorul le trece pe listă sau le pune înapoi.
+  router.post("/rapoarte/indicatori/active", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/rapoarte/indicatori");
+    const b = ctx.body || {};
+    const actiune = String(b.actiune || "");
+    const id = parseInt(b.partener_id, 10) || 0;
+    const p = id ? await db.prepare("SELECT id, nume FROM parteneri WHERE id = ?").get(id).catch(() => null) : null;
+    if (!p || !["scoate", "pune"].includes(actiune)) return redirect(ctx.res, "/rapoarte/indicatori#topuri");
+    const lista = await parteneriVanzariActive();
+    const noua = actiune === "pune" ? lista.filter((x) => x !== id) : [...new Set(lista.concat([id]))];
+    await db
+      .prepare(
+        `INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?)
+         ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la`
+      )
+      .run(CHEIE_ACTIVE, JSON.stringify(noua), azi());
+    console.log(`[indicatori] ${ctx.user.nume || "?"}: ${actiune === "pune" ? "pus înapoi în topul clienților" : "scos din topul clienților (vânzare de active)"} ${numeCurat(p.nume)}`);
+    return redirect(ctx.res, "/rapoarte/indicatori#topuri");
   });
 
   router.post("/rapoarte/indicatori/text", async (ctx) => {

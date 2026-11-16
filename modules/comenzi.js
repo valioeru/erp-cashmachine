@@ -1781,6 +1781,13 @@ function register(router) {
     const vedeScadente = (() => {
       try { return require("../lib/auth").poateAccesa(ctx.user, "/scadente"); } catch (e) { return false; }
     })();
+    // Etichetele de produs ale comenzii (Vali, 16.11.2026: „selectezi comanda
+    // și faci etichete pentru ea”). Butonul îl vede cine are generatorul de
+    // etichete; în paranteză, câte loturi are deja comanda.
+    const vedeEtichete = (() => {
+      try { return require("../lib/auth").poateAccesa(ctx.user, "/productie/etichete"); } catch (e) { return false; }
+    })();
+    const loturiEtichete = vedeEtichete ? await require("./etichete-produs").numarLoturiComanda(comanda.id).catch(() => 0) : 0;
 
     const acceptaPartial = livrare.acceptaPartial(comanda);
     const potiRaspundeLivrare =
@@ -2009,6 +2016,13 @@ function register(router) {
             : poateFactura(comanda)
               ? `<form method="post" action="/comenzi/${comanda.id}/factureaza" class="inline-form"><button type="submit" class="btn">Facturează</button></form>`
               : `<span style="color:var(--text-muted);font-size:13px">Facturarea se deblochează la statusul „în stoc depozit”.</span>`
+        }
+        ${
+          vedeEtichete
+            ? `<a class="btn secondary" href="/productie/etichete/comanda/${comanda.id}">Etichete produs${
+                loturiEtichete ? ` (${loturiEtichete} ${loturiEtichete === 1 ? "lot" : "loturi"})` : ""
+              }</a>`
+            : ""
         }
         ${
           potiSterge
