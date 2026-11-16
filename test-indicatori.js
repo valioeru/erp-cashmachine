@@ -123,6 +123,32 @@ function sectiune(corp, titlu) {
   return j < 0 ? corp.slice(i) : corp.slice(i, j + 8);
 }
 
+// Textul celulei de pe coloana „<an> estimat" (prima coloană de date din
+// tabelul de final de an), pe rândul cu numele dat. Verificarea pe coloană
+// contează: CFO-ul estimat e egal cu cel de la august, deci un simplu „apare în
+// pagină" ar trece și cu coloana goală.
+function celulaEstimata(corp, rand) {
+  const t = sectiune(corp, "La final de an");
+  if (!t.includes(" estimat</th>")) return null;
+  for (const tr of t.split("<tr>")) {
+    const td = [...tr.matchAll(/<td>([\s\S]*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+    if (td.length > 1 && td[0] === rand) return td[1];
+  }
+  return null;
+}
+
+// Fiecare pereche [rând, valoare]: celula estimată trebuie să înceapă cu
+// valoarea (după ea poate veni semaforul „bun / atenție / slab").
+function cereEstimat(eticheta, corp, perechi) {
+  const gresite = [];
+  for (const [rand, val] of perechi) {
+    const c = celulaEstimata(corp, rand);
+    if (c === null || !c.startsWith(val)) gresite.push(`${rand}: „${c}” în loc de „${val}”`);
+  }
+  if (gresite.length) return rau(eticheta, gresite.join("; "));
+  ok(eticheta + " (" + perechi.length + " rânduri)");
+}
+
 // ---- balanțele de test ------------------------------------------------------
 // O balanță adevărată are peste o sută de conturi; pragul din raport e 20, așa
 // că fiecare balanță de test primește conturile care contează plus umplutură
@@ -167,6 +193,9 @@ function balanta(eticheta, deLa, panaLa, d) {
   // d.ca − d.profit, iar soldul lui 121 să rămână exact d.profit.
   const r609 = d.red609 || 0;
   const r709 = d.red709 || 0;
+  // O mișcare prin capitaluri pe care 121 n-o știe (rezerve puse fără
+  // repartizare). Intră și în bancă, ca balanța să rămână echilibrată.
+  const rez = d.rezerve || 0;
   const umplutura = cheltuieliTotal + r609 - (FLUX.amort + FLUX.dob + FLUX.imp + FLUX.consum);
   const R = [];
   // ts = sold inițial + rulaj cumulat de la 1 ianuarie
@@ -184,7 +213,8 @@ function balanta(eticheta, deLa, panaLa, d) {
   pune("371", "Mărfuri", I.marfa, 0, 0, 0, F.marfa, 0);
   pune("4111", "Clienți", I.clienti, 0, 0, 0, F.clienti, 0);
   pune("401", "Furnizori", 0, fI, 0, 0, 0, fF);
-  pune("5121", "Conturi la bănci în lei", I.banca, 0, 0, 0, F.banca, 0);
+  pune("5121", "Conturi la bănci în lei", I.banca, 0, rez, 0, F.banca + rez, 0);
+  if (rez) pune("1061", "Rezerve legale", 0, 0, 0, rez, 0, rez);
   pune("701", "Venituri din vânzarea produselor finite", 0, 0, d.ca + r709, d.ca + r709, 0, 0);
   if (r709) pune("709", "Reduceri comerciale acordate", 0, 0, r709, r709, 0, 0);
   if (r609) pune("609", "Reduceri comerciale primite", 0, 0, r609, r609, 0, 0);
@@ -281,6 +311,29 @@ function fixtureBalante(cuAugustVechi) {
     ["pro-rata liniară", "2026 estimat", "6.450.000,00 lei"],
     ["factorul mediu de sezon"]
   );
+  // Bilanțul estimat pe pro-rata liniară, socotit de mână. Factorul = 12 ÷ 8 = 1,5.
+  //   profitul anului = 220.000 × 1,5 = 330.000 ⇒ rămas de făcut 110.000
+  //   amortizarea anului = 80.000 × 1,5 = 120.000 ⇒ rămasă 40.000
+  //   capitaluri = 420.000 + 110.000 = 530.000
+  //   imobilizări = 400.000 − 40.000 = 360.000 ⇒ total activ = 360.000 + 1.520.000 = 1.880.000
+  //   datorii curente = 1.200.000 − (110.000 + 40.000) = 1.050.000 ⇒ total datorii 1.350.000
+  //   (530.000 + 1.350.000 = 1.880.000: bilanțul se închide)
+  //   equity ratio = 530.000 / 1.880.000 = 28,2%; lichiditate = 1.520.000 / 1.050.000 = 1,45
+  //   leverage = 1.350.000 / 530.000 = 2,55; datorie netă ÷ EBITDA = 180.000 / 525.000 = 0,34
+  //   zile de stoc = 450.000 / 3.000.000 × 365 = 54,75 ⇒ 55; rotația = 365 / 54,75 = 6,67
+  cereEstimat("pe pro-rata liniară, bilanțul estimat se închide", r.corp, [
+    ["Capitaluri proprii", "530.000,00 lei"],
+    ["Active imobilizate", "360.000,00 lei"],
+    ["Total activ", "1.880.000,00 lei"],
+    ["Datorii curente", "1.050.000,00 lei"],
+    ["Total datorii", "1.350.000,00 lei"],
+    ["Equity ratio (capitaluri ÷ total activ)", "28.2%"],
+    ["Lichiditate curentă", "1.45"],
+    ["Leverage (total datorii ÷ capitaluri)", "2.55"],
+    ["Datorie netă ÷ EBITDA (anualizat)", "0.34"],
+    ["Zile de stoc", "55 zile"],
+    ["Rotația stocurilor (ori pe an)", "6.67"],
+  ]);
 
   // ---- etapa 2: balanțele de august există pe toți cei trei ani -----------
   fixtureBalante(true);
@@ -308,11 +361,83 @@ function fixtureBalante(cuAugustVechi) {
     r.corp,
     ["La final de an (cu estimat 2026)", "6.000.000,00 lei", "5.400.000,00 lei"]
   );
+  // ---- estimarea de final de an pe TOȚI indicatorii -----------------------
+  // Cererea lui Vali, 16.11.2026: „fă estimate pe toate, menține actual în
+  // principiu la active și la datorii, urcă pro-rata; activele nu mai cresc
+  // anul ăsta." Valorile sunt socotite de mână din fixtură.
+  //
+  // Factorul de sezon f = (6.000.000/3.900.000 + 5.400.000/3.500.000) / 2 = 1,5406593
+  //   profitul anului = 220.000 × f = 338.945,05 ⇒ rămas de făcut 118.945,05
+  //   amortizarea anului = 80.000 × f = 123.252,75 ⇒ rămasă 43.252,75
+  //   banii făcuți = 118.945,05 + 43.252,75 = 162.197,80 ⇒ plătiți din datoriile curente
+  //   capitaluri = 420.000 + 118.945,05 = 538.945,05
+  //   imobilizări = 400.000 − 43.252,75 = 356.747,25
+  //   total activ = 356.747,25 + 1.520.000 = 1.876.747,25 (activele nu cresc)
+  //   datorii curente = 1.200.000 − 162.197,80 = 1.037.802,20
+  //   total datorii = 300.000 + 1.037.802,20 = 1.337.802,20
+  //   (538.945,05 + 1.337.802,20 = 1.876.747,25: bilanțul se închide)
+  //   capital de lucru = 1.520.000 − 1.037.802,20 = 482.197,80
+  //   equity ratio = 538.945,05 / 1.876.747,25 = 28,7%; îndatorare = 71,3%
+  //   leverage = 1.337.802,20 / 538.945,05 = 2,48; gearing = 180.000 / 538.945,05 = 33,4%
+  //   datorie netă ÷ EBITDA = 180.000 / 539.230,77 = 0,33 (EBITDA e deja pe an întreg)
+  //   acoperirea dobânzii = 415.978,02 / 46.219,78 = 9,00 (amândouă cresc cu f)
+  //   lichiditate = 1.520.000 / 1.037.802,20 = 1,46
+  //   zile de stoc = 450.000 / (2.000.000 × f) × 365 = 53,3 ⇒ 53; rotația = 6,85
+  //   cash flow: profitul și amortizarea din lunile rămase pleacă la datorii,
+  //   deci CFO = 140.000, CFI = −100.000, CFF = −20.000, variația = 20.000,
+  //   exact cele de la august — și se leagă: 140.000 − 100.000 − 20.000 = 20.000.
+  cereEstimat("bilanțul estimat: activele nu cresc, profitul rămas intră în capitaluri și plătește datorii", r.corp, [
+    ["Cifra de afaceri (rulaj 70x)", "6.624.835,16 lei"],
+    ["Profit / (pierdere) — sold 121", "338.945,05 lei"],
+    ["EBITDA", "539.230,77 lei"],
+    ["Total activ", "1.876.747,25 lei"],
+    ["Active imobilizate", "356.747,25 lei"],
+    ["Active circulante", "1.520.000,00 lei"],
+    ["din care stocuri", "500.000,00 lei"],
+    ["Cash (51x + 53x)", "120.000,00 lei"],
+    ["Capitaluri proprii", "538.945,05 lei"],
+    ["Datorii financiare (16x + 519)", "300.000,00 lei"],
+    ["Datorii curente", "1.037.802,20 lei"],
+    ["Total datorii", "1.337.802,20 lei"],
+    ["Capital de lucru (circulante − datorii curente)", "482.197,80 lei"],
+  ]);
+  cereEstimat("indicatorii băncii pe bilanțul estimat", r.corp, [
+    ["Equity ratio (capitaluri ÷ total activ)", "28.7%"],
+    ["Grad de îndatorare (datorii ÷ activ)", "71.3%"],
+    ["Leverage (total datorii ÷ capitaluri)", "2.48"],
+    ["Gearing (datorie netă ÷ capitaluri)", "33.4%"],
+    ["Datorie netă ÷ EBITDA (anualizat)", "0.33"],
+    ["Acoperirea dobânzii (EBIT ÷ dobânzi)", "9.00"],
+    ["Lichiditate curentă", "1.46"],
+    ["Rotația stocurilor (ori pe an)", "6.85"],
+    ["Zile de stoc", "53 zile"],
+  ]);
+  cereEstimat("cash flow-ul estimat se leagă cu variația de cash", r.corp, [
+    ["Cash flow din exploatare (CFO)", "140.000,00 lei"],
+    ["Cash flow din investiții (CFI)", "-100.000,00 lei"],
+    ["Cash flow din finanțare (CFF)", "-20.000,00 lei"],
+    ["Variația de cash în perioadă", "20.000,00 lei"],
+  ]);
+  // nota stă între tabelul de final de an și evoluția pe luni
+  const intreAn = r.corp.slice(r.corp.indexOf("La final de an ("), r.corp.indexOf("Evoluția pe luni"));
   cere(
-    "pozițiile de bilanț nu se extrapolează",
-    r.corp,
-    ["Restul pozițiilor de bilanț sunt fotografii la o dată"]
+    "nota spune cum s-a estimat fiecare parte, cu sumele",
+    intreAn,
+    [
+      "Fluxurile anului",
+      "Bilanțul</strong> rămâne cel de la 31.08.2026",
+      "activele nu mai cresc anul ăsta",
+      "profitul rămas de făcut până la 31 decembrie (118.945,05 lei) intră în capitaluri",
+      "amortizarea rămasă (43.252,75 lei) scade imobilizările",
+      "banii făcuți așa (162.197,80 lei) se socotesc folosiți la plata datoriilor curente",
+      "cu aceleași formule ca pe balanțele reale",
+    ],
+    ["Restul pozițiilor de bilanț sunt fotografii la o dată", "rămâne în cash"]
   );
+  // Anii încheiați de lângă rămân cifre reale, neatinse de estimare.
+  const t = sectiune(r.corp, "La final de an");
+  if (/<th[^>]*>2025<\/th>/.test(t) && t.includes("1.920.000,00 lei")) ok("coloanele 2025 și 2024 rămân bilanțurile reale");
+  else rau("coloanele 2025 și 2024 rămân bilanțurile reale");
   cere(
     "evoluția lunară e tabel separat, cu diferența pe lună",
     r.corp,
@@ -382,7 +507,7 @@ function fixtureBalante(cuAugustVechi) {
     r.corp,
     ["Rezultate", "Bilanț", "Structura și riscul — ce se uită banca", "Cash flow (metoda indirectă)"]
   );
-  cere("EBITDA se estimează, indicatorii de structură nu", r.corp, ["539.230,77 lei"]);
+  cere("EBITDA se estimează pe an întreg", r.corp, ["539.230,77 lei"]);
 
   // ---- raportul de tipărit pentru bancă -----------------------------------
   cere("butonul de raport e pe pagină", r.corp, ["Generează raport pentru bancă", "/rapoarte/indicatori/raport-banca"]);
@@ -434,6 +559,23 @@ function fixtureBalante(cuAugustVechi) {
   rulaj(balanta("2026 la 14.09", "2026-01-01", "2026-09-14", cu({ ca: 4600000, profit: 230000 })));
   r = await cer("/rapoarte/indicatori");
   cere("o balanță mai nouă cu cifra mai mare rămâne", r.corp, ["4.600.000,00 lei"], ["e sărită"]);
+
+  // ---- etapa 2d: rezultatul din 121 față de mișcarea capitalurilor ---------
+  // 50.000 de lei intră în rezerve fără să treacă prin 121. Capitalurile cresc
+  // cu 270.000, iar 121 spune 220.000: diferența se spune pe față, nu se
+  // netezește. (Paza asta a stat până acum doar pe varianta „se potrivește";
+  // cu analiza mutată în lib/indicatori-bilant.js, câmpul trebuie să ajungă
+  // în continuare până în pagină.)
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 31.08'");
+  rulaj(balanta("2026 la 31.08", "2026-01-01", "2026-08-31", cu({ ca: 4300000, profit: 220000, rezerve: 50000 })));
+  r = await cer("/rapoarte/indicatori");
+  cere(
+    "rezultatul din 121 care nu se potrivește cu capitalurile se spune pe față",
+    r.corp,
+    ["nu se potrivește cu cel care iese din mișcarea capitalurilor proprii", "diferență de 50.000,00 lei"]
+  );
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 31.08'");
+  rulaj(balanta("2026 la 31.08", "2026-01-01", "2026-08-31", cu({ ca: 4300000, profit: 220000 })));
 
   // ---- partea scrisă a dosarului ------------------------------------------
   // Fixtura are profit pozitiv și structură slabă, deci comentariul trebuie să
