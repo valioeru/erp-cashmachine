@@ -97,6 +97,24 @@ console.log("\n── Indicatori de bilanț și estimarea de final de an ──�
   else rau("cash flow-ul se leagă la fel ca la reper", `${e.nepotrivireCash} față de ${ref.nepotrivireCash}`);
 }
 
+// ---- 3b. câștigul din vânzarea de active ------------------------------------
+// Vali, 16.11.2026: „da, scoate de peste tot”. Profitul 300 are în el un câștig
+// de 200 din vânzarea unui activ: e în profit, dar nu în EBITDA, nu în EBIT și
+// nu în cash flow-ul din exploatare (banii din vânzare sunt la investiții).
+//   EBITDA = 300 + 0 + 10 + 20 − 200 = 130; EBIT = 110
+//   CFO = 300 − 200 + 20 − 50 (creanțe) − 0 (stocuri) − 50 (furnizori) = 20
+//   CFI = −(0 + 20) + 200 = 180; CFF = (750 − 300 − 600) = −150; variația 50 = 20 + 180 − 150
+// La final de an, cu factorul 2: profitul = (300 − 200) × 2 + 200 = 400 (câștigul
+// o singură dată); EBITDA = 130 × 2 = 260; câștigul rămâne 200.
+{
+  const flC = { ca: 1000, profit: 300, amortizare: 20, dobanzi: 10, impozit: 0, consumStocuri: 400, castigActive: 200 };
+  const x = IB.indicatoriDin(F, I, flC, 181);
+  egal("câștigul din vânzarea de active nu e EBITDA, nici EBIT, nici exploatare", x, { ebitda: 130, ebit: 110, cfo: 20, cfi: 180, cff: -150, variatieCash: 50, nepotrivireCash: 0, castigActive: 200, profit: 300 });
+  const e = IB.estimeazaAnul(Object.assign(x, { an: 2026, luna: "06", pana: "2026-06-30" }), [], []);
+  egal("la final de an câștigul intră o singură dată", e, { profit: 400, profitRamas: 100, ebitda: 260, castigActive: 200, factor: 2 });
+  seInchide("…și bilanțul se închide", e);
+}
+
 // ---- 4. zilele anului întreg ------------------------------------------------
 if (IB.zileInAn(2026) === 365 && IB.zileInAn(2028) === 366 && IB.zileInAn(2100) === 365 && IB.zileInAn(2000) === 366) ok("anul bisect are 366 de zile");
 else rau("anul bisect are 366 de zile", [2026, 2028, 2100, 2000].map(IB.zileInAn).join(", "));

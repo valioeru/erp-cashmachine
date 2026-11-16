@@ -21,7 +21,14 @@
 //      ratio, leverage, gearing, datorie netă ÷ EBITDA, rotația stocurilor —
 //      toți cu valori calculate cu mâna din fixtură, nu copiate din ieșire;
 //   8. raportul de tipărit pentru bancă: antet, stil de tipar, aceleași cifre
-//      și fără nimic din interfața ERP-ului.
+//      și fără nimic din interfața ERP-ului;
+//   9. estimarea de final de an are toți indicatorii (16.11.2026), cu valori
+//      socotite de mână, rând cu rând;
+//  10. vânzările de active (16.11.2026: „scoate din top clienți BCR și Negru”,
+//      apoi „scoate de peste tot”) ies din top, din concentrare, din cifra pe
+//      12 luni, din creanțe și din DSO; câștigul din ele (7583 − 6583) iese din
+//      EBITDA și din cash flow-ul din exploatare și intră o singură dată în
+//      estimarea de final de an.
 const path = require("path");
 const Module = require("module");
 const { execFileSync } = require("child_process");
@@ -149,6 +156,25 @@ function cereEstimat(eticheta, corp, perechi) {
   ok(eticheta + " (" + perechi.length + " rânduri)");
 }
 
+// La fel, pe prima coloană a tabelului „La aceeași lună” (luna de referință).
+function cereLuna(eticheta, corp, perechi) {
+  const t = sectiune(corp, "La aceeași lună, pe trei ani");
+  const celula = (rand) => {
+    for (const tr of t.split("<tr>")) {
+      const td = [...tr.matchAll(/<td>([\s\S]*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+      if (td.length > 1 && td[0] === rand) return td[1];
+    }
+    return null;
+  };
+  const gresite = [];
+  for (const [rand, val] of perechi) {
+    const c = celula(rand);
+    if (c === null || !c.startsWith(val)) gresite.push(`${rand}: „${c}” în loc de „${val}”`);
+  }
+  if (gresite.length) return rau(eticheta, gresite.join("; "));
+  ok(eticheta + " (" + perechi.length + " rânduri)");
+}
+
 // ---- balanțele de test ------------------------------------------------------
 // O balanță adevărată are peste o sută de conturi; pragul din raport e 20, așa
 // că fiecare balanță de test primește conturile care contează plus umplutură
@@ -196,7 +222,13 @@ function balanta(eticheta, deLa, panaLa, d) {
   // O mișcare prin capitaluri pe care 121 n-o știe (rezerve puse fără
   // repartizare). Intră și în bancă, ca balanța să rămână echilibrată.
   const rez = d.rezerve || 0;
-  const umplutura = cheltuieliTotal + r609 - (FLUX.amort + FLUX.dob + FLUX.imp + FLUX.consum);
+  // Vânzarea de active: prețul (7583) și valoarea contabilă a activului
+  // (6583). Profitul din 121 rămâne d.profit: din el, câștigul (preț − valoare)
+  // e partea făcută o dată, iar restul e activitatea — cheltuielile de
+  // exploatare cresc cu exact cât e câștigul.
+  const va = (d.activeVandute && d.activeVandute.venit) || 0;
+  const vc = (d.activeVandute && d.activeVandute.cost) || 0;
+  const umplutura = cheltuieliTotal + r609 - (FLUX.amort + FLUX.dob + FLUX.imp + FLUX.consum) + (va - vc);
   const R = [];
   // ts = sold inițial + rulaj cumulat de la 1 ianuarie
   const pune = (cont, den, siD, siC, rD, rC, sfD, sfC) =>
@@ -207,7 +239,9 @@ function balanta(eticheta, deLa, panaLa, d) {
     );
   pune("1012", "Capital social", 0, I.capital, 0, 0, 0, F.capital);
   // 121: veniturile se închid pe credit, cheltuielile pe debit
-  pune("121", "Profit sau pierdere", 0, I.profit, cheltuieliTotal + r609 + r709, d.ca + r709 + r609, 0, F.profit);
+  pune("121", "Profit sau pierdere", 0, I.profit, cheltuieliTotal + r609 + r709 + va, d.ca + r709 + r609 + va, 0, F.profit);
+  if (va) pune("7583", "Venituri din vânzarea activelor", 0, 0, va, va, 0, 0);
+  if (vc) pune("6583", "Cheltuieli privind activele cedate", 0, 0, vc, vc, 0, 0);
   pune("1621", "Credite bancare pe termen lung", 0, I.credit, 0, 0, 0, F.credit);
   pune("2131", "Echipamente", I.imob, 0, 0, 0, F.imob, 0);
   pune("371", "Mărfuri", I.marfa, 0, 0, 0, F.marfa, 0);
@@ -389,7 +423,7 @@ function fixtureBalante(cuAugustVechi) {
   cereEstimat("bilanțul estimat: activele nu cresc, profitul rămas intră în capitaluri și plătește datorii", r.corp, [
     ["Cifra de afaceri (rulaj 70x)", "6.624.835,16 lei"],
     ["Profit / (pierdere) — sold 121", "338.945,05 lei"],
-    ["EBITDA", "539.230,77 lei"],
+    ["EBITDA (fără vânzările de active)", "539.230,77 lei"],
     ["Total activ", "1.876.747,25 lei"],
     ["Active imobilizate", "356.747,25 lei"],
     ["Active circulante", "1.520.000,00 lei"],
@@ -596,6 +630,18 @@ function fixtureBalante(cuAugustVechi) {
   cere("fără listă: vânzarea de active e primul „client”", topCl(r.corp), ["BCR LEASING TEST IFN SA", "700.000,00 lei", "51.9%", "% din total"], ["% din vânzările comerciale"]);
   cere("numele cu „&amp;” din import apare curat, scăpat o singură dată", topCl(r.corp), ["NEGRU &amp; NEGRU TEST S.R.L."], ["&amp;amp;"]);
   cere("concentrarea pe primul client îl numără", r.corp, ["52% (BCR LEASING TEST IFN SA)"]);
+  // Rândul unui indicator din „Indicatorii dosarului de credit”: valoarea și explicația.
+  const indicator = (corp, nume) => {
+    const t = sectiune(corp, "Indicatorii dosarului de credit");
+    for (const tr of t.split("<tr>")) {
+      const td = [...tr.matchAll(/<td>([\s\S]*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+      if (td.length > 4 && td[0].startsWith(nume)) return { valoare: td[1], explicatie: td[4] };
+    }
+    return { valoare: null, explicatie: null };
+  };
+  // Înainte: pe 12 luni 600.000 + 111.111 + 700.000 + 50.000 = 1.461.111.
+  if (indicator(r.corp, "Cifra de afaceri (12 luni").valoare === "1.461.111,00 lei") ok("fără listă, cifra pe 12 luni are și vânzările de active");
+  else rau("fără listă, cifra pe 12 luni are și vânzările de active", indicator(r.corp, "Cifra de afaceri (12 luni").valoare);
   cere("administratorul are lista, cu clienții anului de ales", r.corp, ["Vânzări de active (spot), scoase din topul clienților", 'action="/rapoarte/indicatori/active"', '<option value="91004">BCR LEASING TEST IFN SA · 700.000,00 lei</option>']);
   await cer("/rapoarte/indicatori/active", { metoda: "post", user: { id: 9, nume: "Agent", rol: "vanzari" }, body: { actiune: "scoate", partener_id: "91004" } });
   await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "sterge", partener_id: "91004" } });
@@ -620,6 +666,24 @@ function fixtureBalante(cuAugustVechi) {
     ["Scoase din topul clienților, ca vânzări de active (spot), nu clienți comerciali: BCR LEASING TEST IFN SA (700.000,00 lei), NEGRU &amp; NEGRU TEST S.R.L. (50.000,00 lei).", "600.000,00 lei = total vânzări 1.350.000,00 lei minus 750.000,00 lei vânzări de active"]
   );
   cere("concentrarea pe primul client e pe cel comercial", r.corp, ["100% (CLIENT INDICATORI SRL)"], ["52% (BCR LEASING TEST IFN SA)"]);
+  // „Scoate de peste tot”: tot ce vine din facturile de vânzare, fără ele.
+  //   cifra pe 12 luni: 600.000 + 111.111 = 711.111 (fără 750.000 de active)
+  //   creșterea: 711.111 față de 500.000 (12–24 luni în urmă) = +42,2%
+  //   creanțe: doar factura de 600.000 + TVA = 714.000, nescadentă ⇒ 0 restanțe
+  //     (fără ele: 833.000 + 59.500 depășite)
+  //   DSO = 714.000 / (711.111 × 1,19) × 365 = 308 de zile
+  //   linia de credit: 8–12% din 711.111 = 56.888,88 – 85.333,32
+  const egalInd = (eticheta, nume, valoare, explicatie) => {
+    const x = indicator(r.corp, nume);
+    if (x.valoare === valoare && (!explicatie || String(x.explicatie || "").includes(explicatie))) ok(eticheta);
+    else rau(eticheta, JSON.stringify(x));
+  };
+  egalInd("cifra pe 12 luni, fără vânzările de active, și spune cât s-a scos", "Cifra de afaceri (12 luni", "711.111,00 lei", "Fără vânzările de active (750.000,00 lei în ultimele 12 luni)");
+  egalInd("creșterea an/an, fără ele", "Creștere an/an", "42.2%");
+  egalInd("DSO, din creanțele și cifra fără ele", "DSO", "308 zile");
+  egalInd("restanțele, fără facturile vânzărilor de active", "Creanțe cu scadența depășită", "0,00 lei (0% din sold)");
+  cere("linia de credit estimată, din cifra fără ele", r.corp, ["56.888,88 lei – 85.333,32 lei"]);
+  cere("nota de sub topuri spune că lipsesc de peste tot", r.corp, ["Vânzările de active lipsesc și din cifra de afaceri pe 12 luni, din creanțe și din DSO.", "Total vânzări 600.000,00 lei (fără vânzările de active)"]);
   cere("în listă: amândoi, cu „Pune înapoi în top”; o singură dată fiecare", r.corp, ['name="partener_id" value="91004"', 'name="partener_id" value="91005"', "Pune înapoi în top"], ['<option value="91004">']);
   const lista = JSON.parse(((q("SELECT valoare FROM setari_app WHERE cheie = 'banca_vanzari_active'")[0]) || {}).valoare || "[]");
   if (JSON.stringify(lista) === "[91004,91005]") ok("lista ținută: [91004, 91005], fără dubluri");
@@ -640,6 +704,47 @@ function fixtureBalante(cuAugustVechi) {
   rulaj("DELETE FROM facturi_linii WHERE factura_id IN (91104, 91105)");
   rulaj("DELETE FROM facturi WHERE id IN (91104, 91105)");
   rulaj("DELETE FROM parteneri WHERE id IN (91004, 91005)");
+
+  // ---- etapa 2f: câștigul din vânzarea de active nu e EBITDA ---------------
+  // Vali, 16.11.2026, după topul clienților: „da, scoate de peste tot”. În
+  // august 2026, active cu valoarea contabilă 100.000 s-au vândut cu 300.000:
+  // câștig 200.000, în profitul de 220.000. Din activitate rămân 20.000.
+  //   EBITDA = 220.000 + 20.000 + 30.000 + 80.000 − 200.000 = 150.000; marja 3,5%
+  //   acoperirea dobânzii = (270.000 − 200.000) / 30.000 = 2,33
+  //   EBITDA anualizat = 150.000 × 365/243 = 225.308,64 ⇒ datorie netă ÷ EBITDA = 0,80
+  //   CFO = 140.000 − 200.000 = −60.000; CFI = −100.000 + 200.000 = 100.000; se leagă
+  //   la final de an (f = 1,5406593): profit = 20.000 × f + 200.000 = 230.813,19;
+  //   EBITDA = 150.000 × f = 231.098,90; capitaluri = 420.000 + 10.813,19
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 31.08'");
+  rulaj(balanta("2026 la 31.08", "2026-01-01", "2026-08-31", cu({ ca: 4300000, profit: 220000, activeVandute: { venit: 300000, cost: 100000 } })));
+  r = await cer("/rapoarte/indicatori");
+  cereLuna("la aceeași lună: EBITDA fără câștig, câștigul pe rândul lui, profitul neatins", r.corp, [
+    ["EBITDA (fără vânzările de active)", "150.000,00 lei"],
+    ["Marja EBITDA", "3.5%"],
+    ["Profit / (pierdere) — sold 121", "220.000,00 lei"],
+    ["din care câștig din vânzarea de active (7583 − 6583)", "200.000,00 lei"],
+    ["Acoperirea dobânzii (EBIT ÷ dobânzi)", "2.33"],
+    ["Datorie netă ÷ EBITDA (anualizat)", "0.80"],
+    ["Cash flow din exploatare (CFO)", "-60.000,00 lei"],
+    ["Cash flow din investiții (CFI)", "100.000,00 lei"],
+  ]);
+  cere("cash flow-ul se leagă și cu câștigul mutat la investiții", r.corp, ["Verificarea cash flow-ului", "Se leagă."]);
+  cereEstimat("la final de an: câștigul o singură dată, activitatea înmulțită", r.corp, [
+    ["Profit / (pierdere) — sold 121", "230.813,19 lei"],
+    ["din care câștig din vânzarea de active (7583 − 6583)", "200.000,00 lei"],
+    ["EBITDA (fără vânzările de active)", "231.098,90 lei"],
+    ["Capitaluri proprii", "430.813,19 lei"],
+  ]);
+  cere("nota estimării spune că, câștigul intră o dată", r.corp, ["Câștigul din vânzarea de active (200.000,00 lei) s-a făcut o dată", "Profitul din activitate păstrează deci marja realizată până acum (0.5%)"]);
+  cere("comentariul rezultatului spune cât e din activitate", r.corp, ["Din el, 200.000,00 lei e câștigul din vânzarea de active", "din activitate rămân 20.000,00 lei"]);
+  cere("indicatorul EBITDA din dosar spune ce s-a scăzut", r.corp, ["− câștigul din vânzarea de active (200.000,00 lei, care nu e activitate)"]);
+  const randCastig = (sectiune(r.corp, "La aceeași lună, pe trei ani").split("<tr>").find((t) => t.includes("din care câștig din vânzarea de active")) || "")
+    .match(/<td>([\s\S]*?)<\/td>/g) || [];
+  const celuleCastig = randCastig.map((x) => x.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(1, 4);
+  if (JSON.stringify(celuleCastig) === JSON.stringify(["200.000,00 lei", "0,00 lei", "0,00 lei"])) ok("anii fără vânzări de active au câștigul 0, pe rândul lui");
+  else rau("anii fără vânzări de active au câștigul 0, pe rândul lui", JSON.stringify(celuleCastig));
+  rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 31.08'");
+  rulaj(balanta("2026 la 31.08", "2026-01-01", "2026-08-31", cu({ ca: 4300000, profit: 220000 })));
 
   // ---- partea scrisă a dosarului ------------------------------------------
   // Fixtura are profit pozitiv și structură slabă, deci comentariul trebuie să
