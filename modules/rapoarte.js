@@ -544,6 +544,7 @@ function analizeazaBalanta(conturi, zile) {
   const areTotaluri = conturi.some((c) => Number(c.ts_d) !== 0 || Number(c.ts_c) !== 0);
 
   let ca = 0, amortizare = 0, dobanzi = 0, impozit = 0, consumStocuri = 0, cheltuieli = 0, dividende = 0;
+  let venitActive = 0, costActive = 0;
   let venituriInchise = 0, profitSold = 0, are121 = false;
   for (const c of conturi) {
     const cont = String(c.cont || "");
@@ -577,6 +578,11 @@ function analizeazaBalanta(conturi, zile) {
     if (cont.startsWith("691") || cont.startsWith("698")) impozit += r.d;
     // ce trece efectiv prin stoc: materii prime, materiale, mărfuri
     if (cont.startsWith("601") || cont.startsWith("602") || cont.startsWith("607")) consumStocuri += r.d;
+    // Vânzarea de active: prețul (7583) și valoarea contabilă a activului cedat
+    // (6583). Diferența e un câștig o singură dată, nu activitate — vezi
+    // castigActive în lib/indicatori-bilant.js.
+    if (cont.startsWith("7583")) venitActive += r.c;
+    if (cont.startsWith("6583")) costActive += r.d;
   }
   // PROFITUL NU SE MAI SOCOTEȘTE DIN RULAJE BRUTE.
   //
@@ -602,9 +608,10 @@ function analizeazaBalanta(conturi, zile) {
   // Indicatorii (EBITDA, structura, rotația stocurilor, cash flow-ul) se
   // socotesc în lib/indicatori-bilant.js, cu aceleași formule pe care le
   // folosește și estimarea de final de an.
-  return Object.assign(IB.indicatoriDin(F, I, { ca, profit, amortizare, dobanzi, impozit, consumStocuri }, zile), {
-    profitSold, nepotrivireProfit, cheltuieli, dividende,
-  });
+  return Object.assign(
+    IB.indicatoriDin(F, I, { ca, profit, amortizare, dobanzi, impozit, consumStocuri, castigActive: venitActive - costActive }, zile),
+    { profitSold, nepotrivireProfit, cheltuieli, dividende, venitActive, costActive }
+  );
 }
 
 async function balanteAnalizate() {
@@ -667,9 +674,12 @@ async function balanteAnalizate() {
 const RANDURI_BILANT = [
   { grup: "Rezultate" },
   { cheie: "ca", nume: "Cifra de afaceri (rulaj 70x)", fmt: "bani", sens: 1, tinta: "în creștere" },
-  { cheie: "ebitda", nume: "EBITDA", fmt: "semn", sens: 1, tinta: "pozitiv, în creștere" },
+  { cheie: "ebitda", nume: "EBITDA (fără vânzările de active)", fmt: "semn", sens: 1, tinta: "pozitiv, în creștere" },
   { cheie: "marjaEbitda", nume: "Marja EBITDA", fmt: "proc", sens: 1, tinta: "> 8%", sus: [8, 4] },
   { cheie: "profit", nume: "Profit / (pierdere) — sold 121", fmt: "semn", sens: 1, tinta: "pozitiv" },
+  // Câștigul din vânzarea de active e în profit (așa e în contabilitate), dar nu
+  // e activitate: se arată separat, ca banca să vadă cât din profit e o dată.
+  { cheie: "castigActive", nume: "din care câștig din vânzarea de active (7583 − 6583)", fmt: "bani", sens: 0, tinta: "—" },
   { cheie: "marja", nume: "Marja netă", fmt: "proc", sens: 1, tinta: "> 3%", sus: [3, 0] },
 
   { grup: "Bilanț" },
@@ -765,7 +775,11 @@ function notaEstimare(e, ref) {
   const factor = e.liniar
     ? `12 ÷ ${Number(ref.luna)} luni — pro-rata liniară, fiindcă n-am aceeași lună în niciun an încheiat cu care să măsor sezonul`
     : `factorul mediu de sezon ${e.factor.toFixed(2)}, măsurat pe ${esc(e.aniFactor.join(" și "))} (cât din anul întreg se făcuse până la aceeași lună)`;
-  const marja = (ref.ca > 0 ? (ref.profit / ref.ca) * 100 : 0).toFixed(1);
+  const castig = Number(ref.castigActive) || 0;
+  const marja = (ref.ca > 0 ? ((ref.profit - castig) / ref.ca) * 100 : 0).toFixed(1);
+  const faraCastig = Math.abs(castig) > 0.005
+    ? ` Câștigul din vânzarea de active (${money(castig)}) s-a făcut o dată: intră o singură dată în profitul anului și deloc în EBITDA.`
+    : "";
   const miscari = [
     e.profitRamas >= 0
       ? `profitul rămas de făcut până la 31 decembrie (${money(e.profitRamas)}) intră în capitaluri`
@@ -783,7 +797,7 @@ function notaEstimare(e, ref) {
   const ultima = miscari.pop();
   return `<p style="font-size:12px;color:var(--text-muted)">Estimarea ${e.an}. <strong>Fluxurile anului</strong> — cifra de afaceri, EBITDA, profitul, dobânzile, amortizarea, consumul de stocuri — sunt cele realizate până la ${esc(
     etichetaLuna(ref.pana)
-  )} (cifra de afaceri ${money(ref.ca)}) × ${factor}. Profitul păstrează deci marja realizată până acum (${marja}%). <strong>Bilanțul</strong> rămâne cel de la ${esc(
+  )} (cifra de afaceri ${money(ref.ca)}) × ${factor}. Profitul din activitate păstrează deci marja realizată până acum (${marja}%).${faraCastig} <strong>Bilanțul</strong> rămâne cel de la ${esc(
     dataRo(ref.pana)
   )}: activele nu mai cresc anul ăsta, iar creditele, stocurile, creanțele și cash-ul rămân cum sunt. Se mișcă doar ce trebuie ca bilanțul să se închidă: ${miscari.join(", ")}, iar ${ultima}. Indicatorii de structură și cash flow-ul ies din bilanțul ăsta, cu aceleași formule ca pe balanțele reale.</p>`;
 }
@@ -962,7 +976,11 @@ function comentariulIndicatorilor(ref, prec, perioada, top1, numeTop1) {
     bun: ref.profit > 0,
     ceArata: `Rezultatul la ${perioada} e ${bani(ref.profit)}${prec ? evolutie(ref.profit, prec.profit, bani) : ""}, la o cifră de afaceri de ${bani(
       ref.ca
-    )} și cheltuieli de ${bani(ref.cheltuieli)}.`,
+    )} și cheltuieli de ${bani(ref.cheltuieli)}.${
+      Math.abs(Number(ref.castigActive) || 0) > 0.005
+        ? ` Din el, ${bani(ref.castigActive)} e câștigul din vânzarea de active, care s-a făcut o dată și nu se repetă; din activitate rămân ${bani(ref.profit - ref.castigActive)}.`
+        : ""
+    }`,
     deCe:
       ref.profit < 0
         ? `Diferența dintre EBITDA (${bani(ref.ebitda)}) și rezultat vine din amortizare ${bani(ref.amortizare)}, dobânzi ${bani(
@@ -2500,20 +2518,30 @@ function register(router) {
     const anCurent = Number(aziStr.slice(0, 4));
     const deLaAnul = `${anCurent}-01-01`;
 
-    const agg = async (directie, deLa, panaLa) =>
+    // Vânzările de active (parteneriVanzariActive) ies din tot ce se socotește
+    // aici din facturile de vânzare: cifra pe 12 luni și creșterea, totalul
+    // anului, creanțele și restanțele (deci DSO și plafoanele), topul și
+    // concentrarea. Vali, 16.11.2026: „da, scoate de peste tot”. Achizițiile
+    // rămân cum sunt.
+    const excluse = await parteneriVanzariActive();
+    const faraActive = excluse.length ? `AND f.partener_id NOT IN (${excluse.join(",")})` : "";
+    const agg = async (directie, deLa, panaLa, filtru) =>
       await db
         .prepare(
           `SELECT COALESCE(SUM(n.net),0) AS net, COUNT(*) AS nr
            FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN (SELECT factura_id, SUM(cantitate*pret_unitar) AS net FROM facturi_linii GROUP BY factura_id) n ON n.factura_id = f.id
-           WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?`
+           WHERE f.directie = ? AND f.status NOT IN ('anulata','ciorna') AND f.intercompany = 0 AND f.data_emiterii >= ? AND f.data_emiterii <= ?
+             ${filtru || ""}`
         )
         .get(directie, deLa, panaLa);
 
-    const v12 = await agg("vanzare", acum12, aziStr);
-    const v24 = await agg("vanzare", acum24, acum12);
+    const v12 = await agg("vanzare", acum12, aziStr, faraActive);
+    const v24 = await agg("vanzare", acum24, acum12, faraActive);
     const a12 = await agg("achizitie", acum12, aziStr);
-    const vAn = await agg("vanzare", deLaAnul, aziStr);
+    const vAn = await agg("vanzare", deLaAnul, aziStr, faraActive);
     const aAn = await agg("achizitie", deLaAnul, aziStr);
+    // Cât s-a scos, pe 12 luni, ca să se poată spune lângă cifra de afaceri.
+    const active12 = excluse.length ? Number((await agg("vanzare", acum12, aziStr, `AND f.partener_id IN (${excluse.join(",")})`)).net) : 0;
 
     const solduri = await db
       .prepare(
@@ -2524,6 +2552,7 @@ function register(router) {
          LEFT JOIN ${SUB_TOTAL} l ON l.factura_id = f.id
          LEFT JOIN ${SUB_PLATIT} pl ON pl.factura_id = f.id
          WHERE f.status NOT IN ('anulata','necunoscut','platita') AND f.intercompany = 0 AND COALESCE(l.total,0) - COALESCE(pl.platit,0) > 0.5
+           ${excluse.length ? `AND NOT (f.directie = 'vanzare' AND f.partener_id IN (${excluse.join(",")}))` : ""}
          GROUP BY f.directie`
       )
       .all(aziStr);
@@ -2539,10 +2568,9 @@ function register(router) {
     const datoriiFurnizori = Number(sA.sold);
 
     // Concentrarea clienților — primul lucru la care se uită analistul de credit.
-    // Vânzările de active (parteneriVanzariActive) nu intră: nici în top, nici
-    // în baza procentelor. Cei cincisprezece de sus sunt și lista din care
-    // administratorul alege ce scoate.
-    const excluse = await parteneriVanzariActive();
+    // Vânzările de active nu intră: nici în top, nici în baza procentelor
+    // (vanzariNetAn e deja fără ele). Cei cincisprezece de sus sunt și lista din
+    // care administratorul alege ce scoate.
     const vanzariClienti = (conditie) =>
       db
         .prepare(
@@ -2554,13 +2582,14 @@ function register(router) {
            GROUP BY p.id, p.nume ORDER BY net DESC LIMIT 15`
         )
         .all(deLaAnul);
-    const topClienti15 = await vanzariClienti(excluse.length ? `AND f.partener_id NOT IN (${excluse.join(",")})` : "");
+    const topClienti15 = await vanzariClienti(faraActive);
     const vanzariActive = excluse.length ? await vanzariClienti(`AND f.partener_id IN (${excluse.join(",")})`) : [];
     for (const c of topClienti15.concat(vanzariActive)) c.nume = numeCurat(c.nume);
     const topClienti = topClienti15.slice(0, 5);
     const totalActive = vanzariActive.reduce((s, c) => s + Number(c.net), 0);
-    // Baza procentelor: vânzările comerciale (fără vânzările de active).
-    const vanzariComerciale = vanzariNetAn - totalActive;
+    // Baza procentelor: vânzările comerciale, adică totalul anului fără
+    // vânzările de active.
+    const vanzariComerciale = vanzariNetAn;
     const top1 = topClienti.length && vanzariComerciale > 0 ? (Number(topClienti[0].net) / vanzariComerciale) * 100 : 0;
     const top5 = vanzariComerciale > 0 ? (topClienti.reduce((s, c) => s + Number(c.net), 0) / vanzariComerciale) * 100 : 0;
 
@@ -2641,7 +2670,9 @@ function register(router) {
         valoare: money(vanzariNet12),
         tinta: "—",
         stare: "",
-        explicatie: "Baza oricărei analize de credit.",
+        explicatie: `Baza oricărei analize de credit.${
+          active12 > 0 ? ` Fără vânzările de active (${money(active12)} în ultimele 12 luni): nu sunt clienți care cumpără din nou.` : ""
+        }`,
       },
       {
         nume: "Creștere an/an",
@@ -2715,7 +2746,9 @@ function register(router) {
           valoare: money(B.ebitda),
           tinta: "pozitiv, în creștere",
           stare: nota(B.ebitda > 0, B.ebitda > 0),
-          explicatie: "Profit net + impozit + dobânzi + amortizare. Banca dimensionează creditul din EBITDA, nu din profitul net — amortizarea nu e un ban care pleacă din cont.",
+          explicatie: `Profit net + impozit + dobânzi + amortizare − câștigul din vânzarea de active${
+            Math.abs(Number(B.castigActive) || 0) > 0.005 ? ` (${money(B.castigActive)}, care nu e activitate)` : ""
+          }. Banca dimensionează creditul din EBITDA, nu din profitul net — amortizarea nu e un ban care pleacă din cont.`,
         },
         {
           nume: "Marja EBITDA",
@@ -2729,7 +2762,7 @@ function register(router) {
           valoare: money(B.cfo),
           tinta: "pozitiv, apropiat de EBITDA",
           stare: nota(B.cfo > 0, B.cfo > 0),
-          explicatie: `Banii pe care i-a produs efectiv activitatea: profit + amortizare − creșterea creanțelor − creșterea stocurilor + creșterea datoriilor la furnizori. Dacă e mult sub EBITDA, profitul stă în creanțe și stocuri, nu în cont. Aici EBITDA e ${money(B.ebitda)}.`,
+          explicatie: `Banii pe care i-a produs efectiv activitatea: profit (fără câștigul din vânzarea de active, care e la investiții) + amortizare − creșterea creanțelor − creșterea stocurilor + creșterea datoriilor la furnizori. Dacă e mult sub EBITDA, profitul stă în creanțe și stocuri, nu în cont. Aici EBITDA e ${money(B.ebitda)}.`,
         },
         {
           nume: "Equity ratio (capitaluri ÷ total activ)",
@@ -2934,7 +2967,7 @@ function register(router) {
 
     const sectiuneBilant = balante.length
       ? `${sectiuneLuna}${sectiuneAn}${sectiuneLunar}${notaProfit}${notaCashFlow}${notaBalanteSarite}
-      <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · equity ratio ≥ 30% · grad de îndatorare ≤ 60–70% · leverage ≤ 2,0 · datorie netă ÷ EBITDA ≤ 3,0 · capitaluri proprii pozitive și în creștere. EBITDA = profit net + impozit + dobânzi + amortizare. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>. Balanțele cu mai puțin de ${PRAG_CONTURI_BALANTA} de conturi sunt sărite — nu sunt balanțe întregi și ar strica comparația.</p>`
+      <p style="font-size:12px;color:var(--text-muted)">Ținte uzuale de bancă: lichiditate curentă ≥ 1,2 · equity ratio ≥ 30% · grad de îndatorare ≤ 60–70% · leverage ≤ 2,0 · datorie netă ÷ EBITDA ≤ 3,0 · capitaluri proprii pozitive și în creștere. EBITDA = profit net + impozit + dobânzi + amortizare − câștigul din vânzarea de active (7583 − 6583): o vânzare de active se face o dată, nu e activitate, iar banii din ea sunt la investiții, nu la exploatare. Calculat direct din balanțele SmartBill Conta încărcate la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>. Balanțele cu mai puțin de ${PRAG_CONTURI_BALANTA} de conturi sunt sărite — nu sunt balanțe întregi și ar strica comparația.</p>`
       : `<div class="flash" style="background:#fbf0da;border-color:#e6d0a0;color:var(--warn)">Pentru indicatorii de bilanț REALI (capitaluri proprii, EBITDA, CFO, lichiditate, leverage, gearing — exact ce cere banca), încarcă balanțele din SmartBill Conta la <a href="/rapoarte/balanta/istoric">Balanțe istorice</a>.</div>`;
 
     const carduri = `
@@ -2963,9 +2996,9 @@ function register(router) {
         vanzariActive.length
           ? `<p style="font-size:12px;color:var(--text-muted)">Scoase din topul clienților, ca vânzări de active (spot), nu clienți comerciali: ${vanzariActive
               .map((c) => `${esc(c.nume)} (${money(c.net)})`)
-              .join(", ")}. Procentele clienților sunt din vânzările comerciale: ${money(vanzariComerciale)} = total vânzări ${money(vanzariNetAn)} minus ${money(
+              .join(", ")}. Procentele clienților sunt din vânzările comerciale: ${money(vanzariComerciale)} = total vânzări ${money(vanzariNetAn + totalActive)} minus ${money(
               totalActive
-            )} vânzări de active.</p>`
+            )} vânzări de active. Vânzările de active lipsesc și din cifra de afaceri pe 12 luni, din creanțe și din DSO.</p>`
           : ""
       }
 
@@ -2983,8 +3016,8 @@ function register(router) {
       )}
       <p style="font-size:12px;color:var(--text-muted)">Amândouă topurile sunt pe anul în curs, 1 ianuarie ${anCurent} → ${dataRo(aziStr)}, fără TVA și fără intercompany. ${
         achizitiiNetAn > 0
-          ? `Total vânzări ${money(vanzariNetAn)}, total achiziții ${money(achizitiiNetAn)}.`
-          : `Total vânzări ${money(vanzariNetAn)}. Nu sunt facturi de achiziție pe ${anCurent} — tabelul de furnizori se umple după importul facturilor de la <a href="/import">Import</a>.`
+          ? `Total vânzări ${money(vanzariNetAn)}${vanzariActive.length ? " (fără vânzările de active)" : ""}, total achiziții ${money(achizitiiNetAn)}.`
+          : `Total vânzări ${money(vanzariNetAn)}${vanzariActive.length ? " (fără vânzările de active)" : ""}. Nu sunt facturi de achiziție pe ${anCurent} — tabelul de furnizori se umple după importul facturilor de la <a href="/import">Import</a>.`
       }</p>`;
 
     const blocSugestii = `
