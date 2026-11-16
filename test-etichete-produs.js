@@ -30,6 +30,16 @@
 //   • LOTUL AJUNGE ÎN DEPOZIT: recepția din producție ia lotul etichetelor.
 //   • DREPTURILE: fără Producție, nimic.
 //
+// ADĂUGAT PE 16.11.2026:
+//   • PE COMANDA CLIENTULUI („selectezi comanda și faci etichete pentru ea"):
+//     liniile comenzii, fiecare cu loturile de până acum; linia cu comandă de
+//     producție ia lotul fișei ei, celelalte un lot propus; lotul ține minte
+//     comanda; butonul de pe pagina comenzii spune câte loturi are.
+//   • BIFA „Etichete produs (doar generatorul)" („Gabi să aibă acces la
+//     generatorul de etichete"): Gabi intră în generator și nicăieri altundeva
+//     în Producție; butonul ei de Producție duce la generator; comenzile de
+//     producție îi apar fără link.
+//
 // Pe PostgreSQL real (port 5433), prin psql.
 const path = require("path");
 const Module = require("module");
@@ -95,11 +105,16 @@ q(`CREATE TABLE IF NOT EXISTS etichete_loturi (id SERIAL PRIMARY KEY, lot TEXT N
      creat_de_id INTEGER, creat_de TEXT, creat_la TEXT);
    CREATE UNIQUE INDEX IF NOT EXISTS idx_etichete_loturi_lot_produs ON etichete_loturi (UPPER(lot), produs_id);
    CREATE TABLE IF NOT EXISTS etichete_tiparite (id SERIAL PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES etichete_loturi(id) ON DELETE CASCADE,
-     fel TEXT NOT NULL, de_la INTEGER NOT NULL, pana_la INTEGER NOT NULL, modificari TEXT, motiv TEXT, tiparit_de_id INTEGER, tiparit_de TEXT, tiparit_la TEXT);`);
+     fel TEXT NOT NULL, de_la INTEGER NOT NULL, pana_la INTEGER NOT NULL, modificari TEXT, motiv TEXT, tiparit_de_id INTEGER, tiparit_de TEXT, tiparit_la TEXT);
+   ALTER TABLE etichete_loturi ADD COLUMN IF NOT EXISTS comanda_id INTEGER;`);
 
 const rute = { get: {}, post: {} };
 const router = { get: (p, h) => { if (!rute.get[p]) rute.get[p] = h; }, post: (p, h) => { if (!rute.post[p]) rute.post[p] = h; }, put: () => {}, delete: () => {} };
 require(path.join(RAD, "modules", "etichete-produs.js")).register(router);
+// Pagina comenzii clientului, pentru butonul „Etichete produs” de pe ea.
+require(path.join(RAD, "modules", "comenzi.js")).register(router);
+const auth = require(path.join(RAD, "lib", "auth.js"));
+const render = require(path.join(RAD, "lib", "render.js"));
 const E = require(path.join(RAD, "lib", "etichete-produs.js"));
 const EM = require(path.join(RAD, "modules", "etichete-produs.js"));
 const FL = require(path.join(RAD, "lib", "fisa-lot.js"));
@@ -165,11 +180,20 @@ const ADMIN = { id: 96331, nume: "Vali Admin", rol: "admin", sectiuni: "" };
 const PROD = { id: 96332, nume: "Ion Producție", rol: "productie", sectiuni: "" };
 const PROD2 = { id: 96334, nume: "Maria Producție", rol: "productie", sectiuni: "" };
 const AGENT = { id: 96333, nume: "Agent", rol: "vanzari", sectiuni: "/crm" };
+// Gabi, 16.11.2026: doar generatorul de etichete, fără restul Producției.
+const GABI = { id: 96335, nume: "Gabi Etichete", rol: "depozit", sectiuni: "/avize,/productie/etichete" };
+const BIFA_PROD = { id: 96336, nume: "Cu bifa Producție", rol: "depozit", sectiuni: "/productie" };
+// Comenzile clientului: CO cu două linii (P1, P2), CO2 cu una (P2).
+const CO = 96361, CO2 = 96362;
+const LA = 96371, LB = 96372, LC = 96373;
 
 function curata() {
   const pr = PRODUSE.join(",");
   q(`DELETE FROM etichete_tiparite WHERE lot_id IN (SELECT id FROM etichete_loturi WHERE produs_id IN (${pr}))`);
   q(`DELETE FROM etichete_loturi WHERE produs_id IN (${pr})`);
+  q(`DELETE FROM aprovizionari WHERE id = 96381 OR comanda_id IN (${CO}, ${CO2})`);
+  q(`DELETE FROM comenzi_linii WHERE comanda_id IN (${CO}, ${CO2})`);
+  q(`DELETE FROM comenzi WHERE id IN (${CO}, ${CO2})`);
   const rec = q(`SELECT id FROM receptii WHERE comanda_productie_id = ${CP}`).map((x) => Number(x.id));
   if (rec.length) {
     q(`DELETE FROM receptii_linii WHERE receptie_id IN (${rec.join(",")})`);
@@ -364,7 +388,115 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
   egal("restul, trimis în depozit la „Finalizată”: tot cu lotul", randuriRec(recId), [[P1, lotCP, 60]]);
 
   // ------------------------------------------------------------------------
-  console.log("\n8. Pe hârtie: nicio zonă nu se revarsă, zonele stau pe loc");
+  // Vali, 16.11.2026: „Să poți genera și etichetele pentru o comandă: selectezi
+  // comanda și faci etichete pentru ea.”
+  console.log("\n8. Pe comanda clientului");
+  q(`INSERT INTO comenzi (id, partener_id, numar, status, data) VALUES (${CO}, ${PARTENER}, '${PREFIX}-CMD-1', 'noua', '${azi()} 09:00:00'), (${CO2}, ${PARTENER}, '${PREFIX}-CMD-2', 'noua', '${azi()} 09:05:00')`);
+  q(`INSERT INTO comenzi_linii (id, comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (${LA}, ${CO}, ${P1}, 100, 10, 'rola'), (${LB}, ${CO}, ${P2}, 5, 2, NULL), (${LC}, ${CO2}, ${P2}, 2, 2, NULL)`);
+  q(`UPDATE comenzi_productie SET comanda_id = ${CO} WHERE id = ${CP}`);
+  const randul = (corp, ce) => (String(corp).split("<tr>").find((t) => t.includes(ce)) || "");
+  r = await cer("get", "/productie/etichete", PROD);
+  bine("lista: „din comanda clientului”, cu numărul, clientul și câte linii are", r.corp.includes('name="comanda_client"') && r.corp.includes(`<option value="${CO}">${PREFIX}-CMD-1 · ${PREFIX} Client Folie SRL · 2 linii</option>`) && r.corp.includes(`<option value="${CO2}">${PREFIX}-CMD-2 · ${PREFIX} Client Folie SRL · 1 linie</option>`), (r.corp.match(/name="comanda_client"[\s\S]{0,300}/) || [""])[0]);
+  // Lotul L1 e făcut din comanda de producție înainte ca ea să fie legată de
+  // comandă: comanda îl găsește prin comanda de producție.
+  egal("lotul comenzii de producție se numără la comandă și fără comanda scrisă pe el", [unul(`SELECT comanda_id FROM etichete_loturi WHERE id = ${L1.id}`), await EM.numarLoturiComanda(CO)], [null, 1]);
+  r = await cer("get", `/productie/etichete/comanda/${CO}`, PROD);
+  const rA = randul(r.corp, `${PREFIX} Folie stretch`), rB = randul(r.corp, `${PREFIX} Sac fără cod`);
+  bine("pagina comenzii: cele două linii, cu cantitatea și unitatea lor", r.cod === 200 && rA.includes("100 rola") && rB.includes("5 buc") && r.corp.includes(`href="/comenzi/${CO}"`), r.corp.slice(0, 200));
+  bine("linia cu comandă de producție: lotul fișei, lotul de etichete de până acum și „Alt lot…” pe comanda de producție", rA.includes(`lot ${lotCP}`) && rA.includes(`href="/productie/etichete/${L1.id}"`) && rA.includes(`comanda_client=${CO}&amp;linie=${LA}&amp;produs_id=${P1}&amp;productie=${CP}`) && rA.includes("Alt lot…"), rA);
+  bine("linia fără comandă de producție: încă niciun lot, „Etichete →” pe comanda clientului", rB.includes("încă niciunul") && rB.includes(`comanda_client=${CO}&amp;linie=${LB}&amp;produs_id=${P2}"`) && !rB.includes("productie=") && rB.includes("Etichete →"), rB);
+  // Comanda de producție cerută din depozit pentru o anumită linie ține de
+  // linia aia: altă linie cu același produs nu-i ia lotul.
+  q(`INSERT INTO aprovizionari (id, comanda_id, linie_id, produs_id, cantitate, sursa, status) VALUES (96381, ${CO}, ${LA}, ${P1}, 100, 'productie', 'confirmata')`);
+  q(`UPDATE comenzi_productie SET aprovizionare_id = 96381 WHERE id = ${CP}`);
+  q(`INSERT INTO comenzi_linii (id, comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (96374, ${CO}, ${P1}, 20, 10, 'rola')`);
+  r = await cer("get", `/productie/etichete/comanda/${CO}`, PROD);
+  const rD = String(r.corp).split("<tr>").filter((t) => t.includes(`${PREFIX} Folie stretch`));
+  bine("linia cerută din depozit își are comanda de producție; a doua linie cu același produs, nu", rD.length === 2 && rD.filter((t) => t.includes(`productie=${CP}`)).length === 1 && rD.some((t) => t.includes(`linie=${LA}&amp;produs_id=${P1}&amp;productie=${CP}`)) && rD.some((t) => t.includes("20 rola") && !t.includes("productie=")), rD.map((t) => t.slice(0, 200)).join(" || "));
+  q(`DELETE FROM comenzi_linii WHERE id = 96374`);
+  q(`UPDATE comenzi_productie SET aprovizionare_id = NULL WHERE id = ${CP}`);
+  q(`DELETE FROM aprovizionari WHERE id = 96381`);
+  // Migrarea din lib/db.js: loturile făcute din comenzile de producție ale unei
+  // comenzi de client primesc comanda. Se rulează exact textul de acolo.
+  const migrare = (require("fs").readFileSync(path.join(RAD, "lib", "db.js"), "utf8").match(/UPDATE etichete_loturi l SET comanda_id = cp\.comanda_id[\s\S]*?;/) || [""])[0];
+  bine("migrarea există în lib/db.js", /comanda_id IS NULL/.test(migrare), migrare);
+  if (migrare) q(migrare);
+  egal("…și lotul făcut din comanda de producție a primit comanda clientului", Number(unul(`SELECT comanda_id FROM etichete_loturi WHERE id = ${L1.id}`)), CO);
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { comanda_client: String(CO), linie: String(LB), produs_id: String(P2) } });
+  bine("formularul din comandă: clientul, numărul comenzii, lot nou propus, comanda ținută minte", r.cod === 200 && r.corp.includes(`name="client" value="${PREFIX} Client Folie SRL"`) && r.corp.includes(`name="comanda" value="${PREFIX}-CMD-1"`) && r.corp.includes(`name="lot" value="${lotL}"`) && r.corp.includes(`name="comanda_id" value="${CO}"`) && r.corp.includes(`name="comanda_productie_id" value=""`), (r.corp.match(/name="comanda_id"[^>]*/) || [""])[0]);
+  bine("…cu drumul înapoi la etichetele comenzii și linkul spre comandă", r.corp.includes(`href="/productie/etichete/comanda/${CO}">← Etichetele comenzii`) && r.corp.includes(`pentru comanda clientului <a href="/comenzi/${CO}">`));
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { comanda_client: String(CO), linie: String(LA), produs_id: String(P1), productie: String(CP) } });
+  bine("linia cu comandă de producție: lotul fișei ei de lot și tot comanda clientului", r.cod === 200 && r.corp.includes(`name="lot" value="${lotCP}"`) && r.corp.includes(`name="comanda_id" value="${CO}"`) && r.corp.includes(`name="comanda_productie_id" value="${CP}"`));
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { comanda_client: String(CO) } });
+  egal("comanda cu mai multe linii, fără linie aleasă: pagina comenzii", unde(r), `/productie/etichete/comanda/${CO}`);
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { comanda_client: String(CO2) } });
+  bine("comanda cu o singură linie: direct formularul", r.cod === 200 && r.corp.includes(`name="produs_id" value="${P2}"`) && r.corp.includes(`name="comanda" value="${PREFIX}-CMD-2"`) && r.corp.includes(`name="comanda_id" value="${CO2}"`));
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { comanda_client: "99999999" } });
+  bine("comanda care nu există: înapoi la listă, cu mesajul", unde(r).startsWith("/productie/etichete?eroare=") && /nu există/.test(parametri(r).eroare || ""), unde(r));
+  r = await cer("get", "/productie/etichete/comanda/99999999", PROD);
+  bine("…la fel pagina unei comenzi care nu există", unde(r).startsWith("/productie/etichete?eroare="));
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ produs_id: String(P2), comanda_productie_id: "", comanda_id: String(CO), lot: "lot #1" }) });
+  bine("lot greșit: înapoi în formular, tot pe comanda clientului", parametri(r).comanda_client === String(CO) && /litere, cifre/.test(parametri(r).eroare || ""), unde(r));
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ produs_id: String(P2), comanda_productie_id: "", comanda_id: String(CO), lot: "tep-cmd-l1", cate: "2" }) });
+  const LC1 = q(`SELECT * FROM etichete_loturi WHERE lot = 'TEP-CMD-L1'`)[0] || {};
+  egal("lotul făcut din comandă ține minte comanda, fără comandă de producție", [Number(LC1.comanda_id), LC1.comanda_productie_id, Number(LC1.tiparite)], [CO, null, 2]);
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ produs_id: String(P2), comanda_productie_id: "", comanda_id: "99999999", lot: "TEP-FARA-CMD", cate: "1" }) });
+  egal("o comandă care nu există nu se scrie pe lot", unul(`SELECT comanda_id FROM etichete_loturi WHERE lot = 'TEP-FARA-CMD'`), null);
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ produs_id: String(P1), comanda_productie_id: String(CP), comanda_id: "", lot: "TEP-CP-CMD", cate: "1" }) });
+  egal("lotul făcut din comanda de producție ia comanda clientului ei", Number(unul(`SELECT comanda_id FROM etichete_loturi WHERE lot = 'TEP-CP-CMD'`)), CO);
+  egal("câte loturi are comanda (pentru butonul de pe ea)", [await EM.numarLoturiComanda(CO), await EM.numarLoturiComanda(CO2), await EM.numarLoturiComanda(0)], [3, 0, 0]);
+  r = await cer("get", `/productie/etichete/comanda/${CO}`, PROD);
+  bine("pagina comenzii arată acum lotul făcut pe a doua linie", randul(r.corp, `${PREFIX} Sac fără cod`).includes("TEP-CMD-L1") && randul(r.corp, `${PREFIX} Sac fără cod`).includes("2 etichete") && !r.corp.includes("TEP-FARA-CMD"));
+  r = await cer("get", "/productie/etichete", PROD, { query: { q: "tep-cmd-1" } });
+  bine("lista loturilor: comanda clientului, cu link spre etichetele ei; se caută și după ea", r.corp.includes(`href="/productie/etichete/comanda/${CO}">${PREFIX}-CMD-1</a>`) && r.corp.includes("<strong>TEP-CMD-L1</strong>") && !r.corp.includes("<strong>TEP-FARA-CMD</strong>"));
+  r = await cer("get", `/productie/etichete/${LC1.id}`, PROD);
+  bine("pagina lotului spune comanda clientului", r.corp.includes(`comanda clientului <a href="/productie/etichete/comanda/${CO}">${PREFIX}-CMD-1</a>`));
+  r = await cer("get", `/comenzi/${CO}`, PROD);
+  bine("pe pagina comenzii: butonul „Etichete produs”, cu câte loturi are", r.corp.includes(`href="/productie/etichete/comanda/${CO}">Etichete produs (3 loturi)</a>`), (r.corp.match(/[^>]{0,80}Etichete produs[^<]{0,40}/) || [r.cod])[0]);
+  r = await cer("get", `/comenzi/${CO2}`, PROD);
+  bine("…fără paranteză, când comanda n-are încă etichete", r.corp.includes(`href="/productie/etichete/comanda/${CO2}">Etichete produs</a>`));
+  r = await cer("get", `/comenzi/${CO}`, AGENT);
+  bine("…pe care agentul fără generator nu-l vede", r.cod !== 500 && !r.corp.includes("/productie/etichete/comanda/"), r.cod);
+  r = await cer("get", `/productie/etichete/comanda/${CO}`, AGENT);
+  bine("…și nici pagina etichetelor comenzii", unde(r) === "/");
+
+  // ------------------------------------------------------------------------
+  // Vali, 16.11.2026: „Gabi să aibă acces la generatorul de etichete.”
+  console.log("\n9. Bifa „Etichete produs (doar generatorul)”");
+  egal("bifa nouă apare în lista din Utilizatori", auth.ZONE.some((z) => z.cheie === "/productie/etichete" && /doar generatorul/.test(z.eticheta)), true);
+  egal("paginile generatorului țin de zona ei, restul Producției de Producție", [auth.sectiune("/productie/etichete"), auth.sectiune(`/productie/etichete/comanda/${CO}`), auth.sectiune("/productie/12"), auth.sectiune("/productie")], ["/productie/etichete", "/productie/etichete", "/productie", "/productie"]);
+  egal("Gabi intră în generator, cu toate paginile lui", ["/productie/etichete", "/productie/etichete/noua", `/productie/etichete/comanda/${CO}`, `/productie/etichete/${L1.id}`, "/productie/etichete/previzualizare"].map((x) => auth.poateAccesa(GABI, x)), [true, true, true, true, true]);
+  egal("…dar nu în restul Producției", ["/productie", `/productie/${CP}`, "/productie/utilaje", "/productie/retete"].map((x) => auth.poateAccesa(GABI, x)), [false, false, false, false]);
+  egal("cine are Producția (bifă sau rol) îl are în continuare; agentul nu", [auth.poateAccesa(BIFA_PROD, "/productie/etichete"), auth.poateAccesa(PROD, "/productie/etichete"), auth.poateAccesa(AGENT, "/productie/etichete")], [true, true, false]);
+  const butonProductie = (u) => (render.navPentru(u).find((x) => x.label === "Producție") || {}).href || null;
+  egal("butonul Producție: la Gabi duce la generator, la ceilalți la comenzi; agentul nu-l are", [butonProductie(GABI), butonProductie(PROD), butonProductie(BIFA_PROD), butonProductie(AGENT)], ["/productie/etichete", "/productie", "/productie", null]);
+  const pag = (u, active) => render.layout({ user: u, title: "T", active, body: "" });
+  const pGabi = pag(GABI, "/productie/etichete");
+  const subnavGabi = (pGabi.match(/<div class="subnav">[\s\S]*?<\/div>/) || [""])[0];
+  bine("pe generator, la Gabi: Producție aprins și din subnav doar „Etichete produs”", pGabi.includes('<a href="/productie/etichete" class="navlink active">Producție</a>') && subnavGabi.includes('href="/productie/etichete"') && !subnavGabi.includes('href="/productie/planificare"') && !subnavGabi.includes('href="/productie"'), subnavGabi);
+  const pProd = pag(PROD, "/productie/etichete");
+  bine("…iar la Producție: butonul aprins și toată subnavigația", pProd.includes('<a href="/productie" class="navlink active">Producție</a>') && pProd.includes('href="/productie/planificare"') && pProd.includes('href="/productie/etichete" class="subnav-link activ"'));
+  bine("pe celelalte pagini, Producție nu se aprinde", !pag(PROD, "/comenzi").includes('class="navlink active">Producție'));
+  r = await cer("get", "/productie/etichete", GABI);
+  bine("Gabi deschide lista; comenzile de producție apar fără link", r.cod === 200 && r.corp.includes(`<strong>${lotCP}</strong>`) && r.corp.includes(`${PREFIX}-CP-1`) && !r.corp.includes(`href="/productie/${CP}"`), r.cod);
+  r = await cer("get", "/productie/etichete", PROD);
+  bine("…la Producție, cu link", r.corp.includes(`href="/productie/${CP}"`));
+  r = await cer("get", `/productie/etichete/comanda/${CO}`, GABI);
+  bine("Gabi deschide etichetele comenzii, tot fără link spre producție", r.cod === 200 && r.corp.includes(`${PREFIX}-CP-1`) && !r.corp.includes(`href="/productie/${CP}"`));
+  r = await cer("get", "/productie/etichete/noua", GABI, { query: { comanda_client: String(CO), linie: String(LA), produs_id: String(P1), productie: String(CP) } });
+  bine("…și formularul, cu comanda de producție fără link", r.cod === 200 && r.corp.includes(`din comanda de producție ${PREFIX}-CP-1`) && !r.corp.includes(`href="/productie/${CP}"`));
+  r = await cer("post", "/productie/etichete", GABI, { body: corp({ produs_id: String(P2), comanda_productie_id: "", comanda_id: String(CO2), lot: "TEP-GABI-1", cate: "3" }) });
+  const LG = q(`SELECT * FROM etichete_loturi WHERE lot = 'TEP-GABI-1'`)[0] || {};
+  egal("Gabi face un lot pe comanda clientului, pe numele ei", [Number(LG.comanda_id), LG.creat_de, Number(LG.tiparite)], [CO2, GABI.nume, 3]);
+  r = await cer("get", `/productie/etichete/${LG.id}`, GABI);
+  bine("…și îi vede pagina", r.cod === 200 && r.corp.includes("Lot TEP-GABI-1"));
+  r = await cer("get", "/productie/etichete/setari", GABI);
+  bine("setările rămân ale administratorului", unde(r) === "/productie/etichete");
+  r = await cer("get", `/comenzi/${CO2}`, GABI);
+  bine("pe pagina comenzii Gabi are butonul, cu lotul ei", r.corp.includes(`href="/productie/etichete/comanda/${CO2}">Etichete produs (1 lot)</a>`));
+
+  // ------------------------------------------------------------------------
+  console.log("\n10. Pe hârtie: nicio zonă nu se revarsă, zonele stau pe loc");
   let pw = null;
   try { pw = require("playwright"); } catch (_) { pw = null; }
   if (!pw) console.log("  (fără Playwright aici — sar peste)");

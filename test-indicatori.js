@@ -236,7 +236,7 @@ const AN = azi.slice(0, 4);
 function fixtureFacturi() {
   const S = [
     "TRUNCATE plati, facturi_linii, facturi, inchideri_istoric RESTART IDENTITY CASCADE",
-    "DELETE FROM parteneri WHERE cui IN ('RO-IND-C','RO-IND-F1','RO-IND-F2')",
+    "DELETE FROM parteneri WHERE cui IN ('RO-IND-C','RO-IND-C2','RO-IND-C3','RO-IND-F1','RO-IND-F2')",
     "INSERT INTO parteneri (id, nume, cui, tip) VALUES (91001,'CLIENT INDICATORI SRL','RO-IND-C','client'), (91002,'FURNIZOR MARE SRL','RO-IND-F1','furnizor'), (91003,'FURNIZOR MIC SRL','RO-IND-F2','furnizor') ON CONFLICT (id) DO NOTHING",
     "INSERT INTO utilizatori (id, nume, email, parola_hash, parola_salt, rol) VALUES (1,'Vali','vali@test.ro','x','y','admin') ON CONFLICT (id) DO NOTHING",
   ];
@@ -577,6 +577,70 @@ function fixtureBalante(cuAugustVechi) {
   rulaj("DELETE FROM balante_snapshot WHERE eticheta = '2026 la 31.08'");
   rulaj(balanta("2026 la 31.08", "2026-01-01", "2026-08-31", cu({ ca: 4300000, profit: 220000 })));
 
+  // ---- etapa 2e: vânzările de active ies din topul clienților ---------------
+  // Vali, 16.11.2026: „Scoate din top clienți BCR și Negru, sunt vânzări de
+  // active spot.” Două vânzări de active anul ăsta: 700.000 (cel mai mare
+  // „client”) și 50.000, cu numele scris din import cu „&amp;” în el.
+  //   înainte: 700.000 / 1.350.000 = 51,9% pe primul; CLIENT INDICATORI 44,4%
+  //   după: rămâne doar CLIENT INDICATORI, 600.000 = 100% din vânzările
+  //   comerciale (1.350.000 − 750.000)
+  rulaj("DELETE FROM setari_app WHERE cheie = 'banca_vanzari_active'");
+  rulaj("INSERT INTO parteneri (id, nume, cui, tip) VALUES (91004,'BCR LEASING TEST IFN SA','RO-IND-C2','client'), (91005,'NEGRU &amp; NEGRU TEST S.R.L.','RO-IND-C3','client') ON CONFLICT (id) DO NOTHING");
+  const zi = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  for (const [id, part, suma, n] of [[91104, 91004, 700000, 20], [91105, 91005, 50000, 15]]) {
+    rulaj(`INSERT INTO facturi (id, serie, numar, partener_id, directie, data_emiterii, data_scadenta, status, firma_id, intercompany, activ) VALUES (${id},'IND',${id},${part},'vanzare','${zi(n)}','${zi(n)}','emisa',NULL,0,1)`);
+    rulaj(`INSERT INTO facturi_linii (factura_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (${id},'activ',1,${suma},19)`);
+  }
+  const topCl = (corp) => sectiune(corp, `Top 5 clienți în ${anul}`);
+  r = await cer("/rapoarte/indicatori");
+  cere("fără listă: vânzarea de active e primul „client”", topCl(r.corp), ["BCR LEASING TEST IFN SA", "700.000,00 lei", "51.9%", "% din total"], ["% din vânzările comerciale"]);
+  cere("numele cu „&amp;” din import apare curat, scăpat o singură dată", topCl(r.corp), ["NEGRU &amp; NEGRU TEST S.R.L."], ["&amp;amp;"]);
+  cere("concentrarea pe primul client îl numără", r.corp, ["52% (BCR LEASING TEST IFN SA)"]);
+  cere("administratorul are lista, cu clienții anului de ales", r.corp, ["Vânzări de active (spot), scoase din topul clienților", 'action="/rapoarte/indicatori/active"', '<option value="91004">BCR LEASING TEST IFN SA · 700.000,00 lei</option>']);
+  await cer("/rapoarte/indicatori/active", { metoda: "post", user: { id: 9, nume: "Agent", rol: "vanzari" }, body: { actiune: "scoate", partener_id: "91004" } });
+  await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "sterge", partener_id: "91004" } });
+  await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "scoate", partener_id: "99999999" } });
+  r = await cer("/rapoarte/indicatori");
+  cere("agentul, o acțiune necunoscută sau un partener inexistent nu schimbă nimic", topCl(r.corp), ["BCR LEASING TEST IFN SA"], ["Scoase din topul clienților"]);
+  let rp = await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "scoate", partener_id: "91004" } });
+  await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "scoate", partener_id: "91005" } });
+  await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "scoate", partener_id: "91005" } });
+  if (rp.antet && rp.antet.Location === "/rapoarte/indicatori#topuri") ok("după „scoate”, înapoi la topuri");
+  else rau("după „scoate”, înapoi la topuri", JSON.stringify(rp.antet));
+  r = await cer("/rapoarte/indicatori");
+  cere(
+    "scoase: topul are doar clientul comercial, la 100% din vânzările comerciale",
+    topCl(r.corp),
+    ["CLIENT INDICATORI SRL", "600.000,00 lei", "100.0%", "% din vânzările comerciale"],
+    ["BCR LEASING TEST IFN SA", "NEGRU &amp; NEGRU TEST"]
+  );
+  cere(
+    "sub tabel se spune cine a ieșit, cu ce sumă, și din ce sunt procentele",
+    r.corp,
+    ["Scoase din topul clienților, ca vânzări de active (spot), nu clienți comerciali: BCR LEASING TEST IFN SA (700.000,00 lei), NEGRU &amp; NEGRU TEST S.R.L. (50.000,00 lei).", "600.000,00 lei = total vânzări 1.350.000,00 lei minus 750.000,00 lei vânzări de active"]
+  );
+  cere("concentrarea pe primul client e pe cel comercial", r.corp, ["100% (CLIENT INDICATORI SRL)"], ["52% (BCR LEASING TEST IFN SA)"]);
+  cere("în listă: amândoi, cu „Pune înapoi în top”; o singură dată fiecare", r.corp, ['name="partener_id" value="91004"', 'name="partener_id" value="91005"', "Pune înapoi în top"], ['<option value="91004">']);
+  const lista = JSON.parse(((q("SELECT valoare FROM setari_app WHERE cheie = 'banca_vanzari_active'")[0]) || {}).valoare || "[]");
+  if (JSON.stringify(lista) === "[91004,91005]") ok("lista ținută: [91004, 91005], fără dubluri");
+  else rau("lista ținută: [91004, 91005], fără dubluri", JSON.stringify(lista));
+  const rbA = await cer("/rapoarte/indicatori/raport-banca");
+  cere("dosarul pentru bancă spune ce s-a scos, dar n-are lista de editat", rbA.corp, ["Scoase din topul clienților, ca vânzări de active (spot)"], ["/rapoarte/indicatori/active", "Pune înapoi în top"]);
+  cere("agentul nu vede lista", (await cer("/rapoarte/indicatori", { user: { id: 9, nume: "Agent", rol: "vanzari" } })).corp, [], ["Pune înapoi în top", "/rapoarte/indicatori/active"]);
+  await cer("/rapoarte/indicatori/active", { metoda: "post", body: { actiune: "pune", partener_id: "91004" } });
+  r = await cer("/rapoarte/indicatori");
+  cere("„Pune înapoi în top” îl aduce înapoi; celălalt rămâne scos", topCl(r.corp), ["BCR LEASING TEST IFN SA", "700.000,00 lei"], ["NEGRU &amp; NEGRU TEST"]);
+  cere("…cu procentul din vânzările comerciale (1.300.000)", topCl(r.corp), ["53.8%", "46.2%"]);
+  // Lista intră în SQL ca numere. O valoare stricată în setari_app (scrisă de
+  // mână, sau altfel decât din pagină) nu are voie să ajungă în interogare.
+  rulaj(`UPDATE setari_app SET valoare = '["91004", "1) OR (1=1", 0, -5, "abc", null]' WHERE cheie = 'banca_vanzari_active'`);
+  r = await cer("/rapoarte/indicatori");
+  cere("din o listă stricată rămân doar numerele bune; pagina merge", topCl(r.corp), ["CLIENT INDICATORI SRL", "NEGRU &amp; NEGRU TEST S.R.L.", "% din vânzările comerciale"], ["BCR LEASING TEST IFN SA"]);
+  rulaj("DELETE FROM setari_app WHERE cheie = 'banca_vanzari_active'");
+  rulaj("DELETE FROM facturi_linii WHERE factura_id IN (91104, 91105)");
+  rulaj("DELETE FROM facturi WHERE id IN (91104, 91105)");
+  rulaj("DELETE FROM parteneri WHERE id IN (91004, 91005)");
+
   // ---- partea scrisă a dosarului ------------------------------------------
   // Fixtura are profit pozitiv și structură slabă, deci comentariul trebuie să
   // conțină și rânduri „bun", și rânduri sub țintă, cu plan de măsuri.
@@ -644,7 +708,7 @@ function fixtureBalante(cuAugustVechi) {
 
   // ---- curățenie ----------------------------------------------------------
   rulaj("TRUNCATE plati, facturi_linii, facturi RESTART IDENTITY CASCADE");
-  rulaj("DELETE FROM parteneri WHERE cui IN ('RO-IND-C','RO-IND-F1','RO-IND-F2')");
+  rulaj("DELETE FROM parteneri WHERE cui IN ('RO-IND-C','RO-IND-C2','RO-IND-C3','RO-IND-F1','RO-IND-F2')");
 
   console.log(`\n${rele ? rele + " probleme" : "Totul curat."}  (${interogari} interogări SQL)\n`);
   process.exit(rele ? 1 : 0);
