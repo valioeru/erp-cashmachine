@@ -17,6 +17,7 @@ const K = require("../lib/comanda-config");
 // de „cine are voie” sunt în lib/comanda-istoric.js, cu testul lor.
 const IST = require("../lib/comanda-istoric");
 const TP = require("../lib/termen-plata");
+const CC = require("../lib/curs-comanda");
 const BR = require("../lib/branding");
 
 // Brandingul comenzii (Vali, 09.11.2026): obligatoriu, ca livrarea parțială.
@@ -151,6 +152,107 @@ function celulaTermenPlata(c) {
   if (pe !== null) return esc(TP.zileText(pe)) + mic("pe factură: scadența = data facturii + termen");
   if (fisa !== null) return esc(TP.zileText(fisa)) + mic("din fișa clientului, la facturare");
   return '<span style="color:var(--text-muted)">nedefinit</span>' + mic("factura pleacă fără scadență");
+}
+
+// ---- cursul comenzii (Vali, 17.11.2026; lib/curs-comanda.js) ---------------
+//
+// Cursurile BNR de azi pentru monedele în care se poate scrie o comandă.
+async function cursuriAzi() {
+  const azi = new Date().toISOString().slice(0, 10);
+  const out = {};
+  for (const m of MONEDE) {
+    if (m === "RON") continue;
+    const c = await require("./curs").laZiua(m, azi).catch(() => null);
+    if (c && Number(c.valoare) > 0) out[m] = { valoare: Number(c.valoare), data: c.data || "" };
+  }
+  return out;
+}
+
+// Factura unei comenzi în altă monedă se scrie în lei, la cursul fixat pe
+// comandă (lib/curs-comanda.js). Până pe 17.11.2026 ciorna lua prețurile în
+// euro și le scria drept lei — o comandă de 1.000 € ieșea factură de 1.000 lei.
+// Fără curs pe comandă nu se facturează: o cifră ghicită ar arăta ca una bună.
+function facturaInLei(comanda) {
+  const moneda = String(comanda.moneda || "RON").toUpperCase();
+  if (moneda === "RON") return { ok: true, moneda, nota: "", pret: (p) => p };
+  if (!(Number(comanda.curs_bnr) > 0)) return { ok: false, moneda };
+  return {
+    ok: true,
+    moneda,
+    nota: `Comandă în ${moneda}: prețurile sunt trecute în lei la cursul comenzii, ${CC.eticheta(comanda)}.`,
+    pret: (p) => CC.pretInLei(p, comanda),
+  };
+}
+function paginaFaraCurs(ctx, comanda, moneda) {
+  return send(
+    ctx.res,
+    200,
+    layout({
+      user: ctx.user,
+      title: "Comanda n-are curs",
+      active: "/comenzi",
+      body: `<h1>Comanda e în ${esc(moneda)} și n-are curs</h1>
+        <p style="max-width:620px">Factura se scrie în lei, la cursul fixat pe comandă, iar comanda asta n-are unul
+          (BNR-ul n-a răspuns când a fost plasată). Deschide „Modifică comanda", scrie cursul și salvează — apoi cere factura din nou.</p>
+        <a class="btn" href="/comenzi/${comanda.id}/editare">Modifică comanda</a>
+        <a class="btn secondary" href="/comenzi/${comanda.id}">Înapoi la comandă</a>`,
+    })
+  );
+}
+
+// Câmpul de curs din formularul comenzii. Ascuns la comenzile în lei.
+// `valoare` = textul scris de om sau cursul de pe comandă; `atins` = e al
+// omului, deci alegerea monedei nu-l rescrie.
+function campCurs(v, atins) {
+  const moneda = MONEDE.includes(String(v.moneda || "")) ? String(v.moneda) : "RON";
+  const valoare = v.curs === null || v.curs === undefined ? "" : typeof v.curs === "string" ? v.curs : CC.scrie(v.curs);
+  return `<label class="field" id="cmd-camp-curs"${moneda === "RON" ? ' style="display:none"' : ""}><span>Curs — lei pentru 1 <b class="cmd-m">${esc(moneda)}</b></span>
+      <input type="text" inputmode="decimal" name="curs" id="cmd-curs" value="${esc(valoare)}" autocomplete="off"${atins ? ' data-atins="1"' : ""} style="width:100%">
+      <small id="cmd-nota-curs" style="display:block;color:var(--text-muted);font-size:12px;margin-top:3px"></small>
+    </label>`;
+}
+
+// Scriptul câmpului: propune BNR-ul zilei, spune cu cât diferă cursul scris.
+function scriptCursComanda(bnr) {
+  const date = JSON.stringify(bnr || {}).replace(/</g, "\\u003c");
+  return `<script>
+    (function () {
+      var BNR = ${date};
+      var sel = document.querySelector('select[name="moneda"]');
+      var camp = document.getElementById("cmd-camp-curs");
+      var inp = document.getElementById("cmd-curs");
+      var nota = document.getElementById("cmd-nota-curs");
+      if (!sel || !camp || !inp) return;
+      function scrie(x) { return Number(x).toLocaleString("ro-RO", { minimumFractionDigits: 4, maximumFractionDigits: 4, useGrouping: false }); }
+      function nr(v) { var t = String(v || "").trim().replace(",", "."); if (!t) return null; var n = Number(t); return isFinite(n) && n > 0 ? n : NaN; }
+      function arata() {
+        var m = sel.value;
+        camp.style.display = m === "RON" ? "none" : "";
+        document.querySelectorAll(".cmd-m").forEach(function (e) { e.textContent = m; });
+        if (m === "RON" || !nota) return;
+        var b = BNR[m], v = nr(inp.value);
+        if (!b) { nota.textContent = "BNR n-are curs pentru " + m + " — scrie-l tu"; return; }
+        var t = "BNR" + (b.data ? " din " + b.data : "") + ": " + scrie(b.valoare);
+        if (v === null) t += " · lăsat gol, se ia BNR-ul";
+        else if (isNaN(v)) t += " · cursul scris nu e un număr";
+        else if (Math.abs(v - b.valoare) >= 0.00005) {
+          var d = (v / b.valoare - 1) * 100;
+          t += " · cursul vostru diferă cu " + (d > 0 ? "+" : "") + d.toLocaleString("ro-RO", { maximumFractionDigits: 2 }) + "%";
+        }
+        nota.textContent = t + ". Rămâne scris pe comandă.";
+      }
+      sel.addEventListener("change", function () {
+        // Altă monedă = alt curs: cel vechi nu mai are ce căuta în câmp.
+        var b = BNR[sel.value];
+        inp.value = sel.value === "RON" || !b ? "" : scrie(b.valoare);
+        inp.removeAttribute("data-atins");
+        arata();
+      });
+      inp.addEventListener("input", function () { inp.setAttribute("data-atins", "1"); arata(); });
+      if (sel.value !== "RON" && !inp.value && BNR[sel.value]) inp.value = scrie(BNR[sel.value].valoare);
+      arata();
+    })();
+  </script>`;
 }
 
 // ------------------------------------------------------------------
@@ -1399,6 +1501,7 @@ function register(router) {
             ${MONEDE.map((m) => `<option value="${m}"${String(v.moneda || "RON") === m ? " selected" : ""}>${m}</option>`).join("")}
           </select>
         </label>
+        ${campCurs(v, String(v.curs || "").trim() !== "")}
         ${TP.camp({ valoare: v.termen_plata_zile, atins: String(v.termen_plata_zile || "").trim() !== "" })}
       </div>
       <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
@@ -1430,6 +1533,7 @@ function register(router) {
     <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
     ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
     ${TP.scriptCamp(TP.hartaTermene(parteneri))}
+    ${scriptCursComanda(await cursuriAzi())}
     ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
@@ -1552,6 +1656,7 @@ function register(router) {
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
       branding: BR.valid(ctx.body.branding),
       moneda,
+      curs: moneda === "RON" ? "" : ctx.body.curs,
       termen_plata_zile: ctx.body.termen_plata_zile,
       linii: produsIds.map((id, i) => ({
         produs_id: id,
@@ -1575,6 +1680,9 @@ function register(router) {
     const termenCitit = TP.citeste(ctx.body.termen_plata_zile);
     if (!termenCitit.ok) return await formularComandaNoua(ctx, { eroare: termenCitit.eroare, valori });
     const termenPlata = termenCitit.zile !== null ? termenCitit.zile : TP.normal(client.termen_plata_zile);
+    // Cursul scris de om (Vali, 17.11.2026): gol = BNR-ul zilei. Vezi lib/curs-comanda.js.
+    const cursCitit = moneda === "RON" ? { ok: true, valoare: null } : CC.citeste(ctx.body.curs);
+    if (!cursCitit.ok) return await formularComandaNoua(ctx, { eroare: CC.MESAJ_CURS, valori });
     // O comandă fără nicio linie cu cantitate e tot o comandă goală: intră în
     // lista depozitului și nu are ce se potrivi cu stocul.
     if (!produsIds.some((id, i) => Number(cantitati[i] || 0) > 0)) {
@@ -1644,10 +1752,11 @@ function register(router) {
     // dimineață, iar o comandă de luna trecută n-ar mai semăna cu nimic din
     // contabilitate. La comenzile în lei nu se scrie nimic.
     const cursAzi = moneda === "RON" ? null : await require("./curs").laZiua(moneda, new Date().toISOString().slice(0, 10));
+    const cursComanda = CC.laPlasare({ moneda, scris: cursCitit.valoare, bnr: cursAzi });
     const info = await db
       .prepare(
-        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, branding, moneda, curs_bnr, curs_bnr_data, termen_plata_zile)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, branding, moneda, curs_bnr, curs_bnr_data, termen_plata_zile, curs_manual)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         partener_id,
@@ -1658,9 +1767,10 @@ function register(router) {
         valori.livrare_partiala,
         valori.branding,
         moneda,
-        cursAzi && cursAzi.valoare > 0 ? cursAzi.valoare : null,
-        cursAzi && cursAzi.data ? cursAzi.data : null,
-        termenPlata
+        cursComanda.curs,
+        cursComanda.data,
+        termenPlata,
+        cursComanda.manual
       );
     const comandaId = info.lastInsertRowid;
 
@@ -1842,7 +1952,9 @@ function register(router) {
           <div><div class="k">Client</div>${esc(comanda.partener_nume)}</div>
           <div><div class="k">Data</div>${esc(comanda.data)}</div>
           <div><div class="k">Status</div>${stari.eticheta(comanda.status)}</div>
-          <div><div class="k">Moneda</div>${esc(comanda.moneda || "RON")}</div>
+          <div><div class="k">Moneda</div>${esc(comanda.moneda || "RON")}${
+            CC.eticheta(comanda) ? `<div style="font-size:12px;color:var(--text-muted)">curs ${esc(CC.eticheta(comanda))}</div>` : ""
+          }</div>
           <div><div class="k">Termen de plată</div>${celulaTermenPlata(comanda)}</div>
           <div><div class="k">Livrare parțială</div>${livrare.eticheta(comanda)}${
             potiRaspundeLivrare && comanda.status !== "anulata" && !comanda.factura_id
@@ -1896,7 +2008,7 @@ function register(router) {
       ${
         String(comanda.moneda || "RON") !== "RON"
           ? `<p style="margin:2px 0 0;text-align:right;color:var(--text-muted);font-size:13px">${esc(
-              BNR.explica(total, comanda.moneda, comanda.curs_bnr, comanda.curs_bnr_data)
+              CC.explica(total, comanda)
             )}</p>`
           : ""
       }
@@ -2137,6 +2249,8 @@ function register(router) {
       livrare_partiala: livrare.raspuns(comanda),
       branding: BR.valid(comanda.branding),
       moneda: comanda.moneda,
+      // Cursul de pe comandă, ca număr: câmpul îl scrie cu virgulă.
+      curs: Number(comanda.curs_bnr) > 0 ? Number(comanda.curs_bnr) : null,
       termen_plata_zile: TP.normal(comanda.termen_plata_zile),
       observatii: comanda.observatii,
       // Prețul din bază merge și într-un câmp ascuns, neatins de rotunjire:
@@ -2183,6 +2297,7 @@ function register(router) {
               ${MONEDE.map((m) => `<option value="${m}"${String(v.moneda || "RON") === m ? " selected" : ""}>${m}</option>`).join("")}
             </select>
           </label>
+          ${campCurs(v, true)}
           ${TP.camp({ valoare: v.termen_plata_zile, atins: true })}
         </div>
         <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
@@ -2214,6 +2329,7 @@ function register(router) {
       <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
       ${TP.scriptCamp(TP.hartaTermene(parteneri))}
+      ${scriptCursComanda(await cursuriAzi())}
       ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(
       ctx.res,
@@ -2291,6 +2407,7 @@ function register(router) {
       livrare_partiala: livrare.valid(b.livrare_partiala),
       branding: BR.valid(b.branding),
       moneda,
+      curs: moneda === "RON" ? "" : b.curs,
       termen_plata_zile: b.termen_plata_zile,
       observatii: b.observatii,
       linii: produsIds.map((id, i) => ({
@@ -2310,6 +2427,8 @@ function register(router) {
     if (!clientNou) {
       return await opreste("Clientul ales nu mai există în ERP. Alege altul.");
     }
+    const cursCitit = moneda === "RON" ? { ok: true, valoare: null } : CC.citeste(b.curs);
+    if (!cursCitit.ok) return await opreste(CC.MESAJ_CURS);
     const termenCitit = TP.citeste(b.termen_plata_zile);
     if (!termenCitit.ok) return await opreste(termenCitit.eroare);
     const termenPlata = TP.laModificare({
@@ -2418,36 +2537,36 @@ function register(router) {
       if (c) s.nou = c.nume;
     }
 
-    if (!schimbari.length) return redirect(ctx.res, `/comenzi/${comanda.id}?ok=nimic`);
-
-    // Moneda schimbată înseamnă curs nou. Cursul VECHI rămâne însă dacă
-    // moneda n-a fost atinsă: o corectură de cantitate pe o comandă de acum
-    // trei săptămâni n-are voie să-i schimbe cursul sub mână — ar muta suma
-    // în lei fără ca nimeni s-o fi cerut.
-    let curs = comanda.curs_bnr;
-    let cursData = comanda.curs_bnr_data;
-    if (dupa.moneda === "RON") {
-      curs = null;
-      cursData = null;
-    } else if (dupa.moneda !== comanda.moneda || !(Number(curs) > 0)) {
-      const c = await require("./curs").laZiua(dupa.moneda, new Date().toISOString().slice(0, 10));
-      curs = c && c.valoare > 0 ? c.valoare : null;
-      cursData = c && c.data ? c.data : null;
-      if (curs) {
-        schimbari.push({
-          ce: "Curs BNR",
-          vechi: comanda.curs_bnr ? BNR.scrieCurs(comanda.curs_bnr) : "",
-          nou: BNR.scrieCurs(curs) + (cursData ? " din " + cursData : ""),
-        });
-      }
+    // Cursul comenzii (lib/curs-comanda.js). Rămâne cel VECHI dacă nici moneda,
+    // nici câmpul de curs n-au fost atinse: o corectură de cantitate pe o
+    // comandă de acum trei săptămâni n-are voie să-i schimbe cursul sub mână —
+    // ar muta suma în lei fără ca nimeni s-o fi cerut. Se schimbă când omul
+    // scrie alt curs (rămâne „pus pe comandă") sau schimbă moneda (BNR-ul zilei).
+    const bnrAzi = dupa.moneda === "RON" ? null : await require("./curs").laZiua(dupa.moneda, new Date().toISOString().slice(0, 10));
+    // Câmpul de curs a venit gol: omul a șters ce era în el și cere BNR-ul
+    // zilei. Un formular care nu trimite câmpul deloc nu cere nimic.
+    const cursGolit = dupa.moneda !== "RON" && b.curs !== undefined && String(b.curs).trim() === "";
+    const cursNou = CC.laModificare({ comanda, moneda: dupa.moneda, scris: cursCitit.valoare, bnr: bnrAzi, golit: cursGolit });
+    const curs = cursNou.curs;
+    const cursData = cursNou.data;
+    const cursVechiText = CC.eticheta(comanda);
+    const cursNouText = CC.eticheta({ moneda: dupa.moneda, curs_bnr: cursNou.curs, curs_bnr_data: cursNou.data, curs_manual: cursNou.manual });
+    // Cursul schimbat intră în istoric cu ce era și ce a rămas, și e o
+    // schimbare de sine stătătoare: alt curs înseamnă altă sumă în lei.
+    // „Curs" = pus de om; „Curs BNR" = luat de la BNR. La trecerea pe lei nu
+    // se scrie nimic aici: rândul „Monedă" spune tot.
+    if (cursVechiText !== cursNouText && cursNouText) {
+      schimbari.push({ ce: cursNou.manual ? "Curs" : "Curs BNR", vechi: cursVechiText, nou: cursNouText });
     }
+
+    if (!schimbari.length) return redirect(ctx.res, `/comenzi/${comanda.id}?ok=nimic`);
 
     await db
       .prepare(
         `UPDATE comenzi SET partener_id = ?, numar = ?, observatii = ?, data_livrare_ceruta = ?,
-           livrare_partiala = ?, branding = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ?, termen_plata_zile = ? WHERE id = ?`
+           livrare_partiala = ?, branding = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ?, termen_plata_zile = ?, curs_manual = ? WHERE id = ?`
       )
-      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, termenPlata, comanda.id);
+      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, termenPlata, cursNou.manual, comanda.id);
 
     // Liniile se rescriu, dar `cantitate_livrata` NU se pierde: depozitul a
     // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să
@@ -2584,13 +2703,16 @@ function register(router) {
       );
     }
 
+    const inLei = facturaInLei(comanda);
+    if (!inLei.ok) return paginaFaraCurs(ctx, comanda, inLei.moneda);
+
     // Scadența vine din termenul de plată al comenzii (Vali, 17.11.2026) și
     // pleacă în SmartBill ca dueDate. Vezi lib/termen-plata.js.
     const dataFacturii = new Date().toISOString().slice(0, 10);
     const termenFactura = TP.efectiv(comanda, { termen_plata_zile: await TP.alPartenerului(db, comanda.partener_id) });
     const info = await db
       .prepare(
-        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, data_scadenta) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?) RETURNING id"
+        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, data_scadenta, observatii) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?, ?) RETURNING id"
       )
       .run(
         comanda.partener_id,
@@ -2598,14 +2720,15 @@ function register(router) {
         ctx.user.id,
         comanda.agent_id || ctx.user.id,
         dataFacturii,
-        TP.scadenta(dataFacturii, termenFactura) || null
+        TP.scadenta(dataFacturii, termenFactura) || null,
+        inLei.nota || null
       );
     const facturaId = info.lastInsertRowid;
     const insertLinie = db.prepare(
       "INSERT INTO facturi_linii (factura_id, produs_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, ?, ?, ?, ?)"
     );
     for (const l of linii) {
-      await insertLinie.run(facturaId, l.produs_id, l.denumire, l.cantitate, l.pret_unitar, l.cota_tva);
+      await insertLinie.run(facturaId, l.produs_id, l.denumire, l.cantitate, inLei.pret(l.pret_unitar), l.cota_tva);
     }
     await db.prepare("UPDATE comenzi SET factura_id = ? WHERE id = ?").run(facturaId, comanda.id);
     await db
@@ -2729,6 +2852,9 @@ function register(router) {
       );
     }
 
+    const inLei = facturaInLei(comanda);
+    if (!inLei.ok) return paginaFaraCurs(ctx, comanda, inLei.moneda);
+
     const dataFacturii = new Date().toISOString().slice(0, 10);
     const termenFactura = TP.efectiv(comanda, { termen_plata_zile: await TP.alPartenerului(db, comanda.partener_id) });
     const info = await db
@@ -2741,7 +2867,7 @@ function register(router) {
         ctx.user.id,
         comanda.agent_id || ctx.user.id,
         dataFacturii,
-        "facturare parțială — restul comenzii rămâne deschis",
+        "facturare parțială — restul comenzii rămâne deschis" + (inLei.nota ? " · " + inLei.nota : ""),
         TP.scadenta(dataFacturii, termenFactura) || null
       );
     const facturaId = info.lastInsertRowid;
@@ -2750,7 +2876,7 @@ function register(router) {
     );
     for (const l of deFacturat) {
       const cota = await db.prepare("SELECT cota_tva FROM produse WHERE id = ?").get(l.produs_id);
-      await insertLinie.run(facturaId, l.produs_id, l.denumire, l.acoperit, l.pret_unitar, cota ? cota.cota_tva : 21);
+      await insertLinie.run(facturaId, l.produs_id, l.denumire, l.acoperit, inLei.pret(l.pret_unitar), cota ? cota.cota_tva : 21);
       await db
         .prepare("UPDATE comenzi_linii SET cantitate_livrata = COALESCE(cantitate_livrata, 0) + ? WHERE id = ?")
         .run(l.acoperit, l.id);
