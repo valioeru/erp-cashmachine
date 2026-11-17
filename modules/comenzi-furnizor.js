@@ -360,6 +360,70 @@ async function deTrimisInDepozit(c, linii) {
     .filter((x) => x.rest > EPS_CANT);
 }
 
+// La comenzile de dinainte: TOT ce a intrat în CT-Park în zilele recepției (din
+// ajunul ei până la trei zile după), pe alte drumuri decât comanda asta, strâns
+// pe marfă și zi. Nu ține de denumire: marfa băgată de mână poate fi scrisă
+// oricum, dar a intrat cam atunci. Grupele care seamănă cu un rând al comenzii
+// sau vin de la furnizorul ei stau primele.
+const ZILE_DUPA_RECEPTIE = 3;
+async function intrateInZileleReceptiei(c, randuri) {
+  const rec = String((c && c.data_receptie) || "").slice(0, 10);
+  if (!eData(rec)) return null;
+  const peste = (zi, n) => new Date(new Date(zi + "T12:00:00Z").getTime() + n * 86400000).toISOString().slice(0, 10);
+  let de = peste(rec, -1);
+  const comanda = String(c.data || "").slice(0, 10);
+  if (eData(comanda) && de < comanda) de = comanda;
+  const pana = peste(rec, ZILE_DUPA_RECEPTIE);
+  let paleti;
+  try {
+    paleti = await db
+      .prepare(
+        `SELECT p.id, COALESCE(p.cantitate_intrare, p.cantitate) AS intrat, p.um, p.data_intrare, p.produs_id, p.furnizor_id,
+                COALESCE(pr.denumire, p.produs_text) AS denumire, COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS cod,
+                COALESCE(f.nume, NULLIF(TRIM(p.furnizor_text), '')) AS furnizor
+           FROM ct_paleti p
+           LEFT JOIN produse pr ON pr.id = p.produs_id
+           LEFT JOIN parteneri f ON f.id = p.furnizor_id
+           LEFT JOIN receptii r ON r.id = p.receptie_id
+          WHERE p.data_intrare >= ? AND p.data_intrare < ? AND (r.id IS NULL OR r.comanda_furnizor_id IS NULL OR r.comanda_furnizor_id <> ?)
+          ORDER BY p.data_intrare, p.id LIMIT 1500`
+      )
+      .all(de, peste(pana, 1), c.id);
+  } catch (e) {
+    console.error("[comenzi-furnizor] paleții din zilele recepției nu s-au putut citi:", e.message);
+    return null;
+  }
+  const grupe = new Map();
+  for (const p of paleti) {
+    const zi = String(p.data_intrare || "").slice(0, 10);
+    const k = [p.produs_id || "", faraSemne(p.denumire), faraSemne(p.um), zi].join("|");
+    let g = grupe.get(k);
+    if (!g) {
+      const seamanaCu = (randuri || []).find((x) => (x.l.produs_id && Number(p.produs_id) === Number(x.l.produs_id)) || seamanaLarg(x.l.denumire, `${p.denumire || ""} ${p.cod || ""}`));
+      g = {
+        denumire: String(p.denumire || "(fără denumire)"),
+        cod: String(p.cod || ""),
+        um: String(p.um || ""),
+        zi,
+        paleti: 0,
+        total: 0,
+        cantitati: new Set(),
+        furnizor: String(p.furnizor || ""),
+        acelasiFurnizor: Boolean(c.furnizor_id) && Number(p.furnizor_id) === Number(c.furnizor_id),
+        seamanaCu: seamanaCu ? seamanaCu.l.denumire : "",
+      };
+      grupe.set(k, g);
+    }
+    g.paleti += 1;
+    g.total = rot3(g.total + nr(p.intrat));
+    g.cantitati.add(rot3(nr(p.intrat)));
+  }
+  const lista = [...grupe.values()]
+    .map((g) => Object.assign(g, { pe: g.cantitati.size === 1 ? [...g.cantitati][0] : null, deVazut: Boolean(g.seamanaCu) || g.acelasiFurnizor }))
+    .sort((x, y) => Number(y.deVazut) - Number(x.deVazut) || x.zi.localeCompare(y.zi) || x.denumire.localeCompare(y.denumire, "ro"));
+  return { de, pana, paleti: paleti.length, grupe: lista.slice(0, 80), taiate: Math.max(0, lista.length - 80) };
+}
+
 // La comenzile de dinainte: ce e ACUM în CT-Park din marfa fiecărui rând —
 // același produs sau o denumire care seamănă —, pe paleți ori încă de pus pe
 // raft. Aceeași socoteală ca „Stoc la zi" (lib/stoc-produse.js). Omul vede cu
@@ -377,7 +441,7 @@ async function acumInDepozit(randuri) {
     x.acum = !stoc
       ? null
       : stoc
-          .filter((r) => r.stoc > EPS_CANT && ((x.l.produs_id && Number(r.produs_id) === Number(x.l.produs_id)) || seamana(x.l.denumire, `${r.denumire} ${r.cod || ""}`)))
+          .filter((r) => r.stoc > EPS_CANT && ((x.l.produs_id && Number(r.produs_id) === Number(x.l.produs_id)) || seamanaLarg(x.l.denumire, `${r.denumire} ${r.cod || ""}`)))
           .slice(0, 6)
           .map((r) => ({ denumire: r.denumire, cod: r.cod || "", stoc: r.stoc, um: r.um || "", paleti: r.paleti, dePus: r.dePus, ultima: r.ultima_intrare || "" }));
   }
@@ -425,6 +489,43 @@ function seamana(denumireLinie, denumirePalet) {
     a.cuvinte.filter((w) => b.text.includes(w)).length + (a.gros != null && b.gros === a.gros ? 1 : 0) + (a.kg != null && b.kg != null && Math.abs(a.kg - b.kg) <= 0.001 ? 1 : 0);
   return gasite >= 2 && gasite / total > 0.5;
 }
+
+// Potrivirea mai largă, pentru comenzile de dinainte de DE_LA_DEPOZIT. Acolo
+// întrebarea e „a băgat-o cineva de mână?", iar marfa băgată de mână poartă de
+// multe ori alt nume decât linia comenzii. Pe 17.11.2026, „TUB SP 470 50/62
+// 350 gr" (CF-2026-0020) nu semăna cu „SP 470 50/63 350 gr" — paleți intrați
+// chiar în ziua recepției —, fiindcă denumirea n-are niciun cuvânt de patru
+// litere: e făcută din numere. Pagina spunea „nu e nimic asemănător" despre
+// marfă aflată pe raft. Aici se numără și numerele de cel puțin două cifre, și
+// cuvintele de trei litere. Ce se contrazice rămâne altă marfă: grosimea,
+// greutatea, culoarea, virgin/reciclat și măsurile scrise cu „x" (48x60 nu e
+// 50x60).
+const MASURI = /(\d{2,4})\s*(?:mm|cm|m)?\s*[x*×]\s*(\d{2,4})(?:\s*(?:mm|cm|m)?\s*[x*×]\s*(\d{2,4}))?/g;
+const masuri = (denumire) => [...faraSemne(denumire).matchAll(MASURI)].map((m) => [m[1], m[2], m[3]].filter(Boolean).map(Number).join("x"));
+function bucati(denumire) {
+  return [...new Set(faraSemne(denumire).split(/[^a-z0-9]+/).filter((w) => (/^\d+$/.test(w) ? w.length >= 2 : w.length >= 3)))];
+}
+function seamanaLarg(denumireLinie, denumirePalet) {
+  const a = trasaturi(denumireLinie);
+  const b = trasaturi(denumirePalet);
+  if (a.gros != null && b.gros != null && a.gros !== b.gros) return false;
+  if (a.kg != null && b.kg != null && Math.abs(a.kg - b.kg) > 0.001) return false;
+  if (a.culoare && b.culoare && a.culoare !== b.culoare) return false;
+  if (a.fel && b.fel && a.fel !== b.fel) return false;
+  const ma = masuri(denumireLinie);
+  const mb = masuri(denumirePalet);
+  if (ma.length && mb.length && !ma.some((m) => mb.includes(m))) return false;
+  if (seamana(denumireLinie, denumirePalet)) return true;
+  const A = bucati(denumireLinie);
+  const B = new Set(bucati(denumirePalet));
+  const comune = A.filter((w) => B.has(w));
+  // Numerele spun ce marfă e: cel puțin jumătate din ale liniei trebuie regăsite.
+  // Un singur număr comun din patru („tub … 50") e altă măsură, nu aceeași marfă.
+  const numar = (w) => /^\d+$/.test(w);
+  const numereLinie = A.filter(numar).length;
+  const numereComune = comune.filter(numar).length;
+  return comune.length >= 2 && comune.length / A.length >= 0.5 && numereComune >= 1 && numereComune * 2 >= numereLinie;
+}
 // „Trimite în depozit" pe pagina comenzii: ce e primit și n-a intrat încă în
 // depozit, cu prezentarea de scris și paleții care poate sunt deja ei.
 function sectiuneInDepozit(c, randuri, opt) {
@@ -447,9 +548,9 @@ function sectiuneInDepozit(c, randuri, opt) {
                         }${r.dePus > EPS_CANT ? `, din care ${esc(cantRo(r.dePus))} încă de pus pe raft` : ""}${r.ultima ? `, ultima intrare ${esc(zi(r.ultima))}` : ""}`
                     )
                     .join("; ")}. Dacă marfa rândului e în ele, n-o mai trimite.`
-                : `<strong>În CT-Park nu e acum nimic</strong> care să semene cu marfa asta${
-                    x.poate && x.poate.length ? "" : ", și niciun palet cu ea n-a intrat de la recepție încoace"
-                  }.`
+                : `<strong>N-am găsit în CT-Park marfă cu denumire asemănătoare</strong>${
+                    x.poate && x.poate.length ? "" : ", nici printre paleții intrați de la recepție încoace"
+                  }. Marfa băgată de mână poate fi scrisă altfel: vezi mai jos tot ce a intrat în zilele recepției.`
             }</td></tr>`;
       const poate =
         x.poate && x.poate.length
@@ -489,6 +590,35 @@ function sectiuneInDepozit(c, randuri, opt) {
           <div class="form-actions" style="margin-top:8px"><button class="btn" type="submit">Trimite în depozit →</button></div>
         </form>`;
   if (veche) {
+    // Tot ce a intrat în depozit în zilele recepției, pe alte drumuri.
+    const it = opt && opt.intrate;
+    const intrate = !it
+      ? ""
+      : `<details data-intrate style="margin-top:12px"${it.grupe.some((g) => g.deVazut) ? " open" : ""}>
+          <summary style="cursor:pointer;font-size:13px;font-weight:600">Tot ce a intrat în CT-Park între ${esc(zi(it.de))} și ${esc(zi(it.pana))}, pe alte drumuri decât comanda asta (${it.paleti} ${
+            it.paleti === 1 ? "palet" : "paleți"
+          })</summary>
+          ${
+            it.grupe.length
+              ? `<p style="margin:6px 0;font-size:12px;color:var(--text-muted)">Marfa comenzii, dacă a fost băgată de mână, e printre rândurile astea — poate sub alt nume. Sus stau cele care seamănă cu un rând al comenzii sau vin de la același furnizor.</p>
+                 <div class="tabel-scroll"><table class="tabel" style="font-size:13px">
+                   <thead><tr><th>Marfă</th><th>Paleți</th><th>Cantitate</th><th>Intrat</th><th>Furnizor</th><th>De ce e sus</th></tr></thead>
+                   <tbody>${it.grupe
+                     .map(
+                       (g) => `<tr${g.deVazut ? ' data-de-vazut style="background:#fffaf0"' : ""}>
+                         <td style="white-space:normal">${esc(g.denumire.slice(0, 90))}${g.cod ? ` <span style="color:var(--text-muted)">(${esc(g.cod)})</span>` : ""}</td>
+                         <td>${g.paleti}${g.pe !== null && g.paleti > 1 ? ` × ${esc(cantRo(g.pe))}` : ""}</td>
+                         <td>${esc(cantRo(g.total))} ${esc(g.um)}</td>
+                         <td>${esc(zi(g.zi))}</td>
+                         <td>${esc(g.furnizor || "—")}</td>
+                         <td style="white-space:normal">${[g.seamanaCu ? "seamănă cu „" + esc(g.seamanaCu.slice(0, 60)) + "”" : "", g.acelasiFurnizor ? "același furnizor" : ""].filter(Boolean).join("; ") || ""}</td>
+                       </tr>`
+                     )
+                     .join("")}</tbody>
+                 </table></div>${it.taiate ? `<p style="font-size:12px;color:var(--text-muted)">…și încă ${it.taiate} feluri de marfă.</p>` : ""}`
+              : `<p style="margin:6px 0;font-size:13px">Niciun palet n-a intrat în CT-Park în zilele astea, în afara celor de pe comandă.</p>`
+          }
+        </details>`;
     // Comanda de dinainte: caseta stă închisă (nu e o alarmă — cel mai des
     // marfa a intrat de mână) și se deschide la cerere sau după o greșeală.
     return `
@@ -505,6 +635,7 @@ function sectiuneInDepozit(c, randuri, opt) {
             CT-Park din marfa lui.
           </p>
           ${formular}
+          ${intrate}
         </div>
       </details>`;
   }
@@ -592,7 +723,8 @@ async function poateDejaPeRaft(c, randuri) {
     .all(de, c.id)
     .catch(() => []);
   for (const x of randuri) {
-    x.poate = paleti.filter((p) => (x.l.produs_id && Number(p.produs_id) === Number(x.l.produs_id)) || seamana(x.l.denumire, p.denumire)).slice(0, 12);
+    const seamanaCu = x.veche ? seamanaLarg : seamana;
+    x.poate = paleti.filter((p) => (x.l.produs_id && Number(p.produs_id) === Number(x.l.produs_id)) || seamanaCu(x.l.denumire, p.denumire)).slice(0, 12);
     x.poateDe = de;
   }
   return randuri;
@@ -2062,6 +2194,7 @@ function register(router) {
     const eroareReceptie = text(q.eroare_receptie);
     const recDepozit = parseInt(q.rec, 10) || 0;
     const deTrimis = poateTrimite(ctx.user) ? await acumInDepozit(await poateDejaPeRaft(c, await deTrimisInDepozit(c, linii))) : [];
+    const intrateInZile = deTrimis.some((x) => x.veche) ? await intrateInZileleReceptiei(c, deTrimis) : null;
 
     const body = `
       <div class="toolbar" style="flex-wrap:wrap">
@@ -2214,7 +2347,7 @@ function register(router) {
           : ""
       }
 
-      ${deTrimis.length ? sectiuneInDepozit(c, deTrimis, { deschis: Boolean(eroareReceptie) || text(q.depozit) === "1" }) : ""}
+      ${deTrimis.length ? sectiuneInDepozit(c, deTrimis, { deschis: Boolean(eroareReceptie) || text(q.depozit) === "1", intrate: intrateInZile }) : ""}
       ${SCRIPT_PREZENTARE}
 
       <h2 style="margin-top:32px">Istoric — cine a modificat ce și când</h2>
@@ -2464,4 +2597,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, EXPEDITOR, MONEDE, UNITATI, poateModifica, citesteFormular, __test: { seamana, trasaturi } };
+module.exports = { register, EXPEDITOR, MONEDE, UNITATI, poateModifica, citesteFormular, __test: { seamana, seamanaLarg, trasaturi } };
