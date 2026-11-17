@@ -321,6 +321,15 @@ async function start() {
   require("./modules/culegere").porneste();
   await auth.curataSesiuni();
   setInterval(() => auth.curataSesiuni(), 60 * 60 * 1000).unref();
+  // Parcarea produselor cu cod vechi, fără stoc, nefolosite de 30 de zile
+  // (lib/cod-vechi.js): la pornire și apoi din șase în șase ore. Înainte de
+  // 17.12.2026 nu parchează nimic.
+  const parcheazaCodVechi = () =>
+    require("./lib/cod-vechi")
+      .parcheaza()
+      .catch((e) => console.error("[cod-vechi] parcarea a căzut:", e.message));
+  setTimeout(parcheazaCodVechi, 90 * 1000).unref();
+  setInterval(parcheazaCodVechi, 6 * 60 * 60 * 1000).unref();
   setInterval(() => {
     require("./modules/curs").seed().catch(() => null);
   }, 6 * 60 * 60 * 1000).unref();
