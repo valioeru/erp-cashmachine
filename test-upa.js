@@ -193,6 +193,10 @@ const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) ||
   await cer("/facturi/:id/upa", { metoda: "post", params: { id: String(f2.id) }, body: { upa: "0" } });
   pf = await cer("/facturi/:id", { params: { id: String(f2.id) } });
   egal("după ce a plecat în SmartBill nu se mai schimbă, iar pagina arată seria cu care a plecat, fără buton", [Number(factura(f2.id).upa), /<div data-upa-factura><div class="k">Seria<\/div>CSHMUPA/.test(pf.corp), /action="\/facturi\/\d+\/upa"/.test(pf.corp)], [1, true, false]);
+  exec(`UPDATE facturi SET sursa_import = 'smartbill', serie = 'CSHMUPA', numar = 86, upa = 0 WHERE id = ${f1.id}`);
+  await cer("/facturi/:id/upa", { metoda: "post", params: { id: String(f1.id) }, body: { upa: "1" } });
+  pf = await cer("/facturi/:id", { params: { id: String(f1.id) } });
+  egal("factura adusă din SmartBill își arată seria ei și n-are buton: nu se mai trimite, deci n-are ce alege", [Number(factura(f1.id).upa), /<div data-upa-factura><div class="k">Seria<\/div>CSHMUPA/.test(pf.corp), /action="\/facturi\/\d+\/upa"/.test(pf.corp)], [0, true, false]);
   r = await cer("/facturi/:id/upa", { metoda: "post", params: { id: "999999999" }, body: { upa: "1" } });
   egal("factură care nu există: 404", r.cod, 404);
 
