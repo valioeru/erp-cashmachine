@@ -14,6 +14,13 @@ const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const concurenta = require("./concurenta");
 const inbox = require("./inbox");
+// Oferta în lei, euro sau dolari, cu cursul fixat pe ea (Vali, 17.11.2026:
+// „la orice comandă, preț etc., din orice loc în tot sistemul, prețurile se
+// introduc în RON sau EUR; se păstrează cursul introdus sau BNR; odată plasat,
+// așa rămâne"). Aceleași reguli ca la comanda de client: lib/curs-comanda.js.
+// Alegerea monedei în formular: lib/pret-valuta.js.
+const CC = require("../lib/curs-comanda");
+const PV = require("../lib/pret-valuta");
 
 const STATUS = {
   ciorna: "Ciornă",
@@ -40,6 +47,15 @@ function azi() {
 
 function nrDoc(prefix, id) {
   return `${prefix}${String(id).padStart(5, "0")}`;
+}
+
+const monedaOfertei = (o) => String((o && o.moneda) || "RON").toUpperCase();
+// Suma sub care se scrie, la oferta în valută, echivalentul în lei la cursul ei.
+function cuLei(v, o) {
+  const m = monedaOfertei(o);
+  if (m === "RON") return money(v);
+  const lei = CC.inLei(v, o);
+  return `${esc(CC.suma(v, m))}${lei === null ? "" : `<br><span style="font-size:11px;color:var(--text-muted)">≈ ${money(lei)}</span>`}`;
 }
 
 async function totalOferta(ofertaId) {
@@ -112,7 +128,7 @@ function register(router) {
           `<a href="/oferte/${o.id}">${esc(o.numar || nrDoc("OF", o.id))}</a>${o.versiune > 1 ? ` <span class="badge gri">v${o.versiune}</span>` : ""}`,
           `<a href="/parteneri/${o.partener_id}">${esc(o.client)}</a>`,
           esc(o.titlu || "—"),
-          money(o.total),
+          cuLei(o.total, o),
           o.valabil_pana ? esc(o.valabil_pana) : "—",
           esc(o.agent || "—"),
           `<span class="badge ${BADGE[o.status] || "gri"}">${esc(STATUS[o.status] || o.status)}</span>`,
@@ -134,16 +150,23 @@ function register(router) {
     const presel = parseInt(ctx.query.partener_id, 10);
     const body = `
       ${subnavCrm("/oferte", ctx.user)}
+      ${ctx.query.eroare ? `<div class="flash flash-rosu" role="alert" style="max-width:560px;background:#f8e5e3;border-color:#efc9c4;color:var(--danger)">${esc(String(ctx.query.eroare))}</div>` : ""}
       <form method="post" action="/oferte" class="form" style="max-width:560px">
         <label class="field"><span>Client</span>
           ${cautaClient({ nume: "client_cautat", obligatoriu: true, partenerId: presel || "", valoare: (parteneri.find((p) => p.id === presel) || {}).nume })}
         </label>
-        <label class="field"><span>Titlu</span><input name="titlu" placeholder="ex. Cutii D7 — livrare lunară"></label>
-        <label class="field"><span>Valabilă până la</span><input type="date" name="valabil_pana"></label>
+        <label class="field"><span>Titlu</span><input name="titlu" placeholder="ex. Cutii D7 — livrare lunară" value="${esc(ctx.query.titlu || "")}"></label>
+        <label class="field"><span>Valabilă până la</span><input type="date" name="valabil_pana" value="${esc(ctx.query.valabil_pana || "")}"></label>
+        ${PV.camp(ctx.query || {}, { eticheta: "Prețurile ofertei sunt în" })}
+        <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 0">
+          La o ofertă în euro sau dolari, cursul lăsat gol e BNR-ul de azi; scris de tine, rămâne exact acela.
+          Cursul rămâne al ofertei și nu se mai mișcă singur.
+        </p>
         <label class="field"><span>Observații</span><textarea name="observatii" rows="3"></textarea></label>
         <button class="btn" type="submit">Creează oferta</button>
       </form>
       ${cautaClientScript(randuriClienti(parteneri, agentiToti))}
+      ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Ofertă nouă", active: "/oferte", body }));
   });
@@ -152,9 +175,36 @@ function register(router) {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const partenerId = parseInt(ctx.body.partener_id, 10);
     if (!Number.isFinite(partenerId)) return redirect(ctx.res, "/oferte/nou");
+    // Moneda și cursul ofertei. O monedă necunoscută, un curs care nu e număr
+    // sau BNR-ul mut fără curs scris: oferta nu se face, iar formularul se
+    // întoarce cu ce era scris și cu motivul.
+    const ales = await PV.dinFormular(ctx.body, require("./curs").laZiua);
+    if (!ales.ok) {
+      const q = new URLSearchParams({
+        eroare: ales.eroare,
+        partener_id: String(partenerId),
+        titlu: String(ctx.body.titlu || ""),
+        valabil_pana: String(ctx.body.valabil_pana || ""),
+        [PV.CAMP_MONEDA]: String(ctx.body[PV.CAMP_MONEDA] || ""),
+        [PV.CAMP_CURS]: String(ctx.body[PV.CAMP_CURS] || ""),
+      });
+      return redirect(ctx.res, `/oferte/nou?${q.toString()}`);
+    }
     const ins = await db
-      .prepare("INSERT INTO oferte (partener_id, agent_id, titlu, valabil_pana, observatii, status) VALUES (?, ?, ?, ?, ?, 'ciorna') RETURNING id")
-      .run(partenerId, ctx.user.id, String(ctx.body.titlu || "").trim() || null, String(ctx.body.valabil_pana || "").trim() || null, String(ctx.body.observatii || "").trim() || null);
+      .prepare(
+        "INSERT INTO oferte (partener_id, agent_id, titlu, valabil_pana, observatii, status, moneda, curs_bnr, curs_bnr_data, curs_manual) VALUES (?, ?, ?, ?, ?, 'ciorna', ?, ?, ?, ?) RETURNING id"
+      )
+      .run(
+        partenerId,
+        ctx.user.id,
+        String(ctx.body.titlu || "").trim() || null,
+        String(ctx.body.valabil_pana || "").trim() || null,
+        String(ctx.body.observatii || "").trim() || null,
+        ales.moneda,
+        ales.curs,
+        ales.data,
+        ales.manual
+      );
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE oferte SET numar = ?, radacina_id = ? WHERE id = ?").run(nrDoc("OF", id), id, id);
     redirect(ctx.res, `/oferte/${id}`);
@@ -174,6 +224,10 @@ function register(router) {
       .all(o.radacina_id || o.id);
     const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 2000").all();
     const editabil = poateEdita(ctx.user, o) && ["ciorna", "trimisa"].includes(o.status);
+    // Moneda ofertei: în ea sunt scrise prețurile liniilor și totalul.
+    const mo = monedaOfertei(o);
+    const bani = (v) => (mo === "RON" ? money(v) : esc(CC.suma(v, mo)));
+    const pretul = (v) => (mo === "RON" ? money(v) : esc(CC.pret(v, mo)));
 
     // Blocul de piață: cu ce prețuri ne bate concurența la clientul ăsta.
     // Îl umplu cu liniile ofertei ca referință, ca diferența să se vadă pe loc,
@@ -234,14 +288,16 @@ function register(router) {
       const nostru = Number(l.pret_unitar) || 0;
       return lista
         .map((x) => {
-          const dif = nostru && x.moneda === "RON" ? nostru - x.pret : null;
+          // Diferența are sens doar între prețuri în aceeași monedă.
+          const dif = nostru && String(x.moneda || "RON").toUpperCase() === mo ? nostru - x.pret : null;
           const semn =
             dif === null
               ? ""
               : dif > 0
-              ? ` <span style="color:var(--danger)">(+${money(dif)} la noi)</span>`
-              : ` <span style="color:var(--ok,#1e7a45)">(${money(dif)} la noi)</span>`;
-          return `<div style="font-size:12px;white-space:nowrap">${esc(x.concurent)}: <strong>${money(x.pret)}</strong> ${esc(x.moneda)}${
+              ? ` <span style="color:var(--danger)">(+${bani(dif)} la noi)</span>`
+              : ` <span style="color:var(--ok,#1e7a45)">(${bani(dif)} la noi)</span>`;
+          // Prețul concurentului, în moneda lui (era „9,00 lei EUR").
+          return `<div style="font-size:12px;white-space:nowrap">${esc(x.concurent)}: <strong>${esc(CC.pret(x.pret, x.moneda))}</strong>${
             x.um ? "/" + esc(x.um) : ""
           } · ${esc(x.data)}${semn}</div>`;
         })
@@ -253,7 +309,7 @@ function register(router) {
       ofertaId: o.id,
       partenerId: o.partener_id,
       inapoi: `/oferte/${o.id}`,
-      referinte: linii.map((l) => ({ produs_id: l.produs_id, denumire: l.denumire, pret: l.pret_unitar, moneda: "RON" })),
+      referinte: linii.map((l) => ({ produs_id: l.produs_id, denumire: l.denumire, pret: l.pret_unitar, moneda: mo })),
     });
 
     const body = `
@@ -267,8 +323,35 @@ function register(router) {
           <div><div class="k">Agent</div>${esc(o.agent || "—")}</div>
           <div><div class="k">Stare</div><span class="badge ${BADGE[o.status] || "gri"}">${esc(STATUS[o.status] || o.status)}</span></div>
           <div><div class="k">Valabilă până</div>${esc(o.valabil_pana || "—")}</div>
-          <div><div class="k">Valoare</div><strong>${money(t.net)}</strong> <span style="font-size:12px;color:var(--text-muted)">(${money(t.brut)} cu TVA)</span></div>
+          <div><div class="k">Valoare</div><strong>${bani(t.net)}</strong> <span style="font-size:12px;color:var(--text-muted)">(${bani(t.brut)} cu TVA)</span>${
+            mo === "RON" ? "" : `<div style="font-size:12px;color:var(--text-muted)">${esc(CC.explica(t.net, o, "ofertă"))}</div>`
+          }</div>
+          <div id="moneda-oferta"><div class="k">Monedă</div>${
+            mo === "RON" ? "lei" : `<strong>${esc(mo)}</strong> <span style="font-size:12px;color:var(--text-muted)">curs ${esc(CC.eticheta(o, "ofertă") || "—")}</span>`
+          }</div>
         </div>
+        ${
+          // Oferta cu linii își ține moneda (prețurile lor sunt scrise în ea):
+          // pe una în lei nu mai e nimic de ales, pe una în valută doar cursul.
+          editabil && (!linii.length || mo !== "RON")
+            ? `<details style="margin-top:10px"${ctx.query.moneda ? " open" : ""}>
+                 <summary style="cursor:pointer;font-size:13px">${linii.length ? "Schimbă cursul ofertei" : "Schimbă moneda sau cursul ofertei"}</summary>
+                 <form method="post" action="/oferte/${o.id}/moneda" class="form" style="max-width:560px;margin-top:8px">
+                   ${PV.camp(
+                     { [PV.CAMP_MONEDA]: mo, [PV.CAMP_CURS]: mo === "RON" || !(Number(o.curs_bnr) > 0) ? "" : CC.scrie(o.curs_bnr) },
+                     { eticheta: "Prețurile ofertei sunt în", doar: linii.length ? [mo] : null }
+                   )}
+                   <p style="font-size:12px;color:var(--text-muted);margin:-4px 0 0">${
+                     linii.length
+                       ? "Oferta are linii, deci moneda rămâne: prețurile lor sunt scrise în ea. Cursul îl poți schimba — golit, se ia BNR-ul de azi."
+                       : "Cursul lăsat gol e BNR-ul de azi; scris de tine, rămâne exact acela."
+                   }</p>
+                   <button class="btn secondary" type="submit">Salvează</button>
+                 </form>
+                 ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}
+               </details>`
+            : ""
+        }
         ${o.observatii ? `<p style="margin:10px 0 0;font-size:13px">${esc(o.observatii)}</p>` : ""}
         ${o.motiv_respingere ? `<p style="margin:10px 0 0;font-size:13px;color:var(--danger)">Respinsă: ${esc(o.motiv_respingere)}</p>` : ""}
       </div>
@@ -280,15 +363,15 @@ function register(router) {
           esc(l.denumire),
           esc(l.um || "buc"),
           Number(l.cantitate).toLocaleString("ro-RO"),
-          money(l.pret_unitar),
+          pretul(l.pret_unitar),
           `${Number(l.cota_tva).toFixed(0)}%`,
-          money(l.cantitate * l.pret_unitar),
+          bani(l.cantitate * l.pret_unitar),
           piataLiniei(l),
           ...(editabil
             ? [`<form method="post" action="/oferte/${o.id}/linii/${l.id}/sterge" class="inline-form"><button class="link-btn danger" type="submit">șterge</button></form>`]
             : []),
         ]),
-        { total: ["TOTAL", "", "", "", "", money(t.net), "", ...(editabil ? [""] : [])] }
+        { total: ["TOTAL", "", "", "", "", bani(t.net), "", ...(editabil ? [""] : [])] }
       )}
 
       ${
@@ -302,7 +385,7 @@ function register(router) {
                     ${produse
                       .map(
                         (p) =>
-                          `<option value="${p.id}" data-pret="${p.pret_vanzare}">${esc(p.denumire)}${
+                          `<option value="${p.id}" data-pret="${CC.dinLei(p.pret_vanzare, o) ?? ""}">${esc(p.denumire)}${
                             piataProduse[String(p.id)] ? " ●" : ""
                           }</option>`
                       )
@@ -312,13 +395,15 @@ function register(router) {
                 <label class="field" style="flex:2;min-width:180px"><span>Denumire (dacă nu alegi produs)</span><input name="denumire"></label>
                 <label class="field" style="width:90px"><span>U.M.</span><input name="um" value="buc"></label>
                 <label class="field" style="width:110px"><span>Cantitate</span><input name="cantitate" type="number" step="0.001" value="1" required></label>
-                <label class="field" style="width:130px"><span>Preț unitar</span><input name="pret_unitar" type="number" step="0.01" required></label>
+                <label class="field" style="width:150px"><span>Preț unitar${mo === "RON" ? "" : " (" + esc(mo) + ")"}</span><input name="pret_unitar" type="number" step="0.0001" required></label>
                 <label class="field" style="width:90px"><span>TVA %</span><input name="cota_tva" type="number" step="0.1" value="21"></label>
                 <button class="btn" type="submit">Adaugă linia</button>
               </div>
               <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0">
                 Produsele cu ● au prețuri de concurență în ERP (${cuPiata} din ${produse.length}).
-                Alege produsul și le vezi aici, cu data lor.
+                Alege produsul și le vezi aici, cu data lor.${
+                  mo === "RON" ? "" : ` Prețurile se scriu în ${esc(mo)}; echivalentul în lei e la cursul ofertei.`
+                }
               </p>
             </form>
             <script>
@@ -328,6 +413,8 @@ function register(router) {
               // deja prețul lui — exact prea târziu.
               (function () {
                 var PIATA = ${piataJson};
+                var MONEDA = ${JSON.stringify(mo)};
+                var NUME_MONEDA = ${JSON.stringify(CC.SIMBOL[mo] || mo)};
                 var sel = document.getElementById("alege-produs");
                 var cutia = document.getElementById("piata-produs");
                 var pretul = document.querySelector('input[name="pret_unitar"]');
@@ -346,11 +433,11 @@ function register(router) {
                   for (var i = 0; i < lista.length; i++) {
                     var x = lista[i];
                     var dif = "";
-                    if (alNostru && x.moneda === "RON") {
+                    if (alNostru && String(x.moneda || "RON").toUpperCase() === MONEDA) {
                       var d = alNostru - x.pret;
                       dif = d > 0
-                        ? ' <span style="color:var(--danger)">(+' + bani(d) + ' lei la noi)</span>'
-                        : ' <span style="color:var(--ok,#1e7a45)">(' + bani(d) + ' lei la noi)</span>';
+                        ? ' <span style="color:var(--danger)">(+' + bani(d) + ' ' + NUME_MONEDA + ' la noi)</span>'
+                        : ' <span style="color:var(--ok,#1e7a45)">(' + bani(d) + ' ' + NUME_MONEDA + ' la noi)</span>';
                     }
                     r.push('<div style="font-size:13px;margin-top:4px">' + esc(x.concurent) + ": <strong>" +
                       bani(x.pret) + " " + esc(x.moneda) + (x.um ? "/" + esc(x.um) : "") + "</strong> · " + esc(x.data) + dif + "</div>");
@@ -453,7 +540,9 @@ function register(router) {
       const p = await db.prepare("SELECT denumire, pret_vanzare, cota_tva, unitate_masura FROM produse WHERE id = ?").get(produsId);
       if (p) {
         if (!denumire) denumire = p.denumire;
-        if (!pret) pret = Number(p.pret_vanzare) || 0;
+        // Prețul din nomenclator e în lei: pe o ofertă în valută intră trecut
+        // în moneda ei, la cursul ofertei.
+        if (!pret) pret = CC.dinLei(p.pret_vanzare, o) || 0;
         if (!ctx.body.um) um = p.unitate_masura || "buc";
       }
     }
@@ -471,6 +560,39 @@ function register(router) {
     const o = await db.prepare("SELECT * FROM oferte WHERE id = ?").get(ctx.params.id);
     if (o && poateEdita(ctx.user, o)) await db.prepare("DELETE FROM oferte_linii WHERE id = ? AND oferta_id = ?").run(ctx.params.lid, o.id);
     redirect(ctx.res, `/oferte/${ctx.params.id}`);
+  });
+
+  // ---------------- moneda și cursul ofertei ----------------
+  //
+  // Moneda se alege la crearea ofertei și se mai poate schimba doar cât oferta
+  // n-are linii: prețurile liniilor sunt scrise în ea, iar un „12,50" rămas din
+  // euro și citit drept lei e exact greșeala care a făcut FCT-3 de cinci ori
+  // mai mică. Cursul se poate schimba oricând oferta mai e de lucru, cu
+  // regulile comenzii (lib/curs-comanda.js): nescris altfel, rămâne cum era;
+  // golit, se ia BNR-ul de azi; scris, rămâne exact acela.
+  router.post("/oferte/:id/moneda", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const o = await db.prepare("SELECT * FROM oferte WHERE id = ?").get(ctx.params.id);
+    if (!o || !poateEdita(ctx.user, o) || !["ciorna", "trimisa"].includes(o.status)) return redirect(ctx.res, `/oferte/${ctx.params.id}`);
+    const inapoi = (text) => redirect(ctx.res, `/oferte/${o.id}?moneda=1&eroare=${encodeURIComponent(text)}`);
+    const b = ctx.body || {};
+    const m = PV.moneda(b[PV.CAMP_MONEDA]);
+    if (m === null) return inapoi("Moneda aleasă nu e una dintre lei, euro și dolari.");
+    const veche = monedaOfertei(o);
+    const areLinii = Number((await db.prepare("SELECT COUNT(*) AS n FROM oferte_linii WHERE oferta_id = ?").get(o.id)).n) > 0;
+    if (areLinii && m !== veche) {
+      return inapoi(
+        `Oferta are deja linii cu prețuri în ${veche === "RON" ? "lei" : veche}. Moneda se schimbă doar pe o ofertă fără linii: șterge liniile sau fă o ofertă nouă. Cursul îl poți schimba oricând.`
+      );
+    }
+    const scris = m === "RON" ? { ok: true, valoare: null } : CC.citeste(b[PV.CAMP_CURS]);
+    if (!scris.ok) return inapoi(CC.MESAJ_CURS);
+    const bnr = m === "RON" ? null : await Promise.resolve(require("./curs").laZiua(m, azi())).catch(() => null);
+    const golit = m !== "RON" && b[PV.CAMP_CURS] !== undefined && String(b[PV.CAMP_CURS]).trim() === "";
+    const nou = CC.laModificare({ comanda: o, moneda: m, scris: scris.valoare, bnr, golit });
+    if (m !== "RON" && !(Number(nou.curs) > 0)) return inapoi(`BNR nu are acum curs pentru ${m}. Scrie cursul în câmpul de lângă monedă.`);
+    await db.prepare("UPDATE oferte SET moneda = ?, curs_bnr = ?, curs_bnr_data = ?, curs_manual = ? WHERE id = ?").run(m, nou.curs, nou.data, nou.manual, o.id);
+    redirect(ctx.res, `/oferte/${o.id}`);
   });
 
   // ---------------- stări ----------------
@@ -508,8 +630,14 @@ function register(router) {
     const radacina = o.radacina_id || o.id;
     const max = await db.prepare("SELECT COALESCE(MAX(versiune),1) AS v FROM oferte WHERE radacina_id = ?").get(radacina);
     const ins = await db
-      .prepare("INSERT INTO oferte (numar, versiune, radacina_id, partener_id, oportunitate_id, agent_id, titlu, status, valabil_pana, observatii) VALUES (?, ?, ?, ?, ?, ?, ?, 'ciorna', ?, ?) RETURNING id")
-      .run(o.numar, Number(max.v) + 1, radacina, o.partener_id, o.oportunitate_id, o.agent_id || ctx.user.id, o.titlu, o.valabil_pana, o.observatii);
+      // Versiunea nouă e aceeași ofertă, revizuită: își ține moneda și cursul.
+      .prepare(
+        "INSERT INTO oferte (numar, versiune, radacina_id, partener_id, oportunitate_id, agent_id, titlu, status, valabil_pana, observatii, moneda, curs_bnr, curs_bnr_data, curs_manual) VALUES (?, ?, ?, ?, ?, ?, ?, 'ciorna', ?, ?, ?, ?, ?, ?) RETURNING id"
+      )
+      .run(
+        o.numar, Number(max.v) + 1, radacina, o.partener_id, o.oportunitate_id, o.agent_id || ctx.user.id, o.titlu, o.valabil_pana, o.observatii,
+        monedaOfertei(o), o.curs_bnr == null ? null : Number(o.curs_bnr), o.curs_bnr_data || null, Number(o.curs_manual) === 1 ? 1 : 0
+      );
     const nouId = ins.lastInsertRowid;
     const linii = await db.prepare("SELECT * FROM oferte_linii WHERE oferta_id = ?").all(o.id);
     for (const l of linii) {
@@ -524,9 +652,19 @@ function register(router) {
   // ---------------- acceptare → contract și/sau comandă ----------------
   async function faContract(o, user) {
     const t = await totalOferta(o.id);
+    // Valoarea contractului se ține în lei. La o ofertă în valută e totalul ei
+    // la cursul ofertei, iar contractul spune din ce s-a făcut.
+    const mo = monedaOfertei(o);
+    const lei = CC.inLei(t.net, o);
+    const nota =
+      mo === "RON"
+        ? null
+        : lei === null
+          ? `Din oferta ${o.numar || nrDoc("OF", o.id)}, în ${mo}: ${CC.suma(t.net, mo)}. Oferta n-are curs, deci valoarea în lei a contractului e de scris de mână.`
+          : `Din oferta ${o.numar || nrDoc("OF", o.id)}, în ${mo}: ${CC.suma(t.net, mo)} × ${CC.eticheta(o, "ofertă").replace(` lei/${mo}`, "")}.`;
     const ins = await db
-      .prepare("INSERT INTO contracte (partener_id, oferta_id, agent_id, titlu, valoare, data_start, status) VALUES (?, ?, ?, ?, ?, ?, 'in_lucru') RETURNING id")
-      .run(o.partener_id, o.id, o.agent_id || user.id, o.titlu || `Contract din oferta ${o.numar || nrDoc("OF", o.id)}`, t.net, azi());
+      .prepare("INSERT INTO contracte (partener_id, oferta_id, agent_id, titlu, valoare, data_start, status, observatii) VALUES (?, ?, ?, ?, ?, ?, 'in_lucru', ?) RETURNING id")
+      .run(o.partener_id, o.id, o.agent_id || user.id, o.titlu || `Contract din oferta ${o.numar || nrDoc("OF", o.id)}`, lei === null ? 0 : lei, azi(), nota);
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE contracte SET numar = ? WHERE id = ?").run(nrDoc("CTR", id), id);
     await db.prepare("UPDATE oferte SET contract_id = ? WHERE id = ?").run(id, o.id);
@@ -534,9 +672,25 @@ function register(router) {
   }
 
   async function faComanda(o, user, contractId) {
+    // Comanda e în moneda ofertei: prețurile liniilor trec pe ea așa cum sunt
+    // scrise. Cursul: cel pus de om pe ofertă e cel convenit cu clientul și
+    // merge pe comandă; altfel comanda se plasează azi, deci cu BNR-ul de azi.
+    // Dacă BNR-ul nu răspunde, rămâne cursul ofertei — unul bun nu se pierde.
+    const mo = monedaOfertei(o);
+    let curs = { curs: null, data: null, manual: 0 };
+    if (mo !== "RON") {
+      if (Number(o.curs_manual) === 1 && Number(o.curs_bnr) > 0) curs = { curs: Number(o.curs_bnr), data: null, manual: 1 };
+      else {
+        const bnr = await Promise.resolve(require("./curs").laZiua(mo, azi())).catch(() => null);
+        curs = CC.laPlasare({ moneda: mo, scris: null, bnr });
+        if (!(Number(curs.curs) > 0) && Number(o.curs_bnr) > 0) curs = { curs: Number(o.curs_bnr), data: o.curs_bnr_data || null, manual: 0 };
+      }
+    }
     const ins = await db
-      .prepare("INSERT INTO comenzi (partener_id, numar, data, status, observatii, oferta_id, contract_id, agent_id) VALUES (?, ?, ?, 'noua', ?, ?, ?, ?) RETURNING id")
-      .run(o.partener_id, null, azi(), `Din oferta ${o.numar || nrDoc("OF", o.id)}`, o.id, contractId || o.contract_id || null, o.agent_id || user.id);
+      .prepare(
+        "INSERT INTO comenzi (partener_id, numar, data, status, observatii, oferta_id, contract_id, agent_id, moneda, curs_bnr, curs_bnr_data, curs_manual) VALUES (?, ?, ?, 'noua', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
+      )
+      .run(o.partener_id, null, azi(), `Din oferta ${o.numar || nrDoc("OF", o.id)}`, o.id, contractId || o.contract_id || null, o.agent_id || user.id, mo, curs.curs, curs.data, curs.manual);
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE comenzi SET numar = ? WHERE id = ?").run(nrDoc("CMD", id), id);
     // Termenul de plată din fișa clientului, copiat pe comandă (lib/termen-plata.js).

@@ -103,6 +103,17 @@ function zile(data) {
 
 function corpOferta(o, linii, u, semnatura) {
   const nrOf = o.numar || "OF" + String(o.id).padStart(5, "0");
+  // Moneda ofertei (Vali, 17.11.2026): prețurile se scriu în ea, nu „lei" din
+  // reflex — o ofertă în euro trimisă cu „lei" lângă sume e de cinci ori mai
+  // ieftină decât a vrut agentul. În textul simplu al mesajului moneda se scrie
+  // cu litere (EUR, USD), ca să ajungă întreagă și în Outlook pe text simplu.
+  const moneda = String(o.moneda || "RON").toUpperCase();
+  const um = moneda === "RON" ? "lei" : moneda;
+  // Prețul unitar: două zecimale, patru când le are (0,0345 pe bucată).
+  const pretUnitar = (v) => {
+    const n = Math.round(Number(v || 0) * 1e4) / 1e4;
+    return nrRo(n, Number.isInteger(Math.round(n * 1e4) / 100) ? 2 : 4);
+  };
   const persoana = String(o.persoana_contact || "").trim();
   const net = linii.reduce((s, l) => s + Number(l.cantitate || 0) * Number(l.pret_unitar || 0), 0);
   const brut = linii.reduce(
@@ -126,14 +137,14 @@ function corpOferta(o, linii, u, semnatura) {
   const randuri = linii.map(
     (l) =>
       ` ${stanga(l.denumire, 30)} ${stanga(l.um || "buc", 6)} ${dreapta(cant(l.cantitate), 10)} ${dreapta(
-        nrRo(l.pret_unitar) + " lei",
+        pretUnitar(l.pret_unitar) + " " + um,
         14
-      )} ${dreapta(nrRo(Number(l.cantitate || 0) * Number(l.pret_unitar || 0)) + " lei", 15)}`
+      )} ${dreapta(nrRo(Number(l.cantitate || 0) * Number(l.pret_unitar || 0)) + " " + um, 15)}`
   );
   const totaluri = [
-    ` ${dreapta("Total fără TVA:", cap.length - 17)} ${dreapta(nrRo(net) + " lei", 15)}`,
-    ` ${dreapta("TVA:", cap.length - 17)} ${dreapta(nrRo(brut - net) + " lei", 15)}`,
-    ` ${dreapta("TOTAL de plată:", cap.length - 17)} ${dreapta(nrRo(brut) + " lei", 15)}`,
+    ` ${dreapta("Total fără TVA:", cap.length - 17)} ${dreapta(nrRo(net) + " " + um, 15)}`,
+    ` ${dreapta("TVA:", cap.length - 17)} ${dreapta(nrRo(brut - net) + " " + um, 15)}`,
+    ` ${dreapta("TOTAL de plată:", cap.length - 17)} ${dreapta(nrRo(brut) + " " + um, 15)}`,
   ];
 
   return [
@@ -150,7 +161,7 @@ function corpOferta(o, linii, u, semnatura) {
     o.valabil_pana ? `Oferta este valabilă până la ${zile(o.valabil_pana)}.` : "",
     o.observatii ? String(o.observatii) : "",
     o.observatii || o.valabil_pana ? "" : "",
-    "Prețurile sunt în lei. Rămân la dispoziția dumneavoastră pentru orice",
+    `Prețurile sunt în ${moneda === "RON" ? "lei" : moneda === "EUR" ? "euro (EUR)" : moneda === "USD" ? "dolari (USD)" : moneda}. Rămân la dispoziția dumneavoastră pentru orice`,
     "lămurire sau ajustare a cantităților.",
     "",
     "Cu stimă,",
@@ -705,4 +716,4 @@ function register(router) {
   });
 }
 
-module.exports = { register };
+module.exports = { register, corpOferta };

@@ -253,12 +253,9 @@ async function pagina(ctx, opt) {
   const tip = String(q.tip || "");
   const arata = ARATA[String(q.arata || "")] ? String(q.arata) : "";
   const tipRand = (r) => (TIPURI.includes(r.tip) ? r.tip : FARA_TIP);
-  const bucati = fara(cauta).split(/\s+/).filter(Boolean);
-  const dupaCautare = toate.filter((r) => {
-    if (!bucati.length) return true;
-    const t = SP.textCautare(r);
-    return bucati.every((b) => t.includes(b));
-  });
+  // Fiecare cuvânt scris trebuie să se regăsească în rând; semnele din jurul
+  // cuvintelor (paranteze, puncte) nu contează — lib/stoc-produse.js, cuvinte.
+  const dupaCautare = toate.filter((r) => SP.sePotriveste(r, cauta));
   const dupaTip = dupaCautare.filter((r) => !tip || tipRand(r) === tip);
   const vizibile = dupaTip.filter((r) => !arata || ARATA[arata].potrivit(r));
 

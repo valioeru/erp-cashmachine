@@ -27,6 +27,8 @@ const T = require("../lib/termene");
 const livrare = require("../lib/livrare-partiala");
 const stari = require("../lib/comenzi-stari");
 const STADIU = require("../lib/stadiu-comanda");
+// Totalul comenzii în moneda ei, cu echivalentul în lei la cursul comenzii.
+const CC = require("../lib/curs-comanda");
 // Unitatea cererii de aprovizionare (16.11.2026): a liniei din comanda
 // clientului, nu a produsului din nomenclator.
 const UMC = require("../lib/um-cerere");
@@ -366,7 +368,10 @@ function register(router) {
           stari.eticheta(c.status),
           stareStoc(c.id),
           livrare.eticheta(c),
-          money(c.total),
+          // Comanda în valută își arată suma în moneda ei (era „lei" la toate).
+          String(c.moneda || "RON").toUpperCase() === "RON"
+            ? money(c.total)
+            : `${esc(CC.suma(c.total, c.moneda))}${CC.inLei(c.total, c) === null ? "" : `<br><span style="font-size:11px;color:var(--text-muted)">≈ ${money(CC.inLei(c.total, c))}</span>`}`,
           `<a class="btn small" href="/depozit/comanda/${c.id}">Deschide</a>`,
         ])
       )}

@@ -2951,7 +2951,7 @@ function register(router) {
         .run(
           c.partener_id,
           `Comanda ${c.numar || "#" + c.id} a fost ștearsă`,
-          `Ștearsă definitiv de ${ctx.user.nume}. Era pe statusul „${c.status}”, valoare ${Number(c.total || 0).toFixed(2)} lei.`,
+          `Ștearsă definitiv de ${ctx.user.nume}. Era pe statusul „${c.status}”, valoare ${sumaIn(c.total, String(c.moneda || "RON").toUpperCase())}.`,
           ctx.user.id
         );
       await db.prepare("DELETE FROM comenzi_linii WHERE comanda_id = ?").run(ctx.params.id);

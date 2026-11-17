@@ -15,6 +15,8 @@ const { deschisa } = require("../lib/solduri");
 const cost = require("../lib/cost");
 const { ALOC, ALOC_FACTURA } = require("./alocari");
 const cb = require("../lib/comision-baza");
+// Ofertele și comenzile în valută se adună în lei, la cursul fixat pe fiecare.
+const CC = require("../lib/curs-comanda");
 const { esc, money, layout, table, subnavCrm } = require("../lib/render");
 const XLS = require("../lib/export-xlsx");
 const { chipuriPerioada, azi: perAzi, ieri: perIeri } = require("../lib/perioada");
@@ -120,7 +122,7 @@ async function trepteleP(filtruAgent) {
   const oferte = await db
     .prepare(
       `SELECT o.status, COUNT(*) AS n,
-              COALESCE(SUM((SELECT SUM(ol.cantitate * ol.pret_unitar) FROM oferte_linii ol WHERE ol.oferta_id = o.id)), 0) AS valoare
+              COALESCE(SUM((SELECT SUM(ol.cantitate * ol.pret_unitar) FROM oferte_linii ol WHERE ol.oferta_id = o.id) * ${CC.sqlFactorLei("o")}), 0) AS valoare
          FROM oferte o WHERE 1=1${undeOferte} GROUP BY o.status`
     )
     .all(...argAgent)
@@ -132,7 +134,7 @@ async function trepteleP(filtruAgent) {
   const comenzi = await db
     .prepare(
       `SELECT COUNT(*) AS n,
-              COALESCE(SUM((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id)), 0) AS valoare
+              COALESCE(SUM((SELECT SUM(cl.cantitate * cl.pret_unitar) FROM comenzi_linii cl WHERE cl.comanda_id = c.id) * ${CC.sqlFactorLei("c")}), 0) AS valoare
          FROM comenzi c WHERE c.status != 'anulata'${undeComenzi}`
     )
     .get(...argAgent)
@@ -2033,4 +2035,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, STADII, STADIU_LABEL, STADII_LEAD, subnavCrm };
+module.exports = { register, STADII, STADIU_LABEL, STADII_LEAD, subnavCrm, trepteleP };

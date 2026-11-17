@@ -4851,7 +4851,6 @@ function register(router) {
     // în lot; ordinea cuvintelor nu contează, nici literele mari, nici
     // diacriticele („banda pet" găsește „Bandă PET 5mm").
     const cauta = String(ctx.query.q || "").trim().slice(0, 80);
-    const faraSemne = (t) => String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     const curat = (col) => `translate(LOWER(${col}), 'ăâîșşțţ', 'aaisstt')`;
     // „107 paleți n-au preț la intrare" (Vali, 11.11.2026): doar ei, ca să li
     // se pună prețul unul după altul. Și cei mai scumpi întâi — un preț pe mia
@@ -4865,7 +4864,9 @@ function register(router) {
     if (faraPretDoar) conditii.push(sqlFaraPret("p"));
     if (faraNumeDoar) conditii.push(sqlFaraNume("p"));
     const argCauta = [];
-    for (const cuvant of faraSemne(cauta).split(/\s+/).filter(Boolean).slice(0, 6)) {
+    // Semnele din jurul cuvintelor nu contează: „(Fragil Optim)" caută
+    // „fragil" și „optim" (lib/stoc-produse.js, cuvinte).
+    for (const cuvant of require("../lib/stoc-produse").cuvinte(cauta).slice(0, 6)) {
       // „%" și „_" scrise de om se caută ca atare, nu ca „orice".
       const tipar = `%${cuvant.replace(/[\\%_]/g, (c) => "\\" + c)}%`;
       conditii.push(`(${curat("COALESCE(pr.denumire, p.produs_text, '')")} LIKE ?

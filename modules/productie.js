@@ -1117,7 +1117,7 @@ function register(router) {
     const umCerere = UMC.umCerere(a, linieClient, produs);
     const comanda = a.comanda_id
       ? await db
-          .prepare("SELECT c.numar, c.partener_id, c.agent_id, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
+          .prepare("SELECT c.numar, c.partener_id, c.agent_id, c.moneda, c.curs_bnr, p.nume AS client FROM comenzi c LEFT JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?")
           .get(a.comanda_id)
       : null;
 
@@ -1137,8 +1137,11 @@ function register(router) {
         .prepare("SELECT pret_unitar FROM comenzi_linii WHERE comanda_id = ? AND produs_id = ? LIMIT 1")
         .get(a.comanda_id, a.produs_id)
         .catch(() => null);
-      const pret = Number(linie && linie.pret_unitar);
-      if (Number.isFinite(pret) && pret > 0) valoareEstimata = Math.round(pret * Number(a.cantitate || 0) * 100) / 100;
+      // Valoarea estimată a comenzii de producție se ține în lei. Prețul unei
+      // comenzi în valută trece în lei la cursul ei; fără curs rămâne nescrisă
+      // — nu se trec euro drept lei.
+      const pret = require("../lib/curs-comanda").pretInLei(linie && linie.pret_unitar, comanda || {});
+      if (pret !== null && Number.isFinite(pret) && pret > 0) valoareEstimata = Math.round(pret * Number(a.cantitate || 0) * 100) / 100;
     }
     const numar = await numarComandaNou();
     const ins = await db

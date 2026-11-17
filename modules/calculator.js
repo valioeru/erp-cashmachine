@@ -195,7 +195,7 @@ function register(router) {
     const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     const oferteDeschise = await db
       .prepare(
-        `SELECT o.id, o.numar, p.nume AS client FROM oferte o LEFT JOIN parteneri p ON p.id = o.partener_id
+        `SELECT o.id, o.numar, o.moneda, p.nume AS client FROM oferte o LEFT JOIN parteneri p ON p.id = o.partener_id
          WHERE o.status IN ('ciorna','trimisa','draft','noua') ORDER BY o.id DESC LIMIT 50`
       )
       .all()
@@ -236,9 +236,19 @@ function register(router) {
                <label class="field"><span>Unde</span>
                  <select name="destinatie">
                    <option value="oferta_noua">Ofertă nouă</option>
-                   ${oferteDeschise.map((o) => `<option value="oferta:${o.id}">Ofertă ${esc(o.numar || "#" + o.id)} — ${esc(o.client || "")}</option>`).join("")}
+                   ${oferteDeschise
+                     .map((o) => {
+                       const m = String(o.moneda || "RON").toUpperCase();
+                       return `<option value="oferta:${o.id}">Ofertă ${esc(o.numar || "#" + o.id)} — ${esc(o.client || "")}${m === "RON" ? "" : " · în " + esc(m)}</option>`;
+                     })
+                     .join("")}
                    <option value="comanda_noua">Comandă nouă</option>
                  </select>
+                 ${
+                   oferteDeschise.some((o) => String(o.moneda || "RON").toUpperCase() !== "RON")
+                     ? `<span data-calc-valuta style="font-size:12px;color:var(--text-muted)">Prețul de aici e în lei. Pe o ofertă în euro sau dolari intră trecut în moneda ei, la cursul ofertei.</span>`
+                     : ""
+                 }
                </label>
                <label class="field"><span>Termen cerut (pentru comandă)</span><input type="date" name="data_livrare_ceruta"></label>
              </div>
@@ -293,9 +303,25 @@ function register(router) {
 
     if (dest.startsWith("oferta:")) {
       const ofertaId = parseInt(dest.split(":")[1], 10);
+      // Calculatorul socotește în lei. Pe o ofertă în valută, prețul intră
+      // trecut în moneda ei, la cursul ofertei (lib/curs-comanda.js).
+      const oferta = await db.prepare("SELECT id, moneda, curs_bnr FROM oferte WHERE id = ?").get(ofertaId);
+      if (!oferta) return redirect(ctx.res, "/calculator");
+      const pretOferta = require("../lib/curs-comanda").dinLei(pret, oferta);
+      // Oferta în valută fără curs: prețul în lei nu are cum trece în moneda
+      // ei, iar scris ca atare ar fi lei citiți drept euro. Linia nu se pune.
+      if (pretOferta === null) {
+        const m = String(oferta.moneda || "").toUpperCase();
+        return redirect(
+          ctx.res,
+          `/oferte/${ofertaId}?moneda=1&eroare=${encodeURIComponent(
+            `Oferta e în ${m} și nu are curs, deci prețul din calculator (în lei) nu se poate trece în moneda ei. Pune cursul pe ofertă și adaugă linia din nou.`
+          )}`
+        );
+      }
       await db
         .prepare("INSERT INTO oferte_linii (oferta_id, produs_id, denumire, um, cantitate, pret_unitar) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(ofertaId, produs.id, denumire, um, cantitate, pret);
+        .run(ofertaId, produs.id, denumire, um, cantitate, pretOferta);
       return redirect(ctx.res, `/oferte/${ofertaId}`);
     }
 
