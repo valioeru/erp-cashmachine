@@ -9,6 +9,7 @@ const inbox = require("./inbox");
 const tsk = require("./taskuri");
 const XLS = require("../lib/export-xlsx");
 const ADR = require("../lib/adresa-client");
+const TP = require("../lib/termen-plata");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
 const STARE_LABEL = {
@@ -401,7 +402,22 @@ function register(router) {
         options: [{ value: "", label: "— (client din afara României)" }].concat(ADR.JUDETE.map((j) => ({ value: j, label: j }))),
       },
       { name: "tara", label: "Țară", ajutor: "Romania pentru firmele din România; altfel țara, de ex. Grecia." },
+      // Termenul de plată (Vali, 17.11.2026) — vezi lib/termen-plata.js.
+      {
+        name: "termen_plata_zile",
+        label: "Termen de plată (zile)",
+        type: "number",
+        ajutor:
+          "Câte zile are de la data facturii până la scadență (0 = plată în ziua facturii). Comenzile noi îl preiau singure și se poate schimba pe fiecare comandă. Gol = nedefinit.",
+      },
     ],
+    // Termenul de plată: doar un număr întreg de zile. Câmpul generic de
+    // număr ar fi primit și „30,5" sau „abc" (care devenea gol, în tăcere),
+    // deci se verifică textul scris, nu valoarea deja convertită.
+    valideaza: async (valori, { ctx }) => {
+      const t = TP.citeste(ctx && ctx.body ? ctx.body.termen_plata_zile : valori.termen_plata_zile);
+      return t.ok ? null : esc(t.eroare);
+    },
     listColumns: [
       { key: "nume", label: "Nume", render: (r) => `<a href="/parteneri/${r.id}">${esc(r.nume)}</a>` },
       { key: "tip", label: "Tip", render: (r) => esc(TIP_LABEL[r.tip] || r.tip) },
@@ -617,6 +633,12 @@ function register(router) {
           <div><div class="k">Email</div>${esc(partener.email) || "—"}</div>
           <div><div class="k">Telefon</div>${esc(partener.telefon) || "—"}</div>
           <div><div class="k">Persoană de contact</div>${esc(partener.persoana_contact) || "—"}</div>
+          <div><div class="k">Termen de plată</div>${
+            TP.normal(partener.termen_plata_zile) === null
+              ? `<span style="color:var(--text-muted)">nedefinit</span> · <a href="/parteneri/${partener.id}/editare">pune-l</a>`
+              : esc(TP.zileText(partener.termen_plata_zile)) +
+                '<div style="font-size:12px;color:var(--text-muted)">îl preiau comenzile noi; pe factură, scadența = data facturii + termen</div>'
+          }</div>
           <div><div class="k">Sursă</div>${esc(partener.sursa) || "—"}</div>
           <div><div class="k">Adresă</div>${esc(partener.adresa) || "—"}</div>
           <div><div class="k">Localitate · județ · țară</div>${

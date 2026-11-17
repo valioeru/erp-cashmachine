@@ -44,6 +44,7 @@ const { esc, layout, table } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const mail = require("../lib/mail");
 const L = require("../lib/comenzi-furnizor-logica");
+const TP = require("../lib/termen-plata");
 const PDF = require("../lib/comanda-furnizor-pdf");
 const PZ = require("../lib/prezentare");
 
@@ -126,6 +127,7 @@ async function comandaCuFurnizor(id) {
   return db
     .prepare(
       `SELECT c.*, p.nume AS furnizor, p.email AS furnizor_email, p.cui AS furnizor_cui, p.adresa AS furnizor_adresa,
+              p.termen_plata_zile AS furnizor_termen,
               u.nume AS creata_nume, um.nume AS modificata_nume
          FROM comenzi_furnizor c
          LEFT JOIN parteneri p ON p.id = c.furnizor_id
@@ -851,9 +853,10 @@ function formularComanda(o) {
           ${modificare ? "" : `<button type="button" class="btn secondary" id="cf-buton-furnizor-nou" onclick="cfDeschideFurnizor()">+ Furnizor nou</button>`}
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
           <label class="field"><span>Data comenzii</span><input type="date" name="data" value="${esc(String(c.data || azi()).slice(0, 10))}" required></label>
           <label class="field"><span>Data solicitată de livrare</span><input type="date" name="data_solicitata" value="${esc(String(c.data_solicitata || "").slice(0, 10))}"></label>
+          ${TP.camp({ valoare: c.termen_plata_zile, atins: Boolean(o.atinsTermen), cine: "furnizorului" })}
         </div>
 
         <h2>Moneda și cursul</h2>
@@ -973,6 +976,11 @@ function citesteFormular(b, monede) {
   }
   if (!linii.length) return { eroare: "linii" };
 
+  // Termenul de plată (Vali, 17.11.2026): gol = cel din fișa furnizorului,
+  // hotărât la salvare. Vezi lib/termen-plata.js.
+  const termen = TP.citeste(b.termen_plata_zile);
+  if (!termen.ok) return { eroare: "termen" };
+
   const moneda = monede.includes(text(b.moneda).toUpperCase()) ? text(b.moneda).toUpperCase() : "RON";
   const cursM = L.cursDinCamp(b.curs);
   const cursE = L.cursDinCamp(b.curs_eur);
@@ -986,6 +994,7 @@ function citesteFormular(b, monede) {
     curs: moneda === "RON" ? null : moneda === "EUR" ? cursE.valoare : cursM.valoare,
     curs_eur: cursE.valoare,
     observatii: text(b.observatii) || null,
+    termen_plata_zile: termen.zile,
   };
   return { antet, linii };
 }
@@ -1007,6 +1016,7 @@ const MESAJE_EROARE = {
   cantitate: "O poziție are denumire dar n-are cantitate (sau cantitatea nu e un număr). Scrie cantitatea sau șterge rândul.",
   pret: "Un preț nu e un număr. Scrie-l cu virgulă sau cu punct, fără puncte de mii — de exemplu 1250,50.",
   curs: "Cursul nu e un număr pozitiv. Scrie-l ca la BNR, de exemplu 5,0912 — sau lasă câmpul gol și se ia cursul BNR.",
+  termen: `Termenul de plată e un număr întreg de zile, între 0 și ${TP.MAX_ZILE} (de exemplu 30). Gol = cel din fișa furnizorului.`,
   primita: "",
 };
 
@@ -1281,7 +1291,7 @@ function register(router) {
     const eroare = text((ctx.query || {}).eroare);
     const furnizorAles = parseInt((ctx.query || {}).furnizor, 10) || null;
     const furnizori = await db
-      .prepare("SELECT id, nume, email FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 3000")
+      .prepare("SELECT id, nume, email, termen_plata_zile FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 3000")
       .all();
     const produse = await db
       .prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000")
@@ -1316,7 +1326,12 @@ function register(router) {
       ${formularComanda({
         mod: "nou",
         actiune: "/procurement/comenzi",
-        c: { furnizor_id: furnizorAles, data: azi(), moneda: "RON" },
+        c: {
+          furnizor_id: furnizorAles,
+          data: azi(),
+          moneda: "RON",
+          termen_plata_zile: TP.normal((furnizori.find((f) => Number(f.id) === Number(furnizorAles)) || {}).termen_plata_zile),
+        },
         linii: liniiPuse,
         furnizori,
         monede,
@@ -1393,6 +1408,7 @@ function register(router) {
       <datalist id="cf-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${datalistProduse(produse, preturi)}
       ${scriptCurs(bnr)}
+      ${TP.scriptCamp(TP.hartaTermene(furnizori), { cine: "furnizorului" })}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă către furnizor", active: "/procurement/comenzi", body }));
   });
@@ -1405,6 +1421,7 @@ function register(router) {
     if (f.eroare) return redirect(ctx.res, "/procurement/comenzi/noua?eroare=" + f.eroare);
     const { antet, linii } = f;
     await completeazaCursuri(antet);
+    if (antet.termen_plata_zile === null) antet.termen_plata_zile = await TP.alPartenerului(db, antet.furnizor_id);
 
     const an = antet.data.slice(0, 4);
     const ultim = await db
@@ -1414,8 +1431,8 @@ function register(router) {
 
     const ins = await db
       .prepare(
-        `INSERT INTO comenzi_furnizor (numar, furnizor_id, data, data_solicitata, status, moneda, curs, curs_eur, observatii, creata_de, creata_la)
-         VALUES (?, ?, ?, ?, 'ciorna', ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO comenzi_furnizor (numar, furnizor_id, data, data_solicitata, status, moneda, curs, curs_eur, observatii, creata_de, creata_la, termen_plata_zile)
+         VALUES (?, ?, ?, ?, 'ciorna', ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         numar,
@@ -1427,7 +1444,8 @@ function register(router) {
         antet.curs_eur,
         antet.observatii,
         ctx.user ? ctx.user.id : null,
-        acum()
+        acum(),
+        antet.termen_plata_zile
       );
     const id = ins.lastInsertRowid;
 
@@ -1449,6 +1467,7 @@ function register(router) {
     ];
     if (antet.moneda !== "RON" && cursuri.curs) despre.push(`curs ${L.scrieCurs(cursuri.curs)} lei/${antet.moneda}`);
     if (antet.moneda !== "EUR" && cursuri.cursEur) despre.push(`curs EUR ${L.scrieCurs(cursuri.cursEur)}`);
+    if (TP.normal(antet.termen_plata_zile) !== null) despre.push(`termen de plată ${TP.zileText(antet.termen_plata_zile)}`);
     await scrieIstoric(id, ctx.user, [{ ce: "Comandă creată", vechi: "", nou: despre.join(" · ") }]);
 
     redirect(ctx.res, `/procurement/comenzi/${id}`);
@@ -1529,7 +1548,7 @@ function register(router) {
   async function paginaModificare(ctx, c, liniiVechi, o) {
     const opt = o || {};
     const furnizori = await db
-      .prepare("SELECT id, nume, email FROM parteneri WHERE tip IN ('furnizor','ambele') OR id = ? ORDER BY nume LIMIT 3000")
+      .prepare("SELECT id, nume, email, termen_plata_zile FROM parteneri WHERE tip IN ('furnizor','ambele') OR id = ? ORDER BY nume LIMIT 3000")
       .all(c.furnizor_id || 0);
     const produse = await db
       .prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000")
@@ -1575,6 +1594,7 @@ function register(router) {
         curs: String(b.curs === undefined ? "" : b.curs),
         curs_eur: String(b.curs_eur === undefined ? "" : b.curs_eur),
         observatii: b.observatii,
+        termen_plata_zile: b.termen_plata_zile,
       };
       atins = { curs: text(b.curs) !== "", eur: text(b.curs_eur) !== "" };
     } else {
@@ -1622,11 +1642,15 @@ function register(router) {
         furnizori,
         monede,
         atins,
+        // Pe modificare termenul e al comenzii: alegerea altui furnizor nu-l
+        // rescrie singură (nota de sub câmp arată ce scrie pe fișa lui).
+        atinsTermen: true,
         motiv: opt.valori ? opt.valori.motiv : "",
       })}
       <datalist id="cf-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${datalistProduse(produse, preturi)}
       ${scriptCurs(ef.bnr)}
+      ${TP.scriptCamp(TP.hartaTermene(furnizori), { cine: "furnizorului" })}
     `;
     send(
       ctx.res,
@@ -1685,8 +1709,14 @@ function register(router) {
     }
 
     await completeazaCursuri(antet);
-    const furnizor = await db.prepare("SELECT id, nume FROM parteneri WHERE id = ?").get(antet.furnizor_id);
+    const furnizor = await db.prepare("SELECT id, nume, termen_plata_zile FROM parteneri WHERE id = ?").get(antet.furnizor_id);
     if (!furnizor) return paginaModificare(ctx, c, liniiVechi, { eroare: MESAJE_EROARE.furnizor, valori: b });
+    antet.termen_plata_zile = TP.laModificare({
+      citit: antet.termen_plata_zile,
+      vechi: c.termen_plata_zile,
+      partenerSchimbat: Number(antet.furnizor_id) !== Number(c.furnizor_id),
+      alFisei: furnizor.termen_plata_zile,
+    });
 
     // Comparația se face cu cursul pe care pagina îl arăta deja: la comenzile
     // vechi, fără curs scris, e BNR-ul zilei lor. Altfel prima modificare a
@@ -1702,6 +1732,7 @@ function register(router) {
         curs: ef.moneda === "RON" ? null : ef.curs,
         curs_eur: ef.cursEur,
         observatii: c.observatii,
+        termen_plata_zile: c.termen_plata_zile,
       },
       Object.assign({}, antet, { furnizor: furnizor.nume })
     ).concat(L.diferenteLinii(liniiVechi, linii, antet.moneda));
@@ -1711,7 +1742,7 @@ function register(router) {
     await db
       .prepare(
         `UPDATE comenzi_furnizor SET furnizor_id = ?, data = ?, data_solicitata = ?, moneda = ?, curs = ?, curs_eur = ?,
-                observatii = ?, modificata_la = ?, modificata_de = ?
+                observatii = ?, modificata_la = ?, modificata_de = ?, termen_plata_zile = ?
           WHERE id = ?`
       )
       .run(
@@ -1724,6 +1755,7 @@ function register(router) {
         antet.observatii,
         acum(),
         ctx.user ? ctx.user.id : null,
+        antet.termen_plata_zile,
         id
       );
     for (const l of linii) {
@@ -1985,6 +2017,13 @@ function register(router) {
         <div class="card"><div class="label">Valoare</div><div class="value">${esc(sumaCu(t.total, m))}</div>${t.faraPret ? `<div class="label">${t.faraPret} fără preț</div>` : ""}</div>
         ${carduriCurs.join("")}
         <div class="card"><div class="label">Data solicitată</div><div class="value">${esc(String(c.data_solicitata || "—").slice(0, 10))}</div></div>
+        <div class="card"><div class="label">Termen de plată</div><div class="value">${esc(
+          TP.normal(c.termen_plata_zile) === null ? "—" : TP.zileText(c.termen_plata_zile)
+        )}</div>${
+          TP.normal(c.termen_plata_zile) === null
+            ? `<div class="label">${TP.normal(c.furnizor_termen) === null ? "nedefinit nici pe fișa furnizorului" : "pe fișa furnizorului: " + esc(TP.zileText(c.furnizor_termen))}</div>`
+            : ""
+        }</div>
         <div class="card"><div class="label">Data recepției</div><div class="value">${esc(String(c.data_receptie || "—").slice(0, 10))}</div>${
           intr === null ? "" : `<div class="label">${intr > 0 ? "cu " + intr + " zile întârziere" : intr === 0 ? "la timp" : "cu " + -intr + " zile mai devreme"}</div>`
         }</div>

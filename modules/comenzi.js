@@ -16,6 +16,7 @@ const K = require("../lib/comanda-config");
 // Modificarea unei comenzi și urma pe care o lasă. Regula de comparație și cea
 // de „cine are voie” sunt în lib/comanda-istoric.js, cu testul lor.
 const IST = require("../lib/comanda-istoric");
+const TP = require("../lib/termen-plata");
 const BR = require("../lib/branding");
 
 // Brandingul comenzii (Vali, 09.11.2026): obligatoriu, ca livrarea parțială.
@@ -139,6 +140,18 @@ function liniiCuPretRau(produsIds, cantitati, preturiCitite) {
   );
 }
 const pretIn = (v, moneda) => BNR.scriePret(v) + " " + (SIMBOL[moneda] || moneda || "lei");
+
+// Termenul de plată pe pagina comenzii (Vali, 17.11.2026; lib/termen-plata.js).
+// Comenzile de dinainte n-au termen copiat: pentru ele se spune că se ia din
+// fișa clientului, în ziua facturii.
+function celulaTermenPlata(c) {
+  const pe = TP.normal(c.termen_plata_zile);
+  const fisa = TP.normal(c.partener_termen);
+  const mic = (t) => `<div style="font-size:12px;color:var(--text-muted)">${t}</div>`;
+  if (pe !== null) return esc(TP.zileText(pe)) + mic("pe factură: scadența = data facturii + termen");
+  if (fisa !== null) return esc(TP.zileText(fisa)) + mic("din fișa clientului, la facturare");
+  return '<span style="color:var(--text-muted)">nedefinit</span>' + mic("factura pleacă fără scadență");
+}
 
 // ------------------------------------------------------------------
 // Anuntul de comanda noua
@@ -1318,7 +1331,7 @@ function register(router) {
     // orice bucată din nume sau din CUI, iar lângă fiecare firmă scrie al cui
     // client e.
     const parteneri = await db
-      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
+      .prepare("SELECT id, nume, cui, agent_id, termen_plata_zile FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
       .all();
     const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     // Produsele unificate (activ = 0) nu mai pot fi alese: altfel codul înghițit
@@ -1378,7 +1391,7 @@ function register(router) {
           valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
         })}
       </label>
-      <div style="display:grid;grid-template-columns:1fr 1fr 140px;gap:14px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px">
         <label class="field"><span>Număr comandă (opțional)</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
         <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta" value="${esc(v.data_livrare_ceruta || "")}"></label>
         <label class="field"><span>Moneda</span>
@@ -1386,6 +1399,7 @@ function register(router) {
             ${MONEDE.map((m) => `<option value="${m}"${String(v.moneda || "RON") === m ? " selected" : ""}>${m}</option>`).join("")}
           </select>
         </label>
+        ${TP.camp({ valoare: v.termen_plata_zile, atins: String(v.termen_plata_zile || "").trim() !== "" })}
       </div>
       <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
         <legend style="font-size:13px;padding:0 4px">Dacă nu e toată marfa pe stoc, clientul acceptă livrare parțială?</legend>
@@ -1415,6 +1429,7 @@ function register(router) {
     </form>
     <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
     ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
+    ${TP.scriptCamp(TP.hartaTermene(parteneri))}
     ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
@@ -1537,6 +1552,7 @@ function register(router) {
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
       branding: BR.valid(ctx.body.branding),
       moneda,
+      termen_plata_zile: ctx.body.termen_plata_zile,
       linii: produsIds.map((id, i) => ({
         produs_id: id,
         cantitate: cantitati[i],
@@ -1549,10 +1565,16 @@ function register(router) {
     if (!idClient) {
       return await formularComandaNoua(ctx, { eroare: "Alege clientul — o comandă nu poate exista fără el.", valori });
     }
-    const client = await db.prepare("SELECT id FROM parteneri WHERE id = ?").get(idClient);
+    const client = await db.prepare("SELECT id, termen_plata_zile FROM parteneri WHERE id = ?").get(idClient);
     if (!client) {
       return await formularComandaNoua(ctx, { eroare: "Clientul ales nu mai există în ERP. Alege altul.", valori });
     }
+    // Termenul de plată (Vali, 17.11.2026): gol = cel din fișa clientului,
+    // copiat acum pe comandă, ca o schimbare ulterioară pe fișă să nu mute
+    // comenzile deja plasate. Vezi lib/termen-plata.js.
+    const termenCitit = TP.citeste(ctx.body.termen_plata_zile);
+    if (!termenCitit.ok) return await formularComandaNoua(ctx, { eroare: termenCitit.eroare, valori });
+    const termenPlata = termenCitit.zile !== null ? termenCitit.zile : TP.normal(client.termen_plata_zile);
     // O comandă fără nicio linie cu cantitate e tot o comandă goală: intră în
     // lista depozitului și nu are ce se potrivi cu stocul.
     if (!produsIds.some((id, i) => Number(cantitati[i] || 0) > 0)) {
@@ -1624,8 +1646,8 @@ function register(router) {
     const cursAzi = moneda === "RON" ? null : await require("./curs").laZiua(moneda, new Date().toISOString().slice(0, 10));
     const info = await db
       .prepare(
-        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, branding, moneda, curs_bnr, curs_bnr_data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO comenzi (partener_id, numar, observatii, agent_id, data_livrare_ceruta, livrare_partiala, branding, moneda, curs_bnr, curs_bnr_data, termen_plata_zile)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         partener_id,
@@ -1637,7 +1659,8 @@ function register(router) {
         valori.branding,
         moneda,
         cursAzi && cursAzi.valoare > 0 ? cursAzi.valoare : null,
-        cursAzi && cursAzi.data ? cursAzi.data : null
+        cursAzi && cursAzi.data ? cursAzi.data : null,
+        termenPlata
       );
     const comandaId = info.lastInsertRowid;
 
@@ -1686,7 +1709,10 @@ function register(router) {
 
   router.get("/comenzi/:id", async (ctx) => {
     const comanda = await db
-      .prepare(`SELECT c.*, p.nume AS partener_nume FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`)
+      .prepare(
+        `SELECT c.*, p.nume AS partener_nume, p.termen_plata_zile AS partener_termen
+           FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.id = ?`
+      )
       .get(ctx.params.id);
     if (!comanda) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/comenzi", body: "<p>Comandă inexistentă.</p>" }));
 
@@ -1817,6 +1843,7 @@ function register(router) {
           <div><div class="k">Data</div>${esc(comanda.data)}</div>
           <div><div class="k">Status</div>${stari.eticheta(comanda.status)}</div>
           <div><div class="k">Moneda</div>${esc(comanda.moneda || "RON")}</div>
+          <div><div class="k">Termen de plată</div>${celulaTermenPlata(comanda)}</div>
           <div><div class="k">Livrare parțială</div>${livrare.eticheta(comanda)}${
             potiRaspundeLivrare && comanda.status !== "anulata" && !comanda.factura_id
               ? formLivrare(livrare.raspuns(comanda) ? "Schimbă" : "Răspunde")
@@ -2082,7 +2109,7 @@ function register(router) {
   async function formularEditare(ctx, comanda, { eroare, valori } = {}) {
     const client = await db.prepare("SELECT id, nume, agent_id FROM parteneri WHERE id = ?").get(comanda.partener_id);
     const parteneri = await db
-      .prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
+      .prepare("SELECT id, nume, cui, agent_id, termen_plata_zile FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
       .all();
     const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     const produse = await db
@@ -2110,6 +2137,7 @@ function register(router) {
       livrare_partiala: livrare.raspuns(comanda),
       branding: BR.valid(comanda.branding),
       moneda: comanda.moneda,
+      termen_plata_zile: TP.normal(comanda.termen_plata_zile),
       observatii: comanda.observatii,
       // Prețul din bază merge și într-un câmp ascuns, neatins de rotunjire:
       // dacă omul nu umblă la preț, la salvare se păstrează exact acesta.
@@ -2147,7 +2175,7 @@ function register(router) {
             valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume,
           })}
         </label>
-        <div style="display:grid;grid-template-columns:1fr 1fr 140px;gap:14px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px">
           <label class="field"><span>Număr comandă</span><input type="text" name="numar" value="${esc(v.numar || "")}"></label>
           <label class="field"><span>Termen cerut de client</span><input type="date" name="data_livrare_ceruta" value="${esc(v.data_livrare_ceruta || "")}"></label>
           <label class="field"><span>Moneda</span>
@@ -2155,6 +2183,7 @@ function register(router) {
               ${MONEDE.map((m) => `<option value="${m}"${String(v.moneda || "RON") === m ? " selected" : ""}>${m}</option>`).join("")}
             </select>
           </label>
+          ${TP.camp({ valoare: v.termen_plata_zile, atins: true })}
         </div>
         <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
           <legend style="font-size:13px;padding:0 4px">Clientul acceptă livrare parțială?</legend>
@@ -2184,6 +2213,7 @@ function register(router) {
       </form>
       <datalist id="comenzi-unitati">${UNITATI.map((u) => `<option value="${u}">`).join("")}</datalist>
       ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
+      ${TP.scriptCamp(TP.hartaTermene(parteneri))}
       ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(
       ctx.res,
@@ -2261,6 +2291,7 @@ function register(router) {
       livrare_partiala: livrare.valid(b.livrare_partiala),
       branding: BR.valid(b.branding),
       moneda,
+      termen_plata_zile: b.termen_plata_zile,
       observatii: b.observatii,
       linii: produsIds.map((id, i) => ({
         produs_id: id,
@@ -2275,9 +2306,18 @@ function register(router) {
 
     const idClient = parseInt(b.partener_id, 10);
     if (!idClient) return await opreste("Alege clientul — o comandă nu poate exista fără el.");
-    if (!(await db.prepare("SELECT id FROM parteneri WHERE id = ?").get(idClient))) {
+    const clientNou = await db.prepare("SELECT id, termen_plata_zile FROM parteneri WHERE id = ?").get(idClient);
+    if (!clientNou) {
       return await opreste("Clientul ales nu mai există în ERP. Alege altul.");
     }
+    const termenCitit = TP.citeste(b.termen_plata_zile);
+    if (!termenCitit.ok) return await opreste(termenCitit.eroare);
+    const termenPlata = TP.laModificare({
+      citit: termenCitit.zile,
+      vechi: comanda.termen_plata_zile,
+      partenerSchimbat: Number(idClient) !== Number(comanda.partener_id),
+      alFisei: clientNou.termen_plata_zile,
+    });
     // O comanda golita de linii n-ar mai avea ce cauta nici in depozit, nici
     // pe factura. Daca omul vrea sa renunte la ea, o anuleaza — nu o goleste.
     if (!noi.length) {
@@ -2301,6 +2341,8 @@ function register(router) {
       // În istoric se scrie textul, nu codul: „nespecificat → cu branding Cash Machine".
       branding: BR.text(comanda),
       moneda: comanda.moneda,
+      // În istoric, ca text: „30 de zile → 45 de zile".
+      termen_plata_zile: TP.normal(comanda.termen_plata_zile) === null ? "" : TP.zileText(comanda.termen_plata_zile),
       observatii: comanda.observatii,
     };
     const liniiInainte = await db
@@ -2347,6 +2389,7 @@ function register(router) {
       livrare_partiala: valori.livrare_partiala,
       branding: BR.text({ branding: valori.branding }),
       moneda,
+      termen_plata_zile: termenPlata === null ? "" : TP.zileText(termenPlata),
       observatii: b.observatii || "",
     };
 
@@ -2402,9 +2445,9 @@ function register(router) {
     await db
       .prepare(
         `UPDATE comenzi SET partener_id = ?, numar = ?, observatii = ?, data_livrare_ceruta = ?,
-           livrare_partiala = ?, branding = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ? WHERE id = ?`
+           livrare_partiala = ?, branding = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ?, termen_plata_zile = ? WHERE id = ?`
       )
-      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, comanda.id);
+      .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, termenPlata, comanda.id);
 
     // Liniile se rescriu, dar `cantitate_livrata` NU se pierde: depozitul a
     // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să
@@ -2541,9 +2584,22 @@ function register(router) {
       );
     }
 
+    // Scadența vine din termenul de plată al comenzii (Vali, 17.11.2026) și
+    // pleacă în SmartBill ca dueDate. Vezi lib/termen-plata.js.
+    const dataFacturii = new Date().toISOString().slice(0, 10);
+    const termenFactura = TP.efectiv(comanda, { termen_plata_zile: await TP.alPartenerului(db, comanda.partener_id) });
     const info = await db
-      .prepare("INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?) RETURNING id")
-      .run(comanda.partener_id, comanda.id, ctx.user.id, comanda.agent_id || ctx.user.id, new Date().toISOString().slice(0, 10));
+      .prepare(
+        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, data_scadenta) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?) RETURNING id"
+      )
+      .run(
+        comanda.partener_id,
+        comanda.id,
+        ctx.user.id,
+        comanda.agent_id || ctx.user.id,
+        dataFacturii,
+        TP.scadenta(dataFacturii, termenFactura) || null
+      );
     const facturaId = info.lastInsertRowid;
     const insertLinie = db.prepare(
       "INSERT INTO facturi_linii (factura_id, produs_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, ?, ?, ?, ?)"
@@ -2673,17 +2729,20 @@ function register(router) {
       );
     }
 
+    const dataFacturii = new Date().toISOString().slice(0, 10);
+    const termenFactura = TP.efectiv(comanda, { termen_plata_zile: await TP.alPartenerului(db, comanda.partener_id) });
     const info = await db
       .prepare(
-        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, observatii) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?) RETURNING id"
+        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, observatii, data_scadenta) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?, ?) RETURNING id"
       )
       .run(
         comanda.partener_id,
         comanda.id,
         ctx.user.id,
         comanda.agent_id || ctx.user.id,
-        new Date().toISOString().slice(0, 10),
-        "facturare parțială — restul comenzii rămâne deschis"
+        dataFacturii,
+        "facturare parțială — restul comenzii rămâne deschis",
+        TP.scadenta(dataFacturii, termenFactura) || null
       );
     const facturaId = info.lastInsertRowid;
     const insertLinie = db.prepare(
@@ -2800,6 +2859,8 @@ async function creeazaComandaAutomata(d, user, motiv) {
       user && user.id ? user.id : null
     );
   const id = Number(info.lastInsertRowid);
+  // Termenul de plată din fișa clientului, copiat pe comandă (lib/termen-plata.js).
+  await TP.copiazaPeComanda(db, "comenzi", id);
   for (const l of d.linii || []) {
     await db
       .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um) VALUES (?, ?, ?, ?, ?)")

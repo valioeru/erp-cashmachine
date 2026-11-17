@@ -6,6 +6,7 @@ const inbox = require("./inbox");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { rezumatPeLuni, aduna } = require("../lib/rezumat-zile");
 const smartbill = require("../lib/smartbill");
+const TP = require("../lib/termen-plata");
 const ADR = require("../lib/adresa-client");
 const SCAN = require("../lib/scan");
 // Cine validează o factură: administratorul, rolul financiar și cine are bifa
@@ -345,11 +346,16 @@ function register(router) {
     const preturi = asArray(ctx.body["pret_unitar[]"]);
     const cotele = asArray(ctx.body["cota_tva[]"]);
 
+    // Scadența lăsată goală se ia din termenul de plată al furnizorului
+    // (Vali, 17.11.2026; lib/termen-plata.js). Cea scrisă de mână rămâne.
+    const scadentaAchizitie =
+      String(data_scadenta || "").trim() ||
+      TP.scadenta(String(data_emiterii || "").trim() || new Date().toISOString().slice(0, 10), await TP.alPartenerului(db, partener_id));
     const info = await db
       .prepare(
         "INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, observatii, status) VALUES (?, ?, ?, 'achizitie', ?, ?, ?, 'emisa') RETURNING id"
       )
-      .run(serie || "FAC", parseInt(String(numar).replace(/[^0-9]/g, ""), 10) || 0, partener_id, data_emiterii || "", data_scadenta || "", observatii || "");
+      .run(serie || "FAC", parseInt(String(numar).replace(/[^0-9]/g, ""), 10) || 0, partener_id, data_emiterii || "", scadentaAchizitie || "", observatii || "");
     const facturaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
@@ -427,9 +433,14 @@ function register(router) {
 
     const maxNumar = (await db.prepare("SELECT COALESCE(MAX(numar),0) AS m FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").get()).m;
 
+    // Scadența lăsată goală se ia din termenul de plată al clientului (Vali,
+    // 17.11.2026; lib/termen-plata.js). Factura se emite azi.
+    const scadentaVanzare =
+      String(data_scadenta || "").trim() ||
+      TP.scadenta(new Date().toISOString().slice(0, 10), await TP.alPartenerului(db, partener_id));
     const info = await db
       .prepare("INSERT INTO facturi (numar, partener_id, directie, data_scadenta, observatii, status) VALUES (?, ?, 'vanzare', ?, ?, 'emisa') RETURNING id")
-      .run(maxNumar + 1, partener_id, data_scadenta || "", observatii || "");
+      .run(maxNumar + 1, partener_id, scadentaVanzare || "", observatii || "");
     const facturaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
@@ -862,6 +873,25 @@ function register(router) {
     if (factura.status !== "ciorna") return redirect(ctx.res, `/facturi/${factura.id}`);
 
     const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
+
+    // Scadența, dacă ciorna n-a primit-o (ciornele de dinainte de 17.11.2026,
+    // sau o comandă fără termen pe care s-a pus între timp unul pe fișă):
+    // data facturii + termenul comenzii. Pleacă în SmartBill ca dueDate.
+    // O scadență deja scrisă nu se atinge. Vezi lib/termen-plata.js.
+    if (!String(factura.data_scadenta || "").trim()) {
+      let termen = null;
+      if (factura.comanda_id) {
+        const c = await db.prepare("SELECT termen_plata_zile, partener_id FROM comenzi WHERE id = ?").get(factura.comanda_id);
+        termen = TP.efectiv(c, { termen_plata_zile: await TP.alPartenerului(db, (c && c.partener_id) || factura.partener_id) });
+      } else {
+        termen = await TP.alPartenerului(db, factura.partener_id);
+      }
+      const sc = TP.scadenta(String(factura.data_emiterii || "").slice(0, 10) || new Date().toISOString().slice(0, 10), termen);
+      if (sc) {
+        await db.prepare("UPDATE facturi SET data_scadenta = ? WHERE id = ?").run(sc, factura.id);
+        factura.data_scadenta = sc;
+      }
+    }
 
     // Numărul se dă abia acum: o ciornă nu consumă un număr de factură.
     let numar = factura.numar;

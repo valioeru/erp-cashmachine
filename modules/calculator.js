@@ -307,6 +307,8 @@ function register(router) {
         )
         .run(partenerId, acum, ctx.user ? ctx.user.id : null, String(b.data_livrare_ceruta || "") || null, "creată din calculatorul de preț");
       const comandaId = ins.lastInsertRowid;
+      // Termenul de plată din fișa clientului, copiat pe comandă (lib/termen-plata.js).
+      await require("../lib/termen-plata").copiazaPeComanda(db, "comenzi", comandaId);
       await db
         .prepare("INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar) VALUES (?, ?, ?, ?)")
         .run(comandaId, produs.id, cantitate, pret);

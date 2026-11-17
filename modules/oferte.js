@@ -539,6 +539,8 @@ function register(router) {
       .run(o.partener_id, null, azi(), `Din oferta ${o.numar || nrDoc("OF", o.id)}`, o.id, contractId || o.contract_id || null, o.agent_id || user.id);
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE comenzi SET numar = ? WHERE id = ?").run(nrDoc("CMD", id), id);
+    // Termenul de plată din fișa clientului, copiat pe comandă (lib/termen-plata.js).
+    await require("../lib/termen-plata").copiazaPeComanda(db, "comenzi", id);
     const linii = await db.prepare("SELECT * FROM oferte_linii WHERE oferta_id = ?").all(o.id);
     for (const l of linii) {
       if (!l.produs_id) continue; // comenzile cer produs din nomenclator
@@ -720,6 +722,7 @@ function register(router) {
       .run(c.partener_id, azi(), `Pe contractul ${c.numar || nrDoc("CTR", c.id)}`, c.id, c.agent_id || ctx.user.id);
     const id = ins.lastInsertRowid;
     await db.prepare("UPDATE comenzi SET numar = ? WHERE id = ?").run(nrDoc("CMD", id), id);
+    await require("../lib/termen-plata").copiazaPeComanda(db, "comenzi", id);
     // Dacă în spatele contractului stă o ofertă, comanda pornește cu liniile
     // ei — nimeni n-are chef să retasteze douăzeci de poziții.
     if (c.oferta_id) {
