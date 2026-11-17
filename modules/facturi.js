@@ -339,6 +339,7 @@ function register(router) {
             : ""
         }
         <a href="/facturi/achizitii" class="btn secondary">Vezi achiziții (facturi de la furnizori)</a>
+        <a href="/facturi/stari-din-smartbill" class="btn secondary">Stări aduse din SmartBill</a>
       </div>
       ${lista}
     `;
@@ -715,6 +716,65 @@ function register(router) {
     redirect(ctx.res, inapoi(total.erori ? "eroare" : "mesaj", text));
   });
 
+  // Ce a schimbat sincronizarea singură, după starea din SmartBill.
+  //
+  // De când factura își ia starea de încasare din SmartBill (17.11.2026), o
+  // factură poate trece pe „plătită" fără nicio încasare în ERP — stornată,
+  // compensată, ori încasată cu o chitanță mai veche decât fereastra raportului
+  // de încasări. Aici se vede fiecare asemenea schimbare, cu ce era înainte:
+  // lista celor de verificat când o cifră de „de încasat" pare prea mică.
+  router.get("/facturi/stari-din-smartbill", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const randuri = await db
+      .prepare(
+        `SELECT s.id, s.factura_id, s.din, s.in_ce, s.motiv, s.la,
+                f.serie, f.numar, f.document_extern, f.data_emiterii, f.status, f.activ, p.nume AS partener,
+                COALESCE(t.total, 0) AS total, COALESCE(pl.platit, 0) AS platit
+           FROM facturi_stare_istoric s
+           JOIN facturi f ON f.id = s.factura_id
+           LEFT JOIN parteneri p ON p.id = f.partener_id
+           LEFT JOIN (SELECT factura_id, SUM(cantitate * pret_unitar * (1 + COALESCE(cota_tva,0) / 100.0)) AS total FROM facturi_linii GROUP BY factura_id) t ON t.factura_id = f.id
+           LEFT JOIN (SELECT factura_id, SUM(suma) AS platit FROM (SELECT * FROM plati WHERE activ = 1) plati GROUP BY factura_id) pl ON pl.factura_id = f.id
+          ORDER BY s.id DESC
+          LIMIT 1000`
+      )
+      .all()
+      .catch(() => []);
+    const numeStare = { emisa: "emisă", platita_partial: "plătită parțial", platita: "plătită", anulata: "anulată" };
+    const stinse = randuri.filter((r) => r.in_ce === "platita");
+    const faraBani = stinse.filter((r) => Number(r.platit) < Number(r.total) - 0.5 && Number(r.total) > 0);
+    const body = `
+      <p><a href="/facturi">← Facturi vânzare</a></p>
+      <div class="detail-box"><div class="detail-grid">
+        <div><div class="k">Schimbări (ultimele ${randuri.length})</div>${randuri.length}</div>
+        <div><div class="k">Trecute pe „plătită”</div>${stinse.length}</div>
+        <div><div class="k">…dintre care fără încasare în ERP</div>${faraBani.length} · ${money(faraBani.reduce((a, r) => a + Number(r.total) - Number(r.platit), 0))}</div>
+      </div>
+      <p style="font-size:13px;color:var(--text-muted);margin:10px 0 0;max-width:820px">
+        Sincronizarea citește din SmartBill și starea de încasare a fiecărei facturi. Când SmartBill o ține stinsă —
+        încasată, stornată sau compensată —, factura trece aici pe „plătită” și iese de la restanțe, fără să i se
+        nască o plată. Statusul doar urcă: dacă SmartBill o ține neîncasată și ERP-ul plătită, nu se schimbă nimic.
+      </p></div>
+      ${table(
+        ["Când", "Factura", "Client", "Emisă", "Total", "Încasat în ERP", "Era", "A devenit", "De ce"],
+        randuri.map((r) => [
+          esc(String(r.la || "").slice(0, 16)),
+          Number(r.activ) === 1
+            ? `<a href="/facturi/${r.factura_id}">${esc(r.document_extern || `${r.serie}-${r.numar ?? r.factura_id}`)}</a>`
+            : esc(r.document_extern || `${r.serie}-${r.numar ?? r.factura_id}`) + ' <span class="badge gri">scoasă</span>',
+          esc(r.partener || "—"),
+          esc(String(r.data_emiterii || "").slice(0, 10)),
+          money(r.total),
+          money(r.platit),
+          esc(numeStare[r.din] || r.din || "—"),
+          esc(numeStare[r.in_ce] || r.in_ce),
+          esc(r.motiv || ""),
+        ])
+      )}
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Stări aduse din SmartBill", active: "/facturi", body }));
+  });
+
   router.get("/facturi/:id", async (ctx) => {
     const factura = await db
       .prepare(`SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`)
@@ -743,6 +803,11 @@ function register(router) {
     const { subtotal, tva, total } = calcTotals(linii);
     const plati = await db.prepare("SELECT * FROM (SELECT * FROM plati WHERE activ = 1) plati WHERE factura_id = ? ORDER BY id DESC").all(factura.id);
     const platit = plati.reduce((s, p) => s + p.suma, 0);
+    // Ultima stare adusă singură din SmartBill (facturi_stare_istoric).
+    const stareAdusa = await db
+      .prepare("SELECT din, in_ce, la FROM facturi_stare_istoric WHERE factura_id = ? ORDER BY id DESC LIMIT 1")
+      .get(factura.id)
+      .catch(() => null);
     const restant = Math.max(0, total - platit);
     const eVanzare = factura.directie !== "achizitie";
     const listaInapoi = eVanzare ? "/facturi" : "/facturi/achizitii";
@@ -857,7 +922,16 @@ function register(router) {
         <div>Subtotal: ${money(subtotal)}</div>
         <div>TVA: ${money(tva)}</div>
         <div class="grand">Total: ${money(total)}</div>
-        <div>Încasat: ${money(platit)} · Restant: ${money(restant)}</div>
+        <div>Încasat: ${money(platit)} · ${
+          // „Plătită" fără plăți care s-o acopere: SmartBill o ține stinsă —
+          // stornată, compensată, ori încasată cu o chitanță pe care raportul
+          // de încasări n-a mai adus-o. Nu e un rest de încasat (lib/solduri.js).
+          factura.status === "platita" && restant > 0.5
+            ? `<span data-stinsa>Stinsă în SmartBill fără încasare adusă în ERP (stornare, compensare sau o încasare mai veche): nu mai e de încasat.${
+                stareAdusa ? ` Starea a venit din SmartBill pe ${esc(String(stareAdusa.la || "").slice(0, 16))}.` : ""
+              }</span>`
+            : `Restant: ${money(restant)}`
+        }</div>
       </div>
 
       <h2>Plăți</h2>

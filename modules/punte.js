@@ -558,12 +558,15 @@ async function ingestFacturi(randuri) {
   const existente = new Set();
   const peSerieNumar = new Set();
   const idPeSerieNumar = new Map(); // cheia fără firmă → id-urile facturilor care o poartă
-  for (const f of await db.prepare("SELECT id, serie, numar, firma_id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
+  const facturaPeSerieNumar = new Map(); // cheia fără firmă → facturile, cu starea lor (pentru starea de încasare)
+  for (const f of await db.prepare("SELECT id, serie, numar, firma_id, status FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
     existente.add(cheiaFacturii(f.serie, f.numar, f.firma_id));
     const k = cheiaFacturii(f.serie, f.numar, "");
     peSerieNumar.add(k);
     if (!idPeSerieNumar.has(k)) idPeSerieNumar.set(k, []);
     idPeSerieNumar.get(k).push(Number(f.id));
+    if (!facturaPeSerieNumar.has(k)) facturaPeSerieNumar.set(k, []);
+    facturaPeSerieNumar.get(k).push({ id: Number(f.id), status: String(f.status || "") });
   }
   let altaFirma = 0;
 
@@ -603,6 +606,73 @@ async function ingestFacturi(randuri) {
   const bani = (v) => (Math.round(Number(v || 0) * 100) / 100).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
+
+  // STAREA DE ÎNCASARE DIN SMARTBILL (17.11.2026)
+  //
+  // Vali, cu poza restanțelor: „Primele 2 facturi sunt încasate în SmartBill."
+  // CSHMUPA0043 și CSHMUPA0042 (Aquila) fuseseră stornate cu CSHM3168 și
+  // CSHM3169. În SmartBill toate patru sunt stinse; în ERP primele două stăteau
+  // de 52 de zile la restanțe, iar stornările, cu minus, la „emise". ERP-ul
+  // afla că o factură s-a închis doar din raportul de încasări, iar o stornare
+  // (sau o compensare) nu e o încasare și nu apare acolo.
+  //
+  // Rândul din raportul de facturi poartă acum și starea din SmartBill
+  // (`incasata`: „y" stinsă, „p" parțial, „n" nu). Regula e cea din
+  // lib/solduri.js și lib/statusuri.js: steagul din SmartBill știe mai bine
+  // decât suma plăților pe care le avem noi, iar statusul urcă, nu coboară.
+  //   • „y" → factura din ERP trece pe „plătită". Nu i se naște nicio plată:
+  //     banii unei stornări nu există, iar o încasare adevărată vine, cu data
+  //     ei, prin raportul de încasări.
+  //   • „p" → o factură „emisă" trece pe „plătită parțial".
+  //   • anulată în SmartBill după ce a intrat în ERP → anulată și aici.
+  //   • SmartBill o ține neîncasată, ERP-ul plătită: nu se coboară nimic, se
+  //     spune în rezultatul lotului.
+  // Factura făcută în ERP urmează aceeași regulă la încasare; anularea ei
+  // rămâne doar semnalată (vezi a treia pază).
+  const stinse = [];
+  const partiale = [];
+  const anulateDinSb = [];
+  const stareDiferita = [];
+  const stareSb = (r) => {
+    const v = String(curat(r.incasata)).toLowerCase();
+    return {
+      incasata: v === "y" || v === "p" || v === "n" ? v : "",
+      anulata: /anulat|storn/.test(String(curat(r.status)).toLowerCase()),
+    };
+  };
+  // Fiecare schimbare făcută singură rămâne scrisă (facturi_stare_istoric).
+  const tineMinte = (f, inCe, motiv) =>
+    db
+      .prepare("INSERT INTO facturi_stare_istoric (factura_id, din, in_ce, motiv) VALUES (?, ?, ?, ?)")
+      .run(f.id, f.status || null, inCe, motiv)
+      .catch(() => {});
+  async function improspateazaStarea(facturi, r, nume, { faraAnulare } = {}) {
+    const sb = stareSb(r);
+    const totalSb = nr(r.total) || nr(r.net !== undefined ? r.net : r.fara_tva) + nr(r.tva);
+    const cuSuma = `${nume}${totalSb ? " · " + bani(totalSb) + " lei" : ""}`;
+    for (const f of facturi || []) {
+      if (f.status === "anulata" || f.status === "ciorna") continue;
+      if (sb.anulata) {
+        if (faraAnulare) continue;
+        await db.prepare("UPDATE facturi SET status = 'anulata' WHERE id = ? AND status <> 'anulata'").run(f.id);
+        await tineMinte(f, "anulata", "anulată în SmartBill");
+        f.status = "anulata";
+        anulateDinSb.push(cuSuma);
+      } else if (sb.incasata === "y" && f.status !== "platita") {
+        await db.prepare("UPDATE facturi SET status = 'platita' WHERE id = ? AND status NOT IN ('anulata', 'platita')").run(f.id);
+        await tineMinte(f, "platita", "stinsă în SmartBill");
+        f.status = "platita";
+        stinse.push(cuSuma);
+      } else if (sb.incasata === "p" && f.status === "emisa") {
+        await db.prepare("UPDATE facturi SET status = 'platita_partial' WHERE id = ? AND status = 'emisa'").run(f.id);
+        await tineMinte(f, "platita_partial", "încasată parțial în SmartBill");
+        f.status = "platita_partial";
+        partiale.push(cuSuma);
+      } else if ((sb.incasata === "n" && (f.status === "platita" || f.status === "platita_partial")) || (sb.incasata === "p" && f.status === "platita")) {
+        stareDiferita.push(`${cuSuma}: ${sb.incasata === "n" ? "neîncasată" : "încasată parțial"} în SmartBill, ${f.status === "platita" ? "plătită" : "plătită parțial"} în ERP`);
+      }
+    }
+  }
 
   for (const r of randuri) {
     const numeClient = curat(r.client) || curat(r.partener);
@@ -658,13 +728,22 @@ async function ingestFacturi(randuri) {
         }
         // Dublura intrată înainte de paza asta e încă în bază, lângă factura ei.
         if ((idPeSerieNumar.get(cheieFaraFirma) || []).some((id) => id !== Number(dinErp.id))) cuDublura.push(care);
+        // Starea de încasare din SmartBill, pe factura din ERP. Anularea ei
+        // rămâne doar semnalată, mai sus: o factură făcută aici a mișcat și stoc.
+        await improspateazaStarea([dinErp], r, care, { faraAnulare: true });
       }
       sarite++;
       continue;
     }
 
-    if (existente.has(cheie)) { sarite++; continue; }
-    if (peSerieNumar.has(cheieFaraFirma)) { sarite++; altaFirma++; continue; }
+    // Factura e deja în ERP: nu se scrie a doua oară, dar își ia starea de
+    // încasare de azi din SmartBill.
+    if (existente.has(cheie) || peSerieNumar.has(cheieFaraFirma)) {
+      await improspateazaStarea(facturaPeSerieNumar.get(cheieFaraFirma), r, `${serie}${numar}`);
+      sarite++;
+      if (!existente.has(cheie)) altaFirma++;
+      continue;
+    }
 
     // partenerul: întâi după CUI, apoi după nume; comun pe tot grupul
     const cui = normCui(r.cui);
@@ -685,7 +764,19 @@ async function ingestFacturi(randuri) {
     const tva = nr(r.tva);
     const total = nr(r.total) || net + tva;
     const stareBruta = String(curat(r.status)).toLowerCase();
-    const status = /anulat|storn/.test(stareBruta) ? "anulata" : /ciorn|schita/.test(stareBruta) ? "ciorna" : "emisa";
+    // Factura nouă intră cu starea de încasare pe care o are în SmartBill în
+    // clipa asta: una deja stinsă (plătită pe loc, stornată în aceeași zi) nu
+    // mai apare o vreme la „de încasat" doar fiindcă încasarea ei n-a ajuns încă.
+    const incasataSb = stareSb(r).incasata;
+    const status = /anulat|storn/.test(stareBruta)
+      ? "anulata"
+      : /ciorn|schita/.test(stareBruta)
+        ? "ciorna"
+        : incasataSb === "y"
+          ? "platita"
+          : incasataSb === "p"
+            ? "platita_partial"
+            : "emisa";
 
     try {
       const ins = await db
@@ -725,6 +816,8 @@ async function ingestFacturi(randuri) {
       }
       existente.add(cheie);
       peSerieNumar.add(cheieFaraFirma);
+      if (!facturaPeSerieNumar.has(cheieFaraFirma)) facturaPeSerieNumar.set(cheieFaraFirma, []);
+      facturaPeSerieNumar.get(cheieFaraFirma).push({ id: Number(facturaId), status });
       create++;
     } catch (e) {
       // Indexul unic de sub facturile de import a prins un duplicat pe care
@@ -760,6 +853,16 @@ async function ingestFacturi(randuri) {
     // Dubluri aduse înainte de 17.11.2026, încă în bază lângă factura lor din
     // ERP. Se scot din Verificări date; sincronizarea nu scoate nimic singură.
     emise_din_erp_cu_dublura_in_baza: cuDublura.slice(0, 20),
+    // Starea de încasare din SmartBill, pusă pe facturile care erau deja în
+    // ERP. „Stinse" = trecute pe „plătită" fără plată adusă: stornări,
+    // compensări, încasări mai vechi decât fereastra raportului de încasări.
+    stinse_dupa_smartbill: stinse.length,
+    stinse_dupa_smartbill_care: stinse.slice(0, 30),
+    partiale_dupa_smartbill: partiale.slice(0, 20),
+    anulate_dupa_smartbill: anulateDinSb.slice(0, 20),
+    // Aici nu se schimbă nimic: SmartBill o ține mai puțin încasată decât ERP-ul.
+    alta_stare_de_incasare: stareDiferita.length,
+    alta_stare_de_incasare_care: stareDiferita.slice(0, 20),
     parteneri_noi: parteneriNoi,
     cu_plata: cuPlata,
     intercompany_marcate: marcaje.facturiMarcate,
