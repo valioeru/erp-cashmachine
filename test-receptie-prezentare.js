@@ -329,6 +329,15 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   bine("rola de 16 kg nu e rola de 50 kg", !seamana(L12, "Jumbo Virgin Automată Negru 23 microni 16 kg"));
   bine("același jumbo, scris altfel, seamănă", seamana(L12, "Jumbo Virgin Negru 23my 50kg"));
   bine("un singur cuvânt comun nu ajunge", !seamana("Bandă adezivă Fragil 48x60", "Bandă adezivă transparentă"));
+  // Potrivirea largă, doar pentru comenzile de dinainte de 13.11: numără și numerele.
+  const { seamanaLarg } = CFM.__test;
+  egal("potrivirea largă: denumirea făcută din numere își găsește marfa scrisă altfel; cea strânsă nu",
+    [seamanaLarg("TUB SP 470 50/62 350 gr", "SP 470 50/63 350 gr 7441399"), seamana("TUB SP 470 50/62 350 gr", "SP 470 50/63 350 gr 7441399")], [true, false]);
+  egal("…dar altă măsură scrisă cu „x” e altă marfă, oricâte cuvinte ar avea în comun (48x60 nu e 50x60)",
+    [seamanaLarg("Fragil Optim · BANDA ADEZIVA FRAGIL 48X60M", "BANDA ADEZIVA FRAGIL 50X60 (Fragil)"), seamanaLarg("Fragil Optim · BANDA ADEZIVA FRAGIL 48X60M", "BANDA ADEZIVA FRAGIL 48X60M (Fragil Optim)"), seamanaLarg("Banda 48mm x 60m alba", "Banda 48 x 66 alba")], [false, true, false]);
+  egal("…doar numere comune puține, sau niciun număr comun, nu ajung; grosimea, culoarea și felul contrazise rămân altă marfă",
+    [seamanaLarg("TUB SP 470 50/62 350 gr", "TUB 50 x 57 x 520 mm 200 gr 1111111"), seamanaLarg("TRP Banda Fragil 48x60", "TRP Bandă transparentă"), seamanaLarg("Jumbo 17my 50kg 1600", "Jumbo 23my 50kg 1600"), seamanaLarg("Folie neagra 500 1000 45", "Folie transparenta 500 1000 45"), seamanaLarg("Granula reciclat 25 1000", "Granula virgin 25 1000")],
+    [false, false, false, false, false]);
 
   // ------------------------------------------------------------------------
   console.log("\n8. „Trimite în depozit”, la comenzile primite înainte");
@@ -337,6 +346,18 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   const O3 = comanda("CF-3", { status: "primita", data: "2026-11-01", dataReceptie: "2026-11-10" });
   const LG = linieCf(O3, P3, `${PREFIX} Granula`, 700, "kg", 4, 700);
   const LF3 = linieCf(O3, P2, `${PREFIX} Banda Fragil 48x60`, 60, "buc", 3, 60);
+  // Un rând făcut din numere (Vali, 17.11.2026: „TUB SP 470 50/62 350 gr” intrase de
+  // mână drept „SP 470 50/63 350 gr”, iar pagina spunea că nu e nimic asemănător).
+  const LT = linieCf(O3, null, `${PREFIX} TUB SP 470 50/62 350 gr`, 3028, "buc", 1, 3028);
+  q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, cantitate_intrare, um, data_intrare, furnizor_id) VALUES
+       ('${PREFIX}-PAL-TUB1', '${PREFIX} SP 470 50/63 350 gr', 1514, 1514, 'buc', '2026-11-10', ${FURNIZOR}),
+       ('${PREFIX}-PAL-TUB2', '${PREFIX} SP 470 50/63 350 gr', 1514, 1514, 'buc', '2026-11-10', ${FURNIZOR})`);
+  // …un palet cu altă marfă, intrat în ajunul recepției: e în listă, dar jos, sub cele de văzut.
+  q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-AJUN', '${PREFIX} Altceva din ajun', 7, 7, 'buc', '2026-11-09')`);
+  // …unul intrat în ultima zi numărată (recepția + 3 zile): e încă în listă.
+  q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-ULTIMA', '${PREFIX} Marfa din ultima zi', 3, 3, 'buc', '2026-11-13')`);
+  // …și un palet cu tuburi de altă măsură, intrat la cinci zile după recepție: nici asemănător, nici în zilele ei.
+  q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-TUBALT', '${PREFIX} TUB 50 x 57 x 520 mm 200 gr', 10, 10, 'buc', '2026-11-15')`);
   // Un palet pus de mână pe 12.11, cu aceeași bandă: poate e chiar ea.
   const palMana = Number(unul(`INSERT INTO ct_paleti (cod, produs_id, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-MANA', ${P2}, 120, 120, 'buc', '2026-11-12') RETURNING id`));
   // …și unul vechi, de dinainte: nu. Nici cel de cu două zile înaintea recepției.
@@ -358,9 +379,27 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   bine("comanda recepționată înainte de 13.11 îl are și ea, într-o casetă închisă, nu ca alarmă", pag.cod === 200 && pag.corp.includes(CASETA_VECHE + ">") && !pag.corp.includes('<h2 style="margin-top:28px" id="in-depozit">'), (pag.corp.match(/<details id="in-depozit"[^>]*>/) || ["lipsește"])[0]);
   bine("…care spune de ce: recepționată pe 10.11.2026, înainte de 13.11.2026, când marfa intra doar de mână", /recepționată pe 10\.11\.2026, înainte de 13\.11\.2026\./.test(sv.replace(/\s+/g, " ")) && /scrie cantitatea și prezentarea doar la rândurile care lipsesc din depozit/.test(sv.replace(/\s+/g, " ")), sv.replace(/\s+/g, " ").slice(0, 400));
   bine("…fără nimic propus: cantitățile sunt goale, cu „cel mult” în câmp", sv.includes(`value="${LG}"`) && sv.includes(`value="${LF3}"`) && sv.includes('name="cant[]" data-cant inputmode="decimal" autocomplete="off" value="" placeholder="cel mult 700"') && sv.includes('value="" placeholder="cel mult 60"') && !/name="cant\[\]"[^>]*value="[^"]/.test(sv), (sv.match(/name="cant\[\]"[^>]*>/g) || []).join(" "));
-  bine("…sub granulă: în CT-Park nu e nimic din ea și n-a intrat niciun palet de la recepție încoace", sv.includes("<strong>În CT-Park nu e acum nimic</strong> care să semene cu marfa asta, și niciun palet cu ea n-a intrat de la recepție încoace."), (sv.match(/În CT-Park[\s\S]{0,200}/) || ["lipsește"])[0]);
+  bine("…sub granulă: n-a găsit nimic asemănător, și o spune fără să jure că marfa lipsește", sv.includes("<strong>N-am găsit în CT-Park marfă cu denumire asemănătoare</strong>, nici printre paleții intrați de la recepție încoace. Marfa băgată de mână poate fi scrisă altfel: vezi mai jos tot ce a intrat în zilele recepției."), (sv.match(/N-am găsit[\s\S]{0,260}/) || ["lipsește"])[0]);
   bine("…sub bandă: cât e acum în CT-Park din ea, pe câți paleți și de când", sv.includes(`<strong>În CT-Park acum</strong>, cu marfă asemănătoare: 200 buc · ${PREFIX} Banda Fragil (TRP-2), pe 3 paleți, ultima intrare 12.11.2026. Dacă marfa rândului e în ele, n-o mai trimite.`), (sv.match(/În CT-Park acum[\s\S]{0,260}/) || ["lipsește"])[0]);
   bine("…și paleții intrați de la recepție încoace (din 09.11), nu și cel de dinainte", /Poate e deja pe raft<\/strong> — intrați în CT-Park din 09\.11\.2026/.test(sv) && sv.includes(`${PREFIX}-PAL-MANA`) && sv.includes(`${PREFIX}-PAL-ALALTAIERI`) && !sv.includes(`${PREFIX}-PAL-VECHI`), (sv.match(/Poate e deja pe raft[\s\S]{0,300}/) || ["lipsește"])[0]);
+  // rândul făcut din numere: marfa lui e pe raft sub alt nume
+  const randTub = sv.slice(sv.indexOf(`value="${LT}"`));
+  bine("rândul făcut din numere își găsește marfa băgată de mână sub alt nume: stocul de acum…", randTub.includes(`<strong>În CT-Park acum</strong>, cu marfă asemănătoare: 3.028 buc · ${PREFIX} SP 470 50/63 350 gr, pe 2 paleți, ultima intrare 10.11.2026.`), (randTub.match(/În CT-Park[\s\S]{0,240}/) || ["lipsește"])[0]);
+  bine("…și paleții intrați de la recepție încoace, nu și tuburile de altă măsură", /Poate e deja pe raft/.test(randTub) && randTub.includes(`${PREFIX}-PAL-TUB1`) && randTub.includes(`${PREFIX}-PAL-TUB2`) && !sv.includes(`${PREFIX}-PAL-TUBALT`), (randTub.match(/Poate e deja pe raft[\s\S]{0,300}/) || ["lipsește"])[0]);
+  // tot ce a intrat în zilele recepției, oricum s-ar numi
+  const intrate = (sv.match(/<details data-intrate[\s\S]*?<\/details>/) || [""])[0];
+  const randuriIntrate = (intrate.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || []).slice(1).map((t) => [/data-de-vazut/.test(t), ...[...t.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim())]);
+  bine("dedesubt: tot ce a intrat în CT-Park între 09.11 și 13.11 pe alte drumuri, cu lista deschisă când are ceva de văzut", /<details data-intrate style="margin-top:12px" open>/.test(intrate) && intrate.includes("Tot ce a intrat în CT-Park între 09.11.2026 și 13.11.2026, pe alte drumuri decât comanda asta (7 paleți)"), intrate.slice(0, 300));
+  egal("…strâns pe marfă și zi: sus ce seamănă cu un rând sau vine de la furnizorul comenzii; apoi restul, pe zile",
+    randuriIntrate,
+    [
+      [true, `${PREFIX} SP 470 50/63 350 gr`, "2 × 1.514", "3.028 buc", "10.11.2026", `${PREFIX} Furnizor Folie SRL`, `seamănă cu „${PREFIX} TUB SP 470 50/62 350 gr”; același furnizor`],
+      [true, `${PREFIX} Banda Fragil (TRP-2)`, "1", "30 buc", "11.11.2026", "—", `seamănă cu „${PREFIX} Banda Fragil 48x60”`],
+      [true, `${PREFIX} Banda Fragil (TRP-2)`, "1", "120 buc", "12.11.2026", "—", `seamănă cu „${PREFIX} Banda Fragil 48x60”`],
+      [false, `${PREFIX} Altceva din ajun`, "1", "7 buc", "09.11.2026", "—", ""],
+      [false, `${PREFIX} Bandă transparentă`, "1", "40 buc", "12.11.2026", "—", ""],
+      [false, `${PREFIX} Marfa din ultima zi`, "1", "3 buc", "13.11.2026", "—", ""],
+    ]);
   pag = await cer("get", `/procurement/comenzi/${O2}`, AGENT);
   bine("agentul nu-l vede", !pag.corp.includes('id="in-depozit"'));
 
@@ -413,13 +452,23 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   pag = await cer("get", `/procurement/comenzi/${O5}`, DEP);
   const sv5 = bucata(pag.corp, "in-depozit", "Istoric — cine a modificat");
   bine("rândul legat de produs își găsește marfa după produs, oricum ar fi scris — granula trimisă adineauri, încă de pus pe raft, fără paleți", new RegExp(`<strong>În CT-Park acum</strong>, cu marfă asemănătoare: 700 kg · ${PREFIX} Granula \\(TRP-3\\), din care 700 încă de pus pe raft, ultima intrare \\d\\d\\.\\d\\d\\.\\d{4}\\.`).test(sv5), (sv5.match(/În CT-Park[\s\S]{0,260}/) || ["lipsește"])[0]);
+  q(`INSERT INTO ct_paleti (cod, produs_id, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-GRAN', ${P3}, 25, 25, 'kg', '2026-11-12')`);
+  const lista5 = (((await cer("get", `/procurement/comenzi/${O5}`, DEP)).corp.match(/<details data-intrate[\s\S]*?<\/details>/) || [""])[0].match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || []).slice(1).map((t) => [/data-de-vazut/.test(t), ...[...t.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim())]);
+  egal("în lista zilelor recepției, paletul cu produsul rândului e de văzut chiar dacă rândul e scris cu alt nume",
+    lista5.filter((x) => x[1].startsWith(`${PREFIX} Granula`)), [[true, `${PREFIX} Granula (TRP-3)`, "1", "25 kg", "12.11.2026", "—", `seamănă cu „${PREFIX} Marfa scrisa cu alt nume”`]]);
+  q(`DELETE FROM ct_paleti WHERE cod = '${PREFIX}-PAL-GRAN'`);
   bine("rândul scris liber o găsește după denumire: banda de pe paleți și cea încă de pus pe raft", new RegExp(`700 buc · ${PREFIX} Banda Fragil \\(TRP-2\\), pe 3 paleți, din care 500 încă de pus pe raft, ultima intrare \\d\\d\\.\\d\\d\\.\\d{4}\\.`).test(sv5), (sv5.match(/În CT-Park acum[\s\S]{0,300}/g) || ["lipsește"]).join(" || "));
   pag = await cer("get", `/procurement/comenzi/${O3}`, DEP, { query: { depozit: "1" } });
   bine("o legătură cu ?depozit=1 deschide caseta", pag.corp.includes(CASETA_VECHE + " open>"));
   const O4 = comanda("CF-4", { status: "primita", data: "2026-11-12", dataReceptie: "2026-11-14" });
   const LD = linieCf(O4, P3, `${PREFIX} Granula`, 90, "kg", 4, 90);
+  // Un rând făcut din numere și un palet cu marfa lui sub alt nume, intrat în ziua recepției:
+  // la comanda nouă potrivirea rămâne cea strânsă (marfa ei sigur n-a intrat de mână).
+  linieCf(O4, null, `${PREFIX} TUB SP 470 50/62 350 gr`, 50, "buc", 1, 50);
+  q(`INSERT INTO ct_paleti (cod, produs_text, cantitate, cantitate_intrare, um, data_intrare) VALUES ('${PREFIX}-PAL-TUB3', '${PREFIX} SP 470 50/63 350 gr', 50, 50, 'buc', '2026-11-14')`);
   pag = await cer("get", `/procurement/comenzi/${O4}`, DEP);
-  bine("comanda recepționată de pe 13.11 încoace rămâne cum era: caseta de atenționare, cu restul propus și fără „ce e acum în CT-Park”", pag.corp.includes('<h2 style="margin-top:28px" id="in-depozit">Trimite în depozit</h2>') && !pag.corp.includes('data-in-depozit="veche"') && bucata(pag.corp, "in-depozit", "Istoric").includes(`value="${LD}"`) && bucata(pag.corp, "in-depozit", "Istoric").includes('autocomplete="off" value="90" style="width:110px"') && !bucata(pag.corp, "in-depozit", "Istoric").includes("În CT-Park"), (bucata(pag.corp, "in-depozit", "Istoric").match(/name="cant\[\]"[^>]*>/g) || ["lipsește"]).join(" "));
+  bine("la comanda de după 13.11 potrivirea rămâne cea strânsă: paletul scris altfel nu apare ca „poate deja pe raft”", !bucata(pag.corp, "in-depozit", "Istoric").includes(`${PREFIX}-PAL-TUB3`) && !bucata(pag.corp, "in-depozit", "Istoric").includes("Poate e deja pe raft"), (bucata(pag.corp, "in-depozit", "Istoric").match(/Poate e deja pe raft[\s\S]{0,200}/) || [""])[0]);
+  bine("comanda recepționată de pe 13.11 încoace rămâne cum era: caseta de atenționare, cu restul propus și fără „ce e acum în CT-Park”", pag.corp.includes('<h2 style="margin-top:28px" id="in-depozit">Trimite în depozit</h2>') && !pag.corp.includes('data-in-depozit="veche"') && bucata(pag.corp, "in-depozit", "Istoric").includes(`value="${LD}"`) && bucata(pag.corp, "in-depozit", "Istoric").includes('autocomplete="off" value="90" style="width:110px"') && !bucata(pag.corp, "in-depozit", "Istoric").includes("În CT-Park") && !pag.corp.includes("data-intrate"), (bucata(pag.corp, "in-depozit", "Istoric").match(/name="cant\[\]"[^>]*>/g) || ["lipsește"]).join(" "));
 
   // ------------------------------------------------------------------------
   console.log("\n9. Recepția din depozit");
