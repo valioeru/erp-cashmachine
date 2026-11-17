@@ -183,10 +183,78 @@ async function verificaCodul(valori, { vechi } = {}) {
     alege alt cod, sau, dacă e același produs, lucrează pe acela.`;
 }
 
+// ---- prețul scris în valută, trecut în lei --------------------------------
+//
+// Vali, 17.11.2026: „prețurile se introduc în RON sau EUR; se păstrează cursul
+// introdus sau BNR; odată plasat, așa rămâne în istoric". Prețurile produsului
+// stau în lei (din ele se fac comenzile, ofertele, marjele). Cine are prețul în
+// euro sau dolari îl scrie aici: se trece în lei, în câmpul ales, la cursul
+// scris sau la BNR-ul zilei, iar „Din ce s-au făcut prețurile" ține minte
+// suma, moneda și cursul. Nu se convertește nimic la salvare: un formular cu
+// prețuri deja în lei, salvat cu moneda rămasă pe euro, le-ar fi înmulțit.
+const CAMPURI_PRET = [
+  ["pret_achizitie", "Preț achiziție"],
+  ["pret_productie", "Cost de producție"],
+  ["pret_minim", "Preț minim"],
+  ["pret_vanzare", "Preț vânzare"],
+];
+function trecereDinValuta(bnr) {
+  const date = JSON.stringify(bnr || {}).replace(/</g, "\\u003c");
+  return `<div data-trecere-valuta style="font-weight:400;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input type="text" inputmode="decimal" data-tv-suma placeholder="suma" style="width:100px" aria-label="Suma în valută">
+      <select data-tv-moneda aria-label="Moneda" style="width:auto"><option>EUR</option><option>USD</option></select>
+      <span>la cursul</span>
+      <input type="text" inputmode="decimal" data-tv-curs style="width:100px" aria-label="Cursul; gol = BNR-ul zilei">
+      <span>→</span>
+      <select data-tv-camp aria-label="În ce câmp" style="width:auto">${CAMPURI_PRET.map(([n, e]) => `<option value="${n}">${esc(e)}</option>`).join("")}</select>
+      <button type="button" class="btn secondary small" data-tv-pune>Trece în lei</button>
+      <span data-tv-mesaj style="font-size:13px;color:var(--text-muted)">Cursul gol = BNR-ul zilei.</span>
+    </div>
+    <script>
+      (function () {
+        var BNR = ${date};
+        var cutie = document.querySelector("[data-trecere-valuta]");
+        if (!cutie || cutie.getAttribute("data-legat")) return;
+        cutie.setAttribute("data-legat", "1");
+        var q = function (s) { return cutie.querySelector(s); };
+        var nr = function (v) { var t = String(v == null ? "" : v).trim().replace(",", "."); if (!t) return null; var n = Number(t); return isFinite(n) && n > 0 ? n : NaN; };
+        var ro = function (x, z) { return Number(x).toLocaleString("ro-RO", { minimumFractionDigits: z, maximumFractionDigits: z, useGrouping: false }); };
+        var ziRo = function (d) { var p = String(d || "").split("-"); return p.length === 3 ? p[2] + "." + p[1] + "." + p[0] : String(d || ""); };
+        var moneda = q("[data-tv-moneda]"), curs = q("[data-tv-curs]"), mesaj = q("[data-tv-mesaj]");
+        var arataBnr = function () { var b = BNR[moneda.value]; curs.placeholder = b ? ro(b.valoare, 4) : "scrie cursul"; };
+        moneda.addEventListener("change", arataBnr);
+        arataBnr();
+        q("[data-tv-pune]").addEventListener("click", function () {
+          var suma = nr(q("[data-tv-suma]").value), scris = nr(curs.value), b = BNR[moneda.value];
+          if (suma === null || isNaN(suma)) { mesaj.textContent = "Scrie suma, ca număr."; return; }
+          if (isNaN(scris)) { mesaj.textContent = "Cursul nu e un număr."; return; }
+          var c = scris !== null ? scris : b ? b.valoare : null;
+          if (c === null) { mesaj.textContent = "BNR nu are acum curs pentru " + moneda.value + ". Scrie cursul."; return; }
+          var camp = q("[data-tv-camp]"), tinta = document.querySelector('input[name="' + camp.value + '"]');
+          if (!tinta) return;
+          var lei = Math.round(suma * c * 10000) / 10000;
+          tinta.value = String(lei);
+          var deUnde = scris !== null && !(b && Math.abs(scris - b.valoare) < 0.00005) ? "curs pus de voi" : "BNR din " + ziRo(b.data);
+          var eticheta = camp.options[camp.selectedIndex].text;
+          var rand = eticheta + ": " + ro(suma, 2).replace(/,?0+$/, "") + " " + moneda.value + " × " + ro(c, 4) + " (" + deUnde + ")";
+          var nota = document.querySelector('input[name="pret_nota"]');
+          if (nota) {
+            // Nota veche a aceluiași câmp se înlocuiește; ale celorlalte rămân.
+            var parti = String(nota.value || "").split(" · ").filter(function (x) { return x && x.indexOf(eticheta + ": ") !== 0; });
+            parti.push(rand);
+            nota.value = parti.join(" · ");
+          }
+          mesaj.textContent = eticheta + " = " + ro(lei, 4) + " lei. Salvează ca să rămână.";
+        });
+      })();
+    </script>`;
+}
+
 function register(router) {
   // Adaosul implicit se citește o dată per cerere și se ține aici, ca să nu
   // facem o interogare pentru fiecare dintre cele peste patru mii de rânduri.
   let adaosCurent = ADAOS_IMPLICIT;
+  let bnrCurent = {};
 
   registerCrud(router, {
     path: "/produse",
@@ -200,7 +268,11 @@ function register(router) {
     ],
     limita: 200,
     ordine: "denumire",
-    inainte: async () => { adaosCurent = await adaosImplicit(); },
+    inainte: async () => {
+      adaosCurent = await adaosImplicit();
+      // Cursul BNR al zilei, pentru trecerea unui preț din valută în lei (mai jos).
+      bnrCurent = await require("../lib/pret-valuta").bnrAzi(require("./curs").laZiua).catch(() => ({}));
+    },
     valideaza: verificaCodul,
     // Produsul nou: familia, caracteristicile, codul generat și restul
     // câmpurilor de mai jos, într-un singur formular.
@@ -238,7 +310,8 @@ function register(router) {
       { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },
       { name: "gestiune", label: "Gestiune", datalist: true, ajutor: "Gestiunea din contabilitate în care stă produsul." },
       { name: "unitate_masura", label: "Unitate de măsură", default: "buc" },
-      { name: "pret_achizitie", label: "Preț achiziție", type: "number", step: "0.01", default: 0, ajutor: "Pentru marfa pe care o cumpărăm." },
+      { name: "_valuta", label: "Ai prețul în euro sau dolari?", type: "calculat", calc: () => trecereDinValuta(bnrCurent) },
+      { name: "pret_achizitie", label: "Preț achiziție", type: "number", step: "0.0001", default: 0, ajutor: "Pentru marfa pe care o cumpărăm. În lei." },
       { name: "pret_productie", label: "Cost de producție", type: "number", step: "0.0001", ajutor: "Pentru ce facem noi. Lasă gol dacă produsul are rețetă — atunci costul se ia din ea." },
       {
         name: "_cost",
@@ -261,8 +334,9 @@ function register(router) {
           return `${money(pl)} <span style="font-weight:400;color:var(--text-muted)">(adaos ${a.valoare}%${a.propriu ? "" : ", implicit"})</span>`;
         },
       },
-      { name: "pret_minim", label: "Preț minim de vânzare", type: "number", step: "0.01", ajutor: "Sub prețul ăsta pagina te avertizează. Lasă gol dacă n-ai o limită." },
-      { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", step: "0.01", default: 0, ajutor: "Prețul folosit efectiv în oferte și facturi." },
+      { name: "pret_minim", label: "Preț minim de vânzare", type: "number", step: "0.0001", ajutor: "Sub prețul ăsta pagina te avertizează. Lasă gol dacă n-ai o limită." },
+      { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", step: "0.0001", default: 0, ajutor: "Prețul folosit efectiv în oferte și facturi. În lei." },
+      { name: "pret_nota", label: "Din ce s-au făcut prețurile", ajutor: "Se completează singur când treci un preț din valută în lei, cu cursul din ziua aceea. Rămâne scris cât nu-l schimbi." },
       { name: "cota_tva", label: "Cotă TVA (%)", type: "number", step: "0.01", default: 21 },
       { name: "stoc_minim", label: "Stoc minim (alertă)", type: "number", step: "0.01", default: 0 },
     ],
@@ -808,4 +882,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, poateConfirma, verificaCodul, produsulCuCodul };
+module.exports = { register, poateConfirma, verificaCodul, produsulCuCodul, trecereDinValuta };

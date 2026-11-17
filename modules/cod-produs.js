@@ -897,6 +897,7 @@ const CAMPURI_FISA = [
   { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", default: 0, ajutor: "Prețul folosit efectiv în oferte și facturi." },
   { name: "cota_tva", label: "Cotă TVA (%)", type: "number", default: 21 },
   { name: "stoc_minim", label: "Stoc minim (alertă)", type: "number", default: 0 },
+  { name: "pret_nota", label: "Din ce s-au făcut prețurile", ajutor: "Se completează singur când treci un preț din valută în lei, cu cursul din ziua aceea." },
 ];
 
 // Ce a scris omul în câmpurile fișei. Textul, fără spații la capete; un număr
@@ -1021,6 +1022,10 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto } = {}) {
     const ajutor = f.ajutor ? `<small style="display:block;color:var(--text-muted);font-size:12px;margin-top:3px">${esc(f.ajutor)}</small>` : "";
     return `<label class="field" style="flex:1 1 200px;max-width:300px">${esc(f.label)}${input}${ajutor}</label>`;
   };
+  // Trecerea unui preț din valută în lei, aceeași ca în fișa produsului (modules/produse.js).
+  const trecere = require("./produse").trecereDinValuta(
+    await require("../lib/pret-valuta").bnrAzi(require("./curs").laZiua).catch(() => ({}))
+  );
   const rand = (nume) => `<div style="display:flex;gap:10px;flex-wrap:wrap">${CAMPURI_FISA.filter((f) => nume.includes(f.name)).map(campFisa).join("")}</div>`;
 
   const fara = !fam.length
@@ -1066,8 +1071,10 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto } = {}) {
         </label>
       </div>
       ${rand(["categorie", "gestiune", "unitate_masura"])}
+      <div class="field" style="margin:6px 0"><span style="display:block;font-size:13px">Ai prețul în euro sau dolari?</span>${trecere}</div>
       ${rand(["pret_achizitie", "pret_productie", "adaos_lista"])}
       ${rand(["pret_minim", "pret_vanzare", "cota_tva", "stoc_minim"])}
+      ${rand(["pret_nota"])}
       <div class="form-actions">
         <button class="btn" type="submit" id="btn-salveaza">Adaugă produsul</button>
         <a href="/produse" class="btn secondary">Renunță</a>
@@ -1191,8 +1198,8 @@ async function scrieProdusul(r, familieId, extra = {}) {
       .prepare(
         `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id,
                               categorie, gestiune, pret_achizitie, pret_productie, adaos_lista, pret_minim, cota_tva,
-                              creat_de, creat_la, cod_semnatura, furnizor_id)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
+                              creat_de, creat_la, cod_semnatura, furnizor_id, pret_nota)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
       )
       .run(
         r.cod, r.cod, denumire, unitate,
@@ -1205,7 +1212,8 @@ async function scrieProdusul(r, familieId, extra = {}) {
         tva === null ? 21 : tva,
         Number(e.creat_de) || null, acum,
         r.contor ? r.semnatura : null,
-        furnizorId
+        furnizorId,
+        text(e.pret_nota)
       );
   const furnizorId = await furnizorulScris(r);
   // La textul liber, numărul de ordine se ia din nou chiar înainte de scriere:

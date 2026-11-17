@@ -137,6 +137,28 @@ async function scrieTrimisa(facturaId, rezultat, cand) {
   }
 }
 
+// ---- facturile scrise de mână, cu prețuri în valută -------------------------
+//
+// Vali, 17.11.2026: „la orice comandă, preț etc., din orice loc în tot sistemul,
+// prețurile se introduc în RON sau EUR; se păstrează cursul introdus sau BNR;
+// odată plasat, așa rămâne în istoric". Convenția rămâne: liniile facturii sunt
+// în lei. Prețul scris în euro sau dolari se trece în lei la cursul ales (gol =
+// BNR-ul zilei), cu patru zecimale, ca la factura făcută din comandă, iar
+// observațiile țin minte cursul. Vezi lib/pret-valuta.js.
+const valutaFacturii = (corp) => require("../lib/pret-valuta").dinFormular(corp, require("./curs").laZiua);
+function pretLinieInLei(scris, valuta) {
+  const PV = require("../lib/pret-valuta");
+  const p = Number(String(scris == null ? "" : scris).trim().replace(",", ".") || 0);
+  if (!Number.isFinite(p)) return 0;
+  const lei = PV.inLei(p, valuta, 4);
+  return lei === null ? 0 : lei;
+}
+function cuNotaDeCurs(observatii, valuta) {
+  const PV = require("../lib/pret-valuta");
+  const nota = PV.eLei(valuta) ? "" : `Prețuri scrise în ${valuta.moneda}, trecute în lei: ${PV.nota(1, valuta)}.`;
+  return [String(observatii || "").trim(), nota].filter(Boolean).join(" · ");
+}
+
 function register(router) {
   // Lista de facturi — o SINGURĂ interogare agregată, cu paginare și căutare.
   //
@@ -379,6 +401,12 @@ function register(router) {
       <label class="field"><span>Data scadenței</span><input type="date" name="data_scadenta"></label>
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2"></textarea></label>
 
+      ${ctx.query && ctx.query.eroare ? `<div class="flash flash-rosu" role="alert" style="background:#f8e5e3;border-color:#efc9c4;color:var(--danger)">${esc(String(ctx.query.eroare))}</div>` : ""}
+      <div data-valuta-factura style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        ${require("../lib/pret-valuta").camp(ctx.query || {}, { eticheta: "Prețurile liniilor sunt scrise în" })}
+      </div>
+      <p style="font-size:13px;color:var(--text-muted);margin-top:-4px">Factura se ține în lei. Prețurile scrise în euro sau dolari se trec în lei la cursul de aici (gol = BNR-ul zilei), iar cursul rămâne scris în observații.</p>
+
       <h2>Linii factură</h2>
       <table class="table lines-table">
         <thead><tr><th>Produs</th><th>Denumire pe factură</th><th>Cantitate</th><th>Preț unitar</th><th>TVA %</th><th></th></tr></thead>
@@ -400,7 +428,8 @@ function register(router) {
         <a href="/facturi/achizitii" class="btn secondary">Renunță</a>
       </div>
     </form>
-    ${lineRowsScript()}`;
+    ${lineRowsScript()}
+    ${require("../lib/pret-valuta").script(await require("../lib/pret-valuta").bnrAzi(require("./curs").laZiua))}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Achiziție nouă", active: "/facturi/achizitii", body }));
   });
 
@@ -412,6 +441,11 @@ function register(router) {
     const preturi = asArray(ctx.body["pret_unitar[]"]);
     const cotele = asArray(ctx.body["cota_tva[]"]);
 
+    // Prețurile se pot scrie și în valută (Vali, 17.11.2026; lib/pret-valuta.js):
+    // în factură rămân în lei, la cursul ales, iar observațiile țin minte cursul.
+    const valuta = await valutaFacturii(ctx.body);
+    if (!valuta.ok) return redirect(ctx.res, `/facturi/achizitii/noua?eroare=${encodeURIComponent(valuta.eroare)}`);
+
     // Scadența lăsată goală se ia din termenul de plată al furnizorului
     // (Vali, 17.11.2026; lib/termen-plata.js). Cea scrisă de mână rămâne.
     const scadentaAchizitie =
@@ -421,7 +455,7 @@ function register(router) {
       .prepare(
         "INSERT INTO facturi (serie, numar, partener_id, directie, data_emiterii, data_scadenta, observatii, status) VALUES (?, ?, ?, 'achizitie', ?, ?, ?, 'emisa') RETURNING id"
       )
-      .run(serie || "FAC", parseInt(String(numar).replace(/[^0-9]/g, ""), 10) || 0, partener_id, data_emiterii || "", scadentaAchizitie || "", observatii || "");
+      .run(serie || "FAC", parseInt(String(numar).replace(/[^0-9]/g, ""), 10) || 0, partener_id, data_emiterii || "", scadentaAchizitie || "", cuNotaDeCurs(observatii, valuta));
     const facturaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
@@ -437,7 +471,7 @@ function register(router) {
         if (!(pid in produsCache)) produsCache[pid] = await db.prepare("SELECT denumire FROM produse WHERE id = ?").get(pid);
         numeLinie = produsCache[pid] ? produsCache[pid].denumire : "";
       }
-      await insertLinie.run(facturaId, pid, numeLinie || "(fără denumire)", cant, Number(preturi[i] || 0), Number(cotele[i] || 0));
+      await insertLinie.run(facturaId, pid, numeLinie || "(fără denumire)", cant, pretLinieInLei(preturi[i], valuta), Number(cotele[i] || 0));
     }
 
     redirect(ctx.res, `/facturi/${facturaId}`);
@@ -465,6 +499,12 @@ function register(router) {
       <label class="field"><span>Data scadenței</span><input type="date" name="data_scadenta"></label>
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2"></textarea></label>
 
+      ${ctx.query && ctx.query.eroare ? `<div class="flash flash-rosu" role="alert" style="background:#f8e5e3;border-color:#efc9c4;color:var(--danger)">${esc(String(ctx.query.eroare))}</div>` : ""}
+      <div data-valuta-factura style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        ${require("../lib/pret-valuta").camp(ctx.query || {}, { eticheta: "Prețurile liniilor sunt scrise în" })}
+      </div>
+      <p style="font-size:13px;color:var(--text-muted);margin-top:-4px">Factura se ține în lei. Prețurile scrise în euro sau dolari se trec în lei la cursul de aici (gol = BNR-ul zilei), iar cursul rămâne scris în observații.</p>
+
       <h2>Linii factură</h2>
       <table class="table lines-table">
         <thead><tr><th>Produs</th><th>Denumire pe factură</th><th>Cantitate</th><th>Preț unitar</th><th>TVA %</th><th></th></tr></thead>
@@ -486,7 +526,8 @@ function register(router) {
         <a href="/facturi" class="btn secondary">Renunță</a>
       </div>
     </form>
-    ${lineRowsScript()}`;
+    ${lineRowsScript()}
+    ${require("../lib/pret-valuta").script(await require("../lib/pret-valuta").bnrAzi(require("./curs").laZiua))}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Factură nouă", active: "/facturi", body }));
   });
 
@@ -498,6 +539,10 @@ function register(router) {
     const preturi = asArray(ctx.body["pret_unitar[]"]);
     const cotele = asArray(ctx.body["cota_tva[]"]);
 
+    // Prețurile se pot scrie și în valută: în factură rămân în lei (vezi mai sus, la achiziții).
+    const valuta = await valutaFacturii(ctx.body);
+    if (!valuta.ok) return redirect(ctx.res, `/facturi/nou?eroare=${encodeURIComponent(valuta.eroare)}`);
+
     const maxNumar = (await db.prepare("SELECT COALESCE(MAX(numar),0) AS m FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").get()).m;
 
     // Scadența lăsată goală se ia din termenul de plată al clientului (Vali,
@@ -507,7 +552,7 @@ function register(router) {
       TP.scadenta(new Date().toISOString().slice(0, 10), await TP.alPartenerului(db, partener_id));
     const info = await db
       .prepare("INSERT INTO facturi (numar, partener_id, directie, data_scadenta, observatii, status) VALUES (?, ?, 'vanzare', ?, ?, 'emisa') RETURNING id")
-      .run(maxNumar + 1, partener_id, scadentaVanzare || "", observatii || "");
+      .run(maxNumar + 1, partener_id, scadentaVanzare || "", cuNotaDeCurs(observatii, valuta));
     const facturaId = info.lastInsertRowid;
 
     const insertLinie = db.prepare(
@@ -523,7 +568,7 @@ function register(router) {
         if (!(pid in produsCache)) produsCache[pid] = await db.prepare("SELECT denumire FROM produse WHERE id = ?").get(pid);
         numeLinie = produsCache[pid] ? produsCache[pid].denumire : "";
       }
-      await insertLinie.run(facturaId, pid, numeLinie || "(fără denumire)", cant, Number(preturi[i] || 0), Number(cotele[i] || 0));
+      await insertLinie.run(facturaId, pid, numeLinie || "(fără denumire)", cant, pretLinieInLei(preturi[i], valuta), Number(cotele[i] || 0));
     }
 
     redirect(ctx.res, `/facturi/${facturaId}`);
