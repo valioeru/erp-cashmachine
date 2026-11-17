@@ -608,7 +608,8 @@ function register(router) {
     const z = R.rezumat(linii);
     // Locul nu se mai alege dintr-o listă de coduri: depozitul e unul singur,
     // CT-Park, iar marfa se pune pe hartă după finalizare (secțiunea de jos).
-    const produse = await db.prepare("SELECT id, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
+    // Fără produsele parcate; cele cu cod vechi fără stoc poartă eticheta în denumire (lib/cod-vechi.js).
+    const produse = (await require("../lib/cod-vechi").pentruAles(await db.prepare("SELECT id, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 6000").all())).map((p) => Object.assign(p, { denumire: require("../lib/cod-vechi").cuEticheta(p.denumire, p) }));
     const retur = R.esteRetur(r.sursa);
     const inchisa = r.stare === "finalizata" || r.stare === "anulata";
     // Prezentarea mărfii: câți paleți și cât pe un palet plin. La stocul

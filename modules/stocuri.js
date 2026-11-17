@@ -148,7 +148,8 @@ function register(router) {
   });
 
   router.get("/stocuri/miscare/nou", async (ctx) => {
-    const produse = await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire").all();
+    // Fără produsele parcate; cele cu cod vechi fără stoc poartă eticheta în denumire (lib/cod-vechi.js).
+    const produse = (await require("../lib/cod-vechi").pentruAles(await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire").all())).map((p) => Object.assign(p, { denumire: require("../lib/cod-vechi").cuEticheta(p.denumire, p) }));
     const depozite = await db.prepare("SELECT id, denumire FROM depozite ORDER BY denumire").all();
     if (produse.length === 0 || depozite.length === 0) {
       return send(

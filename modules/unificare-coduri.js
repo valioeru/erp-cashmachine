@@ -34,6 +34,7 @@ const { send, redirect } = require("../lib/router");
 const U = require("../lib/unificare-coduri");
 const FZ = require("../lib/produse-fuziune");
 const SP = require("../lib/stoc-produse");
+const CV = require("../lib/cod-vechi");
 
 const CALE = "/configurari/unificare-coduri";
 // Câte perechi „scrise de două ori" încap pe pagină și cât durează, cel mult,
@@ -75,7 +76,7 @@ async function citeste() {
     .prepare(
       `SELECT id, cod, cod_generat, denumire, unitate_masura, cod_familie_id, categorie,
               COALESCE(pret_achizitie, 0) AS pret_achizitie, COALESCE(pret_vanzare, 0) AS pret_vanzare,
-              COALESCE(cod_vechi_exceptat, 0) AS exceptat
+              COALESCE(cod_vechi_exceptat, 0) AS exceptat, parcat_la, parcat_fel, nascut_la
          FROM produse
         WHERE COALESCE(activ, 1) = 1 AND fuzionat_in IS NULL
         ORDER BY denumire, id`
@@ -100,8 +101,12 @@ async function citeste() {
 }
 
 // Ce are de arătat pagina: rândurile celor două părți.
+// Produsul bun: făcut din configurator sau trecut de om ca „E bun așa". În el
+// intră cele vechi; el nu intră în niciunul vechi.
+const eBun = (p) => U.eNou(p) || Number(p && p.exceptat) === 1;
+
 function socoteste(d) {
-  const noi = d.produse.filter(U.eNou);
+  const noi = d.produse.filter(eBun);
   const frati = U.perechi(d.produse).filter((x) => !d.respinse.has(`${x.vechi.id}:${x.nou.id}`));
   const frateLui = new Map(frati.map((x) => [Number(x.vechi.id), x]));
 
@@ -140,7 +145,13 @@ function socoteste(d) {
   // 3. Cele scoase din listă cu „E bun așa", ca să poată fi repuse.
   const exceptate = d.produse.filter((p) => !U.eNou(p) && Number(p.exceptat) === 1);
 
-  return { noi, cuStoc, faraStoc, exceptate };
+  // 4. Cod vechi, fără stoc: la alegere apar cu „COD VECHI — nu selecta"
+  //    (lib/cod-vechi.js). 5. Parcate: nu mai apar la alegere deloc.
+  const azi = new Date().toISOString().slice(0, 10);
+  const parcate = d.produse.filter((p) => CV.eParcat(p));
+  const vechiFaraStoc = d.produse.filter((p) => !eBun(p) && !CV.eParcat(p) && !CV.eProaspat(p, azi) && !d.stoc.has(Number(p.id)));
+
+  return { noi, cuStoc, faraStoc, exceptate, vechiFaraStoc, parcate };
 }
 
 const stocText = (s) =>
@@ -243,6 +254,7 @@ function piedica(vechi, nou) {
   if (Number(vechi.id) === Number(nou.id)) return "E același produs.";
   // Sensul contează: produsul cu cod nou e cel care rămâne.
   if (U.eNou(vechi) && !U.eNou(nou)) return "Produsul cu cod nou e cel care rămâne: nu se unifică el într-unul cu cod vechi. Alege-le invers.";
+  if (eBun(vechi) && !eBun(nou)) return "Produsul trecut ca „E bun așa” e cel care rămâne: nu se unifică el într-unul cu cod vechi. Alege-le invers.";
   return "";
 }
 
@@ -267,6 +279,7 @@ async function unifica(vechi, nou, user, fel) {
     )
     .run(vechi.id, nou.id, fel || "de_mana", completate.length ? "completat din cel vechi: " + completate.join(", ") : null, user ? user.id : null);
   console.log(`[unificare-coduri] #${vechi.id} „${vechi.denumire}” → #${nou.id} „${nou.denumire}”: ${r.total} rânduri mutate (${(user && user.nume) || "?"})`);
+  CV.goleste();
   const cazute = locuriCazute(r.mutari);
   if (cazute.length) console.error(`[unificare-coduri] #${vechi.id} → #${nou.id}: N-AU PUTUT FI MUTATE ${cazute.join(", ")}:`, JSON.stringify(r.mutari).slice(0, 600));
   return { total: r.total, mutari: r.mutari, completate, cazute };
@@ -277,7 +290,7 @@ function register(router) {
     const q = ctx.query || {};
     const d = await citeste();
     const s = socoteste(d);
-    const parte = String(q.parte || "") === "perechi" ? "perechi" : "stoc";
+    const parte = ["perechi", "vechi", "parcate"].includes(String(q.parte || "")) ? String(q.parte) : "stoc";
     const cauta = String(q.q || "").trim().slice(0, 80);
     const cuvinte = SP.cuvinte(cauta);
     const sePotriveste = (...texte) => {
@@ -295,16 +308,20 @@ function register(router) {
         <div class="card"><div class="label">Produse cu cod nou</div><div class="value">${s.noi.length}</div><div class="ct-sub">făcute din configurator</div></div>
         <div class="card"><div class="label">Produse vechi cu stoc</div><div class="value">${s.cuStoc.length}</div><div class="ct-sub">${cuPropunere} cu o propunere</div></div>
         <div class="card"><div class="label">Scrise de două ori, fără stoc</div><div class="value">${s.faraStoc.length}</div><div class="ct-sub">se unifică în bloc</div></div>
+        <div class="card"><div class="label">Cod vechi, fără stoc</div><div class="value">${s.vechiFaraStoc.length}</div><div class="ct-sub">la alegere apar cu „nu selecta”</div></div>
+        <div class="card"><div class="label">Parcate</div><div class="value">${s.parcate.length}</div><div class="ct-sub">nu mai apar la alegere</div></div>
       </div>`;
     const taburi = `<div class="subnav" style="margin:10px 0">
         <a href="${CALE}" class="subnav-link${parte === "stoc" ? " activ" : ""}">Produse vechi cu stoc (${s.cuStoc.length})</a>
         <a href="${CALE}?parte=perechi" class="subnav-link${parte === "perechi" ? " activ" : ""}">Scrise de două ori, fără stoc (${s.faraStoc.length})</a>
+        <a href="${CALE}?parte=vechi" class="subnav-link${parte === "vechi" ? " activ" : ""}">Cod vechi, fără stoc (${s.vechiFaraStoc.length})</a>
+        <a href="${CALE}?parte=parcate" class="subnav-link${parte === "parcate" ? " activ" : ""}">Parcate (${s.parcate.length})</a>
       </div>
       <form method="get" action="${CALE}" class="toolbar" style="margin:0 0 10px">
-        ${parte === "perechi" ? '<input type="hidden" name="parte" value="perechi">' : ""}
+        ${parte !== "stoc" ? `<input type="hidden" name="parte" value="${parte}">` : ""}
         <input type="search" name="q" value="${esc(cauta)}" placeholder="Caută după denumire sau cod" style="min-width:280px">
         <button class="btn secondary" type="submit">Caută</button>
-        ${cauta ? `<a class="btn secondary small" href="${CALE}${parte === "perechi" ? "?parte=perechi" : ""}">Arată tot</a>` : ""}
+        ${cauta ? `<a class="btn secondary small" href="${CALE}${parte !== "stoc" ? "?parte=" + parte : ""}">Arată tot</a>` : ""}
       </form>`;
 
     let corp;
@@ -395,6 +412,50 @@ function register(router) {
                 )}
               </details>`
             : ""
+        }`;
+    } else if (parte === "vechi" || parte === "parcate") {
+      const parcat = parte === "parcate";
+      const folosit = await CV.folosite().catch(() => new Map());
+      const toate = (parcat ? s.parcate : s.vechiFaraStoc).filter((x) => sePotriveste(x.denumire, codulLui(x)));
+      const pagina = toate.slice(0, PE_PAGINA);
+      const ziRo = (z) => (z ? `${z.slice(8, 10)}.${z.slice(5, 7)}.${z.slice(0, 4)}` : "");
+      corp = `
+        <p style="max-width:900px;color:var(--text-muted)">${
+          parcat
+            ? `Produse cu cod vechi, fără stoc, nefolosite de ${CV.ZILE} de zile. <strong>Nu mai apar la alegerea produsului</strong> (comenzi, oferte, comenzi la furnizori, producție, recepție, facturi). Rămân în nomenclator și pe documentele vechi. „Scoate din parcare” le aduce înapoi la alegere.`
+            : `Produse cu cod vechi care n-au marfă în CT-Park. La alegerea produsului apar cu <strong>„${esc(CV.ETICHETA)}”</strong>. Cele nefolosite ${CV.ZILE} de zile (pe nicio comandă, ofertă, factură, recepție sau palet) se parchează singure, în fiecare noapte, începând cu ${ziRo(CV.PARCARE_DE_LA)}. Dacă un produs de aici e de fapt bun, deschide-i fișa sau trece-l ca „E bun așa” de mai jos.`
+        }</p>
+        ${
+          pagina.length
+            ? `<div class="tabel-scroll"><table class="table" data-unificare="${parte}">
+                <thead><tr><th>Produs</th><th>UM</th><th>Folosit ultima dată</th>${parcat ? "<th>Parcat</th>" : ""}<th></th></tr></thead>
+                <tbody>${pagina
+                  .map(
+                    (x) => `<tr data-produs="${x.id}">
+                      <td style="white-space:normal">${numeProdus(x)}</td>
+                      <td>${esc(x.unitate_masura || "—")}</td>
+                      <td>${folosit.get(Number(x.id)) ? esc(ziRo(folosit.get(Number(x.id)))) : '<span style="color:var(--text-muted)">niciodată</span>'}</td>
+                      ${parcat ? `<td>${esc(ziRo(String(x.parcat_la).slice(0, 10)))}${x.parcat_fel === "mana" ? " · de mână" : ""}</td>` : ""}
+                      <td style="white-space:nowrap">
+                        <form method="post" action="${CALE}/parcare" class="inline-form">
+                          <input type="hidden" name="produs_id" value="${x.id}"><input type="hidden" name="pe" value="${parcat ? "0" : "1"}">
+                          <button class="btn secondary small" type="submit">${parcat ? "Scoate din parcare" : "Parchează"}</button>
+                        </form>
+                        ${
+                          parcat
+                            ? ""
+                            : `<form method="post" action="${CALE}/excepta" class="inline-form">
+                                 <input type="hidden" name="produs_id" value="${x.id}"><input type="hidden" name="pe" value="1"><input type="hidden" name="inapoi" value="vechi">
+                                 <button class="link-btn" type="submit" title="Codul lui e bun: nu mai e socotit cod vechi">E bun așa</button>
+                               </form>`
+                        }
+                      </td>
+                    </tr>`
+                  )
+                  .join("")}</tbody>
+              </table></div>
+              <p style="font-size:13px;color:var(--text-muted)">${toate.length > pagina.length ? `Primele ${pagina.length} din ${toate.length}. Caută după denumire sau cod ca să ajungi la celelalte.` : `${toate.length} ${toate.length === 1 ? "produs" : "produse"}.`}</p>`
+            : `<p>${cauta ? "Nimic nu se potrivește cu ce ai căutat." : parcat ? "Niciun produs parcat." : "Niciun produs cu cod vechi fără stoc."}</p>`
         }`;
     } else {
       const toate = s.faraStoc.filter((x) => sePotriveste(x.vechi.denumire, x.nou.denumire, codulLui(x.nou)));
@@ -625,8 +686,30 @@ function register(router) {
     const p = await db.prepare("SELECT id, denumire FROM produse WHERE id = ?").get(id);
     if (!p) return redirect(ctx.res, CALE);
     await db.prepare("UPDATE produse SET cod_vechi_exceptat = ? WHERE id = ?").run(pe, id);
+    CV.goleste();
     console.log(`[unificare-coduri] #${id} „${p.denumire}”: ${pe ? "scos din lista de unificat" : "repus în lista de unificat"} (${(ctx.user && ctx.user.nume) || "?"})`);
-    redirect(ctx.res, `${CALE}?ok=${encodeURIComponent(pe ? `„${p.denumire}” rămâne cum e și a ieșit din listă.` : `„${p.denumire}” e din nou în listă.`)}`);
+    redirect(ctx.res, `${CALE}?${String(ctx.body.inapoi) === "vechi" ? "parte=vechi&" : ""}ok=${encodeURIComponent(pe ? `„${p.denumire}” rămâne cum e și a ieșit din listă.` : `„${p.denumire}” e din nou în listă.`)}`);
+  });
+
+  // Parcarea de mână și scoaterea din parcare. Se parchează doar un produs cu
+  // cod vechi fără stoc: unul cu marfă trebuie să poată fi vândut.
+  router.post(`${CALE}/parcare`, async (ctx) => {
+    const id = idDin(ctx.body.produs_id);
+    const pe = String(ctx.body.pe) === "0" ? 0 : 1;
+    const d = await citeste();
+    const p = d.dupaId.get(id);
+    const inapoi = (parte, cheie, text) => redirect(ctx.res, `${CALE}?parte=${parte}&${cheie}=${encodeURIComponent(text)}`);
+    if (!p) return inapoi(pe ? "vechi" : "parcate", "eroare", "Produsul nu mai există sau a fost unificat.");
+    if (!pe) {
+      await CV.scoateDinParcare(id);
+      console.log(`[unificare-coduri] #${id} „${p.denumire}”: scos din parcare (${(ctx.user && ctx.user.nume) || "?"})`);
+      return inapoi("parcate", "ok", `„${p.denumire}” a ieșit din parcare și apare din nou la alegere.`);
+    }
+    if (eBun(p)) return inapoi("vechi", "eroare", "Produsul are cod bun: nu se parchează.");
+    if (d.stoc.has(id)) return inapoi("vechi", "eroare", "Produsul are stoc în CT-Park: nu se parchează. Locul lui e în lista de unificat.");
+    await CV.parcheazaDeMana(id);
+    console.log(`[unificare-coduri] #${id} „${p.denumire}”: parcat de mână (${(ctx.user && ctx.user.nume) || "?"})`);
+    inapoi("vechi", "ok", `„${p.denumire}” e parcat: nu mai apare la alegerea produsului.`);
   });
 
   // Unificarea în bloc a perechilor „scrise de două ori", fără stoc. Fiecare
@@ -674,4 +757,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, CALE, subnav, citeste, socoteste, completeazaDinVechi, piedica, MESAJ_DOUA_RETETE };
+module.exports = { register, CALE, subnav, citeste, socoteste, completeazaDinVechi, piedica, MESAJ_DOUA_RETETE, eBun };

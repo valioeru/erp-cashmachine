@@ -461,8 +461,9 @@ function register(router) {
       .all(deLa)
       .catch(() => []);
     const produse = await db
-      .prepare("SELECT id, COALESCE(NULLIF(TRIM(cod), ''), cod_generat) AS cod, denumire FROM produse WHERE COALESCE(activ, 1) = 1 ORDER BY denumire LIMIT 5000")
+      .prepare("SELECT id, COALESCE(NULLIF(TRIM(cod), ''), cod_generat) AS cod, denumire FROM produse WHERE COALESCE(activ, 1) = 1 ORDER BY denumire LIMIT 6000")
       .all()
+      .then((l) => require("../lib/cod-vechi").pentruAles(l))
       .catch(() => []);
     const randuri = loturi.map((l) => [
       `<a href="${CALE}/${l.id}"><strong>${esc(l.lot)}</strong></a>`,
@@ -502,7 +503,7 @@ function register(router) {
               .join("")}</select></label>
           <label class="field"><span>…sau produsul, din nomenclator</span>
             <input name="produs" list="et-produse" autocomplete="off" placeholder="scrie codul sau denumirea">
-            <datalist id="et-produse">${produse.map((p) => `<option value="#${p.id} ${esc(p.cod || "")} — ${esc(p.denumire)}"></option>`).join("")}</datalist></label>
+            <datalist id="et-produse">${produse.map((p) => `<option value="#${p.id} ${esc(p.cod || "")} — ${esc(p.denumire)}"${p.cod_vechi ? ` label="${require("../lib/cod-vechi").ETICHETA}"` : ""}></option>`).join("")}</datalist></label>
         </div>
         <div class="form-actions"><button class="btn" type="submit">Continuă →</button></div>
       </form>

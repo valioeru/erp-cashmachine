@@ -800,6 +800,7 @@ function datalistProduse(produse, preturi) {
       u ? u.moneda : "",
       u ? String(u.data).slice(0, 10) : "",
       u ? u.furnizor : "",
+      p.cod_vechi ? 1 : 0, // cod vechi fără stoc: lista îl arată cu „nu selecta”
     ];
   });
   const categorii = [...new Set(produse.map((p) => text(p.categorie)).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ro"));
@@ -820,7 +821,8 @@ function datalistProduse(produse, preturi) {
       for (var i = 0; i < CF_PRODUSE.length && puse < 1200; i++) {
         var p = CF_PRODUSE[i];
         if (categorie && p[3] !== categorie) continue;
-        html += '<option value="' + String(p[1]).replace(/"/g, "&quot;") + '">';
+        // Eticheta stă în atributul label, nu în valoare: valoarea e cheia după care se regăsește produsul.
+        html += '<option value="' + String(p[1]).replace(/"/g, "&quot;") + '"' + (p[8] ? ' label="COD VECHI — nu selecta"' : '') + '>';
         puse++;
       }
       dl.innerHTML = html;
@@ -1526,9 +1528,9 @@ function register(router) {
     const furnizori = await db
       .prepare("SELECT id, nume, email, termen_plata_zile FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 3000")
       .all();
-    const produse = await db
-      .prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000")
-      .all();
+    const produse = await require("../lib/cod-vechi").pentruAles(
+      await db.prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000").all()
+    );
     const preturi = await ultimelePreturi();
     const monede = await monedeDisponibile();
     const bnr = await cursuriBnr(azi());
@@ -1783,9 +1785,10 @@ function register(router) {
     const furnizori = await db
       .prepare("SELECT id, nume, email, termen_plata_zile FROM parteneri WHERE tip IN ('furnizor','ambele') OR id = ? ORDER BY nume LIMIT 3000")
       .all(c.furnizor_id || 0);
-    const produse = await db
-      .prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000")
-      .all();
+    const produse = await require("../lib/cod-vechi").pentruAles(
+      await db.prepare("SELECT id, cod, denumire, unitate_masura, categorie FROM produse WHERE COALESCE(activ,1) = 1 ORDER BY denumire LIMIT 6000").all(),
+      (await db.prepare("SELECT produs_id FROM comenzi_furnizor_linii WHERE comanda_id = ? AND produs_id IS NOT NULL").all(c.id).catch(() => [])).map((l) => l.produs_id)
+    );
     const preturi = await ultimelePreturi();
     const monede = await monedeDisponibile(c.moneda);
     const ef = await cursulEfectiv(c);

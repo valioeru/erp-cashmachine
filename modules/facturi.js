@@ -356,7 +356,8 @@ function register(router) {
   });
   router.get("/facturi/achizitii/noua", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'client' ORDER BY nume").all();
-    const produse = await db.prepare("SELECT id, denumire, pret_achizitie, cota_tva FROM produse WHERE activ = 1 ORDER BY denumire").all();
+    // Fără produsele parcate; cele cu cod vechi fără stoc poartă eticheta în denumire (lib/cod-vechi.js).
+    const produse = (await require("../lib/cod-vechi").pentruAles(await db.prepare("SELECT id, denumire, pret_achizitie, cota_tva FROM produse WHERE activ = 1 ORDER BY denumire").all())).map((p) => Object.assign(p, { denumire: require("../lib/cod-vechi").cuEticheta(p.denumire, p) }));
     if (parteneri.length === 0) {
       return send(
         ctx.res,
@@ -444,7 +445,8 @@ function register(router) {
 
   router.get("/facturi/nou", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'furnizor' ORDER BY nume").all();
-    const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva FROM produse WHERE activ = 1 ORDER BY denumire").all();
+    // Fără produsele parcate; cele cu cod vechi fără stoc poartă eticheta în denumire (lib/cod-vechi.js).
+    const produse = (await require("../lib/cod-vechi").pentruAles(await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva FROM produse WHERE activ = 1 ORDER BY denumire").all())).map((p) => Object.assign(p, { denumire: require("../lib/cod-vechi").cuEticheta(p.denumire, p) }));
     if (parteneri.length === 0) {
       return send(
         ctx.res,

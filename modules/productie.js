@@ -1223,7 +1223,9 @@ function register(router) {
          ORDER BY CASE m.status WHEN 'ceruta' THEN 0 WHEN 'confirmata' THEN 1 ELSE 2 END, m.id DESC LIMIT 200`
       )
       .all();
-    const produse = await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
+    const produse = (await require("../lib/cod-vechi").pentruAles(await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 6000").all())).map((p) =>
+      Object.assign(p, { denumire: require("../lib/cod-vechi").cuEticheta(p.denumire, p) })
+    );
     const comenzi = await db
       .prepare("SELECT id, numar FROM comenzi_productie WHERE status IN ('noua','in_productie') ORDER BY id DESC LIMIT 100")
       .all();
@@ -1436,9 +1438,9 @@ function register(router) {
     // Produsele se iau din nomenclator, nu se mai scriu liber. Produse noi se
     // adaugă doar din Financiar → Produse, ca să nu se nască al treilea cod
     // pentru același articol direct din formularul de comandă.
-    const produse = await db
-      .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 5000")
-      .all();
+    const produse = await require("../lib/cod-vechi").pentruAles(
+      await db.prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 6000").all()
+    );
     const caracToate = await db
       .prepare("SELECT * FROM produse_caracteristici WHERE activ = 1 ORDER BY produs_id, ordine, id")
       .all();
@@ -1525,7 +1527,7 @@ function register(router) {
           var UM = ${umJson};
           var OPTIUNI = ${JSON.stringify(
             '<option value="">— alege din nomenclator —</option>' +
-              produse.map((p) => `<option value="${p.id}">${esc(p.denumire)}${p.cod ? ` (${esc(p.cod)})` : ""}</option>`).join("")
+              produse.map((p) => `<option value="${p.id}">${esc(p.denumire)}${p.cod ? ` (${esc(p.cod)})` : ""}${p.cod_vechi ? " — " + require("../lib/cod-vechi").ETICHETA : ""}</option>`).join("")
           ).replace(/</g, "\\u003c")};
           var zona = document.getElementById("linii-produse");
           var contor = 0;

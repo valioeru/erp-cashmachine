@@ -908,7 +908,8 @@ function register(router) {
       ];
     });
 
-    const produse = await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 3000").all();
+    // Fără produsele parcate; cele cu cod vechi fără stoc poartă eticheta în denumire (lib/cod-vechi.js).
+    const produse = (await require("../lib/cod-vechi").pentruAles(await db.prepare("SELECT id, denumire FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 6000").all())).map((p) => Object.assign(p, { denumire: require("../lib/cod-vechi").cuEticheta(p.denumire, p) }));
     const furnizori = await db.prepare("SELECT id, nume FROM parteneri WHERE tip IN ('furnizor','ambele') ORDER BY nume LIMIT 2000").all();
 
     const body = `

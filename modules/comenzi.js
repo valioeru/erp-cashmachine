@@ -550,6 +550,7 @@ function lineRowsScript(produse, familii, eAdmin, stocuri) {
       String(p.unitate_masura || "").trim(),
       st && st.fel !== "gol" ? st.text : "",
       st && st.fel !== "gol" ? st.fel : "",
+      p.cod_vechi ? 1 : 0, // cod vechi fără stoc: se vede la alegere, cu „nu selecta”
     ];
   });
   return `<script>
@@ -664,8 +665,9 @@ function lineRowsScript(produse, familii, eAdmin, stocuri) {
         // Stocul, mic, sub produs (Stoc la zi: CT-Park, cât e liber).
         var stocTxt = '<span class="rezultat-stoc rezultat-stoc-' + (p[8] || 'gol') + '">' +
                       comenziEscHtml(p[7] || 'fără stoc în CT-Park') + '</span>';
+        var vechiTxt = p[9] ? ' <span class="rezultat-cod-vechi" style="color:#b42318;font-weight:600;font-size:12px">COD VECHI — nu selecta</span>' : '';
         return '<button type="button" class="rezultat-produs" data-id="' + p[0] + '" data-pret="' + p[3] +
-               '" onclick="comenziAlege(this)">' + cod + p[2] + ' ' + catTxt + stocTxt + '</button>';
+               '" onclick="comenziAlege(this)">' + cod + p[2] + vechiTxt + ' ' + catTxt + stocTxt + '</button>';
       }).join('') + comenziButonNou(input.value);
       cutie.hidden = false;
       comenziAseaza(cutie, input);
@@ -1454,9 +1456,10 @@ function register(router) {
     const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     // Produsele unificate (activ = 0) nu mai pot fi alese: altfel codul înghițit
     // ar renaște ca duplicat chiar din formularul de comandă.
-    const produse = await db
-      .prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire")
-      .all();
+    // Fără produsele parcate; cele cu cod vechi fără stoc vin cu eticheta lor (lib/cod-vechi.js).
+    const produse = await require("../lib/cod-vechi").pentruAles(
+      await db.prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire").all()
+    );
     // Familiile cu caracteristicile lor, pentru panoul de configurare din
     // fiecare linie. Se citesc o singură dată și se trimit ca date, nu câte un
     // tur la server pentru fiecare linie adăugată.
@@ -2240,7 +2243,7 @@ function register(router) {
       .prepare("SELECT id, nume, cui, agent_id, termen_plata_zile FROM parteneri WHERE tip != 'furnizor' ORDER BY nume")
       .all();
     const agentiToti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
-    const produse = await db
+    const produseToate = await db
       .prepare("SELECT id, cod, denumire, pret_vanzare, categorie, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire")
       .all();
     const familiiPagina = await familiiPentruFormular();
@@ -2253,6 +2256,8 @@ function register(router) {
           WHERE cl.comanda_id = ? ORDER BY cl.id`
       )
       .all(comanda.id);
+    // Fără produsele parcate — în afară de cele deja puse pe comanda asta, care trebuie să se poată salva la loc.
+    const produse = await require("../lib/cod-vechi").pentruAles(produseToate, liniiBaza.map((l) => l.produs_id));
     // Furnizorul scris deja pe fiecare produs al comenzii — și după o eroare
     // de salvare, când liniile vin din formular, nu din bază.
     const furnizorVechi = new Map(

@@ -222,7 +222,9 @@ function register(router) {
     const versiuni = await db
       .prepare("SELECT id, numar, versiune, status, creat_la FROM oferte WHERE radacina_id = ? ORDER BY versiune DESC")
       .all(o.radacina_id || o.id);
-    const produse = await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 2000").all();
+    const produse = await require("../lib/cod-vechi").pentruAles(
+      await db.prepare("SELECT id, denumire, pret_vanzare, cota_tva, unitate_masura FROM produse WHERE activ = 1 ORDER BY denumire LIMIT 6000").all()
+    );
     const editabil = poateEdita(ctx.user, o) && ["ciorna", "trimisa"].includes(o.status);
     // Moneda ofertei: în ea sunt scrise prețurile liniilor și totalul.
     const mo = monedaOfertei(o);
@@ -385,7 +387,7 @@ function register(router) {
                     ${produse
                       .map(
                         (p) =>
-                          `<option value="${p.id}" data-pret="${CC.dinLei(p.pret_vanzare, o) ?? ""}">${esc(p.denumire)}${
+                          `<option value="${p.id}" data-pret="${CC.dinLei(p.pret_vanzare, o) ?? ""}">${esc(require("../lib/cod-vechi").cuEticheta(p.denumire, p))}${
                             piataProduse[String(p.id)] ? " ●" : ""
                           }</option>`
                       )
