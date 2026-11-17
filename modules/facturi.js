@@ -870,11 +870,13 @@ function register(router) {
                 <div data-upa-factura><div class="k">Seria</div>${
                   factura.smartbill_sync_la
                     ? esc(factura.smartbill_serie || "—")
+                    : factura.sursa_import
+                      ? esc(factura.serie || "—") // adusă din SmartBill: are deja seria ei
                     : Number(factura.upa) === 1
                       ? `<span class="badge albastru">unitate protejată (UPA)</span> <span style="font-size:12px;color:var(--text-muted)">pleacă pe ${esc(require("../lib/upa").serie(factura))}, cu mențiunea UPA</span>`
                       : "serie normală"
                 }${
-                  !factura.smartbill_sync_la && !doarCitire
+                  !factura.smartbill_sync_la && !factura.sursa_import && !doarCitire
                     ? ` <form method="post" action="/facturi/${factura.id}/upa" class="inline-form"><input type="hidden" name="upa" value="${Number(factura.upa) === 1 ? "0" : "1"}">
                          <button class="link-btn" type="submit">${Number(factura.upa) === 1 ? "treci pe seria normală" : "treci pe unitate protejată (UPA)"}</button></form>`
                     : ""
@@ -1324,9 +1326,10 @@ function register(router) {
   // Seria facturii, cât n-a plecat în SmartBill: unitate protejată (UPA) sau
   // normală. Vine de pe comandă; aici se poate îndrepta înainte de trimitere.
   router.post("/facturi/:id/upa", async (ctx) => {
-    const f = await db.prepare("SELECT id, directie, smartbill_sync_la FROM facturi WHERE id = ?").get(ctx.params.id);
+    const f = await db.prepare("SELECT id, directie, smartbill_sync_la, sursa_import FROM facturi WHERE id = ?").get(ctx.params.id);
     if (!f) return send(ctx.res, 404, "Factura nu există");
-    if (f.directie === "vanzare" && !f.smartbill_sync_la) {
+    // Nu și pe facturile aduse din SmartBill: acelea au deja seria lor.
+    if (f.directie === "vanzare" && !f.smartbill_sync_la && !f.sursa_import) {
       const upa = String((ctx.body || {}).upa || "") === "1" ? 1 : 0;
       await db.prepare("UPDATE facturi SET upa = ? WHERE id = ?").run(upa, f.id);
       console.log(`[facturi] #${f.id}: ${upa ? "pe unitate protejată (UPA)" : "pe seria normală"} (${(ctx.user && ctx.user.nume) || "?"})`);
