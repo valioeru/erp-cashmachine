@@ -98,6 +98,45 @@ async function eFacturaAgentului(user, factura) {
   return Boolean(r);
 }
 
+// Cum se numește factura pe pagina ei: cu numărul fiscal din SmartBill, dacă a
+// fost trimisă din ERP („CSHM3409 (FCT-4 în ERP)"); altfel cu seria și numărul ei.
+function numeFactura(f) {
+  const erp = `${f.serie}-${f.numar ?? f.id}`;
+  return eTrimisaDinErp(f) ? `${String(f.document_extern).trim()} (${erp} în ERP)` : erp;
+}
+
+// Factura făcută în ERP și trimisă în SmartBill, care își poartă numărul fiscal
+// ca document. Semnul e numărul primit din SmartBill: doar trimiterea îl scrie.
+// (Lipsa sursei de import nu e un semn — și facturile scrise de mână n-au una.)
+function eTrimisaDinErp(f) {
+  return Boolean(f && String(f.smartbill_numar || "").trim() && String(f.document_extern || "").trim() && f.serie && f.numar != null);
+}
+
+// Factura a plecat în SmartBill: se ține minte când și ce număr a primit acolo.
+//
+// Numărul din SmartBill e numărul ei FISCAL — cel de pe hârtia clientului și
+// din e-Factura; „FCT-4" e doar numărul ciornei din ERP. De-aia se scrie și ca
+// `document_extern`: după el caută sincronizarea încasărilor, după el se arată
+// factura în liste, și după el o recunoaște sincronizarea facturilor, ca să
+// n-o aducă a doua oară din SmartBill (modules/punte.js, a treia pază —
+// Vali, 17.11.2026: „Fact de la Maia Foods nu trebuie dublată").
+// La o retrimitere, numărul nou îl înlocuiește pe cel vechi doar dacă
+// documentul era chiar numărul vechi din SmartBill.
+async function scrieTrimisa(facturaId, rezultat, cand) {
+  const serie = String((rezultat && rezultat.series) || "").trim();
+  const numar = String((rezultat && rezultat.number) || "").trim();
+  const inainte = await db.prepare("SELECT smartbill_serie, smartbill_numar, document_extern FROM facturi WHERE id = ?").get(facturaId);
+  await db
+    .prepare("UPDATE facturi SET smartbill_sync_la = ?, smartbill_serie = ?, smartbill_numar = ? WHERE id = ?")
+    .run(cand, serie, numar, facturaId);
+  if (!serie || !numar) return;
+  const vechi = inainte ? `${String(inainte.smartbill_serie || "").trim()}${String(inainte.smartbill_numar || "").trim()}` : "";
+  const acum = String((inainte && inainte.document_extern) || "").trim();
+  if (!acum || (vechi && acum === vechi)) {
+    await db.prepare("UPDATE facturi SET document_extern = ? WHERE id = ?").run(`${serie}${numar}`, facturaId);
+  }
+}
+
 function register(router) {
   // Lista de facturi — o SINGURĂ interogare agregată, cu paginare și căutare.
   //
@@ -138,7 +177,7 @@ function register(router) {
 
     const facturi = await db
       .prepare(
-        `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, f.data_scadenta, f.status, f.moneda, f.total_valuta,
+        `SELECT f.id, f.serie, f.numar, f.document_extern, f.data_emiterii, f.data_scadenta, f.status, f.moneda, f.total_valuta, f.smartbill_numar,
                 p.nume AS partener_nume,
                 COALESCE(l.total, 0) AS total,
                 COALESCE(pl.platit, 0) AS platit
@@ -198,8 +237,12 @@ function register(router) {
       } întârziere</span></span>`;
     };
 
+    // Factura făcută în ERP și trimisă în SmartBill se arată cu numărul ei
+    // fiscal; cel din ERP rămâne dedesubt, mic, ca s-o găsești și după el.
+    const numarErp = (f) =>
+      eTrimisaDinErp(f) ? `<br><span style="font-size:11px;color:var(--text-muted)">în ERP: ${esc(`${f.serie}-${f.numar}`)}</span>` : "";
     const rows = facturi.map((f) => [
-      `<a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar ?? f.id}`)}</a>`,
+      `<a href="/facturi/${f.id}">${esc(f.document_extern || `${f.serie}-${f.numar ?? f.id}`)}</a>${numarErp(f)}`,
       esc(f.partener_nume),
       esc((f.data_emiterii || "").slice(0, 10)),
       scadentaCelula(f),
@@ -760,6 +803,14 @@ function register(router) {
               : ""
           }
         </div>
+        ${
+          // Mențiunile de pe factură — cursul la care o comandă în valută a fost
+          // trecută în lei, o îndreptare făcută după emitere — se scriau, dar nu
+          // se vedeau nicăieri.
+          String(factura.observatii || "").trim()
+            ? `<div data-observatii style="margin-top:10px;font-size:13px"><span style="color:var(--text-muted);font-size:12px">Observații</span><br>${esc(String(factura.observatii).trim())}</div>`
+            : ""
+        }
       </div>
 
       ${
@@ -861,7 +912,7 @@ function register(router) {
       }
     `;
     const emailuri = await inbox.blocEmailuri({ user: ctx.user, facturaId: factura.id });
-    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${factura.serie}-${factura.numar ?? factura.id}`, active: doarCitire ? "/crm" : eVanzare ? "/facturi" : "/facturi/achizitii", body: body + emailuri }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${numeFactura(factura)}`, active: doarCitire ? "/crm" : eVanzare ? "/facturi" : "/facturi/achizitii", body: body + emailuri }));
   });
 
   router.post("/facturi/:id/plata", async (ctx) => {
@@ -992,9 +1043,10 @@ function register(router) {
       try {
         const proaspata = await db.prepare("SELECT * FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE id = ?").get(factura.id);
         const rezultat = await smartbill.trimiteFactura(proaspata, linii);
-        await db
-          .prepare("UPDATE facturi SET smartbill_sync_la = ?, smartbill_serie = ?, smartbill_numar = ? WHERE id = ?")
-          .run(new Date().toISOString().slice(0, 19).replace("T", " "), rezultat.serie || null, rezultat.numar || null, factura.id);
+        // `series` și `number`: așa le întoarce lib/smartbill.js. Aici se citeau
+        // `serie` și `numar`, care nu există — factura ar fi rămas „trimisă”,
+        // dar fără numărul ei din SmartBill.
+        await scrieTrimisa(factura.id, rezultat, new Date().toISOString().slice(0, 19).replace("T", " "));
         mesajSmartbill = "Trimisă și în SmartBill.";
       } catch (e) {
         mesajSmartbill = "Factura e validă la noi, dar nu a plecat în SmartBill: " + e.message;
@@ -1123,9 +1175,7 @@ function register(router) {
     const linii = await liniiPentruSmartBill(factura.id);
     try {
       const rezultat = await smartbill.trimiteFactura(factura, linii, adresa);
-      await db
-        .prepare("UPDATE facturi SET smartbill_sync_la = ?, smartbill_serie = ?, smartbill_numar = ? WHERE id = ?")
-        .run(new Date().toISOString(), rezultat.series || "", String(rezultat.number || ""), factura.id);
+      await scrieTrimisa(factura.id, rezultat, new Date().toISOString());
     } catch (err) {
       console.error("Eroare trimitere SmartBill:", err);
       return send(

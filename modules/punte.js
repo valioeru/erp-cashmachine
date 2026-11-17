@@ -341,7 +341,7 @@ async function ingestProfitProdus(randuri) {
 // dată, în bloc. Nu completăm parțial: ori știm factura întreagă, ori o lăsăm
 // cum era.
 async function ingestFacturiLinii(randuri) {
-  let facturi = 0, linii = 0, negasite = 0, faraProdus = 0;
+  let facturi = 0, linii = 0, negasite = 0, faraProdus = 0, dinErp = 0;
 
   const idxProduse = indexProduse(await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire, pret_achizitie FROM produse").all());
 
@@ -364,16 +364,25 @@ async function ingestFacturiLinii(randuri) {
     let f = null;
     if (serie && Number.isFinite(numar)) {
       f = await db
-        .prepare("SELECT id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND UPPER(COALESCE(serie,'')) = ? AND numar = ? ORDER BY id LIMIT 1")
+        .prepare("SELECT id, smartbill_numar FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND UPPER(COALESCE(serie,'')) = ? AND numar = ? ORDER BY id LIMIT 1")
         .get(serie, numar);
     }
     if (!f) {
       f = await db
-        .prepare("SELECT id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND REPLACE(UPPER(COALESCE(document_extern,'')), ' ', '') = ? ORDER BY id LIMIT 1")
+        .prepare("SELECT id, smartbill_numar FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND REPLACE(UPPER(COALESCE(document_extern,'')), ' ', '') = ? ORDER BY id LIMIT 1")
         .get(String(cheie).toUpperCase().replace(/\s/g, ""));
     }
     if (!f) {
       negasite++;
+      continue;
+    }
+    // Factura făcută în ERP și trimisă în SmartBill își are liniile ei, cu
+    // produsele alese de om; de când își poartă numărul fiscal ca document
+    // (17.11.2026) se găsește și ea după „CSHM 3409". Liniile citite din pagina
+    // SmartBill sunt ale aceleiași facturi, dar cu produsul ghicit după nume —
+    // nu le înlocuiesc pe ale ei.
+    if (curat(f.smartbill_numar)) {
+      dinErp++;
       continue;
     }
 
@@ -401,6 +410,8 @@ async function ingestFacturiLinii(randuri) {
     linii,
     negasite,
     faraProdus,
+    // Facturi făcute în ERP: au liniile lor, cele din SmartBill nu s-au scris peste.
+    facute_in_erp: dinErp,
     nota:
       negasite > 0
         ? `${negasite} facturi din lot n-au fost găsite în ERP după serie+număr — probabil nu sunt importate.`
@@ -546,11 +557,50 @@ async function ingestFacturi(randuri) {
   // asupra firmei.
   const existente = new Set();
   const peSerieNumar = new Set();
-  for (const f of await db.prepare("SELECT serie, numar, firma_id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
+  const idPeSerieNumar = new Map(); // cheia fără firmă → id-urile facturilor care o poartă
+  for (const f of await db.prepare("SELECT id, serie, numar, firma_id FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare'").all()) {
     existente.add(cheiaFacturii(f.serie, f.numar, f.firma_id));
-    peSerieNumar.add(cheiaFacturii(f.serie, f.numar, ""));
+    const k = cheiaFacturii(f.serie, f.numar, "");
+    peSerieNumar.add(k);
+    if (!idPeSerieNumar.has(k)) idPeSerieNumar.set(k, []);
+    idPeSerieNumar.get(k).push(Number(f.id));
   }
   let altaFirma = 0;
+
+  // A TREIA PAZĂ: FACTURA EMISĂ DIN ERP, ÎNTOARSĂ DIN SMARTBILL (17.11.2026)
+  //
+  // Factura făcută în ERP are seria și numărul ERP-ului (FCT-4). Trimisă în
+  // SmartBill, primește acolo numărul ei fiscal (CSHM3409), pe care ERP-ul îl
+  // ține în smartbill_serie / smartbill_numar. Raportul adus din SmartBill o
+  // conține sub numărul fiscal, iar cheile de mai sus, făcute din seria și
+  // numărul ERP-ului, n-o recunoșteau: CSHM3409 a intrat ca factură nouă lângă
+  // FCT-4, și Maia Food a avut 1.936 lei de două ori (Vali, 17.11.2026: „Fact
+  // de la Maia Foods nu trebuie dublată").
+  //
+  // Rândul care poartă numărul fiscal al unei facturi emise din ERP nu se mai
+  // scrie. Factura din ERP primește în schimb ce îi lipsea: numărul fiscal ca
+  // document (după el se leagă încasările venite din SmartBill) și scadența
+  // din SmartBill, dacă n-avea una. Când totalul din SmartBill nu e cel din
+  // ERP, se spune în rezultatul lotului — nu se schimbă nicio sumă singură.
+  const emiseDinErp = new Map();
+  for (const f of await db
+    .prepare(
+      `SELECT f.id, f.serie, f.numar, f.status, f.smartbill_serie, f.smartbill_numar, f.document_extern, f.data_scadenta,
+              COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva, 0) / 100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
+         FROM (SELECT * FROM facturi WHERE activ = 1) f
+        WHERE f.directie = 'vanzare' AND COALESCE(f.smartbill_serie, '') <> '' AND COALESCE(f.smartbill_numar, '') <> ''
+        ORDER BY f.id`
+    )
+    .all()
+    .catch(() => [])) {
+    const k = cheiaFacturii(f.smartbill_serie, f.smartbill_numar, "");
+    if (!emiseDinErp.has(k)) emiseDinErp.set(k, f);
+  }
+  let emise = 0;
+  const diferente = [];
+  const cuDublura = [];
+  const alteStari = [];
+  const bani = (v) => (Math.round(Number(v || 0) * 100) / 100).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const admin = await db.prepare("SELECT id FROM utilizatori WHERE rol = 'admin' ORDER BY id LIMIT 1").get();
 
@@ -576,8 +626,44 @@ async function ingestFacturi(randuri) {
       null;
 
     const cheie = cheiaFacturii(serie, numar, firmaId);
-    if (existente.has(cheie)) { sarite++; continue; }
     const cheieFaraFirma = cheiaFacturii(serie, numar, "");
+
+    // Factura emisă din ERP (a treia pază, mai sus). Înaintea celorlalte: și
+    // dacă dublura a apucat să intre, factura din ERP tot își primește numărul
+    // fiscal și scadența.
+    const dinErp = emiseDinErp.get(cheieFaraFirma);
+    if (dinErp) {
+      if (!dinErp.vazuta) {
+        dinErp.vazuta = true;
+        emise++;
+        const fiscal = `${serie}${numar}`;
+        if (!curat(dinErp.document_extern)) {
+          await db.prepare("UPDATE facturi SET document_extern = ? WHERE id = ? AND COALESCE(document_extern, '') = ''").run(fiscal, dinErp.id);
+        }
+        const scadenta = data(r.scadenta) || data(r.data_scadenta);
+        if (scadenta && !curat(dinErp.data_scadenta)) {
+          await db.prepare("UPDATE facturi SET data_scadenta = ? WHERE id = ? AND COALESCE(data_scadenta, '') = ''").run(scadenta, dinErp.id);
+        }
+        const care = `${dinErp.serie || ""}-${dinErp.numar ?? dinErp.id} = ${fiscal}`;
+        const totalSb = nr(r.total) || nr(r.net !== undefined ? r.net : r.fara_tva) + nr(r.tva);
+        if (totalSb !== 0 && Math.abs(totalSb - nr(dinErp.total)) > 0.05) {
+          diferente.push(`${care}: ${bani(dinErp.total)} lei în ERP, ${bani(totalSb)} lei în SmartBill`);
+        }
+        // Anulată într-o parte și valabilă în cealaltă: una dintre ele minte
+        // despre banii de încasat. Se spune; nu se anulează nimic singur.
+        const anulataSb = /anulat|storn/.test(String(curat(r.status)).toLowerCase());
+        const anulataErp = dinErp.status === "anulata";
+        if (anulataSb !== anulataErp) {
+          alteStari.push(`${care}: ${anulataErp ? "anulată în ERP, valabilă în SmartBill" : "valabilă în ERP, anulată în SmartBill"}`);
+        }
+        // Dublura intrată înainte de paza asta e încă în bază, lângă factura ei.
+        if ((idPeSerieNumar.get(cheieFaraFirma) || []).some((id) => id !== Number(dinErp.id))) cuDublura.push(care);
+      }
+      sarite++;
+      continue;
+    }
+
+    if (existente.has(cheie)) { sarite++; continue; }
     if (peSerieNumar.has(cheieFaraFirma)) { sarite++; altaFirma++; continue; }
 
     // partenerul: întâi după CUI, apoi după nume; comun pe tot grupul
@@ -664,6 +750,16 @@ async function ingestFacturi(randuri) {
     // firmă emitentă decât are factura în bază — de verificat de unde a citit
     // puntea firma, nu de ignorat.
     serie_la_alta_firma: altaFirma,
+    // Facturi emise din ERP, regăsite în raport sub numărul lor din SmartBill:
+    // nu s-au scris a doua oară. La cele cu altă sumă în SmartBill decât în
+    // ERP, cineva trebuie să se uite — de obicei factura a fost îndreptată în
+    // SmartBill după trimitere.
+    emise_din_erp: emise,
+    emise_din_erp_cu_alta_suma: diferente.slice(0, 20),
+    emise_din_erp_cu_alta_stare: alteStari.slice(0, 20),
+    // Dubluri aduse înainte de 17.11.2026, încă în bază lângă factura lor din
+    // ERP. Se scot din Verificări date; sincronizarea nu scoate nimic singură.
+    emise_din_erp_cu_dublura_in_baza: cuDublura.slice(0, 20),
     parteneri_noi: parteneriNoi,
     cu_plata: cuPlata,
     intercompany_marcate: marcaje.facturiMarcate,
@@ -1235,9 +1331,17 @@ const NOTA_INCASARE = "încasare SmartBill";
 const RECONSTITUITE = ["Plată reconstituită automat din statusul din SmartBill", "Încasare adusă prin punte din SmartBill"];
 
 async function ingestIncasari(randuri) {
-  const facturi = await db
-    .prepare("SELECT id, serie, numar, document_extern, inchis_istoric FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna')")
-    .all();
+  // ORDINEA. Când două facturi din bază poartă aceeași cheie, banii merg pe
+  // prima din listă — iar fără o ordine cerută, „prima" era la voia bazei de
+  // date. Cazul care contează: factura făcută în ERP și dublura ei adusă din
+  // SmartBill înainte de paza din 17.11.2026 (vezi ingestFacturi), amândouă cu
+  // documentul CSHM3409. Banii merg pe cea făcută în ERP: e cea care rămâne.
+  // O încasare căzută pe dublură ar fi ieșit din calcule odată cu ea.
+  const facturi = (
+    await db
+      .prepare("SELECT id, serie, numar, document_extern, inchis_istoric, smartbill_serie, smartbill_numar FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND status NOT IN ('anulata','ciorna') ORDER BY id")
+      .all()
+  ).sort((a, b) => (curat(a.smartbill_numar) ? 0 : 1) - (curat(b.smartbill_numar) ? 0 : 1) || a.id - b.id);
   const dupaCheie = new Map();
   // Incasarile care cad pe facturi inchise ca istorie veche.
   //
@@ -1265,6 +1369,9 @@ async function ingestIncasari(randuri) {
   for (const f of facturi) {
     pune(`${f.serie || ""}${f.numar || ""}`, f.id, Boolean(f.inchis_istoric));
     if (f.document_extern) pune(f.document_extern, f.id, Boolean(f.inchis_istoric));
+    // Factura trimisă din ERP se găsește și după numărul ei din SmartBill,
+    // orice ar scrie la document: încasarea vine pe numărul fiscal.
+    if (curat(f.smartbill_numar)) pune(`${f.smartbill_serie || ""}${f.smartbill_numar}`, f.id, Boolean(f.inchis_istoric));
   }
 
   const existente = new Set(
