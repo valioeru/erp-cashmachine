@@ -304,6 +304,15 @@ const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) ||
   const f6 = q("SELECT id, observatii FROM facturi WHERE comanda_id = ?", [c6])[0] || {};
   egal("comanda în lei, facturată parțial: prețul ei și doar nota de parțial", [Number((q("SELECT cantitate, pret_unitar FROM facturi_linii WHERE factura_id = ?", [f6.id || 0])[0] || {}).pret_unitar), f6.observatii], [7.5, "facturare parțială — restul comenzii rămâne deschis"]);
 
+  console.log("\n── Lista de comenzi ─────────────────────────────────────────");
+  r = await cer("/comenzi", { query: { perioada: "tot" } });
+  const randComanda = (id) => (new RegExp(`<tr[^>]*>(?:(?!</tr>)[\\s\\S])*?href="/comenzi/${id}"[\\s\\S]*?</tr>`).exec(r.corp) || [""])[0];
+  are(randComanda(c1), "123,45 €", "comanda în euro își arată totalul în euro, nu în lei");
+  are(randComanda(c1), "≈ 648,11 lei", "…cu echivalentul în lei la cursul comenzii (123,45 € × 5,25)");
+  are(randComanda(c1), 'data-filtru="648,11 lei"', "…pe care îl adună filtrele din capul tabelului");
+  egal("comanda în euro fără curs: suma în euro, fără echivalent, și nu intră în totalul în lei", [randComanda(c4).includes("20,00 €"), randComanda(c4).includes("≈"), randComanda(c4).includes('data-filtru="fără curs"')], [true, false, true]);
+  egal("comanda în lei: ca până acum", [randComanda(c3).includes("123,45 lei"), randComanda(c3).includes("data-filtru"), randComanda(c3).includes("≈")], [true, false, false]);
+
   curata();
   console.log("\n" + interogari + " interogări SQL reale.");
   console.log(rele ? rele + " probleme." : "Totul curat.");

@@ -149,6 +149,7 @@ const PRODUSE = [P1, P2, P3, P4];
 
 function curata() {
   const pr = PRODUSE.join(",");
+  q(`DELETE FROM cursuri_bnr WHERE luat_la = '${PREFIX}-test'`);
   const cf = q(`SELECT id FROM comenzi_furnizor WHERE numar LIKE '${PREFIX}-%' OR furnizor_id = ${FURNIZOR}`).map((x) => Number(x.id));
   const c = cf.join(",") || "0";
   const rec = q(`SELECT id FROM receptii WHERE numar LIKE '${PREFIX}-%' OR comanda_furnizor_id IN (${c}) OR partener_id = ${FURNIZOR}`).map((x) => Number(x.id));
@@ -244,6 +245,8 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   const l1 = rec1.length ? liniiRec(rec1[0].id) : [];
   egal("…doar cu ce a venit: produsul, 1.000 kg, prezentarea, prețul în lei (2 EUR × 5)", l1.map((x) => [Number(x.produs_id), Number(x.cantitate_primita), x.um, x.stare, x.conditie, Number(x.paleti_nr), Number(x.paleti_pe), Number(x.pret_unitar), Number(x.comanda_furnizor_linie_id)]),
     [[P1, 1000, "kg", "primita", "bun", 3, 400, 10, LA]]);
+  // Vali, 17.11.2026: cursul plasat rămâne în istoric — rândul ține minte din ce s-au făcut leii.
+  egal("…și rândul ține minte din ce s-au făcut leii: prețul comenzii și cursul ei", q(`SELECT id, pret_nota FROM receptii_linii WHERE receptie_id = ${rec1.length ? rec1[0].id : 0}`).map((x) => x.pret_nota), [`2 EUR × 5,0000 (cursul comenzii ${PREFIX}-CF-1)`]);
   egal("stocul crește o dată, cu 1.000", Number(unul(`SELECT COALESCE(SUM(cantitate), 0) FROM miscari_stoc WHERE produs_id = ${P1}`)) - stocInainte, 1000);
   bine("pagina spune unde e marfa acum, cu recepția", (parametri(r).ok_receptie || "").includes(`recepția ${rec1[0] && rec1[0].numar}`) && /„De alocat pe raft”/.test(parametri(r).ok_receptie || "") && parametri(r).rec === String(rec1[0] && rec1[0].id), unde(r));
   const ist = q(`SELECT ce, nou FROM comenzi_furnizor_istoric WHERE comanda_id = ${O1} ORDER BY id`);
@@ -288,6 +291,7 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   r = await cer("post", `/stocuri/ct-park/gata/receptie/${lidA}/paleti`, DEP, { body: { paleti: "400 + 200" } });
   const pal = q(`SELECT id, cantitate, um, pret_unitar, receptie_id FROM ct_paleti WHERE receptie_linie_id = ${lidA} ORDER BY id`);
   egal("trei paleți: 400, 400, 200 kg, cu prețul recepției", pal.map((p) => [Number(p.cantitate), p.um, Number(p.pret_unitar), Number(p.receptie_id)]), [[400, "kg", 10, Number(rec1[0].id)], [400, "kg", 10, Number(rec1[0].id)], [200, "kg", 10, Number(rec1[0].id)]]);
+  egal("…iar pe paleți scrie de unde e prețul: din recepție, cu euro și cursul comenzii", q(`SELECT id, pret_sursa FROM ct_paleti WHERE receptie_linie_id = ${lidA} ORDER BY id`).map((p) => p.pret_sursa), Array(3).fill(`prețul din recepție: 2 EUR × 5,0000 (cursul comenzii ${PREFIX}-CF-1)`));
   egal("…fără loc, iar pagina deschide etichetele lor, cu drumul înapoi la Intrare", [Number(unul(`SELECT count(*) FROM ct_ocupari WHERE palet_id IN (${pal.map((p) => p.id).join(",") || 0})`)), primul, unde(r)], [0, String(pal[0] && pal[0].id), `/stocuri/ct-park/etichete?paleti=${pal.slice(1).map((p) => p.id).join(",")}&de_la=intrare`]);
   const et = await cer("get", "/stocuri/ct-park/etichete", DEP, { query: { paleti: pal.map((p) => p.id).join(","), de_la: "intrare" } });
   bine("pagina etichetelor duce înapoi la paleții fără loc", et.corp.includes('href="/stocuri/ct-park/intrare#fara-loc"'));
@@ -297,7 +301,7 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   bine("…iar paleții stau la „fără loc pe raft”, cu „Pune pe raft”", pal.every((p) => fl.includes(`/stocuri/ct-park/scaner/intrare/palet/${p.id}"`)), fl.slice(0, 300));
 
   const lidB = Number(l2[0].id);
-  bine("cutiile fără preț cer prețul în listă", randul(sec, lidB).includes('<input name="pret" inputmode="decimal" autocomplete="off" required placeholder="preț lei / buc"'), (randul(sec, lidB).match(/<form[^>]*\/paleti"[\s\S]{0,700}/) || ["lipsește"])[0]);
+  bine("cutiile fără preț cer prețul în listă", randul(sec, lidB).includes('<input name="pret" inputmode="decimal" autocomplete="off" required data-pv-pret placeholder="preț / buc"'), (randul(sec, lidB).match(/<form[^>]*\/paleti"[\s\S]{0,700}/) || ["lipsește"])[0]);
   r = await cer("post", `/stocuri/ct-park/gata/receptie/${lidB}/paleti`, DEP, { body: { paleti: "300" } });
   bine("…fără preț nu se face paletul, iar mesajul spune unde se scrie", /Scrie-l în căsuța de preț a rândului/.test(parametri(r).gata_eroare || "") && Number(unul(`SELECT count(*) FROM ct_paleti WHERE receptie_linie_id = ${lidB}`)) === 0, parametri(r).gata_eroare);
   r = await cer("post", `/stocuri/ct-park/gata/receptie/${lidB}/paleti`, DEP, { body: { paleti: "300", pret: "1,5" } });
@@ -360,6 +364,7 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   const rc2 = receptiiCf(O2);
   egal("trimise 300: recepția în depozit, finalizată, cu prețul (3 lei) și prezentarea", rc2.map((x) => [x.stare, x.data, liniiRec(x.id).map((l) => [Number(l.produs_id), Number(l.cantitate_primita), Number(l.pret_unitar), Number(l.paleti_nr), Number(l.paleti_pe), Number(l.comanda_furnizor_linie_id)])]),
     [["finalizata", "2026-11-13", [[P2, 300, 3, 2, 150, LC]]]]);
+  egal("…comanda în lei nu lasă nicio notă de curs pe rând", q(`SELECT id, pret_nota FROM receptii_linii WHERE receptie_id = ${rc2.length ? rc2[0].id : 0}`).map((x) => x.pret_nota), [null]);
   bine("…spus pe pagină și în istoric", /Marfa a intrat în depozit pe recepția/.test(parametri(r).ok_receptie || "") && unul(`SELECT ce FROM comenzi_furnizor_istoric WHERE comanda_id = ${O2} ORDER BY id DESC LIMIT 1`) === "Trimisă în depozit", unde(r));
   pag = await cer("get", `/procurement/comenzi/${O2}`, DEP);
   bine("au rămas 200 de trimis, iar 300 sunt deja în depozit", bucata(pag.corp, "in-depozit", "Istoric").includes('value="200"') && bucata(pag.corp, "in-depozit", "Istoric").includes("300 buc"));
@@ -398,6 +403,16 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
   const lp2 = Number(liniiRec(RP2)[0].id);
   sec = sectiunea((await cer("get", "/stocuri/ct-park/intrare", DEP)).corp);
   bine("marfa din producție fără preț nu primește căsuța de preț (intră și fără)", randul(sec, lp2).includes(`/gata/receptie/${lp2}/paleti`) && !randul(sec, lp2).includes('name="pret"'), randul(sec, lp2).slice(0, 300));
+
+  // ------------------------------------------------------------------------
+  console.log("\nComanda în valută fără curs pus de noi: BNR-ul zilei ei, scris pe rând");
+  // O zi veche, cu un singur curs în tabel: cel pus aici.
+  q(`INSERT INTO cursuri_bnr (data, moneda, valoare, luat_la) VALUES ('1999-02-01', 'USD', 2.75, '${PREFIX}-test')`);
+  const O9 = comanda("CF-9", { moneda: "USD", data: "1999-02-03" });
+  const LX = linieCf(O9, P3, `${PREFIX} Granula`, 100, "kg", 3, 0);
+  r = await cer("post", `/procurement/comenzi/${O9}/receptie`, DEP, { body: { "linie_id[]": [String(LX)], "primit[]": ["100"], "paleti_nr[]": ["1"], "paleti_pe[]": ["100"], data_receptie: "2026-11-13" } });
+  const rec9 = receptiiCf(O9);
+  egal("prețul intră în lei la BNR-ul din ziua comenzii (3 USD × 2,75), iar rândul spune de unde e cursul", q(`SELECT id, pret_unitar, pret_nota FROM receptii_linii WHERE receptie_id = ${rec9.length ? rec9[0].id : 0}`).map((x) => [Number(x.pret_unitar), x.pret_nota]), [[8.25, `3 USD × 2,7500 (BNR din ziua comenzii ${PREFIX}-CF-9)`]]);
 
   curata();
   console.log(esecuri ? `\n${esecuri} ESEC(URI)` : "\nToate verificările au trecut.");

@@ -272,8 +272,8 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
 
   console.log("\n2. Intrare marfă: formularul");
   let pag = (await cer("get", "/stocuri/ct-park/intrare", DEP)).corp;
-  bine("căsuța de preț e obligatorie", /<input type="text" inputmode="decimal" name="pret_unitar" id="pret-intrare" required /.test(pag));
-  bine("…goală, cu îndemnul de a-l scrie de pe factură", /name="pret_unitar" id="pret-intrare" required placeholder="ex\. 7,35"\s+value="">/.test(pag) && pag.includes("Scrie prețul de pe factura sau avizul furnizorului."));
+  bine("căsuța de preț e obligatorie", /<input type="text" inputmode="decimal" name="pret_unitar" id="pret-intrare" data-pv-pret required /.test(pag));
+  bine("…goală, cu îndemnul de a-l scrie de pe factură", /name="pret_unitar" id="pret-intrare" data-pv-pret required placeholder="ex\. 7,35"\s+value="">/.test(pag) && pag.includes("Scrie prețul de pe factura sau avizul furnizorului."));
   bine("…și spune că fără preț marfa nu intră", fara(pag).includes("Fără preț, marfa nu mai intră în depozit."));
   bine("valoarea intrării are locul ei, lângă total", pag.includes('id="valoare-intrare"'));
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(L1) } })).corp;
@@ -281,15 +281,15 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(L2) } })).corp;
   bine("din recepție, fără preț pe rând: cel de pe produs", pag.includes('value="2,5" data-propus="1"') && pag.includes("Propus: preț de achiziție de pe produs."));
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(L3) } })).corp;
-  bine("din recepție, fără niciun preț: gol, și spune că ERP-ul nu-l știe", /id="pret-intrare" required placeholder="ex\. 7,35"\s+value="">/.test(pag) && pag.includes("ERP-ul nu știe prețul mărfii ăsteia"));
+  bine("din recepție, fără niciun preț: gol, și spune că ERP-ul nu-l știe", /id="pret-intrare" data-pv-pret required placeholder="ex\. 7,35"\s+value="">/.test(pag) && pag.includes("ERP-ul nu știe prețul mărfii ăsteia"));
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { aprovizionare: String(A_CU) } })).corp;
   bine("marfă gata din producție: costul din rețetă", pag.includes('value="1,234567" data-propus="1"') && pag.includes("Propus: costul din rețetă."));
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(L4) } })).corp;
-  bine("marfă făcută de noi, fără cost pe produs: prețul NU e obligatoriu și spune de ce", /name="pret_unitar" id="pret-intrare" placeholder="ex\. 7,35"\s+value="">/.test(pag) && !/id="pret-intrare" required/.test(pag) && pag.includes("Marfă făcută de noi, iar produsul n-are încă un cost în ERP") && pag.includes("paletul intră fără preț și îl pune biroul"), (pag.match(/<label class="field">Preț de intrare[\s\S]{0,400}/) || [""])[0]);
+  bine("marfă făcută de noi, fără cost pe produs: prețul NU e obligatoriu și spune de ce", /name="pret_unitar" id="pret-intrare" data-pv-pret placeholder="ex\. 7,35"\s+value="">/.test(pag) && !/id="pret-intrare"[^>]* required/.test(pag) && pag.includes("Marfă făcută de noi, iar produsul n-are încă un cost în ERP") && pag.includes("paletul intră fără preț și îl pune biroul"), (pag.match(/<label class="field">Preț de intrare[\s\S]{0,400}/) || [""])[0]);
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { aprovizionare: String(A_PROD) } })).corp;
   bine("…la fel la cererea depozitului către producție", !/id="pret-intrare" required/.test(pag) && pag.includes("Marfă făcută de noi"));
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { receptie_linie: String(L5) } })).corp;
-  bine("marfă făcută de noi, cu rețetă: prețul vine din rețetă și e obligatoriu, ca la orice marfă cu preț știut", pag.includes('value="1,234567" data-propus="1"') && /id="pret-intrare" required/.test(pag));
+  bine("marfă făcută de noi, cu rețetă: prețul vine din rețetă și e obligatoriu, ca la orice marfă cu preț știut", pag.includes('value="1,234567" data-propus="1"') && /id="pret-intrare" data-pv-pret required/.test(pag));
   pag = (await cer("get", "/stocuri/ct-park/intrare", DEP, { query: { q: `${PREFIX} ` } })).corp;
   const buton = (id) => (new RegExp(`<input type="radio" name="produs_id" value="${id}"[^>]*>`).exec(pag) || [""])[0];
   bine("produsele găsite prin căutare își poartă prețul și sursa lui", buton(PA).includes('data-pret="2,5" data-pret-sursa="preț de achiziție de pe produs"') && buton(PC).includes('data-pret="1,234567" data-pret-sursa="costul din rețetă"') && buton(PD).includes('data-pret-sursa="costul din rețetă (2 componente fără cost)"'), buton(PA) + buton(PC));
@@ -298,7 +298,7 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   console.log("\n3. Intrare marfă: fără preț nu intră");
   let r = await intrare({ produs_id: String(PB), um: "buc" });
   egal("produs fără preț, nimic scris: refuzat, niciun palet", [r.cod, paletiiProdusului(PB)], [422, []]);
-  bine("…cu mesajul care spune ce e de făcut și cu drumul înapoi la formular", r.corp.includes(`${PREFIX} Marfa fara niciun pret n-a intrat în depozit.`) && r.corp.includes("Scrie prețul de intrare, în lei pe unitatea de măsură.") && r.corp.includes('onclick="history.back()"'));
+  bine("…cu mesajul care spune ce e de făcut și cu drumul înapoi la formular", r.corp.includes(`${PREFIX} Marfa fara niciun pret n-a intrat în depozit.`) && r.corp.includes("Scrie prețul de intrare, pe unitatea de măsură — în lei sau, cu moneda aleasă, în euro ori dolari.") && r.corp.includes('onclick="history.back()"'));
   r = await intrare({ produs_text: `${PREFIX} marfa scrisa liber`, um: "buc", pret_unitar: "0" });
   egal("marfă scrisă liber, cu preț zero: refuzată", [r.cod, Number(unul(`SELECT COUNT(*) FROM ct_paleti WHERE produs_text = '${PREFIX} marfa scrisa liber'`))], [422, 0]);
   r = await intrare({ produs_id: String(PB), um: "buc", pret_unitar: "7,35" }, 60);
@@ -359,13 +359,13 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   egal("ce știe ERP-ul despre un rând, pentru pagini", [await SC.pretRand("r" + L1), await SC.pretRand("r" + L3), await SC.pretRand("c" + A_CU), await SC.pretRand("c" + A_FARA), await SC.pretRand("x1")], [{ pret: 7.35, sursa: "prețul din recepție" }, null, { pret: 1.234567, sursa: "costul din rețetă" }, null, null]);
   const SCAN = "/stocuri/ct-park/scaner";
   pag = (await cer("get", `${SCAN}/intrare/rand/r${L3}`, DEP)).corp;
-  bine("pagina scanerului, rând fără preț: căsuță de preț, obligatorie, ținută minte între scanări", /<input name="pret" data-tine="pret" inputmode="decimal" value="" autocomplete="off" required>/.test(pag) && pag.includes("ERP-ul nu-l știe"), (pag.match(/<label class="sc-f">Preț[\s\S]{0,300}/) || [""])[0]);
+  bine("pagina scanerului, rând fără preț: căsuță de preț, obligatorie, ținută minte între scanări", /<input name="pret" data-tine="pret" data-pv-pret inputmode="decimal" value="" autocomplete="off" required>/.test(pag) && pag.includes("ERP-ul nu-l știe"), (pag.match(/<label class="sc-f">Preț[\s\S]{0,300}/) || [""])[0]);
   pag = (await cer("get", `${SCAN}/intrare/rand/r${L3}`, DEP, { query: { pret: "0,3" } })).corp;
-  bine("…prețul scris rămâne în căsuță după o scanare", pag.includes('name="pret" data-tine="pret" inputmode="decimal" value="0,3"'));
+  bine("…prețul scris rămâne în căsuță după o scanare", pag.includes('name="pret" data-tine="pret" data-pv-pret inputmode="decimal" value="0,3"'));
   pag = (await cer("get", `${SCAN}/intrare/rand/r${L1}`, DEP)).corp;
   bine("rând cu preț știut: doar îl arată, fără căsuță", pag.includes('id="sc-pret-stiut"') && /Preț de intrare: <strong>7,35 lei \/ buc<\/strong> — prețul din recepție/.test(pag) && !pag.includes('data-tine="pret"'), (pag.match(/sc-pret-stiut[\s\S]{0,200}/) || [""])[0]);
   pag = (await cer("get", `${SCAN}/intrare/rand/r${L4}`, DEP)).corp;
-  bine("marfă făcută de noi, fără cost: căsuța de preț e la alegere, nu obligatorie", /<input name="pret" data-tine="pret" inputmode="decimal" value="" autocomplete="off">/.test(pag) && pag.includes("produsul n-are cost în ERP; scrie-l doar dacă îl știi"), (pag.match(/<label class="sc-f">Preț[\s\S]{0,300}/) || [""])[0]);
+  bine("marfă făcută de noi, fără cost: căsuța de preț e la alegere, nu obligatorie", /<input name="pret" data-tine="pret" data-pv-pret inputmode="decimal" value="" autocomplete="off">/.test(pag) && pag.includes("produsul n-are cost în ERP; scrie-l doar dacă îl știi"), (pag.match(/<label class="sc-f">Preț[\s\S]{0,300}/) || [""])[0]);
   r = await cer("post", `${SCAN}/intrare/rand/r${L3}`, DEP, { body: { actiune: "paleti", cant: "20" } });
   bine("trimis fără preț: se întoarce pe pagină cu mesajul, și ține minte cantitatea", calea(r) === `${SCAN}/intrare/rand/r${L3}` && parametri(r).eroare === CT.MESAJ_FARA_PRET && parametri(r).cant === "20", unde(r));
   r = await cer("post", `${SCAN}/intrare/rand/r${L3}`, DEP, { body: { actiune: "paleti", cant: "20", pret: "0,3" } });
@@ -494,7 +494,7 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   bine("cardul valorii duce la paleții fără preț", /n-au preț la intrare, deci nu sunt la socoteală — <a href="\/stocuri\/ct-park\/paleti\?fara_pret=1" id="arata-fara-pret">arată-i și pune prețurile<\/a>/.test(pag));
   bine("…și la cei mai scumpi întâi", pag.includes('<a href="/stocuri/ct-park/paleti?ordine=valoare">cei mai scumpi întâi</a>'));
   let rd = randLista(pag, `${PREFIX}-PAL-${nrPalet}`); // C_FARA: fără preț, alți paleți cu aceeași marfă au preț
-  bine("paletul fără preț are căsuța și butonul „Pune” pe rândul lui", rd.includes(`action="/stocuri/ct-park/palet/${C_FARA}/pret"`) && rd.includes('name="pret"') && />Pune<\/button>/.test(rd) && rd.includes('placeholder="lei / buc"'), rd.slice(-700));
+  bine("paletul fără preț are căsuța și butonul „Pune” pe rândul lui", rd.includes(`action="/stocuri/ct-park/palet/${C_FARA}/pret"`) && rd.includes('name="pret"') && />Pune<\/button>/.test(rd) && rd.includes('placeholder="preț / buc"'), rd.slice(-700));
   bine("…formularul se întoarce în lista asta, cu căutarea ei", rd.includes(`name="inapoi" value="/stocuri/ct-park/paleti?q=${PREFIX}"`), rd.slice(-700));
   bine("…fără bifa „la fel”: e singurul cu marfa asta fără preț", !rd.includes('name="la_fel"'));
   rd = randLista(pag, coduri(pag).find((c) => randLista(pag, c).includes(`/palet/${ALT}/pret`)) || "x");
