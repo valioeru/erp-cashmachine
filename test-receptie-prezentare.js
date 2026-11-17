@@ -335,6 +335,8 @@ const bucata = (html, id, pana) => { const i = html.indexOf(`id="${id}"`); if (i
     [seamanaLarg("TUB SP 470 50/62 350 gr", "SP 470 50/63 350 gr 7441399"), seamana("TUB SP 470 50/62 350 gr", "SP 470 50/63 350 gr 7441399")], [true, false]);
   egal("…dar altă măsură scrisă cu „x” e altă marfă, oricâte cuvinte ar avea în comun (48x60 nu e 50x60)",
     [seamanaLarg("Fragil Optim · BANDA ADEZIVA FRAGIL 48X60M", "BANDA ADEZIVA FRAGIL 50X60 (Fragil)"), seamanaLarg("Fragil Optim · BANDA ADEZIVA FRAGIL 48X60M", "BANDA ADEZIVA FRAGIL 48X60M (Fragil Optim)"), seamanaLarg("Banda 48mm x 60m alba", "Banda 48 x 66 alba")], [false, true, false]);
+  egal("…aceeași măsură scrisă mai scurt sau în altă ordine rămâne aceeași marfă („520 X 50/57” și „50 x 57 x 520”); una care nu încape în cealaltă, nu",
+    [seamanaLarg("TUB SP 520 X 50/57 200 gr", "TUB 50 x 57 x 520 mm 200 gr 1111111"), seamanaLarg("Cutie 300x200 carton", "Cutie carton 200 x 300 x 100"), seamanaLarg("Cutie 300x200x100 carton", "Cutie carton 300x200x150")], [true, true, false]);
   egal("…doar numere comune puține, sau niciun număr comun, nu ajung; grosimea, culoarea și felul contrazise rămân altă marfă",
     [seamanaLarg("TUB SP 470 50/62 350 gr", "TUB 50 x 57 x 520 mm 200 gr 1111111"), seamanaLarg("TRP Banda Fragil 48x60", "TRP Bandă transparentă"), seamanaLarg("Jumbo 17my 50kg 1600", "Jumbo 23my 50kg 1600"), seamanaLarg("Folie neagra 500 1000 45", "Folie transparenta 500 1000 45"), seamanaLarg("Granula reciclat 25 1000", "Granula virgin 25 1000")],
     [false, false, false, false, false]);
