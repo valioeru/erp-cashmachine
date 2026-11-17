@@ -1372,6 +1372,22 @@ const STARE_CERERE = {
 };
 
 function register(router) {
+  // Totalul unei comenzi în listă, în moneda ei.
+  //
+  // Lista scria „lei" la toate comenzile: 1.584,00 € apărea drept 1.584,00 lei
+  // (comanda #97, 17.11.2026). Acum comanda în valută își arată suma în
+  // moneda ei, cu echivalentul în lei la cursul fixat pe comandă dedesubt.
+  // Filtrele și totalul din capul tabelului (lib/filtre-tabel.js) adună lei,
+  // deci citesc echivalentul, din data-filtru; comanda fără curs nu se adună.
+  const celulaTotal = (c) => {
+    const m = String(c.moneda || "RON").toUpperCase();
+    if (m === "RON") return money(c.total);
+    const lei = Number(c.curs_bnr) > 0 ? BNR.inLei(c.total, m, c.curs_bnr) : null;
+    return `<span data-filtru="${lei === null ? "fără curs" : esc(money(lei))}">${esc(sumaIn(c.total, m))}${
+      lei === null ? "" : `<br><span style="font-size:11px;color:var(--text-muted)">≈ ${esc(money(lei))}</span>`
+    }</span>`;
+  };
+
   router.get("/comenzi", async (ctx) => {
     const per = perioadaDin(ctx.query, "tot");
     const comenzi = await db
@@ -1413,7 +1429,7 @@ function register(router) {
           celulaDataCeruta(c),
           celulaDataConfirmata(c),
           stari.eticheta(c.status),
-          money(c.total),
+          celulaTotal(c),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
         ]),
         // Filtre ca în Excel pe fiecare coloană (Vali, 06.11.2026: „Filtre te

@@ -20,6 +20,8 @@ const CPL = require("../lib/ct-palet-linii");
 const codbare = require("../lib/codbare");
 const SCAN = require("../lib/scan");
 const CTM = require("../lib/ct-mutare");
+// Prețul scris în lei sau în valută, cu cursul lui (Vali, 17.11.2026).
+const PV = require("../lib/pret-valuta");
 
 // Planul halei. Erau constante scrise în sursă — acum sunt DATE: se pot
 // schimba din „Planul halei", fără să umble cineva prin cod. Valorile de aici
@@ -1124,8 +1126,18 @@ async function dinReceptie(lid) {
 // Prețul scris egal cu cel propus își păstrează sursa: formularul vine cu
 // propunerea gata scrisă, iar „scris la intrare" ar minți despre de unde e.
 // „7,35" și „7.35" sunt același preț: căsuța e text, ca să primească virgula.
+//
+// ÎN LEI SAU ÎN VALUTĂ (Vali, 17.11.2026: „prețurile se introduc în RON sau
+// EUR; se păstrează cursul introdus sau BNR; odată plasat, așa rămâne… la
+// marfa intrată în stoc sau oriunde"). Prețul se poate scrie și în euro sau
+// dolari, cum e pe factura furnizorului. Pe palet rămâne în lei — din el iese
+// valoarea stocului și costul cu care pleacă marfa —, trecut la cursul ales:
+// BNR-ul zilei sau cel scris de om. Sursa ține minte din ce s-a făcut: „scris
+// la intrare: 1,25 EUR × 5,0912 (BNR din 17.11.2026)". Cursul nu se mai
+// recalculează: paletul intrat ieri rămâne cu leii lui de ieri.
+// (lib/pret-valuta.js; câmpurile `pret_moneda` și `pret_curs`.)
 const MESAJ_FARA_PRET =
-  "Scrie prețul de intrare, în lei pe unitatea de măsură. ERP-ul nu-l știe: marfa n-are preț nici în recepție, nici pe produs.";
+  "Scrie prețul de intrare, pe unitatea de măsură — în lei sau, cu moneda aleasă, în euro ori dolari. ERP-ul nu-l știe: marfa n-are preț nici în recepție, nici pe produs.";
 // Șase zecimale: o etichetă costă 0,016678 lei, iar la patru zecimale s-ar pierde.
 // Niciun palet pe loc fără denumirea mărfii (Vali, 11.11.2026: „Nu trebuie să
 // bage produs fără denumire pe spațiu" — CT261111-0370 intrase cu 1.515, fără
@@ -1159,8 +1171,10 @@ async function costProdus(produsId) {
 async function pretStiut(b) {
   const m = b || {};
   if (nr(m.receptie_linie_id)) {
-    const l = await db.prepare("SELECT pret_unitar FROM receptii_linii WHERE id = ?").get(nr(m.receptie_linie_id)).catch(() => null);
-    const r = l ? cuPret(l.pret_unitar, "prețul din recepție") : null;
+    // Prețul scris în valută pe rândul recepției (sau venit dintr-o comandă
+    // la furnizor în valută) își poartă nota: din ce s-au făcut leii.
+    const l = await db.prepare("SELECT * FROM receptii_linii WHERE id = ?").get(nr(m.receptie_linie_id)).catch(() => null);
+    const r = l ? cuPret(l.pret_unitar, "prețul din recepție" + (String(l.pret_nota || "").trim() ? ": " + String(l.pret_nota).trim() : "")) : null;
     if (r) return r;
   }
   return costProdus(m.produs_id);
@@ -1192,11 +1206,23 @@ async function pretInRegula(b, opt) {
   return Boolean(await pretDeIntrare(b)) || (await intraSiFaraPret(b, opt));
 }
 
+// Moneda în care e scris prețul din formular: lei, sau valută cu cursul ei.
+// { ok: false, eroare } când nu se poate trece în lei (curs greșit, BNR mut).
+const valutaPretului = (b) => PV.dinFormular(b, require("./curs").laZiua);
+
 // Prețul cu care intră marfa și de unde e luat; null dacă nu-l știe nimeni.
 async function pretDeIntrare(b) {
   const scris = CI.cifra(b && b.pret_unitar);
   const stiut = await pretStiut(b);
-  if (scris !== null && scris > 0) return stiut && acelasiPret(scris, stiut.pret) ? stiut : { pret: rotPret(scris), sursa: "scris la intrare" };
+  if (scris !== null && scris > 0) {
+    // Un preț scris în valută, cu un curs care nu se poate folosi, nu e un
+    // preț: paginile spun de ce (valutaPretului), iar aici nu trece nimic cu
+    // leii ghiciți.
+    const ales = await valutaPretului(b);
+    if (!ales.ok) return null;
+    const lei = PV.inLei(scris, ales);
+    return stiut && acelasiPret(lei, stiut.pret) ? stiut : { pret: rotPret(lei), sursa: PV.sursa("scris la intrare", scris, ales) };
+  }
   return stiut;
 }
 
@@ -1209,6 +1235,8 @@ async function puneMarfa(ctx, b, grupuri, cantitatePalet, opt) {
   // Costul cu care intră paletul (pretDeIntrare, mai sus). Paginile verifică
   // înainte și îi spun omului ce are de scris; aici e plasa, ca nicio cale
   // ocolită să nu lase un palet fără preț pe raft.
+  const valuta = await valutaPretului(b);
+  if (!valuta.ok) throw new Error(valuta.eroare);
   const pi = await pretDeIntrare(b);
   if (!pi && !(await intraSiFaraPret(b, opt))) throw new Error(MESAJ_FARA_PRET);
   const pretPalet = pi ? pi.pret : null;
@@ -1997,6 +2025,10 @@ async function iesirePartiala(user, id, b) {
 //
 // `scrise` e { pret } (un preț pentru tot paletul; doar la un singur produs)
 // sau { linii: { [id]: pret } } (pe fiecare produs, din fișa paletului).
+// `scrise.valuta` = moneda în care sunt scrise prețurile (lib/pret-valuta.js):
+// se trec în lei la cursul ei, iar sursa ține minte din ce s-au făcut.
+// `scrise.nota` = nota gata făcută, când prețul vine deja în lei de la un alt
+// palet cu aceeași marfă (punePretLaFel).
 const SURSA_PRET_PUS = "pus după intrare";
 const SURSA_PRET_CORECTAT = "corectat după intrare";
 const oraRoAcum = () => new Date().toLocaleString("sv-SE", { timeZone: "Europe/Bucharest" }).slice(0, 19);
@@ -2019,13 +2051,16 @@ async function punePret(user, paletId, scrise) {
     if (cuMarfa.length > 1) return { eroare: `Pe ${p.cod} sunt mai multe produse: prețul se pune pe fiecare, din fișa paletului.` };
     cereri = String(s.pret == null ? "" : s.pret).trim() === "" ? [] : [{ linie: tinta[0] || null, text: s.pret }];
   }
-  if (!cereri.length) return { eroare: "Scrie prețul: un număr mai mare ca zero, în lei pe unitatea de măsură." };
+  const valuta = s.valuta && s.valuta.ok ? s.valuta : PV.LEI;
+  const inCe = PV.eLei(valuta) ? "în lei" : "în " + valuta.moneda;
+  if (!cereri.length) return { eroare: `Scrie prețul: un număr mai mare ca zero, ${inCe} pe unitatea de măsură.` };
 
   const schimbari = [];
   for (const c of cereri) {
-    const pret = CI.cifra(c.text);
+    const scris = CI.cifra(c.text);
+    const pret = scris === null ? null : PV.inLei(scris, valuta);
     const nume = (c.linie ? c.linie.produs_text : p.produs_text) || "marfa";
-    if (pret === null || !(rotPret(pret) > 0)) return { eroare: `„${nume}”: scrie prețul ca număr mai mare ca zero, în lei pe unitatea de măsură.` };
+    if (pret === null || !(rotPret(pret) > 0)) return { eroare: `„${nume}”: scrie prețul ca număr mai mare ca zero, ${inCe} pe unitatea de măsură.` };
     const vechi = c.linie ? nr(c.linie.pret_unitar) : nr(p.pret_unitar);
     if (vechi > 0 && acelasiPret(pret, vechi)) continue;
     if (vechi > 0 && !admin) return { eroare: `„${nume}” are deja preț (${scriePret(vechi)} lei). Un preț pus îl schimbă doar administratorul.` };
@@ -2034,6 +2069,7 @@ async function punePret(user, paletId, scrise) {
       marfa: nume,
       vechi: vechi > 0 ? vechi : null,
       nou: rotPret(pret),
+      nota: s.nota || PV.nota(scris, valuta),
       sursaVeche: (c.linie ? c.linie.pret_sursa : p.pret_sursa) || null,
     });
   }
@@ -2041,8 +2077,9 @@ async function punePret(user, paletId, scrise) {
 
   const cine = user ? user.nume : null;
   const cand = oraRoAcum();
+  const sursaLui = (x) => (x.vechi ? SURSA_PRET_CORECTAT : SURSA_PRET_PUS) + (x.nota ? ": " + x.nota : "");
   for (const x of schimbari) {
-    const sursa = x.vechi ? SURSA_PRET_CORECTAT : SURSA_PRET_PUS;
+    const sursa = sursaLui(x);
     if (x.linie) {
       await db.prepare("UPDATE ct_palet_linii SET pret_unitar = ?, pret_sursa = ? WHERE id = ? AND palet_id = ?").run(x.nou, sursa, x.linie.id, p.id);
     }
@@ -2056,7 +2093,7 @@ async function punePret(user, paletId, scrise) {
   if (cuMarfa.length) await rescrieRezumat(p.id);
   else {
     const x = schimbari[0];
-    await db.prepare("UPDATE ct_paleti SET pret_unitar = ?, pret_sursa = ? WHERE id = ?").run(x.nou, x.vechi ? SURSA_PRET_CORECTAT : SURSA_PRET_PUS, p.id);
+    await db.prepare("UPDATE ct_paleti SET pret_unitar = ?, pret_sursa = ? WHERE id = ?").run(x.nou, sursaLui(x), p.id);
   }
   console.log(`[ct-park] pret pe ${p.cod}: ${schimbari.map((x) => `${x.vechi ? scriePret(x.vechi) : "fără"} → ${scriePret(x.nou)}`).join("; ")} de ${cine || "?"}`);
   return { ok: true, palet: p, schimbari };
@@ -2094,7 +2131,7 @@ const cheieLaFel = (produsId, text, pret) => {
 // preț (dacă nici ăsta n-avea) sau pe cei cu exact prețul vechi (un preț
 // greșit, corectat de administrator). Fiecare trece prin punePret, cu regulile
 // și cu istoricul lui.
-async function punePretLaFel(user, palet, vechi, nou) {
+async function punePretLaFel(user, palet, vechi, nou, nota) {
   const unde = [];
   const arg = [nr(palet.id)];
   if (nr(palet.produs_id)) {
@@ -2114,7 +2151,7 @@ async function punePretLaFel(user, palet, vechi, nou) {
     .catch(() => []);
   let n = 0;
   for (const a of altii) {
-    const r = await punePret(user, a.id, { pret: nou });
+    const r = await punePret(user, a.id, { pret: nou, nota: nota || "" });
     if (r.ok && r.schimbari.length) n++;
   }
   return n;
@@ -2338,11 +2375,12 @@ function paginaFaraNume(ctx) {
   return send(ctx.res, 422, layout({ user: ctx.user, title: "Lipsește denumirea mărfii", active: "/stocuri/ct-park", body }));
 }
 
-// Intrarea refuzată pentru că marfa n-are preț. „Înapoi" păstrează formularul.
-function paginaFaraPret(ctx, numeMarfa) {
+// Intrarea refuzată pentru că marfa n-are preț — sau are unul în valută, cu un
+// curs care nu se poate folosi (`mesaj`). „Înapoi" păstrează formularul.
+function paginaFaraPret(ctx, numeMarfa, mesaj) {
   const body = `
     ${subtabs("/stocuri/ct-park/intrare", ctx.user)}
-    <div class="flash flash-rosu" role="alert"><strong>${esc(numeMarfa)} n-a intrat în depozit.</strong> ${esc(MESAJ_FARA_PRET)}</div>
+    <div class="flash flash-rosu" role="alert"><strong>${esc(numeMarfa)} n-a intrat în depozit.</strong> ${esc(mesaj || MESAJ_FARA_PRET)}</div>
     <p><button class="btn" type="button" onclick="history.back()">← Înapoi la formular, cu tot ce ai scris</button></p>
     <p class="explic" style="max-width:720px">Prețul rămâne lipit de palet: din el iese valoarea stocului și costul cu care pleacă marfa.
       Îl găsești pe factura sau pe avizul furnizorului. La marfa făcută de noi, costul vine din rețeta produsului.</p>`;
@@ -3560,24 +3598,26 @@ function register(router) {
         <form method="post" action="/stocuri/ct-park/palet/${p.id}/adauga" class="ct-pa-card">
           <h2>+ Adaugă marfă pe palet</h2>
           <table class="ct-pa">
-            <tr><th>Produs</th><th>Acum</th><th>Adaug</th><th>Preț / UM</th></tr>
+            <tr><th>Produs</th><th>Acum</th><th>Adaug</th><th>Preț (<span data-pv-um>lei</span>) / UM</th></tr>
             ${linii
               .map(
                 (l) => `<tr><td>${numeLinie(l)}</td><td class="ct-pa-acum">${cantLinie(l)}</td>
                   <td>${camp("adauga_" + l.id, "0")}</td>
-                  <td>${camp("pret_" + l.id, nr(l.pret_unitar) ? "același: " + nr(l.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 6 }) : "scrie prețul")}</td></tr>`
+                  <td>${camp("pret_" + l.id, nr(l.pret_unitar) ? "același: " + nr(l.pret_unitar).toLocaleString("ro-RO", { maximumFractionDigits: 6 }) + " lei" : "scrie prețul", "data-pv-pret")}</td></tr>`
               )
               .join("")}
             <tr><td colspan="4" class="ct-pa-sub">Alt produs pe palet</td></tr>
             <tr><td><input name="nou_produs" type="text" autocomplete="off" placeholder="cod sau denumire"></td>
                 <td><input name="nou_um" type="text" autocomplete="off" placeholder="UM" style="max-width:70px"></td>
-                <td>${camp("nou_cantitate", "cât")}</td><td>${camp("nou_pret", "preț")}</td></tr>
+                <td>${camp("nou_cantitate", "cât")}</td><td>${camp("nou_pret", "preț", "data-pv-pret")}</td></tr>
           </table>
+          <div style="margin-top:8px">${PV.camp({}, { eticheta: "Prețurile scrise sunt în", compact: true })}</div>
           <label class="field" style="margin-top:8px">Observații<input name="observatii" type="text" autocomplete="off"></label>
           <button class="btn" type="submit">Adaugă pe palet</button>
           <p class="explic">Fără preț scris, marfa adăugată intră cu prețul de pe palet. Cu alt preț, paletul ia media ponderată.
             Unde paletul n-are preț, sau la „alt produs", prețul îl ia ERP-ul de pe produs; dacă nu-l știe, trebuie scris.
-            „Alt produs" se caută după codul vostru, apoi după denumirea exactă; altfel rămâne scris liber.</p>
+            „Alt produs" se caută după codul vostru, apoi după denumirea exactă; altfel rămâne scris liber.
+            Prețul scris în euro sau dolari se trece în lei la cursul ales.</p>
         </form>
 
         <form method="post" action="/stocuri/ct-park/palet/${p.id}/scoate-partial" class="ct-pa-card">
@@ -3610,6 +3650,7 @@ function register(router) {
             Dacă nu mai rămâne nimic, paletul iese din depozit și locul se eliberează; altfel stă pe loc.</p>
         </form>
       </div>
+      ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}
       <style>
         [hidden] { display:none !important; }
         .ct-pa-doua { display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:14px; margin:12px 0 16px; }
@@ -3663,24 +3704,27 @@ function register(router) {
     const liniiPret = linii.length ? linii : toateLiniile.slice(0, 1);
     const randPret = (nume, cat, pretAcum, sursa, camp, um) => `<tr><td>${nume}</td><td class="ct-pa-acum">${cat}</td>
         <td>${nr(pretAcum) > 0 ? `${nr(pretAcum).toLocaleString("ro-RO", { maximumFractionDigits: 6 })} lei / ${um || "UM"}<br><span class="mic" style="color:var(--text-muted)">${esc(sursa || "")}</span>` : '<span class="badge galben">fără preț</span>'}</td>
-        <td>${nr(pretAcum) > 0 && !eAdmin ? "—" : `<input name="${camp}" type="text" inputmode="decimal" autocomplete="off" placeholder="${nr(pretAcum) > 0 ? "preț nou" : "scrie prețul"}">`}</td></tr>`;
+        <td>${nr(pretAcum) > 0 && !eAdmin ? "—" : `<input name="${camp}" type="text" inputmode="decimal" autocomplete="off" data-pv-pret placeholder="${nr(pretAcum) > 0 ? "preț nou" : "scrie prețul"}">`}</td></tr>`;
     const lipsaPret = liniiPret.length ? liniiPret.some((l) => !(nr(l.pret_unitar) > 0)) : !(nr(p.pret_unitar) > 0);
     const formularPret =
       poatePret && (lipsaPret || eAdmin)
         ? `<form method="post" action="/stocuri/ct-park/palet/${p.id}/pret" class="ct-pa-card" id="pret" style="margin:0 0 14px;max-width:760px">
              <h2>Prețul de intrare</h2>
              <table class="ct-pa">
-               <tr><th>Produs</th><th>Pe palet</th><th>Preț acum</th><th>${lipsaPret ? "Preț (lei / UM)" : "Preț nou (lei / UM)"}</th></tr>
+               <tr><th>Produs</th><th>Pe palet</th><th>Preț acum</th><th>${lipsaPret ? "Preț" : "Preț nou"} (<span data-pv-um>lei</span> / UM)</th></tr>
                ${
                  liniiPret.length
                    ? liniiPret.map((l) => randPret(numeLinie(l), nr(l.cantitate) > CPL.EPS ? cantLinie(l) : "fără cantitate", l.pret_unitar, l.pret_sursa, "pret_" + l.id, umLinie(l))).join("")
                    : randPret(esc(p.produs || p.produs_text || "marfă"), "fără cantitate", p.pret_unitar, p.pret_sursa, "pret", esc(p.um || p.unitate_masura || ""))
                }
              </table>
+             <div style="margin-top:8px;max-width:520px">${PV.camp({}, { eticheta: "Prețul e scris în" })}</div>
              <button class="btn" type="submit" style="margin-top:8px">Salvează prețul</button>
              <p class="explic">Din preț iese valoarea stocului și costul cu care pleacă marfa; un palet fără preț nu intră în niciuna.
-               Un preț deja pus îl schimbă doar administratorul. Fiecare schimbare rămâne scrisă mai jos, cu cine a făcut-o.</p>
+               Un preț deja pus îl schimbă doar administratorul. Fiecare schimbare rămâne scrisă mai jos, cu cine a făcut-o.
+               Prețul scris în euro sau dolari se trece în lei la cursul ales și rămâne așa.</p>
            </form>
+           ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}
            <style>
              .ct-pa-card { background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
              .ct-pa-card h2 { margin:0 0 8px; font-size:16px; }
@@ -3963,9 +4007,21 @@ function register(router) {
     if (p.data_iesire) return inapoi("eroare", "Paletul a ieșit din depozit — pe el nu se mai adaugă.");
     const b = ctx.body || {};
     const linii = (await liniiPalet(id)).filter((l) => nr(l.cantitate) > CPL.EPS);
+    // Prețurile scrise în valută (lib/pret-valuta.js) se trec în lei înainte de
+    // socoteală: media ponderată și valoarea paletului sunt în lei. Ce nu e
+    // număr rămâne cum e scris, ca regula de mai jos să-l refuze cu mesajul ei.
+    const valuta = await valutaPretului(b);
+    if (!valuta.ok) return inapoi("eroare", valuta.eroare);
+    const noteValuta = [];
+    const inLei = (text, nume) => {
+      const n = CI.cifra(text);
+      if (n === null || PV.eLei(valuta)) return text;
+      if (n > 0) noteValuta.push(`${nume}: ${PV.nota(n, valuta)}`);
+      return String(PV.inLei(n, valuta));
+    };
     const scrise = {};
-    for (const l of linii) scrise[l.id] = { cantitate: b["adauga_" + l.id], pret: b["pret_" + l.id] };
-    const v = CPL.validareAdaugare(linii, scrise, { produs: b.nou_produs, cantitate: b.nou_cantitate, um: b.nou_um, pret: b.nou_pret });
+    for (const l of linii) scrise[l.id] = { cantitate: b["adauga_" + l.id], pret: inLei(b["pret_" + l.id], l.produs_text || "marfa") };
+    const v = CPL.validareAdaugare(linii, scrise, { produs: b.nou_produs, cantitate: b.nou_cantitate, um: b.nou_um, pret: inLei(b.nou_pret, String(b.nou_produs || "").trim() || "alt produs") });
     if (v.eroare) return inapoi("eroare", v.eroare);
     // Și marfa adăugată intră cu preț (Vali, 11.11.2026). O linie fără preț
     // îl ia de pe produs, dacă ERP-ul îl știe; altfel se scrie acum.
@@ -3980,13 +4036,19 @@ function register(router) {
     const prodNou = v.nou ? await produsDupaCodSauNume(v.nou.produs) : null;
     let pretLinieNoua = null;
     if (v.nou) {
-      pretLinieNoua = nr(v.nou.pret_unitar) > 0 ? { pret: rotPret(v.nou.pret_unitar), sursa: "scris la adăugare" } : prodNou ? await costProdus(prodNou.id) : null;
+      pretLinieNoua =
+        nr(v.nou.pret_unitar) > 0
+          ? { pret: rotPret(v.nou.pret_unitar), sursa: PV.sursa("scris la adăugare", CI.cifra(b.nou_pret), valuta) }
+          : prodNou
+            ? await costProdus(prodNou.id)
+            : null;
       if (!pretLinieNoua) return inapoi("eroare", `La „${v.nou.produs}” scrie și prețul: ERP-ul nu-l știe.`);
     }
 
     const azi = aziStr();
     const cine = ctx.user ? ctx.user.nume : null;
-    const obs = String(b.observatii || "").trim() || null;
+    // Din ce s-au făcut leii rămâne scris lângă adăugare, cu observațiile omului.
+    const obs = [String(b.observatii || "").trim(), noteValuta.length ? "preț scris în valută — " + noteValuta.join("; ") : ""].filter(Boolean).join(" · ").slice(0, 500) || null;
     const audit = (linieId, produsId, text, cant, um, pret) =>
       db
         .prepare(
@@ -4036,19 +4098,24 @@ function register(router) {
       const m = /^pret_(\d+)$/.exec(k);
       if (m) linii[m[1]] = b[k];
     }
-    const r = await punePret(ctx.user, id, Object.keys(linii).length ? { linii } : { pret: b.pret });
+    // Prețul scris în valută (lib/pret-valuta.js): se trece în lei la cursul
+    // ales acum, iar sursa ține minte din ce s-a făcut.
+    const valuta = await valutaPretului(b);
+    if (!valuta.ok) return inapoi("eroare", valuta.eroare);
+    const r = await punePret(ctx.user, id, Object.assign(Object.keys(linii).length ? { linii } : { pret: b.pret }, { valuta }));
     if (r.eroare) return inapoi("eroare", r.eroare);
     if (!r.schimbari.length) return inapoi("ok", `${r.palet.cod} avea deja prețul ăsta.`);
     const um = r.palet.um ? " / " + r.palet.um : "";
     const x = r.schimbari[0];
+    const dinCe = (y) => (y.nota ? ` (${y.nota})` : "");
     let mesaj =
       r.schimbari.length > 1
-        ? `Prețurile sunt puse pe ${r.palet.cod}: ${r.schimbari.map((y) => `${y.marfa} ${scriePret(y.nou)} lei`).join("; ")}.`
+        ? `Prețurile sunt puse pe ${r.palet.cod}: ${r.schimbari.map((y) => `${y.marfa} ${scriePret(y.nou)} lei${dinCe(y)}`).join("; ")}.`
         : x.vechi
-          ? `Prețul lui ${r.palet.cod} e schimbat din ${scriePret(x.vechi)} în ${scriePret(x.nou)} lei${um}.`
-          : `Prețul de ${scriePret(x.nou)} lei${um} e pus pe ${r.palet.cod}.`;
+          ? `Prețul lui ${r.palet.cod} e schimbat din ${scriePret(x.vechi)} în ${scriePret(x.nou)} lei${um}${dinCe(x)}.`
+          : `Prețul de ${scriePret(x.nou)} lei${um}${dinCe(x)} e pus pe ${r.palet.cod}.`;
     if (String(b.la_fel || "") === "1" && r.schimbari.length === 1) {
-      const n = await punePretLaFel(ctx.user, r.palet, x.vechi, x.nou);
+      const n = await punePretLaFel(ctx.user, r.palet, x.vechi, x.nou, x.nota);
       if (n) mesaj += ` La fel pe încă ${plural(n, "palet", "paleți")} cu aceeași marfă.`;
     }
     return inapoi("ok", mesaj);
@@ -4859,7 +4926,8 @@ function register(router) {
       const altii = Math.max(0, (laFel.get(cheieLaFel(p.produs_id, p.produs_text, p.pret_unitar)) || 1) - 1);
       const camp = `<form method="post" action="/stocuri/ct-park/palet/${p.id}/pret" class="pret-palet">
           <input type="hidden" name="inapoi" value="${esc(adresaListei)}">
-          <input name="pret" type="text" inputmode="decimal" autocomplete="off" required placeholder="lei / ${esc(p.um || "UM")}" aria-label="Preț de intrare pentru ${esc(p.cod)}">
+          ${PV.COPII}
+          <input name="pret" type="text" inputmode="decimal" autocomplete="off" required data-pv-pret placeholder="preț / ${esc(p.um || "UM")}" aria-label="Preț de intrare pentru ${esc(p.cod)}">
           <button class="btn small" type="submit">${arePret ? "Schimbă" : "Pune"}</button>
           ${
             altii
@@ -4925,7 +4993,7 @@ function register(router) {
                <strong>Paleții din depozit fără preț la intrare.</strong>
                ${
                  poatePret
-                   ? "Scrie prețul în dreptul fiecăruia, în lei pe unitatea de măsură, și apasă „Pune”. Unde mai sunt paleți cu aceeași marfă, bifa de lângă îl pune pe toți dintr-o dată."
+                   ? "Scrie prețul în dreptul fiecăruia, pe unitatea de măsură, și apasă „Pune”. E în lei; pentru o factură în euro sau dolari, alege moneda mai jos. Unde mai sunt paleți cu aceeași marfă, bifa de lângă îl pune pe toți dintr-o dată."
                    : "Prețul îl pune cine face intrările în depozit."
                }
                <a href="/stocuri/ct-park/paleti${cauta ? "?q=" + encodeURIComponent(cauta) : ""}">Arată toți paleții</a>
@@ -4975,6 +5043,15 @@ function register(router) {
               : `<a href="/stocuri/ct-park/paleti?ordine=valoare">cei mai scumpi întâi</a>, ca să se vadă un preț greșit`
           }</div></div>
       </div>
+      ${
+        poatePret
+          ? `<div class="detail-box" id="moneda-preturi" style="margin-bottom:10px;max-width:760px">
+               <strong>Moneda prețurilor pe care le scrii în listă.</strong> Dacă factura furnizorului e în euro sau dolari, alege moneda aici:
+               prețul se trece în lei la cursul ales și așa rămâne pe palet.
+               <div style="margin-top:8px">${PV.camp({}, { eticheta: "Prețurile din listă sunt în" })}</div>
+             </div>`
+          : ""
+      }
       <style>
         .pret-palet { display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; margin:0; }
         .pret-palet input[type="text"] { width:92px; }
@@ -5042,6 +5119,7 @@ function register(router) {
         });
       })();
       </script>
+      ${poatePret ? PV.script(await PV.bnrAzi(require("./curs").laZiua)) : ""}
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Paleți în CT-Park", active: "/stocuri/ct-park", body }));
   });
@@ -5270,9 +5348,10 @@ function register(router) {
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px">
           <label class="field">…sau denumirea scrisă liber<input name="produs_text" id="marfa-text" placeholder="folie stretch 23µ reciclat" value="${esc(pre ? pre.produs_text : "")}"></label>
           <label class="field">UM<input name="um" placeholder="kg" value="${esc(pre ? pre.um : "")}"></label>
-          <label class="field">Preț de intrare (lei / UM)${pretLaAlegere ? "" : " — obligatoriu"}<input type="text" inputmode="decimal" name="pret_unitar" id="pret-intrare"${pretLaAlegere ? "" : " required"} placeholder="ex. 7,35"
+          <label class="field">Preț de intrare (<span data-pv-um>lei</span> / UM)${pretLaAlegere ? "" : " — obligatoriu"}<input type="text" inputmode="decimal" name="pret_unitar" id="pret-intrare" data-pv-pret${pretLaAlegere ? "" : " required"} placeholder="ex. 7,35"
             value="${esc(prePret ? scriePret(prePret.pret) : "")}"${prePret ? ' data-propus="1"' : ""}></label>
         </div>
+        ${PV.camp({}, { eticheta: "Prețul e scris în" })}
         <p class="explic" style="margin-top:-6px">
           <strong id="pret-de-unde">${
             prePret
@@ -5285,6 +5364,8 @@ function register(router) {
           }</strong>
           Prețul rămâne lipit de paletul ăsta: din el iese valoarea stocului, iar când marfa pleacă, pleacă cu costul
           cu care a intrat — ăsta e rostul lui FIFO. Fără preț, marfa nu mai intră în depozit.
+          Dacă factura furnizorului e în euro sau dolari, alege moneda și scrie prețul de pe factură: pe palet rămâne în lei,
+          la cursul BNR al zilei sau la cel scris de tine, iar cursul nu se mai schimbă după aceea.
         </p>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px">
           <label class="field">Furnizor
@@ -5357,6 +5438,7 @@ function register(router) {
           .paleti-intrare input.ct-in-loc, .paleti-intrare input.ct-in-pal, .paleti-intrare input.ct-in-cant, .paleti-intrare select { width:100%; }
         }
       </style>
+      ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}
       <script>
       (function () {
         var tb = document.getElementById("paleti-intrare");
@@ -5367,6 +5449,16 @@ function register(router) {
         var pret = document.getElementById("pret-intrare");
         var deUnde = document.getElementById("pret-de-unde");
         var val = document.getElementById("valoare-intrare");
+        // Moneda prețului (lib/pret-valuta.js): cu câți lei se înmulțește
+        // prețul scris. 1 la lei; NaN când cursul nu se știe încă.
+        var moneda = document.querySelector("[data-pv-moneda]");
+        function cursPret() {
+          if (!moneda || moneda.value === "RON") return 1;
+          var c = cif((document.querySelector("[data-pv-valoare]") || {}).value);
+          if (c !== null) return c > 0 ? c : NaN;
+          var b = (window.PV_BNR || {})[moneda.value];
+          return b ? b.valoare : NaN;
+        }
         function total() {
           var s = 0, are = false;
           tb.querySelectorAll("tr.palet-rand").forEach(function (tr) {
@@ -5378,7 +5470,23 @@ function register(router) {
           // Valoarea se vede înainte de salvare: un preț pe mia de bucăți,
           // scris la o marfă numărată în bucăți, sare în ochi aici.
           var pr = pret ? cif(pret.value) : null;
-          if (val) val.textContent = are && pr !== null && pr > 0 ? (s * pr).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei" : "—";
+          var k = cursPret();
+          if (val) val.textContent = are && pr !== null && pr > 0 && !isNaN(k) ? (s * pr * k).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei" : "—";
+        }
+        // Prețul propus de ERP e în lei. Pe altă monedă nu mai are ce căuta în
+        // câmp: ar intra drept euro.
+        if (moneda) {
+          moneda.addEventListener("change", function () {
+            if (pret && moneda.value !== "RON" && pret.getAttribute("data-propus") === "1") {
+              pret.value = "";
+              pret.removeAttribute("data-propus");
+              pret.dispatchEvent(new Event("input", { bubbles: true }));
+              if (deUnde) deUnde.textContent = "Prețul propus de ERP era în lei. Scrie prețul în " + moneda.value + ", de pe factura furnizorului.";
+            }
+            total();
+          });
+          var campCurs = document.querySelector("[data-pv-valoare]");
+          if (campCurs) campCurs.addEventListener("input", total);
         }
         // Fără denumire nu intră: ori un produs ales din catalog, ori numele
         // scris. Căsuța de nume e obligatorie doar cât nu e ales niciun produs.
@@ -5417,8 +5525,9 @@ function register(router) {
         document.addEventListener("change", function (ev) {
           if (ev.target.name !== "produs_id") return;
           if (um && !um.value) um.value = ev.target.getAttribute("data-um") || "";
-          // Prețul produsului ales, dacă omul n-a scris unul al lui.
-          if (pret && (!pret.value || pret.getAttribute("data-propus") === "1")) {
+          // Prețul produsului ales, dacă omul n-a scris unul al lui. E în lei:
+          // se propune doar cât prețul se scrie în lei.
+          if (pret && (!moneda || moneda.value === "RON") && (!pret.value || pret.getAttribute("data-propus") === "1")) {
             var p = ev.target.getAttribute("data-pret") || "";
             pret.value = p;
             if (p) pret.setAttribute("data-propus", "1"); else pret.removeAttribute("data-propus");
@@ -5465,6 +5574,11 @@ function register(router) {
     // pentru formularul trimis altfel.
     if (!areNume(marfa)) return paginaFaraNume(ctx);
 
+    // Prețul scris în valută trebuie să se poată trece în lei (curs bun, sau
+    // BNR-ul zilei). Altfel se spune de ce, nu „lipsește prețul".
+    const valuta = await valutaPretului(marfa);
+    if (!valuta.ok) return paginaFaraPret(ctx, numeMarfa, valuta.eroare);
+
     // Fără preț nu intră (Vali, 11.11.2026). Căsuța e obligatorie și în
     // pagină; aici e pentru formularul trimis altfel.
     if (!(await pretInRegula(marfa))) return paginaFaraPret(ctx, numeMarfa);
@@ -5483,6 +5597,7 @@ function register(router) {
       <input type="hidden" name="produs_text" value="${esc(String(b.produs_text || ""))}">
       <input type="hidden" name="um" value="${esc(um)}">
       <input type="hidden" name="pret_unitar" value="${esc(String(b.pret_unitar || ""))}">
+      ${PV.ascunse(b)}
       <input type="hidden" name="furnizor_id" value="${esc(String(b.furnizor_id || ""))}">
       <input type="hidden" name="furnizor_text" value="${esc(String(b.furnizor_text || ""))}">
       <input type="hidden" name="lot" value="${esc(String(b.lot || ""))}">
@@ -5556,6 +5671,8 @@ function register(router) {
     const b = ctx.body;
     const chei = Object.keys(b).filter((k) => /^grup_\d+$/.test(k));
     if (chei.length && !areNume(b)) return paginaFaraNume(ctx);
+    const valuta = chei.length ? await valutaPretului(b) : PV.LEI;
+    if (!valuta.ok) return paginaFaraPret(ctx, String(b.produs_text || "").trim() || "Marfa", valuta.eroare);
     if (chei.length && !(await pretInRegula(b))) return paginaFaraPret(ctx, String(b.produs_text || "").trim() || "Marfa");
     const idPaleti = [];
     for (const k of chei) {
@@ -6568,6 +6685,7 @@ module.exports = {
   corecteazaMarfa,
   // Prețul de intrare: regula e aici, o folosesc și scanerul și recepția.
   pretDeIntrare,
+  valutaPretului,
   pretStiut,
   pretInRegula,
   dinProductiaNoastra,

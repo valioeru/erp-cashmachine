@@ -39,6 +39,8 @@ const GP = require("../lib/gata-productie");
 const SCAN = require("../lib/scan");
 const CPL = require("../lib/ct-palet-linii");
 const codbare = require("../lib/codbare");
+// Prețul scris în lei sau în valută, cu cursul lui (Vali, 17.11.2026).
+const PV = require("../lib/pret-valuta");
 // Cerut la apel: modules/ct-park.js cere la rândul lui modulul ăsta.
 const ctPark = () => require("./ct-park");
 
@@ -469,7 +471,15 @@ function register(router) {
     // arată; dacă nu, se cere aici, o dată, și se ține minte între scanări.
     const pretStiut = await SC.pretRand(r.cheie);
     const pretScris = qy.pret !== undefined ? String(qy.pret).slice(0, 20) : "";
-    const stare = () => ({ sursa: sursa === "toate" ? "" : sursa, lat: cate === 1 ? "" : cate, loc: loc.join(","), cant: qy.cant !== undefined ? cantScrisa : "", pret: pretStiut ? "" : pretScris });
+    // Moneda prețului scris și cursul ei (lib/pret-valuta.js), ținute minte
+    // între scanări ca și prețul.
+    const monedaScrisa = pretStiut ? "RON" : PV.moneda(qy.pret_moneda) || "RON";
+    const cursScris = monedaScrisa === "RON" ? "" : String(qy.pret_curs === undefined ? "" : qy.pret_curs).slice(0, 20);
+    const stare = () => ({
+      sursa: sursa === "toate" ? "" : sursa, lat: cate === 1 ? "" : cate, loc: loc.join(","), cant: qy.cant !== undefined ? cantScrisa : "", pret: pretStiut ? "" : pretScris,
+      pret_moneda: monedaScrisa === "RON" ? "" : monedaScrisa, pret_curs: cursScris,
+    });
+    const alegeMoneda = pretStiut ? "" : PV.camp({ pret_moneda: monedaScrisa, pret_curs: cursScris }, { compact: true, clasa: "sc-f", tine: true, eticheta: "Prețul e în" });
     const aici = (extra) => `${CALE}/intrare/rand/${r.cheie}${q(Object.assign(stare(), extra))}`;
     const cod = SC.curat(qy.cod);
     if (cod) {
@@ -513,10 +523,10 @@ function register(router) {
             : r.sursa === "productie"
               ? // Marfa făcută de noi, fără cost pe produs: prețul nu se cere
                 // (modules/ct-park.js, regula prețului de intrare).
-                `<label class="sc-f">Preț de intrare (lei${r.um ? " / " + esc(r.um) : ""}) — produsul n-are cost în ERP; scrie-l doar dacă îl știi
-                   <input name="pret" data-tine="pret" inputmode="decimal" value="${esc(pretScris)}" autocomplete="off"></label>`
-              : `<label class="sc-f">Preț de intrare (lei${r.um ? " / " + esc(r.um) : ""}) — ERP-ul nu-l știe, scrie-l de pe factură sau aviz
-                   <input name="pret" data-tine="pret" inputmode="decimal" value="${esc(pretScris)}" autocomplete="off" required></label>`
+                `<label class="sc-f">Preț de intrare (<span data-pv-um>lei</span>${r.um ? " / " + esc(r.um) : ""}) — produsul n-are cost în ERP; scrie-l doar dacă îl știi
+                   <input name="pret" data-tine="pret" data-pv-pret inputmode="decimal" value="${esc(pretScris)}" autocomplete="off"></label>${alegeMoneda}`
+              : `<label class="sc-f">Preț de intrare (<span data-pv-um>lei</span>${r.um ? " / " + esc(r.um) : ""}) — ERP-ul nu-l știe, scrie-l de pe factură sau aviz
+                   <input name="pret" data-tine="pret" data-pv-pret inputmode="decimal" value="${esc(pretScris)}" autocomplete="off" required></label>${alegeMoneda}`
         }
         <div class="sc-mic">Mai mulți paleți, fără loc deocamdată: scrie cât e pe fiecare, cu plus între ei — „400 + 400 + 200” sau „3 x 400” — și apasă butonul de jos.</div>
         <button class="sc-ok" type="submit" name="actiune" value="loc"${alese.length ? "" : " disabled"}>${alese.length ? `EFECTUEAZĂ — pune pe ${esc(alese.map((l) => l.adresa).join(" + "))}` : "Scanează sau alege locul"}</button>
@@ -525,7 +535,8 @@ function register(router) {
       <div class="sc-t">Unde îl pui</div>
       ${blocPropuneri(propuneri, (x) => aici({ loc: x.join(",") }), loc)}
       <div class="sc-t">Câte locuri ține paletul</div>
-      <div>${[1, 2, 3].map((n) => `<a class="sc-chip${n === cate ? " activ" : ""}" href="${esc(aici({ lat: n === 1 ? "" : n, loc: "" }))}">${n} ${n === 1 ? "loc" : "locuri"}</a>`).join("")}</div>`;
+      <div>${[1, 2, 3].map((n) => `<a class="sc-chip${n === cate ? " activ" : ""}" href="${esc(aici({ lat: n === 1 ? "" : n, loc: "" }))}">${n} ${n === 1 ? "loc" : "locuri"}</a>`).join("")}</div>
+      ${pretStiut ? "" : PV.script(await PV.bnrAzi(require("./curs").laZiua))}`;
     pagina(ctx, { titlu: "Marfă de pus pe raft", inapoi: { href: lista({}), text: "Intrare" }, corp });
   });
 
@@ -538,12 +549,12 @@ function register(router) {
     const cuLoc = String(b.actiune || "loc") !== "paleti";
     const loc = cuLoc ? ids(b.locuri) : [];
     const inapoi = (eroare, peste) =>
-      redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { lat: nr(b.lat) > 1 ? nr(b.lat) : "", loc: ids(b.locuri).join(","), cant: String(b.cant || "").slice(0, 80), pret: String(b.pret || "").slice(0, 20), eroare, peste: peste ? String(peste) : "" }))}`);
+      redirect(ctx.res, `${CALE}/intrare/rand/${encodeURIComponent(cheie)}${q(Object.assign({}, tine, { lat: nr(b.lat) > 1 ? nr(b.lat) : "", loc: ids(b.locuri).join(","), cant: String(b.cant || "").slice(0, 80), pret_moneda: (PV.moneda(b.pret_moneda) || "RON") === "RON" ? "" : PV.moneda(b.pret_moneda), pret_curs: String(b.pret_curs || "").slice(0, 20), pret: String(b.pret || "").slice(0, 20), eroare, peste: peste ? String(peste) : "" }))}`);
     const cantitati = SC.cantitatiDinText(b.cant);
     if (!cantitati.length || cantitati.some((x) => !(x > 0))) return inapoi("Scrie cât e pe palet: un număr mai mare ca zero (sau mai multe, cu plus între ele: 400 + 400 + 200).");
     if (cuLoc && !loc.length) return inapoi("Scanează locul de pe raft sau alege unul din cele propuse.");
     if (cuLoc && cantitati.length > 1) return inapoi("Pe locul ales se pune un singur palet. Scrie o singură cantitate, sau apasă „Fă doar paleții și etichetele”.");
-    const r = await SC.faPaleti(ctx.user, cheie, cantitati, loc, { confirmaPeste: b.confirma_peste, pret: b.pret });
+    const r = await SC.faPaleti(ctx.user, cheie, cantitati, loc, { confirmaPeste: b.confirma_peste, pret: b.pret, moneda: b.pret_moneda, curs: b.pret_curs });
     // Mai mult decât era de pus: pagina se întoarce cu întrebarea și ține
     // minte suma, ca a doua apăsare s-o confirme.
     if (r.eroare) {
@@ -1165,7 +1176,7 @@ function registerHartii(router) {
         erori.push(`„${scris.slice(0, 40)}” nu e o listă de cantități.`);
         continue;
       }
-      const r = await SC.faPaleti(u, "r" + l.id, cantitati, [], { peste: String(b.peste || "") === "1", pret: b["pret_" + l.id] });
+      const r = await SC.faPaleti(u, "r" + l.id, cantitati, [], { peste: String(b.peste || "") === "1", pret: b["pret_" + l.id], moneda: b.pret_moneda, curs: b.pret_curs });
       if (r.eroare) erori.push(r.peste ? `${r.eroare} Dacă a venit mai mult, bifează „pe paleți e mai mult decât s-a numărat” și trimite din nou.` : r.faraPret ? `„${scris.slice(0, 40)}”: ${r.eroare} Scrie-l în căsuța de preț a rândului.` : r.eroare);
       if (r.ids && r.ids.length) facute.push(...r.ids);
     }

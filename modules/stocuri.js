@@ -4,6 +4,8 @@ const { SUB_STOC } = require("../lib/stoc");
 const { registerCrud } = require("../lib/crud");
 const { esc, money, layout, table, actionLinks } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
+// Prețul scris în lei sau în valută, cu cursul lui (Vali, 17.11.2026).
+const PV = require("../lib/pret-valuta");
 
 function register(router) {
   // Gestiune depozite (CRUD generic)
@@ -170,25 +172,34 @@ function register(router) {
         <select name="tip" required><option value="intrare">Intrare (achiziție / recepție)</option><option value="iesire">Ieșire (vânzare / consum)</option></select>
       </label>
       <label class="field"><span>Cantitate</span><input type="number" step="0.01" name="cantitate" required></label>
-      <label class="field"><span>Preț unitar</span><input type="number" step="0.01" name="pret_unitar"></label>
+      <label class="field"><span>Preț unitar (<span data-pv-um>lei</span>)</span><input type="text" inputmode="decimal" name="pret_unitar" data-pv-pret autocomplete="off"></label>
+      ${PV.camp(ctx.query || {}, { eticheta: "Prețul e scris în" })}
       <label class="field"><span>Document referință</span><input type="text" name="document_ref" placeholder="ex: NIR 123 / Factură 456"></label>
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2"></textarea></label>
       <div class="form-actions">
         <button type="submit" class="btn">Salvează mișcarea</button>
         <a href="/stocuri" class="btn secondary">Renunță</a>
       </div>
-    </form>`;
-    send(ctx.res, 200, layout({ user: ctx.user, title: "Mișcare de stoc nouă", active: "/stocuri", body }));
+    </form>
+    ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}`;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Mișcare de stoc nouă", active: "/stocuri", body: (ctx.query && ctx.query.eroare ? `<div class="flash flash-rosu" role="alert">${esc(String(ctx.query.eroare))}</div>` : "") + body }));
   });
 
   router.post("/stocuri/miscare", async (ctx) => {
     const { produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, observatii } = ctx.body;
+    // Prețul se poate scrie și în valută (lib/pret-valuta.js): în mișcare
+    // rămâne în lei, la cursul ales, iar observațiile țin minte din ce s-a făcut.
+    const scris = Number(String(pret_unitar || "").trim().replace(",", "."));
+    const pret = Number.isFinite(scris) && scris > 0 ? scris : 0;
+    const valuta = pret > 0 ? await PV.dinFormular(ctx.body, require("./curs").laZiua) : PV.LEI;
+    if (!valuta.ok) return redirect(ctx.res, `/stocuri/miscare/nou?eroare=${encodeURIComponent(valuta.eroare)}`);
+    const nota = pret > 0 ? PV.nota(pret, valuta) : "";
     await db
       .prepare(
         `INSERT INTO miscari_stoc (produs_id, depozit_id, tip, cantitate, pret_unitar, document_ref, observatii)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(produs_id, depozit_id, tip, Number(cantitate || 0), Number(pret_unitar || 0), document_ref || "", observatii || "");
+      .run(produs_id, depozit_id, tip, Number(cantitate || 0), pret > 0 ? PV.inLei(pret, valuta) : 0, document_ref || "", [String(observatii || "").trim(), nota ? "preț: " + nota : ""].filter(Boolean).join(" · "));
     redirect(ctx.res, "/stocuri");
   });
 

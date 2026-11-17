@@ -58,6 +58,8 @@ const { esc } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { poateAccesa } = require("../lib/auth");
 const GP = require("../lib/gata-productie");
+// Prețul scris în lei sau în valută, cu cursul lui (Vali, 17.11.2026).
+const PV = require("../lib/pret-valuta");
 
 const INTRARE = "/stocuri/ct-park/intrare";
 const cant = (v) => (Number(v) || 0).toLocaleString("ro-RO", { maximumFractionDigits: 3 });
@@ -146,7 +148,7 @@ async function sectiune(user, query) {
       <form method="post" action="${baza}/paleti" class="gata-paleti" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0 0">
         <input name="paleti" value="${esc(x.paleti_propusi || String(x.ramas).replace(".", ","))}" required autocomplete="off"
                aria-label="Cât e pe fiecare palet" title="Cât e pe fiecare palet: 3 x 400, 2 x 400 + 200 sau 400 + 400 + 200" style="width:150px">
-        ${x.cerePret ? `<input name="pret" inputmode="decimal" autocomplete="off" required placeholder="preț lei / ${um}" aria-label="Preț de intrare, lei pe ${um}" style="width:120px">` : ""}
+        ${x.cerePret ? `${PV.COPII}<input name="pret" inputmode="decimal" autocomplete="off" required data-pv-pret placeholder="preț / ${um}" aria-label="Preț de intrare, pe ${um}" style="width:120px">` : ""}
         <button class="btn small" type="submit">Fă paleții și etichetele →</button>
         <label class="mic" style="display:inline-flex;gap:4px;align-items:center;margin:0;color:var(--text-muted)"><input type="checkbox" name="peste" value="1"> a venit mai mult</label>
       </form>
@@ -250,10 +252,21 @@ async function sectiune(user, query) {
       ${maiJos.length ? `<p class="gata-mai-jos" style="margin:0 0 8px;font-size:13px">Tot aici, mai jos: ${maiJos.join(" · ")}.</p>` : ""}
       ${
         lista.length
-          ? `<div class="tabel-scroll"><table class="table">
+          ? `<div data-pv-zona>
+        ${
+          // Unde ERP-ul nu știe prețul, rândul are o căsuță de preț. Prețurile
+          // se pot scrie și în valută, cum sunt pe factura furnizorului
+          // (lib/pret-valuta.js): pe palet rămân în lei, la cursul ales.
+          lista.some((x) => x.cerePret)
+            ? `<div id="gata-moneda" style="margin:0 0 8px;max-width:620px;font-size:13px">${PV.camp({}, { eticheta: "Prețurile scrise în listă sunt în", compact: true })}</div>`
+            : ""
+        }
+        <div class="tabel-scroll"><table class="table">
         <thead><tr><th>Produs</th><th>De alocat</th><th>De unde / pentru</th><th>Stare</th></tr></thead>
         <tbody>${lista.map(rand).join("")}</tbody>
-      </table></div>`
+      </table></div>
+        ${lista.some((x) => x.cerePret) ? PV.script(await PV.bnrAzi(require("./curs").laZiua)) : ""}
+      </div>`
           : '<p style="margin:0;font-size:13px">Nimic de alocat acum.</p>'
       }
       ${
@@ -490,7 +503,7 @@ function register(router) {
           : "Scrie cât e pe fiecare palet: 3 x 400, 2 x 400 + 200 sau 400 + 400 + 200."
       );
     }
-    const r = await SC.faPaleti(ctx.user, (fel === "receptie" ? "r" : "c") + id, cantitati, [], { peste: String(b.peste || "") === "1", pret: b.pret });
+    const r = await SC.faPaleti(ctx.user, (fel === "receptie" ? "r" : "c") + id, cantitati, [], { peste: String(b.peste || "") === "1", pret: b.pret, moneda: b.pret_moneda, curs: b.pret_curs });
     if (r.eroare) {
       const spune = r.peste
         ? `${r.eroare} Dacă a venit mai mult, bifează „a venit mai mult” și trimite din nou.`

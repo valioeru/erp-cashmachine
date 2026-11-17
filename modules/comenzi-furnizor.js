@@ -279,12 +279,23 @@ async function inDepozit(user, c, randuri, data) {
   const REC = require("./receptie");
   const ef = await cursulEfectiv(c);
   const curs = nr(ef.curs) > 0 ? nr(ef.curs) : null;
+  // Din ce se fac leii, la comanda în valută: prețul ei, cursul și de unde e
+  // cursul. Rămâne scris pe rândul recepției și, de acolo, pe paleți
+  // (Vali, 17.11.2026: cursul plasat rămâne așa în istoric).
+  const dinCe = (pret) =>
+    ef.moneda === "RON" || !curs
+      ? null
+      : `${String(Math.round(nr(pret) * 1e6) / 1e6).replace(".", ",")} ${ef.moneda} × ${L.scrieCurs(curs)} (${
+          ef.dinBnr ? "BNR din ziua comenzii" : "cursul comenzii"
+        } ${c.numar || "#" + c.id})`;
+  const arePret = (x) => !(x.l.pret_unitar === null || x.l.pret_unitar === undefined || x.l.pret_unitar === "" || !curs);
   const linii = deTrimis.map((x) => ({
     produs_id: x.l.produs_id || null,
     produs_text: x.l.produs_id ? null : x.l.denumire,
     cantitate: rot3(x.cant),
     um: x.l.um || "",
-    pret_unitar: x.l.pret_unitar === null || x.l.pret_unitar === undefined || x.l.pret_unitar === "" || !curs ? null : Math.round(nr(x.l.pret_unitar) * curs * 1e6) / 1e6,
+    pret_unitar: arePret(x) ? Math.round(nr(x.l.pret_unitar) * curs * 1e6) / 1e6 : null,
+    pret_nota: arePret(x) ? dinCe(x.l.pret_unitar) : null,
     paleti_nr: x.p ? x.p.nr : null,
     paleti_pe: x.p ? x.p.pe : null,
     comanda_furnizor_linie_id: Number(x.l.id),

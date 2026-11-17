@@ -29,6 +29,8 @@ const R = require("../lib/receptie");
 const POZE = require("../lib/receptie-poze");
 const drive = require("../lib/drive");
 const { cantPusa } = require("../lib/gata-productie");
+// Prețul scris în lei sau în valută, cu cursul lui (Vali, 17.11.2026).
+const PV = require("../lib/pret-valuta");
 
 const nr = (v) => Number(v || 0);
 function azi() {
@@ -120,8 +122,8 @@ async function creeaza(date, linii) {
     await db
       .prepare(
         `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare, productie_linie_id,
-                                     paleti_nr, paleti_pe, comanda_furnizor_linie_id, lot)
-         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?, ?, ?, ?, ?)`
+                                     paleti_nr, paleti_pe, comanda_furnizor_linie_id, lot, pret_nota)
+         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -139,7 +141,10 @@ async function creeaza(date, linii) {
         Number(l.comanda_furnizor_linie_id) || null,
         // Lotul etichetelor de produs, la marfa din producție
         // (lib/stadiu-comanda.js, cuLotEtichete).
-        text(l.lot, 60)
+        text(l.lot, 60),
+        // Din ce s-a făcut prețul în lei, când a fost scris în valută
+        // (lib/pret-valuta.js) — doar dacă rândul are preț.
+        l.pret_unitar == null ? null : text(l.pret_nota, 200)
       );
   }
   return id;
@@ -424,18 +429,26 @@ async function sectiuneCtPark(r, linii) {
                ${
                  x.pret
                    ? ""
-                   : `<label class="field" style="max-width:420px"><span>Preț de intrare (lei / ${esc(x.um || "UM")}) — ${
+                   : `<label class="field" style="max-width:420px"><span>Preț de intrare (<span data-pv-um>lei</span> / ${esc(x.um || "UM")}) — ${
                        r.sursa === "productie" ? "produsul n-are cost în ERP; scrie-l doar dacă îl știi" : "ERP-ul nu-l știe, scrie-l de pe factură sau aviz"
                      }</span>
-                        <input name="pret_${x.id}" inputmode="decimal" autocomplete="off" placeholder="ex. 7,35"></label>`
+                        <input name="pret_${x.id}" inputmode="decimal" autocomplete="off" data-pv-pret placeholder="ex. 7,35"></label>`
                }`
            )
            .join("")}
+         ${
+           // Prețurile de mai sus se pot scrie și în valută, cum sunt pe factura
+           // furnizorului (lib/pret-valuta.js): pe palet rămân în lei, la cursul ales.
+           faraPaleti.some((x) => !x.pret)
+             ? `<div style="max-width:520px">${PV.camp({}, { eticheta: "Prețurile scrise mai sus sunt în" })}</div>`
+             : ""
+         }
          <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin:4px 0 0">
            <input type="checkbox" name="peste" value="1" style="margin-top:3px">
            <span>Pe paleți e mai mult decât s-a numărat — se salvează cantitatea de pe paleți, iar recepția o ia pe aceea.</span></label>
          <div class="form-actions"><button class="btn" type="submit">Fă paleții și scoate etichetele →</button></div>
-       </form>`
+       </form>
+       ${faraPaleti.some((x) => !x.pret) ? PV.script(await PV.bnrAzi(require("./curs").laZiua)) : ""}`
     : "";
   return `
     <h3 style="margin-top:22px" id="ct-park">Unde pui marfa — CT-Park</h3>
@@ -714,11 +727,13 @@ function register(router) {
                      <select name="produs_id"><option value="">— scriu mai jos —</option>${produse.map((p) => `<option value="${p.id}">${esc(p.denumire)}</option>`).join("")}</select></label>
                    <label class="field" style="margin:0"><span>Cantitate anunțată</span><input type="number" step="any" name="cantitate" required></label>
                    <label class="field" style="margin:0"><span>UM</span><input name="um" placeholder="buc"></label>
-                   <label class="field" style="margin:0"><span>Preț unitar</span><input type="number" step="0.0001" name="pret_unitar"></label>
+                   <label class="field" style="margin:0"><span>Preț unitar (<span data-pv-um>lei</span>)</span><input type="text" inputmode="decimal" name="pret_unitar" data-pv-pret autocomplete="off"></label>
                  </div>
                  <label class="field"><span>…sau produs scris liber</span><input name="produs_text"></label>
+                 <div style="max-width:520px;margin-bottom:8px">${PV.camp({}, { eticheta: "Prețul e scris în" })}</div>
                  <button class="btn small" type="submit">Adaugă rândul</button>
                </form>
+               ${PV.script(await PV.bnrAzi(require("./curs").laZiua))}
              </details>
 
              <div class="toolbar" style="margin-top:18px">
@@ -747,12 +762,18 @@ function register(router) {
     const liber = text(b.produs_text, 200);
     const cant = R.cifra(b.cantitate);
     if ((!produsId && !liber) || cant == null || cant < 0) return redirect(ctx.res, `/depozit/receptie/${id}`);
+    // Prețul scris în valută (lib/pret-valuta.js) se trece în lei la cursul
+    // ales, iar rândul ține minte din ce s-a făcut. Un curs care nu se poate
+    // folosi oprește rândul, cu motivul lui: fără el, prețul ar intra greșit.
+    const scris = R.cifra(b.pret_unitar);
+    const valuta = scris == null ? PV.LEI : await PV.dinFormular(b, require("./curs").laZiua);
+    if (!valuta.ok) return redirect(ctx.res, `/depozit/receptie/${id}?eroare=${encodeURIComponent(valuta.eroare)}`);
     await db
       .prepare(
-        `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare)
-         VALUES (?, ?, ?, ?, ?, ?, 'de_primit')`
+        `INSERT INTO receptii_linii (receptie_id, produs_id, produs_text, cantitate_asteptata, um, pret_unitar, stare, pret_nota)
+         VALUES (?, ?, ?, ?, ?, ?, 'de_primit', ?)`
       )
-      .run(id, produsId, liber, cant, text(b.um, 20), R.cifra(b.pret_unitar));
+      .run(id, produsId, liber, cant, text(b.um, 20), scris == null ? null : PV.inLei(scris, valuta), scris == null ? null : PV.nota(scris, valuta) || null);
     redirect(ctx.res, `/depozit/receptie/${id}`);
   });
 
