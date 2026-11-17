@@ -1523,6 +1523,10 @@ function register(router) {
         ${campCurs(v, String(v.curs || "").trim() !== "")}
         ${TP.camp({ valoare: v.termen_plata_zile, atins: String(v.termen_plata_zile || "").trim() !== "" })}
       </div>
+        <label class="field" data-upa style="display:flex;align-items:center;gap:8px;border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
+          <input type="checkbox" name="upa" value="1"${Number(v.upa) === 1 ? " checked" : ""} style="width:auto">
+          <span>Factura va fi pe <strong>unitate protejată (UPA)</strong> — pleacă pe seria UPA, cu mențiunea ei. Nebifat: seria normală.</span>
+        </label>
       <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
         <legend style="font-size:13px;padding:0 4px">Dacă nu e toată marfa pe stoc, clientul acceptă livrare parțială?</legend>
         <label style="display:inline-flex;align-items:center;gap:6px;margin-right:18px">
@@ -1673,6 +1677,7 @@ function register(router) {
       observatii,
       data_livrare_ceruta: ctx.body.data_livrare_ceruta,
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
+      upa: String(ctx.body.upa || "") === "1" ? 1 : 0,
       branding: BR.valid(ctx.body.branding),
       moneda,
       curs: moneda === "RON" ? "" : ctx.body.curs,
@@ -1792,6 +1797,8 @@ function register(router) {
         cursComanda.manual
       );
     const comandaId = info.lastInsertRowid;
+    // Bifa de unitate protejată: factura făcută din comandă pleacă pe seria UPA (lib/upa.js).
+    if (valori.upa) await db.prepare("UPDATE comenzi SET upa = 1 WHERE id = ?").run(comandaId);
 
     const insertLinie = db.prepare(
       `INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um, furnizor_id, furnizor_text, furnizor_sursa)
@@ -1981,6 +1988,7 @@ function register(router) {
               : ""
           }</div>
           <div><div class="k">Branding</div>${BR.eticheta(comanda)}</div>
+          <div data-upa-comanda><div class="k">Factura</div>${Number(comanda.upa) === 1 ? '<span class="badge albastru">unitate protejată (UPA)</span>' : "serie normală"}</div>
           <div><div class="k">Observații</div>${esc(comanda.observatii) || "—"}</div>
         </div>
       </div>
@@ -2268,6 +2276,7 @@ function register(router) {
       numar: comanda.numar,
       data_livrare_ceruta: comanda.data_livrare_ceruta,
       livrare_partiala: livrare.raspuns(comanda),
+      upa: Number(comanda.upa) === 1 ? 1 : 0,
       branding: BR.valid(comanda.branding),
       moneda: comanda.moneda,
       // Cursul de pe comandă, ca număr: câmpul îl scrie cu virgulă.
@@ -2321,6 +2330,10 @@ function register(router) {
           ${campCurs(v, true)}
           ${TP.camp({ valoare: v.termen_plata_zile, atins: true })}
         </div>
+        <label class="field" data-upa style="display:flex;align-items:center;gap:8px;border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
+          <input type="checkbox" name="upa" value="1"${Number(v.upa) === 1 ? " checked" : ""} style="width:auto">
+          <span>Factura va fi pe <strong>unitate protejată (UPA)</strong> — pleacă pe seria UPA, cu mențiunea ei. Nebifat: seria normală.</span>
+        </label>
         <fieldset class="field" style="border:1px solid var(--border,#ddd);border-radius:8px;padding:10px 12px">
           <legend style="font-size:13px;padding:0 4px">Clientul acceptă livrare parțială?</legend>
           <label style="display:inline-flex;align-items:center;gap:6px;margin-right:18px">
@@ -2426,6 +2439,7 @@ function register(router) {
       numar: b.numar,
       data_livrare_ceruta: b.data_livrare_ceruta,
       livrare_partiala: livrare.valid(b.livrare_partiala),
+      upa: String(b.upa || "") === "1" ? 1 : 0,
       branding: BR.valid(b.branding),
       moneda,
       curs: moneda === "RON" ? "" : b.curs,
@@ -2480,6 +2494,8 @@ function register(router) {
       livrare_partiala: livrare.raspuns(comanda),
       // În istoric se scrie textul, nu codul: „nespecificat → cu branding Cash Machine".
       branding: BR.text(comanda),
+      // Tot ca text: „serie normală → unitate protejată (UPA)".
+      upa: require("../lib/upa").eticheta(comanda),
       moneda: comanda.moneda,
       // În istoric, ca text: „30 de zile → 45 de zile".
       termen_plata_zile: TP.normal(comanda.termen_plata_zile) === null ? "" : TP.zileText(comanda.termen_plata_zile),
@@ -2528,6 +2544,7 @@ function register(router) {
       data_livrare_ceruta: String(b.data_livrare_ceruta || "") || null,
       livrare_partiala: valori.livrare_partiala,
       branding: BR.text({ branding: valori.branding }),
+      upa: require("../lib/upa").eticheta({ upa: valori.upa }),
       moneda,
       termen_plata_zile: termenPlata === null ? "" : TP.zileText(termenPlata),
       observatii: b.observatii || "",
@@ -2588,6 +2605,11 @@ function register(router) {
            livrare_partiala = ?, branding = ?, moneda = ?, curs_bnr = ?, curs_bnr_data = ?, termen_plata_zile = ?, curs_manual = ? WHERE id = ?`
       )
       .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, termenPlata, cursNou.manual, comanda.id);
+    // Bifa de unitate protejată se poate schimba cât comanda se mai poate modifica.
+    if ((Number(comanda.upa) === 1 ? 1 : 0) !== valori.upa) {
+      await db.prepare("UPDATE comenzi SET upa = ? WHERE id = ?").run(valori.upa, comanda.id);
+      console.log(`[comenzi] ${comanda.numar || "#" + comanda.id}: factura ${valori.upa ? "pe unitate protejată (UPA)" : "pe seria normală"} (${(ctx.user && ctx.user.nume) || "?"})`);
+    }
 
     // Liniile se rescriu, dar `cantitate_livrata` NU se pierde: depozitul a
     // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să
@@ -2733,7 +2755,7 @@ function register(router) {
     const termenFactura = TP.efectiv(comanda, { termen_plata_zile: await TP.alPartenerului(db, comanda.partener_id) });
     const info = await db
       .prepare(
-        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, data_scadenta, observatii) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?, ?) RETURNING id"
+        `INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, data_scadenta, observatii, upa) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?, ?, ${Number(comanda.upa) === 1 ? 1 : 0}) RETURNING id`
       )
       .run(
         comanda.partener_id,
@@ -2880,7 +2902,7 @@ function register(router) {
     const termenFactura = TP.efectiv(comanda, { termen_plata_zile: await TP.alPartenerului(db, comanda.partener_id) });
     const info = await db
       .prepare(
-        "INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, observatii, data_scadenta) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?, ?) RETURNING id"
+        `INSERT INTO facturi (partener_id, comanda_id, directie, status, creata_de, agent_id, data_emiterii, observatii, data_scadenta, upa) VALUES (?, ?, 'vanzare', 'ciorna', ?, ?, ?, ?, ?, ${Number(comanda.upa) === 1 ? 1 : 0}) RETURNING id`
       )
       .run(
         comanda.partener_id,

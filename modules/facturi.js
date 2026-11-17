@@ -866,6 +866,18 @@ function register(router) {
                   factura.smartbill_sync_la
                     ? `<span class="badge verde">trimisă (${esc(factura.smartbill_serie)}-${esc(factura.smartbill_numar)})</span>`
                     : '<span class="badge gri">netrimisă</span>'
+                }</div>
+                <div data-upa-factura><div class="k">Seria</div>${
+                  factura.smartbill_sync_la
+                    ? esc(factura.smartbill_serie || "—")
+                    : Number(factura.upa) === 1
+                      ? `<span class="badge albastru">unitate protejată (UPA)</span> <span style="font-size:12px;color:var(--text-muted)">pleacă pe ${esc(require("../lib/upa").serie(factura))}, cu mențiunea UPA</span>`
+                      : "serie normală"
+                }${
+                  !factura.smartbill_sync_la && !doarCitire
+                    ? ` <form method="post" action="/facturi/${factura.id}/upa" class="inline-form"><input type="hidden" name="upa" value="${Number(factura.upa) === 1 ? "0" : "1"}">
+                         <button class="link-btn" type="submit">${Number(factura.upa) === 1 ? "treci pe seria normală" : "treci pe unitate protejată (UPA)"}</button></form>`
+                    : ""
                 }</div>`
               : ""
           }
@@ -1308,6 +1320,19 @@ function register(router) {
       </form>`;
     return send(ctx.res, 200, layout({ user: ctx.user, title: "Datele clientului pentru SmartBill", active: "/facturi", body }));
   }
+
+  // Seria facturii, cât n-a plecat în SmartBill: unitate protejată (UPA) sau
+  // normală. Vine de pe comandă; aici se poate îndrepta înainte de trimitere.
+  router.post("/facturi/:id/upa", async (ctx) => {
+    const f = await db.prepare("SELECT id, directie, smartbill_sync_la FROM facturi WHERE id = ?").get(ctx.params.id);
+    if (!f) return send(ctx.res, 404, "Factura nu există");
+    if (f.directie === "vanzare" && !f.smartbill_sync_la) {
+      const upa = String((ctx.body || {}).upa || "") === "1" ? 1 : 0;
+      await db.prepare("UPDATE facturi SET upa = ? WHERE id = ?").run(upa, f.id);
+      console.log(`[facturi] #${f.id}: ${upa ? "pe unitate protejată (UPA)" : "pe seria normală"} (${(ctx.user && ctx.user.nume) || "?"})`);
+    }
+    redirect(ctx.res, `/facturi/${f.id}`);
+  });
 
   router.post("/facturi/:id/smartbill", async (ctx) => {
     const factura = await facturaPentruSmartBill(ctx.params.id);
