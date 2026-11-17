@@ -310,15 +310,47 @@
   };
 
   // ---- facturi emise ------------------------------------------------------
-  S.facturi = async function (zile) {
-    const j = await raport(
-      "/raport/facturi/",
-      /\/raport\/facturi\/ajax/,
-      { sSearch: JSON.stringify({ from: acumMinus(zile), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "5000" },
-      reincarca("invoices_datatable")
-    );
-    const firma = S.firma();
-    const randuri = (j.aaData || []).map((r) => ({
+  //
+  // STAREA DE ÎNCASARE (17.11.2026). Vali, cu poza restanțelor din ERP:
+  // „Primele 2 facturi sunt încasate în SmartBill." Erau CSHMUPA0043 și
+  // CSHMUPA0042, stornate pe 31.08 cu CSHM3168 și CSHM3169. SmartBill le ține
+  // pe toate patru drept stinse, dar o stornare nu e o încasare, deci nu apare
+  // în raportul de încasări — singurul loc din care ERP-ul afla că o factură
+  // s-a închis. Raportul de facturi o spune însă pe fiecare rând: coloana
+  // Status e un JSON cu `is_paid` — „y" (încasată, ori stinsă prin stornare
+  // sau compensare), „p" (parțial), „n". De acum pleacă și ea spre ERP.
+  //
+  // O factură se poate stinge la luni după ce a fost emisă, deci nu ajunge să
+  // citim ultimele trei zile. Raportul se cere pe STARE_ZILE în urmă (200 de
+  // zile au fost 658 de rânduri, în 3 secunde), dar spre ERP pleacă doar:
+  //   • facturile din fereastra cerută (`zile`), ca până acum;
+  //   • dintre cele mai vechi, cele a căror stare s-a schimbat de la ultima
+  //     trimitere reușită. Ce s-a trimis se ține minte în localStorage-ul
+  //     paginii SmartBill, pe firmă. Prima rulare — sau una de după golirea
+  //     lui — le trimite pe toate: e și recuperarea.
+  // `{ complet: true }` le trimite pe toate, orice s-ar ști: așa face rularea
+  // de seară (S.tot), ca o trimitere pierdută pe drum să se repare singură
+  // până a doua zi.
+  const STARE_ZILE = 400;
+  const isoMinus = (zile) => new Date(Date.now() - zile * 86400000).toISOString().slice(0, 10);
+
+  // Starea de încasare din coloana Status: „y", „p", „n" sau gol (necitită).
+  S.stareIncasare = function (celula) {
+    let o = celula;
+    if (typeof celula === "string") {
+      try {
+        o = JSON.parse(celula);
+      } catch (e) {
+        o = null;
+      }
+    }
+    const v = String((o && o.is_paid) || "").trim().toLowerCase();
+    return v === "y" || v === "p" || v === "n" ? v : "";
+  };
+
+  // Rândul din raport, cum pleacă spre ERP.
+  S.randFactura = function (r, firma) {
+    return {
       document: String(r[2] || "").trim(),
       client: r[3],
       data: doarZi(r[4]),
@@ -328,10 +360,69 @@
       total: r[8],
       moneda: r[9],
       status: String(r[13]) === "True" ? "anulata" : String(r[14]) === "True" ? "ciorna" : "emisa",
+      incasata: S.stareIncasare(r[11]),
       firma,
-    }));
-    await trimite("facturi", randuri, `sincronizare ${firma} — facturi ${zile} zile`);
-    return randuri.length;
+    };
+  };
+
+  // Starea unei facturi într-o literă: ce se ține minte și ce se compară.
+  S.semnFactura = (x) => (x.status === "anulata" ? "a" : x.status === "ciorna" ? "c" : x.incasata || "-");
+
+  // Ce pleacă spre ERP din tot ce s-a citit. `prag` = prima zi a ferestrei
+  // cerute (AAAA-LL-ZZ); `stiut` = { document: semn } de la ultima trimitere
+  // reușită. Întoarce și starea de ținut minte după o trimitere reușită.
+  S.alegeFacturi = function (toate, prag, stiut, complet) {
+    const s = stiut || {};
+    const noi = [];
+    const vechi = [];
+    const stare = {};
+    for (const x of toate) {
+      if (!x.document) continue;
+      const semn = S.semnFactura(x);
+      stare[x.document] = semn;
+      if (String(x.data || "") >= prag) noi.push(x);
+      else if (complet || s[x.document] !== semn) vechi.push(x);
+    }
+    return { randuri: noi.concat(vechi), noi: noi.length, vechi: vechi.length, stare };
+  };
+
+  const cheieStare = (firma) => "erp-sync-stare-facturi:" + String(firma || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const stareStiuta = (firma) => {
+    try {
+      return JSON.parse(window.localStorage.getItem(cheieStare(firma)) || "{}") || {};
+    } catch (e) {
+      return {};
+    }
+  };
+
+  S.facturi = async function (zile, opt) {
+    const o = opt || {};
+    const inUrma = Math.max(Number(zile) || 0, Number(o.stareZile) || STARE_ZILE);
+    const j = await raport(
+      "/raport/facturi/",
+      /\/raport\/facturi\/ajax/,
+      { sSearch: JSON.stringify({ from: acumMinus(inUrma), to: aziText(), currency: "0" }), iDisplayStart: "0", iDisplayLength: "5000" },
+      reincarca("invoices_datatable")
+    );
+    const firma = S.firma();
+    const toate = (j.aaData || []).map((r) => S.randFactura(r, firma));
+    const ales = S.alegeFacturi(toate, isoMinus(Number(zile) || 0), stareStiuta(firma), Boolean(o.complet));
+    const linie = await trimite(
+      "facturi",
+      ales.randuri,
+      `sincronizare ${firma} — facturi ${zile} zile` + (ales.vechi ? `, plus ${ales.vechi} mai vechi cu starea de încasare` : "")
+    );
+    // Starea se ține minte doar când lotul chiar a ajuns în ERP (sau n-a fost
+    // nimic de trimis): altfel schimbarea s-ar pierde fără urmă.
+    if (!ales.randuri.length || (linie && linie.lot)) {
+      try {
+        window.localStorage.setItem(cheieStare(firma), JSON.stringify(ales.stare));
+      } catch (e) {
+        /* fără localStorage: data viitoare pleacă din nou toate — nimic pierdut */
+      }
+    }
+    log("facturi: citite", { citite: toate.length, din_fereastra: ales.noi, mai_vechi_cu_starea_schimbata: ales.vechi });
+    return ales.randuri.length;
   };
 
   // ---- încasări -----------------------------------------------------------
@@ -595,7 +686,9 @@
     log("pornit", { firma: S.firma(), zile: z });
     const rezultat = { firma: S.firma(), zile: z, reusite: {}, esuate: {} };
     for (const [nume, f] of [
-      ["facturi", () => S.facturi(z)],
+      // Seara pleacă starea de încasare a tuturor facturilor citite, nu doar
+      // a celor schimbate: dacă o trimitere s-a pierdut peste zi, se repară.
+      ["facturi", () => S.facturi(z, { complet: true })],
       ["incasari", () => S.incasari(z)],
       ["productie", () => S.productie(Math.max(z, 30))],
       ["costuri", () => S.costuri()],
