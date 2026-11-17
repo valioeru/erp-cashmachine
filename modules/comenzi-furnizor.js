@@ -502,6 +502,15 @@ function seamana(denumireLinie, denumirePalet) {
 // 50x60).
 const MASURI = /(\d{2,4})\s*(?:mm|cm|m)?\s*[x*×]\s*(\d{2,4})(?:\s*(?:mm|cm|m)?\s*[x*×]\s*(\d{2,4}))?/g;
 const masuri = (denumire) => [...faraSemne(denumire).matchAll(MASURI)].map((m) => [m[1], m[2], m[3]].filter(Boolean).map(Number).join("x"));
+// Două măsuri sunt aceeași marfă și când una e scrisă mai scurt sau în altă
+// ordine: „520 x 50" (din „TUB SP 520 X 50/57") încape în „50 x 57 x 520".
+// Pe 17.11.2026 tocmai asta despărțea tuburile comenzii CF-2026-0020 de
+// paleții lor. Se contrazic doar când niciuna nu încape în cealaltă.
+function masuriCareSeIncap(m, n) {
+  const a = m.split("x");
+  const b = n.split("x");
+  return a.every((x) => b.includes(x)) || b.every((x) => a.includes(x));
+}
 function bucati(denumire) {
   return [...new Set(faraSemne(denumire).split(/[^a-z0-9]+/).filter((w) => (/^\d+$/.test(w) ? w.length >= 2 : w.length >= 3)))];
 }
@@ -514,7 +523,7 @@ function seamanaLarg(denumireLinie, denumirePalet) {
   if (a.fel && b.fel && a.fel !== b.fel) return false;
   const ma = masuri(denumireLinie);
   const mb = masuri(denumirePalet);
-  if (ma.length && mb.length && !ma.some((m) => mb.includes(m))) return false;
+  if (ma.length && mb.length && !ma.some((m) => mb.some((n) => masuriCareSeIncap(m, n)))) return false;
   if (seamana(denumireLinie, denumirePalet)) return true;
   const A = bucati(denumireLinie);
   const B = new Set(bucati(denumirePalet));
