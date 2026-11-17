@@ -16,6 +16,13 @@
 //   • FĂRĂ BIFĂ: pagina facturii spune că n-ai drept, iar ruta refuză și nu
 //     schimbă nimic.
 //   • UTILIZATORI: bifa apare în formular și se salvează.
+//
+// 17.11.2026 — agenții deschid, din „Biroul meu", facturile clienților lor
+// (test-factura-agent.js). De atunci cine are CRM-ul trece de ușă la adresa
+// unei facturi (/facturi/<id>, doar pagina), iar pagina hotărăște: o arată
+// numai dacă factura e a unui client de-al lui, și numai de citit. Lista,
+// validarea și trimiterea în SmartBill rămân închise fără bifă — asta apără
+// testul de aici în continuare.
 const path = require("path");
 const Module = require("module");
 const { execFileSync } = require("child_process");
@@ -135,6 +142,7 @@ const factura = (id) => q(`SELECT status, numar, validata_de FROM facturi WHERE 
   const ADMIN = { id: Number(unul("SELECT id FROM utilizatori ORDER BY id LIMIT 1")), nume: "Vali Test", rol: "admin", sectiuni: "" };
   const GABI = { id: U_GABI, nume: "Gabi Test", rol: "depozit", sectiuni: "/crm,/comenzi,/depozit,/avize,/facturi" };
   const FARA = { id: U_GABI, nume: "Fără bifă", rol: "depozit", sectiuni: "/crm,/comenzi,/depozit,/avize" };
+  const FARA_CRM = { id: U_GABI, nume: "Fără bifă și fără CRM", rol: "depozit", sectiuni: "/comenzi,/depozit,/avize" };
   const DOAR_FIN = { id: U_GABI, nume: "Doar Financiar", rol: "depozit", sectiuni: "/financiar" };
   const CONTABIL = { id: U_GABI, nume: "Contabil", rol: "financiar", sectiuni: "" };
 
@@ -142,7 +150,10 @@ const factura = (id) => q(`SELECT status, numar, validata_de FROM facturi WHERE 
   egal("cu bifa Facturare: lista, factura, factura nouă, validarea, trimiterea în SmartBill",
     ["/facturi", "/facturi/12", "/facturi/nou", "/facturi/12/valideaza", "/facturi/12/smartbill"].map((p) => auth.poateAccesa(GABI, p)), [true, true, true, true, true]);
   egal("…dar nimic altceva din Financiar", ["/financiar", "/banca", "/salarii", "/angajati", "/costuri", "/import"].map((p) => auth.poateAccesa(GABI, p)), [false, false, false, false, false, false]);
-  egal("fără bifă: facturile rămân închise", ["/facturi", "/facturi/12", "/facturi/12/valideaza"].map((p) => auth.poateAccesa(FARA, p)), [false, false, false]);
+  egal("fără bifă și fără CRM: facturile rămân închise", ["/facturi", "/facturi/12", "/facturi/12/valideaza"].map((p) => auth.poateAccesa(FARA_CRM, p)), [false, false, false]);
+  egal("fără bifă, dar cu „Biroul meu”: trece de ușă doar la pagina unei facturi; lista, factura nouă, validarea, SmartBill și achizițiile rămân închise",
+    ["/facturi", "/facturi/12", "/facturi/nou", "/facturi/12/valideaza", "/facturi/12/smartbill", "/facturi/12/plata", "/facturi/12/sterge", "/facturi/achizitii"].map((p) => auth.poateAccesa(FARA, p)),
+    [false, true, false, false, false, false, false, false]);
   egal("cine are „Financiar” le vede ca până acum", ["/facturi", "/facturi/12", "/banca"].map((p) => auth.poateAccesa(DOAR_FIN, p)), [true, true, true]);
   egal("rolul financiar, fără nicio bifă: ca până acum", ["/facturi", "/facturi/12/valideaza"].map((p) => auth.poateAccesa(CONTABIL, p)), [true, true]);
   egal("pentru meniu, facturile țin tot de Financiar; la acces contează și bifa lor", [auth.sectiune("/facturi/12"), auth.zoneleRutei("/facturi/12")], ["/financiar", ["/financiar", "/facturi"]]);
@@ -164,7 +175,10 @@ const factura = (id) => q(`SELECT status, numar, validata_de FROM facturi WHERE 
   let p = await cer("get", `/facturi/${F1}`, GABI);
   bine("Gabi, cu bifa: vede butonul de validare", p.cod === 200 && p.corp.includes(`action="/facturi/${F1}/valideaza"`) && p.corp.includes("Validează și emite factura") && !p.corp.includes("Nu ai drepturi de validare"), p.cod);
   p = await cer("get", `/facturi/${F1}`, FARA);
-  bine("fără bifă: pagina spune că n-are drept și nu arată butonul", p.corp.includes("Nu ai drepturi de validare") && !p.corp.includes(`action="/facturi/${F1}/valideaza"`));
+  bine("fără bifă, factura altui client: pagina refuză și nu arată nici factura, nici butonul",
+    p.cod === 403 && p.corp.includes("Factura nu e a unui client de-al tău") && !p.corp.includes(`action="/facturi/${F1}/valideaza"`) && !p.corp.includes("TFD Produs"), p.cod);
+  p = await cer("get", `/facturi/${F1}`, FARA_CRM);
+  bine("…la fel fără CRM, dacă ar ajunge cumva la pagină", p.cod === 403 && !p.corp.includes(`action="/facturi/${F1}/valideaza"`) && !p.corp.includes("TFD Produs"), p.cod);
   p = await cer("get", `/facturi/${F1}`, DOAR_FIN);
   bine("doar cu „Financiar”: vede factura, dar nu butonul — ca până acum", p.cod === 200 && p.corp.includes("Nu ai drepturi de validare") && !p.corp.includes(`action="/facturi/${F1}/valideaza"`));
 

@@ -266,6 +266,45 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
   bine("pagina de tipărit are foaia cât eticheta", E.pagina([plina], "100x150").includes("@page { size: 100mm 150mm; margin: 0; }") && E.pagina([mica], "100x50").includes("@page { size: 100mm 50mm; margin: 0; }"));
 
   // ------------------------------------------------------------------------
+  console.log("\n2b. Câmp bifat fără valoare: rămâne numele lui, cu loc de scris de mână");
+  // Vali, 17.11.2026: „Chiar dacă nu am greutatea brută și netă, unde lași loc
+  // pune denumirea câmpului, fără valoare."
+  const casutaDin = (html, camp) => (new RegExp('<div class="c[^"]*" data-camp="' + camp + '"><span>([^<]*)</span><b[^>]*>([^<]*)</b></div>').exec(html) || []).slice(1);
+  const LOC = "&emsp;&emsp;&emsp;&ensp;";
+  const fara = E.continut({ denumire: "Folie", cod: "F1", cod_scan: "F1", data_productiei: "2026-11-17" });
+  fara.lot = "L261117-01";
+  const etG = (plus, campuri, fmt) => E.eticheta(Object.assign({}, fara, plus), campuri, fmt || "100x150", firma, { numar: 1 });
+  const AMBELE = ["greutate_neta", "greutate_bruta"];
+  let e2 = etG({}, AMBELE.concat(["operator", "cantitate"]));
+  egal("greutățile bifate, fără valoare: numele căsuței și bara dintre ele, cu loc de scris în față", casutaDin(e2, "greutate"), ["Greutate netă / brută", LOC + " / "]);
+  egal("…la fel operatorul și cantitatea: numele, fără valoare", [casutaDin(e2, "operator"), casutaDin(e2, "cantitate")], [["Operator", ""], ["Cantitate pe ambalaj", ""]]);
+  egal("câmpul nebifat rămâne alb, fără nume", [casutaDin(e2, "client"), casutaDin(e2, "comanda"), casutaDin(e2, "valabilitate")], [["", ""], ["", ""], ["", ""]]);
+  bine("…și doar el e marcat gol", /class="c gol" data-camp="comanda"/.test(e2) && /class="c lat gol" data-camp="client"/.test(e2) && /class="c" data-camp="greutate"/.test(e2) && /class="c" data-camp="operator"/.test(e2) && cate(e2, " gol\"") === 4, cate(e2, " gol\""));
+  egal("doar neta scrisă: valoarea ei, bara și loc pentru brută", casutaDin(etG({ greutate_neta: "15,2 kg" }, AMBELE), "greutate"), ["Greutate netă / brută", "15,2 kg / "]);
+  egal("doar bruta scrisă: loc pentru netă, bara și valoarea", casutaDin(etG({ greutate_bruta: "16 kg" }, AMBELE), "greutate"), ["Greutate netă / brută", LOC + " / 16 kg"]);
+  egal("amândouă scrise: ca până acum", casutaDin(etG({ greutate_neta: "15,2 kg", greutate_bruta: "16 kg" }, AMBELE), "greutate"), ["Greutate netă / brută", "15,2 kg / 16 kg"]);
+  egal("doar neta bifată: numele ei, cu sau fără valoare — bruta scrisă nu apare", [casutaDin(etG({ greutate_bruta: "16 kg" }, ["greutate_neta"]), "greutate"), casutaDin(etG({ greutate_neta: "15,2 kg", greutate_bruta: "16 kg" }, ["greutate_neta"]), "greutate")], [["Greutate netă", ""], ["Greutate netă", "15,2 kg"]]);
+  egal("doar bruta bifată", [casutaDin(etG({ greutate_neta: "15,2 kg" }, ["greutate_bruta"]), "greutate"), casutaDin(etG({ greutate_neta: "15,2 kg", greutate_bruta: "16 kg" }, ["greutate_bruta"]), "greutate")], [["Greutate brută", ""], ["Greutate brută", "16 kg"]]);
+  egal("niciuna bifată: căsuța albă, chiar dacă greutățile sunt scrise", casutaDin(etG({ greutate_neta: "15,2 kg", greutate_bruta: "16 kg" }, ["operator"]), "greutate"), ["", ""]);
+  egal("pe lat, la fel", casutaDin(etG({}, AMBELE, "150x100"), "greutate"), ["Greutate netă / brută", LOC + " / "]);
+  egal("pe 100 × 50, pe lat și pe înalt: cantitatea bifată și goală își ține numele; nebifată, nu",
+    ["100x50", "50x100"].map((f) => [casutaDin(etG({}, ["cantitate"], f), "cantitate"), casutaDin(etG({}, [], f), "cantitate"), casutaDin(etG({ data_productiei: "" }, ["data_productiei"], f), "data_productiei")]),
+    [[["Cantitate", ""], ["", ""], ["Data producției", ""]], [["Cantitate", ""], ["", ""], ["Data producției", ""]]]);
+  egal("ce scrie omul la greutate rămâne scăpat", casutaDin(etG({ greutate_neta: "<b>1", greutate_bruta: "2&3" }, AMBELE), "greutate"), ["Greutate netă / brută", "&lt;b&gt;1 / 2&amp;3"]);
+  bine("…și cu o singură greutate, sau cu locul de scris în față", etG({ greutate_neta: "<b>1", greutate_bruta: "2&3" }, AMBELE).includes("&lt;b&gt;1 / 2&amp;3") && etG({ greutate_bruta: "<i>" }, AMBELE).includes(LOC + " / &lt;i&gt;") && etG({ greutate_neta: "<i>" }, ["greutate_neta"]).includes("<b>&lt;i&gt;</b>"));
+  const rau = etG({ client: "<u>C", operator: "<i>O", comanda: "a&b", cantitate: "<s>", valabilitate: "<x>" }, ["client", "operator", "comanda", "cantitate", "valabilitate"]);
+  egal("…la fel în celelalte căsuțe: clientul, operatorul, comanda, cantitatea, valabilitatea", [casutaDin(rau, "client")[1], casutaDin(rau, "operator")[1], casutaDin(rau, "comanda")[1], casutaDin(rau, "cantitate")[1], casutaDin(rau, "valabilitate")[1], /<(u|i|s|x)>/.test(rau)],
+    ["&lt;u&gt;C", "&lt;i&gt;O", "a&amp;b", "&lt;s&gt;", "&lt;x&gt;", false]);
+  egal("greutățile sunt bifate implicit pe hârtia mare, în ambele orientări; pe cea mică nu au loc", ["100x150", "150x100", "100x50", "50x100"].map((f) => AMBELE.every((k) => E.IMPLICITE[f].includes(k))), [true, true, false, false]);
+  egal("eticheta implicită, fără nicio greutate scrisă, are căsuța greutăților cu numele ei", casutaDin(etG({}, E.IMPLICITE["100x150"]), "greutate"), ["Greutate netă / brută", LOC + " / "]);
+  // Numele lung al clientului: litera scade, ca să încapă în căsuță.
+  const marimeB = (html, camp) => ((new RegExp('data-camp="' + camp + '"><span>[^<]*</span><b style="font-size:([0-9.]+)pt"').exec(html) || [])[1] || "");
+  egal("clientul: litera scade cu lungimea numelui, pe înalt și pe lat",
+    [["Client SRL", "100x150"], ["DELIVERY SOLUTIONS S.A.", "100x150"], ["O FIRMĂ CU NUME LUNG S.R.L.", "100x150"], ["DELIVERY SOLUTIONS S.A.", "150x100"], ["O FIRMĂ CU NUMELE FOARTE LUNG S.R.L.", "150x100"]].map(([n, f]) => marimeB(etG({ client: n }, ["client"], f), "client")),
+    ["9.5", "8.5", "7.5", "10", "7"]);
+  egal("…iar căsuța nebifată n-are nici mărime", marimeB(etG({ client: "DELIVERY SOLUTIONS S.A." }, [], "100x150"), "client"), "");
+
+  // ------------------------------------------------------------------------
   console.log("\n3. Etichetă nouă: din comanda de producție sau din nomenclator");
   q(`INSERT INTO parteneri (id, tip, nume) VALUES (${PARTENER}, 'client', '${PREFIX} Client Folie SRL')`);
   q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${P1}, 'TEP-FOLIE', '${PREFIX} Folie stretch automată 23 µm', 'buc'), (${P2}, NULL, '${PREFIX} Sac fără cod', 'buc')`);
@@ -377,6 +416,42 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
   egal("SVG-ul se recunoaște, textul nu", [EM.siglaTip({ data: Buffer.from('<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"></svg>') }), EM.siglaTip({ data: Buffer.from("<html><svg>") })], ["image/svg+xml", null]);
   r = await cer("post", "/productie/etichete/setari", ADMIN, { body: { nume: "CASH MACHINE SRL", fara_sigla: "1" } });
   bine("„scoate sigla încărcată” revine la „CM”", unul("SELECT valoare FROM setari_app WHERE cheie = 'etichete_sigla'") === null || unul("SELECT valoare FROM setari_app WHERE cheie = 'etichete_sigla'") === "");
+
+  // ------------------------------------------------------------------------
+  console.log("\n6b. Greutățile, bifate implicit — și aduse o singură dată în lista salvată înainte");
+  {
+    const cheieL = (h) => `etichete_campuri_${h}`;
+    const salvat = (h) => unul(`SELECT valoare FROM setari_app WHERE cheie = '${cheieL(h)}'`);
+    const pune = (cheie, v) => { q(`DELETE FROM setari_app WHERE cheie = '${cheie}'`); if (v !== null) q(`INSERT INTO setari_app (cheie, valoare) VALUES ('${cheie}', '${String(v).replace(/'/g, "''")}')`); };
+    const inainte = { mare: salvat("100x150"), mic: salvat("100x50") };
+    const bifatG = (html, k) => html.includes(`name="campuri[]" value="${k}" checked`);
+    egal("după prima deschidere, versiunea listelor e ținută minte", unul("SELECT valoare FROM setari_app WHERE cheie = 'etichete_campuri_versiune'"), "2");
+    // O listă salvată înainte de 17.11.2026, fără greutăți.
+    pune("etichete_campuri_versiune", null);
+    pune(cheieL("100x150"), JSON.stringify(["denumire", "lot", "cantitate", "client", "cod_bare"]));
+    pune(cheieL("100x50"), JSON.stringify(["denumire", "lot", "cantitate", "cod_bare"]));
+    r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie" } });
+    egal("lista salvată înainte primește greutățile: sunt bifate în formular, lângă ce era", [bifatG(r.corp, "greutate_neta"), bifatG(r.corp, "greutate_bruta"), bifatG(r.corp, "client"), bifatG(r.corp, "cantitate"), bifatG(r.corp, "operator")], [true, true, true, true, false]);
+    egal("…și scrise în ea, la locul lor între câmpuri", JSON.parse(salvat("100x150")), ["denumire", "lot", "cantitate", "greutate_neta", "greutate_bruta", "client", "cod_bare"]);
+    egal("…iar lista hârtiei mici rămâne neatinsă", JSON.parse(salvat("100x50")), ["denumire", "lot", "cantitate", "cod_bare"]);
+    egal("…o singură dată: versiunea e ținută minte", unul("SELECT valoare FROM setari_app WHERE cheie = 'etichete_campuri_versiune'"), "2");
+    await cer("post", "/productie/etichete/setari", ADMIN, { body: { nume: "CASH MACHINE SRL", "implicite_100x150[]": ["client"], "implicite_100x50[]": ["cantitate"] } });
+    r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie" } });
+    egal("scoase din Setări, scoase rămân", [bifatG(r.corp, "greutate_neta"), bifatG(r.corp, "greutate_bruta"), bifatG(r.corp, "client"), JSON.parse(salvat("100x150")).includes("greutate_neta")], [false, false, true, false]);
+    // Fără nimic salvat: lista din cod, cu greutățile — și nu se scrie nimic în locul omului.
+    pune("etichete_campuri_versiune", null);
+    pune(cheieL("100x150"), null);
+    r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie" } });
+    egal("fără nimic salvat: greutățile sunt bifate, din lista implicită, și nu se scrie nicio listă", [bifatG(r.corp, "greutate_neta"), bifatG(r.corp, "greutate_bruta"), salvat("100x150"), unul("SELECT valoare FROM setari_app WHERE cheie = 'etichete_campuri_versiune'")], [true, true, null, "2"]);
+    bine("formularul spune ce se întâmplă cu un câmp bifat și lăsat gol", r.corp.includes("Un câmp bifat și lăsat gol iese cu numele lui și cu loc de scris de mână"));
+    r = await cer("get", "/productie/etichete/previzualizare", PROD, { query: { produs_id: String(P1), format: "100x150", campuri: "greutate_neta,greutate_bruta,operator", lot: "L1" } });
+    egal("previzualizarea, fără nicio greutate scrisă: căsuța are numele și bara; operatorul, doar numele", [casutaDin(r.corp, "greutate"), casutaDin(r.corp, "operator")], [["Greutate netă / brută", LOC + " / "], ["Operator", ""]]);
+    r = await cer("get", "/productie/etichete/setari", ADMIN);
+    bine("setările: exemplele arată căsuța greutăților cu numele ei", r.cod === 200 && cate(r.corp, "Greutate netă / brută") >= 2 && r.corp.includes("iese cu numele lui și cu loc de scris de mână"), cate(r.corp, "Greutate netă / brută"));
+    // Înapoi cum era după secțiunea 6, ca restul testului să nu depindă de asta.
+    pune(cheieL("100x150"), inainte.mare);
+    pune(cheieL("100x50"), inainte.mic);
+  }
 
   // ------------------------------------------------------------------------
   console.log("\n7. Lotul etichetelor ajunge pe recepția din producție");
@@ -496,6 +571,68 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
   bine("pe pagina comenzii Gabi are butonul, cu lotul ei", r.corp.includes(`href="/productie/etichete/comanda/${CO2}">Etichete produs (1 lot)</a>`));
 
   // ------------------------------------------------------------------------
+  // Vali, 17.11.2026: „La etichete generator să poți selecta și format landscape
+  // sau portrait la ambele formate, și regenerezi tu în funcție de asta."
+  console.log("\n9b. Portret sau peisaj, pe ambele hârtii");
+  egal("patru grafici: fiecare hârtie, pe înalt și pe lat", Object.entries(E.FORMATE).map(([k, f]) => [k, f.latime, f.inaltime, f.hartie, f.orientare]),
+    [["100x150", 100, 150, "100x150", "portret"], ["150x100", 150, 100, "100x150", "peisaj"], ["100x50", 100, 50, "100x50", "peisaj"], ["50x100", 50, 100, "100x50", "portret"]]);
+  egal("hârtia + orientarea dau graficul", [E.format("100x150", "peisaj"), E.format("100x150", "portret"), E.format("100x50", "portret"), E.format("100x50", "peisaj"), E.format("150x100", "portret"), E.format("50x100", "peisaj")],
+    ["150x100", "100x150", "50x100", "100x50", "100x150", "100x50"]);
+  egal("fără orientare sau cu una necunoscută, formatul rămâne cum e (loturile vechi)", [E.format("100x150"), E.format("100x50", ""), E.format("150x100", "pe dos"), E.format("ceva", "peisaj")], ["100x150", "100x50", "150x100", "150x100"]);
+  egal("câmpurile țin de hârtie, nu de orientare", [JSON.stringify(E.CAMPURI_FORMAT["150x100"]) === JSON.stringify(E.CAMPURI_FORMAT["100x150"]), JSON.stringify(E.CAMPURI_FORMAT["50x100"]) === JSON.stringify(E.CAMPURI_FORMAT["100x50"]),
+    E.campuriAlese("50x100", ["greutate_neta", "client", "cod_bare_lot", "cantitate"])], [true, true, ["denumire", "lot", "cantitate", "cod_bare"]]);
+  const cOri = E.continut({ denumire: "Folie stretch", cod: "FSV23", cod_scan: "FSV23", caracteristici: "Grosime: 23 µm\nLățime: 500 mm\nCuloare: transparent", data_productiei: "2026-11-17", cantitate: "36 buc", client: "Client SRL", comanda: "CMD-1" });
+  cOri.lot = "CM-261117-1579";
+  const peLat = E.eticheta(cOri, E.CAMPURI_FORMAT["150x100"], "150x100", firma, { numar: 3, tiparitLa: "2026-11-17" });
+  bine("100×150 pe lat: grafica ei, cu cele opt căsuțe, codul produsului și al lotului", peLat.includes('class="et et-150x100"') && cate(peLat, 'data-camp="') === 8 && cate(peLat, 'class="cod-bare"') === 2 && peLat.includes("Nr. 3 · tipărit 17.11.2026"), peLat.slice(0, 300));
+  const ordinea = (html) => (html.match(/data-camp="[a-z_]+"/g) || []).map((x) => x.slice(11, -1));
+  egal("…căsuțele, în aceeași ordine ca pe înalt", [ordinea(peLat), JSON.stringify(ordinea(peLat)) === JSON.stringify(ordinea(E.eticheta(cOri, E.CAMPURI_FORMAT["100x150"], "100x150", firma, { numar: 3 })))],
+    [["lot", "data_productiei", "cantitate", "greutate", "client", "comanda", "valabilitate", "operator"], true]);
+  bine("…lotul, greutățile, clientul și operatorul au câte un rând întreg (pe lat coloana e îngustă), pe șase rânduri",
+    /class="c lot"[^>]*data-camp="lot"/.test(peLat) && /class="c lat"[^>]*data-camp="client"/.test(peLat) &&
+      E.STIL.includes('.et-150x100 .date .lot, .et-150x100 .date .lat, .et-150x100 .date [data-camp="greutate"], .et-150x100 .date [data-camp="operator"] { grid-column: 1 / -1; }') &&
+      /\.et-150x100 \.date \{[^}]*grid-template-rows: repeat\(6, 1fr\)/.test(E.STIL));
+  const peInalt = E.eticheta(cOri, E.CAMPURI_FORMAT["50x100"], "50x100", firma, { numar: 3, tiparitLa: "2026-11-17" });
+  bine("100×50 pe înalt: grafica ei, cu codul de bare culcat pe latura lungă și fără codul lotului", peInalt.includes('class="et et-50x100"') && peInalt.includes('<div class="rot"><svg class="cod-bare"') && cate(peInalt, 'class="cod-bare"') === 1 && cate(peInalt, 'data-camp="') === 3 && peInalt.includes("Grosime: 23 µm · Lățime: 500 mm") && !peInalt.includes("Culoare"), peInalt.slice(0, 300));
+  egal("foaia de tipărit ia mărimea graficii", ["100x150", "150x100", "100x50", "50x100"].map((f) => (E.pagina([""], f).match(/@page \{ size: ([^;]+);/) || [])[1]), ["100mm 150mm", "150mm 100mm", "100mm 50mm", "50mm 100mm"]);
+
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie" } });
+  bine("formularul întreabă hârtia și orientarea; implicit 100 × 150 pe înalt", cate(r.corp, 'name="format" value="') === 2 && cate(r.corp, 'name="orientare" value="') === 2 && r.corp.includes('name="format" value="100x150" checked') && r.corp.includes('name="orientare" value="portret" checked'));
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie", format: "100x50", orientare: "portret" } });
+  bine("…și ține minte ce s-a ales când se întoarce cu o eroare", r.corp.includes('name="format" value="100x50" checked') && r.corp.includes('name="orientare" value="portret" checked') && r.corp.includes("width:210px;height:430px"));
+  r = await cer("get", "/productie/etichete/previzualizare", PROD, { query: { produs_id: String(P1), format: "100x150", orientare: "peisaj", campuri: "cantitate", lot: "L1" } });
+  bine("previzualizarea pe lat", r.cod === 200 && r.corp.includes("et-150x100") && r.corp.includes("size: 150mm 100mm"));
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ lot: "lot #1", orientare: "peisaj" }) });
+  egal("eroare la salvare: orientarea se întoarce în formular", parametri(r).orientare, "peisaj");
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ produs_id: String(P1), comanda_productie_id: "", lot: "ORI-LAT", orientare: "peisaj", cate: "2" }) });
+  const LO = q("SELECT id, format, campuri FROM etichete_loturi WHERE lot = 'ORI-LAT'")[0] || {};
+  egal("lotul făcut pe lat ține minte grafica", LO.format, "150x100");
+  r = await cer("get", unde(r), PROD);
+  bine("…și se tipărește pe lat, pe foaia de 150 × 100", cate(r.corp, 'class="et et-150x100"') === 2 && r.corp.includes("size: 150mm 100mm"));
+  r = await cer("post", "/productie/etichete", PROD, { body: corp({ produs_id: String(P1), comanda_productie_id: "", lot: "ORI-INALT", format: "100x50", orientare: "portret", cate: "1" }) });
+  egal("100 × 50 pe înalt", (q("SELECT id, format FROM etichete_loturi WHERE lot = 'ORI-INALT'")[0] || {}).format, "50x100");
+  // Întoarcerea unui lot deja făcut.
+  r = await cer("get", `/productie/etichete/${LO.id}`, PROD);
+  bine("pagina lotului arată orientarea și o poate întoarce", r.corp.includes(`action="/productie/etichete/${LO.id}/orientare"`) && r.corp.includes('name="orientare" value="peisaj" checked') && r.corp.includes("100 × 150 mm, peisaj") && r.corp.includes("width:630px;height:430px"));
+  r = await cer("post", `/productie/etichete/${LO.id}/orientare`, PROD, { body: { orientare: "portret" } });
+  egal("întors pe înalt: aceeași hârtie, altă grafică; câmpurile rămân", [unde(r), q(`SELECT id, format FROM etichete_loturi WHERE id = ${LO.id}`)[0].format, q(`SELECT id, campuri FROM etichete_loturi WHERE id = ${LO.id}`)[0].campuri], [`/productie/etichete/${LO.id}`, "100x150", LO.campuri]);
+  r = await cer("get", `/productie/etichete/${LO.id}/mostra`, PROD);
+  bine("…și de acum se tipărește pe înalt", r.corp.includes("et-100x150") && r.corp.includes("size: 100mm 150mm"));
+  await cer("post", `/productie/etichete/${LO.id}/orientare`, PROD, { body: { orientare: "anapoda" } });
+  egal("o orientare necunoscută nu schimbă nimic", q(`SELECT id, format FROM etichete_loturi WHERE id = ${LO.id}`)[0].format, "100x150");
+  r = await cer("post", `/productie/etichete/${LO.id}/orientare`, AGENT, { body: { orientare: "peisaj" } });
+  egal("fără Producție nu se întoarce nimic", [unde(r), q(`SELECT id, format FROM etichete_loturi WHERE id = ${LO.id}`)[0].format], ["/", "100x150"]);
+  // Câmpurile bifate implicit se aleg pe hârtie și sunt aceleași în ambele orientări.
+  r = await cer("get", "/productie/etichete/setari", ADMIN);
+  bine("setările: câmpurile implicite pe cele două hârtii și exemplul fiecărei grafici", cate(r.corp, "(pe înalt și pe lat)") === 2 && cate(r.corp, "<iframe title=\"Exemplu ") === 4 && r.corp.includes('name="implicite_100x150[]"') && !r.corp.includes('name="implicite_150x100[]"'));
+  await cer("post", "/productie/etichete/setari", ADMIN, { body: { nume: "CASH MACHINE SRL", "implicite_100x50[]": ["numar"], "implicite_100x150[]": ["client"] } });
+  const bifat = (html, k) => html.includes(`name="campuri[]" value="${k}" checked`);
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie", format: "100x50", orientare: "portret" } });
+  egal("ce s-a bifat implicit pe 100 × 50 e bifat și pe înalt", [bifat(r.corp, "numar"), bifat(r.corp, "cantitate")], [true, false]);
+  r = await cer("get", "/productie/etichete/noua", PROD, { query: { produs: "tep-folie", format: "100x150", orientare: "peisaj" } });
+  egal("…iar ce s-a bifat pe 100 × 150, și pe lat", [bifat(r.corp, "client"), bifat(r.corp, "cantitate")], [true, false]);
+
+  // ------------------------------------------------------------------------
   console.log("\n10. Pe hârtie: nicio zonă nu se revarsă, zonele stau pe loc");
   let pw = null;
   try { pw = require("playwright"); } catch (_) { pw = null; }
@@ -506,12 +643,14 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
     const firmaLunga = { nume: "CASH MACHINE S.R.L. — PRODUCȚIE ȘI DISTRIBUȚIE AMBALAJE", adresa: "Str. Emil Racovita 31-33, Vila F16, Voluntari, Jud. Ilfov, România, cod 077190", telefon: "+40 21 404 6404 / +40 722 000 000", email: "office@cashmachine.ro" };
     const b = await pw.chromium.launch();
     const p = await b.newPage();
-    for (const fmt of ["100x150", "100x50"]) {
+    for (const fmt of ["100x150", "150x100", "100x50", "50x100"]) {
       // A treia: o denumire de 200 de litere late, care fără plafonul de rânduri ar împinge codul afară.
       const lata = Object.assign({}, c, { denumire: "MWMWMWMWMW ".repeat(19).slice(0, 200) });
       // A patra: datele firmei de acum (Vila Ana, telefonul și emailul de office), pe câmpurile implicite.
       const firmaAzi = Object.assign({ nume: "CASH MACHINE S.R.L." }, E.FIRMA_IMPLICITA);
-      const et = [E.eticheta(lung, E.CAMPURI_FORMAT[fmt], fmt, firmaLunga, { numar: 300, tiparitLa: "2026-11-13" }), E.eticheta(c, [], fmt, firma, { numar: 1 }), E.eticheta(lata, E.CAMPURI_FORMAT[fmt], fmt, firma, { numar: 2 }), E.eticheta(c, E.IMPLICITE[fmt], fmt, firmaAzi, { numar: 3, tiparitLa: "2026-11-14" })];
+      const et = [E.eticheta(lung, E.CAMPURI_FORMAT[fmt], fmt, firmaLunga, { numar: 300, tiparitLa: "2026-11-13" }), E.eticheta(c, [], fmt, firma, { numar: 1 }), E.eticheta(lata, E.CAMPURI_FORMAT[fmt], fmt, firma, { numar: 2 }), E.eticheta(c, E.IMPLICITE[fmt], fmt, firmaAzi, { numar: 3, tiparitLa: "2026-11-14" }),
+        // A cincea: lotul unei comenzi de producție obișnuite, de 14 caractere.
+        E.eticheta(Object.assign({}, c, { lot: "CM-261117-1579" }), E.IMPLICITE[fmt], fmt, firmaAzi, { numar: 4, tiparitLa: "2026-11-17" })];
       await p.setContent(E.pagina(et, fmt));
       const m = await p.evaluate(() =>
         [...document.querySelectorAll(".et")].map((et) => ({
@@ -523,14 +662,49 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
           taiat: [".f-nume", ".f-adr", ".f-ct"].map((k) => et.querySelector(k)).filter((x) => x && (x.scrollWidth > x.clientWidth + 1 || x.scrollHeight > x.clientHeight + 1)).map((x) => x.className),
         }))
       );
-      const h = fmt === "100x150" ? 567 : 189;
+      const h = Math.round(E.FORMATE[fmt].inaltime * 3.7795);
       bine(`${fmt}: eticheta are exact mărimea ei, cu text lung sau scurt`, m.every((x) => Math.abs(x.h - h) <= 1), JSON.stringify(m.map((x) => x.h)));
       bine(`${fmt}: nicio zonă nu se revarsă, nici cu textele cele mai lungi`, m.every((x) => !x.peste.length), JSON.stringify(m.map((x) => x.peste)));
       bine(`${fmt}: toate zonele încap pe etichetă, cu marginea de jos`, m.every((x) => !x.afara.length), JSON.stringify(m.map((x) => x.afara)));
-      const maxRanduri = fmt === "100x150" ? 4 : 2;
+      const maxRanduri = { "100x150": 4, "150x100": 3, "100x50": 2, "50x100": 7 }[fmt];
       bine(`${fmt}: denumirea are cel mult ${maxRanduri} rânduri întregi (restul se taie cu „…”)`, m.every((x) => x.randuri <= maxRanduri + 0.05), JSON.stringify(m.map((x) => x.randuri)));
       bine(`${fmt}: cu datele de acum, numele, adresa, telefonul și emailul încap întregi`, !m[3].taiat.length, JSON.stringify(m[3].taiat));
       bine(`${fmt}: zonele stau la aceeași înălțime pe toate etichetele`, m.every((x) => JSON.stringify(x.sus) === JSON.stringify(m[0].sus)), JSON.stringify(m.map((x) => x.sus)));
+      // Lățimea, lotul întreg și codul de bare pe etichetă — mai ales la cele două grafici noi.
+      const g = await p.evaluate(() =>
+        [...document.querySelectorAll(".et")].map((et) => {
+          const e = et.getBoundingClientRect();
+          const lot = et.querySelector(".lot b");
+          return {
+            w: Math.round(e.width),
+            lotTaiat: lot ? lot.scrollWidth > lot.clientWidth + 1 : false,
+            bareAfara: [...et.querySelectorAll("svg.cod-bare")].filter((s) => { const b = s.getBoundingClientRect(); return b.left < e.left - 1 || b.right > e.right + 1 || b.top < e.top - 1 || b.bottom > e.bottom + 1; }).length,
+            bareInalte: [...et.querySelectorAll("svg.cod-bare")].map((s) => { const b = s.getBoundingClientRect(); return b.height > b.width; }),
+          };
+        })
+      );
+      bine(`${fmt}: eticheta are și lățimea ei`, g.every((x) => Math.abs(x.w - Math.round(E.FORMATE[fmt].latime * 3.7795)) <= 1), JSON.stringify(g.map((x) => x.w)));
+      bine(`${fmt}: lotul unei comenzi de producție (CM-261117-1579) se vede întreg`, !g[4].lotTaiat && !g[3].lotTaiat, JSON.stringify(g.map((x) => x.lotTaiat)));
+      bine(`${fmt}: codurile de bare stau pe etichetă`, g.every((x) => !x.bareAfara), JSON.stringify(g.map((x) => x.bareAfara)));
+      if (fmt === "50x100") bine("50x100: codul de bare e culcat pe latura lungă", g.every((x) => x.bareInalte.length === 1 && x.bareInalte[0] === true), JSON.stringify(g.map((x) => x.bareInalte)));
+      // Căsuțele de completat de mână: numele lor se văd întregi, iar căsuțele nu ies din rândul lor.
+      const gol = E.continut({ denumire: "Folie stretch automată", cod: "FSV23", cod_scan: "FSV23", data_productiei: "" });
+      gol.lot = "L261117-01";
+      const cuClient = Object.assign({}, gol, { client: "DELIVERY SOLUTIONS S.A.", greutate_neta: "576 kg", greutate_bruta: "598 kg", cantitate: "36 role", data_productiei: "2026-11-17" });
+      await p.setContent(E.pagina([E.eticheta(gol, E.CAMPURI_FORMAT[fmt], fmt, firma, { numar: 1 }), E.eticheta(cuClient, E.CAMPURI_FORMAT[fmt], fmt, firma, { numar: 2 })], fmt));
+      const k = await p.evaluate(() =>
+        [...document.querySelectorAll(".et")].map((et) => ({
+          nume: [...et.querySelectorAll(".date .c span")].map((x) => x.textContent).filter(Boolean),
+          taiate: [...et.querySelectorAll(".date .c span, .date .c b")].filter((x) => x.scrollWidth > x.clientWidth + 1).map((x) => x.parentElement.getAttribute("data-camp") + ":" + x.tagName),
+          iesite: [...et.querySelectorAll(".date .c")].filter((x) => x.scrollHeight > x.clientHeight + 1).map((x) => x.getAttribute("data-camp")),
+          bara: (() => { const b = et.querySelector('[data-camp="greutate"] b'); if (!b) return null; const r = document.createRange(); r.selectNodeContents(b); const t = b.textContent; const i = t.indexOf("/"); if (i < 0) return null; r.setStart(b.firstChild, i); r.setEnd(b.firstChild, i + 1); return Math.round((r.getBoundingClientRect().left - b.getBoundingClientRect().left) / 3.7795); })(),
+        }))
+      );
+      const mare = E.FORMATE[fmt].hartie === "100x150";
+      egal(`${fmt}: fără nicio valoare, fiecare căsuță bifată își arată numele`, k[0].nume, mare ? ["Lot", "Data producției", "Cantitate pe ambalaj", "Greutate netă / brută", "Client", "Comanda", "Valabil până la", "Operator"] : ["Lot", "Data producției", "Cantitate"]);
+      bine(`${fmt}: numele căsuțelor se văd întregi, goale sau pline — și clientul cu nume lung`, !k[0].taiate.length && !k[1].taiate.length, JSON.stringify(k.map((x) => x.taiate)));
+      bine(`${fmt}: nicio căsuță nu iese din rândul ei`, !k[0].iesite.length && !k[1].iesite.length, JSON.stringify(k.map((x) => x.iesite)));
+      if (mare) bine(`${fmt}: în fața barei rămân cel puțin 10 mm de scris pentru greutatea netă`, k[0].bara >= 10 && k[0].bara <= 16, k[0].bara);
     }
     await b.close();
   }
