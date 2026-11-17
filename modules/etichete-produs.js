@@ -87,12 +87,30 @@ async function scrieSetare(cheie, valoare) {
 // Datele firmei de pe etichetă: ce s-a scris în Setări. Altfel numele de pe
 // aviz, iar adresa, telefonul și emailul din E.FIRMA_IMPLICITA (depozitul din
 // CTPark, Vila Ana nr. 6 — nu sediul social; telefonul și emailul de office).
+// Greutățile au intrat între câmpurile bifate implicit pe 17.11.2026 (Vali:
+// căsuța lor să iasă cu numele ei și fără valoare, ca să se scrie la cântar).
+// Lista salvată din Setări înainte de ziua aceea nu le are — nu fiindcă le-a
+// scos cineva, ci fiindcă atunci nu erau în ea — deci le primește acum, O
+// SINGURĂ DATĂ. După aceea contează doar ce se bifează în Setări: cine le
+// scoate de acolo, scoase rămân.
+const VERSIUNE_IMPLICITE = "2";
+async function aduGreutatileInImplicite() {
+  if (text(await setare("etichete_campuri_versiune")) === VERSIUNE_IMPLICITE) return;
+  const s = json(await setare("etichete_campuri_100x150"), null);
+  if (Array.isArray(s)) {
+    await scrieSetare("etichete_campuri_100x150", JSON.stringify(E.campuriAlese("100x150", s.concat(["greutate_neta", "greutate_bruta"]))));
+  }
+  await scrieSetare("etichete_campuri_versiune", VERSIUNE_IMPLICITE);
+}
+
 async function setari() {
+  await aduGreutatileInImplicite().catch((e) => console.error("[etichete] greutățile implicite:", e.message));
   const f = json(await setare("etichete_firma"), {}) || {};
   const A = AV.FURNIZOR;
   const implicite = {};
+  // Câmpurile bifate implicit țin de hârtie: aceleași pe înalt și pe lat.
   for (const fmt of Object.keys(E.FORMATE)) {
-    const s = json(await setare("etichete_campuri_" + fmt), null);
+    const s = json(await setare("etichete_campuri_" + E.hartia(fmt)), null);
     implicite[fmt] = E.campuriAlese(fmt, Array.isArray(s) ? s : E.IMPLICITE[fmt]);
   }
   return {
@@ -289,7 +307,8 @@ async function lotPentruProductie(cpId, produsId) {
 // conținutul. Codul produsului și codul de bare vin din nomenclator, nu din
 // formular.
 function dinFormular(b, p) {
-  const fmt = E.format(b.format);
+  // `format` e hârtia (sau cheia întreagă, la loturile vechi), `orientare` o întoarce.
+  const fmt = E.format(b.format, b.orientare);
   const campuri = E.campuriAlese(fmt, lista(b["campuri[]"]).concat(lista(b.campuri)));
   const c = E.continut(Object.assign({}, b, { cod: codProdus(p), cod_scan: SCAN.codProdus(codProdus(p), p && p.id) }));
   if (!c.denumire) c.denumire = text(p && p.denumire);
@@ -307,6 +326,27 @@ function etichetele(lot, tiparire, s) {
 }
 
 const FEL = { nou: "Prima tipărire", suplimentar: "Suplimentar", din_nou: "Din nou" };
+
+// Cât de mare e cadrul în care se vede eticheta, în pixeli: 4,2 px la milimetru
+// (100 mm = 420 px, ca până acum), plus loc pentru margine.
+function cadru(fmt) {
+  const f = E.FORMATE[E.format(fmt)];
+  return { latime: Math.round(f.latime * 4.2), inaltime: Math.round(f.inaltime * 4.2) + 10 };
+}
+const stilCadru = (fmt) => `width:${cadru(fmt).latime}px;height:${cadru(fmt).inaltime}px;max-width:100%`;
+
+// Hârtia și orientarea, în formular.
+function alegeFormat(fmt) {
+  const radio = (nume, val, ales, text_) =>
+    `<label style="display:inline-flex;gap:6px;align-items:center;margin-right:18px;font-weight:400"><input type="radio" name="${nume}" value="${val}"${ales ? " checked" : ""}> ${esc(text_)}</label>`;
+  return `<div class="field"><span>Format (hârtia din imprimantă)</span>
+          ${Object.entries(E.HARTII).map(([k, n]) => radio("format", k, k === E.hartia(fmt), n)).join("")}
+        </div>
+        <div class="field"><span>Orientare</span>
+          ${Object.entries(E.ORIENTARI).map(([k, n]) => radio("orientare", k, k === E.orientarea(fmt), n)).join("")}
+          <small style="display:block;color:var(--text-muted);font-size:12px;margin-top:3px">Eticheta se reașază singură: pe lat, 100 × 150 are căsuțele în dreapta; pe înalt, 100 × 50 are codul de bare culcat pe latura lungă.</small>
+        </div>`;
+}
 
 // ---- Paginile -------------------------------------------------------------------
 function campuriHtml(fmt, alese) {
@@ -332,14 +372,29 @@ const SCRIPT_PREVIZUALIZARE = `<script>
   var t = null;
   function formate() {
     var mic = f.querySelector('input[name="format"]:checked');
+    var ori = f.querySelector('input[name="orientare"]:checked');
     var e50 = mic && mic.value === "100x50";
+    var portret = !ori || ori.value === "portret";
     f.querySelectorAll("label.et-camp").forEach(function (l) {
       var cb = l.querySelector("input");
       if (cb.hasAttribute("data-mereu")) return;
       if (l.getAttribute("data-doar150") === "1") { cb.disabled = e50; l.style.opacity = e50 ? "0.45" : "1"; }
     });
-    fr.style.height = e50 ? "230px" : "640px";
+    // Cadrul ia forma etichetei: 4,2 px la milimetru.
+    var lat = e50 ? (portret ? 50 : 100) : (portret ? 100 : 150);
+    var inalt = e50 ? (portret ? 100 : 50) : (portret ? 150 : 100);
+    fr.style.width = Math.round(lat * 4.2) + "px";
+    fr.style.height = (Math.round(inalt * 4.2) + 10) + "px";
   }
+  // Altă hârtie: orientarea trece pe cea obișnuită a ei (100 × 150 pe înalt,
+  // 100 × 50 pe lat). De acolo omul o întoarce, dacă vrea.
+  f.querySelectorAll('input[name="format"]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      var vrut = r.value === "100x50" ? "peisaj" : "portret";
+      var o = f.querySelector('input[name="orientare"][value="' + vrut + '"]');
+      if (o) o.checked = true;
+    });
+  });
   function reface() {
     var p = new URLSearchParams();
     var campuri = [];
@@ -499,7 +554,7 @@ function register(router) {
       return redirect(ctx.res, `${CALE}?eroare=${encodeURIComponent(mesaj)}`);
     }
     const s = await setari();
-    const fmt = E.format(q.format);
+    const fmt = E.format(q.format, q.orientare);
     const linie = cp ? cp.produse.find((x) => x.produs_id === Number(p.id)) : null;
     // Ce vine propus: din comanda de producție, altfel din fișa produsului. Ce
     // a scris omul (întors după o eroare) are întâietate.
@@ -539,12 +594,9 @@ function register(router) {
         <input type="hidden" name="produs_id" value="${p.id}">
         <input type="hidden" name="comanda_productie_id" value="${cp ? cp.c.id : ""}">
         <input type="hidden" name="comanda_id" value="${comandaId || ""}">
-        <div class="field"><span>Format</span>
-          ${Object.entries(E.FORMATE)
-            .map(([k, f]) => `<label style="display:inline-flex;gap:6px;align-items:center;margin-right:18px;font-weight:400"><input type="radio" name="format" value="${k}"${k === fmt ? " checked" : ""}> ${esc(f.nume)}</label>`)
-            .join("")}
-        </div>
-        <div class="field"><span>Ce apare pe etichetă</span><div>${campuriHtml("100x150", alese)}</div></div>
+        ${alegeFormat(fmt)}
+        <div class="field"><span>Ce apare pe etichetă</span><div>${campuriHtml("100x150", alese)}</div>
+          <small style="display:block;color:var(--text-muted);font-size:12px">Un câmp bifat și lăsat gol iese cu numele lui și cu loc de scris de mână — de exemplu greutatea, aflată abia la cântar. Nebifat, căsuța lui rămâne albă.</small></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           ${camp("lot", "Lot", 'required maxlength="30" style="font-weight:700;text-transform:uppercase"')}
           ${camp("data_productiei", "Data producției", 'type="date"')}
@@ -558,7 +610,7 @@ function register(router) {
           ${camp("observatii", "Observații", 'maxlength="120"')}
         </div>
         <label class="field" style="margin-top:10px"><span>Denumirea de pe etichetă</span><input name="denumire" value="${esc(v("denumire"))}" maxlength="200"></label>
-        <label class="field"><span>Caracteristici — câte una pe rând (pe 100×150 încap 6, pe 100×50 primul rând)</span>
+        <label class="field"><span>Caracteristici — câte una pe rând (pe 100×150 încap 6; pe 100×50, primul rând pe lat și primele două pe înalt)</span>
           <textarea name="caracteristici" rows="5" maxlength="1000">${esc(v("caracteristici"))}</textarea></label>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-top:6px">
           <label class="field" style="margin:0"><span>Câte etichete tipărești acum</span>
@@ -572,7 +624,7 @@ function register(router) {
       </form>
       <div style="flex:0 0 auto">
         <div style="font-size:13px;color:var(--text-muted);margin-bottom:4px">Cum iese eticheta (nr. 1)</div>
-        <iframe id="et-mostra" title="Previzualizarea etichetei" style="width:420px;height:640px;border:1px solid var(--border,#ddd);background:#eceff3"></iframe>
+        <iframe id="et-mostra" title="Previzualizarea etichetei" style="${stilCadru(fmt)};border:1px solid var(--border,#ddd);background:#eceff3"></iframe>
       </div>
       </div>
       ${SCRIPT_PREVIZUALIZARE}`;
@@ -598,7 +650,7 @@ function register(router) {
     const b = ctx.body || {};
     const inapoi = (mesaj) => {
       const qs = new URLSearchParams();
-      for (const k of ["produs_id", "format", "lot", "data_productiei", "cantitate", "greutate_neta", "greutate_bruta", "client", "comanda", "valabilitate", "operator", "observatii", "denumire", "caracteristici", "cate"]) {
+      for (const k of ["produs_id", "format", "orientare", "lot", "data_productiei", "cantitate", "greutate_neta", "greutate_bruta", "client", "comanda", "valabilitate", "operator", "observatii", "denumire", "caracteristici", "cate"]) {
         if (text(b[k])) qs.set(k, text(b[k]).slice(0, 1000));
       }
       if (text(b.comanda_productie_id)) qs.set("productie", text(b.comanda_productie_id));
@@ -694,9 +746,10 @@ function register(router) {
         <input type="file" name="sigla" accept="image/png,image/jpeg,image/svg+xml">
         ${s.sigla ? `<label style="display:block;margin-top:6px;font-weight:400"><input type="checkbox" name="fara_sigla" value="1"> scoate sigla încărcată (revine „CM”)</label>` : ""}
         <h2 style="font-size:16px">Câmpurile bifate implicit</h2>
-        ${Object.entries(E.FORMATE)
+        <p style="font-size:13px;color:var(--text-muted);margin-top:0">Un câmp bifat și lăsat gol la etichetă iese cu numele lui și cu loc de scris de mână (greutatea netă și brută, de exemplu).</p>
+        ${Object.entries(E.HARTII)
           .map(
-            ([fmt, f]) => `<div class="field"><span>${esc(f.nume)}</span><div>${E.CAMPURI.filter((c) => E.CAMPURI_FORMAT[fmt].includes(c.cheie))
+            ([fmt, numeHartie]) => `<div class="field"><span>${esc(numeHartie)} (pe înalt și pe lat)</span><div>${E.CAMPURI.filter((c) => E.CAMPURI_FORMAT[fmt].includes(c.cheie))
               .map(
                 (c) =>
                   `<label style="display:inline-flex;gap:5px;align-items:center;margin:0 14px 6px 0;font-size:13px;font-weight:400"><input type="checkbox" name="implicite_${fmt}[]" value="${c.cheie}"${
@@ -710,8 +763,12 @@ function register(router) {
       </form>
       <h2 style="font-size:16px;margin-top:22px">Cum arată acum</h2>
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
-        <iframe title="Exemplu 100×150" style="width:420px;height:620px;border:1px solid var(--border,#ddd)" srcdoc="${esc(E.pagina([exemplu("100x150")], "100x150", { sigla: s.sigla }))}"></iframe>
-        <iframe title="Exemplu 100×50" style="width:420px;height:230px;border:1px solid var(--border,#ddd)" srcdoc="${esc(E.pagina([exemplu("100x50")], "100x50", { sigla: s.sigla }))}"></iframe>
+        ${Object.entries(E.FORMATE)
+          .map(
+            ([fmt, f]) => `<div><div style="font-size:12px;color:var(--text-muted);margin-bottom:3px">${esc(f.nume)}</div>
+          <iframe title="Exemplu ${esc(f.nume)}" style="${stilCadru(fmt)};border:1px solid var(--border,#ddd)" srcdoc="${esc(E.pagina([exemplu(fmt)], fmt, { sigla: s.sigla }))}"></iframe></div>`
+          )
+          .join("")}
       </div>`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Setările etichetelor", active: CALE, body }));
   });
@@ -732,7 +789,7 @@ function register(router) {
       "etichete_firma",
       JSON.stringify({ nume: text(b.nume).slice(0, 80), adresa: text(b.adresa).slice(0, 160), telefon: text(b.telefon).slice(0, 40), email: text(b.email).slice(0, 80) })
     );
-    for (const fmt of Object.keys(E.FORMATE)) {
+    for (const fmt of Object.keys(E.HARTII)) {
       await scrieSetare("etichete_campuri_" + fmt, JSON.stringify(E.campuriAlese(fmt, lista(b[`implicite_${fmt}[]`]))));
     }
     if (sigla) await scrieSetare("etichete_sigla", sigla);
@@ -875,10 +932,32 @@ function register(router) {
         </div>
         <div style="flex:0 0 auto">
           <div style="font-size:13px;color:var(--text-muted);margin-bottom:4px">Eticheta nr. 1</div>
-          <iframe title="Eticheta lotului" style="width:420px;height:${E.format(l.format) === "100x50" ? 230 : 640}px;border:1px solid var(--border,#ddd);background:#eceff3" src="${CALE}/${l.id}/mostra"></iframe>
+          <iframe title="Eticheta lotului" style="${stilCadru(l.format)};border:1px solid var(--border,#ddd);background:#eceff3" src="${CALE}/${l.id}/mostra"></iframe>
+          <form method="post" action="${CALE}/${l.id}/orientare" style="margin-top:8px;font-size:13px">
+            <span style="color:var(--text-muted)">Orientare:</span>
+            ${Object.entries(E.ORIENTARI)
+              .map(([k, n]) => `<label style="display:inline-flex;gap:5px;align-items:center;margin:0 10px 0 6px;font-weight:400"><input type="radio" name="orientare" value="${k}"${k === E.orientarea(l.format) ? " checked" : ""}> ${esc(n)}</label>`)
+              .join("")}
+            <button class="btn small secondary" type="submit">Întoarce eticheta</button>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:3px">Aceeași hârtie, ${esc(E.HARTII[E.hartia(l.format)])}. De aici încolo lotul se tipărește așa, și „din nou”.</div>
+          </form>
         </div>
       </div>`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Lot " + l.lot, active: CALE, body }));
+  });
+
+  // Întoarce eticheta unui lot: aceeași hârtie, altă orientare (Vali,
+  // 17.11.2026). Câmpurile și conținutul rămân; se schimbă doar grafica.
+  router.post(`${CALE}/:id/orientare`, async (ctx) => {
+    if (!poate(ctx.user)) return redirect(ctx.res, "/");
+    const l = await lotul(ctx.params.id);
+    if (!l) return redirect(ctx.res, `${CALE}?eroare=${encodeURIComponent("Lotul nu există.")}`);
+    const nou = E.format(l.format, text((ctx.body || {}).orientare));
+    if (nou !== E.format(l.format)) {
+      await db.prepare("UPDATE etichete_loturi SET format = ? WHERE id = ?").run(nou, l.id);
+      console.log(`[etichete] ${(ctx.user && ctx.user.nume) || "?"} a întors lotul ${l.lot}: ${E.FORMATE[nou].nume}`);
+    }
+    redirect(ctx.res, `${CALE}/${l.id}`);
   });
 
   router.get(`${CALE}/:id/mostra`, async (ctx) => {

@@ -11,7 +11,7 @@ const ADR = require("../lib/adresa-client");
 const SCAN = require("../lib/scan");
 // Cine validează o factură: administratorul, rolul financiar și cine are bifa
 // „Facturare” (lib/auth.js, areFacturare).
-const { areFacturare } = require("../lib/auth");
+const { areFacturare, poateAccesa } = require("../lib/auth");
 
 const STATUS_LABEL = {
   ciorna: '<span class="badge gri">ciornă</span>',
@@ -75,6 +75,27 @@ function lineRowsScript() {
       if (denInput && !denInput.value) denInput.value = opt.text;
     }
   </script>`;
+}
+
+// Factura unui client de-al agentului (Vali, 17.11.2026 — vezi RUTA_FACTURA
+// din lib/auth.js). Agentul ajunge aici din biroul lui sau de pe fișa
+// clientului; are voie să vadă factura de VÂNZARE dacă e agentul de pe ea, are
+// clientul alocat (alocari_clienti) sau e agentul scris pe fișa clientului.
+// Facturile de achiziție și ale clienților altora rămân închise.
+async function eFacturaAgentului(user, factura) {
+  if (!user || !factura || factura.directie === "achizitie") return false;
+  const id = Number(user.id);
+  if (!(id > 0)) return false;
+  if (Number(factura.agent_id) === id) return true;
+  const r = await db
+    .prepare(
+      `SELECT p.id FROM parteneri p
+        WHERE p.id = ? AND (p.agent_id = ?
+           OR EXISTS (SELECT 1 FROM alocari_clienti a WHERE a.partener_id = p.id AND a.utilizator_id = ?))`
+    )
+    .get(factura.partener_id, id, id)
+    .catch(() => null);
+  return Boolean(r);
 }
 
 function register(router) {
@@ -657,6 +678,24 @@ function register(router) {
       .get(ctx.params.id);
     if (!factura) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/facturi", body: "<p>Factură inexistentă.</p>" }));
 
+    // Cine n-are Facturarea sau Financiarul a intrat pe ușa agenților: vede
+    // doar facturile clienților lui, și doar le citește.
+    const doarCitire = !poateAccesa(ctx.user, "/facturi");
+    if (doarCitire && !(await eFacturaAgentului(ctx.user, factura))) {
+      return send(
+        ctx.res,
+        403,
+        layout({
+          user: ctx.user,
+          title: "Factura altui client",
+          active: "/crm",
+          body: `<h1>Factura nu e a unui client de-al tău</h1>
+            <p style="max-width:620px">Poți deschide facturile clienților alocați ție. Pentru celelalte, vorbește cu financiarul sau cu administratorul.</p>
+            <a class="btn secondary" href="/crm/birou">Înapoi la biroul meu</a>`,
+        })
+      );
+    }
+
     const linii = await db.prepare("SELECT * FROM facturi_linii WHERE factura_id = ?").all(factura.id);
     const { subtotal, tva, total } = calcTotals(linii);
     const plati = await db.prepare("SELECT * FROM (SELECT * FROM plati WHERE activ = 1) plati WHERE factura_id = ? ORDER BY id DESC").all(factura.id);
@@ -674,7 +713,16 @@ function register(router) {
       : [];
 
     const body = `
-      <div class="toolbar"><a href="${listaInapoi}" class="btn secondary small">← ${eVanzare ? "Facturi vânzare" : "Facturi achiziție"}</a></div>
+      <div class="toolbar">${
+        doarCitire
+          ? `<a href="/crm/birou" class="btn secondary small">← Biroul meu</a> <a href="/parteneri/${factura.partener_id}" class="btn secondary small">Fișa clientului</a>`
+          : `<a href="${listaInapoi}" class="btn secondary small">← ${eVanzare ? "Facturi vânzare" : "Facturi achiziție"}</a>`
+      }</div>
+      ${
+        doarCitire
+          ? `<p style="font-size:13px;color:var(--text-muted);margin:0 0 10px">Vezi factura pentru că e a unui client de-al tău. Încasările, anularea și trimiterea în SmartBill rămân la facturare.</p>`
+          : ""
+      }
       ${ctx.query.mesaj ? `<p style="color:var(--text-muted)">${esc(ctx.query.mesaj)}</p>` : ""}
       ${
         factura.status === "ciorna"
@@ -767,7 +815,7 @@ function register(router) {
         plati.map((p) => [esc(p.data), money(p.suma), esc(p.metoda), esc(p.observatii)])
       )}
       ${
-        factura.status !== "anulata" && restant > 0
+        !doarCitire && factura.status !== "anulata" && restant > 0
           ? `<form method="post" action="/facturi/${factura.id}/plata" class="form" style="max-width:420px">
               <label class="field"><span>Sumă încasată</span><input type="number" step="0.01" name="suma" required max="${restant}" value="${restant.toFixed(2)}"></label>
               <label class="field"><span>Metodă</span>
@@ -780,7 +828,7 @@ function register(router) {
       }
 
       ${
-        eVanzare
+        eVanzare && !doarCitire
           ? `<h2>Integrare SmartBill</h2>
       ${
         smartbill.isConfigured()
@@ -797,7 +845,10 @@ function register(router) {
           : ""
       }
 
-      <div class="toolbar" style="margin-top:14px">
+      ${
+        doarCitire
+          ? ""
+          : `<div class="toolbar" style="margin-top:14px">
         ${
           factura.status !== "anulata"
             ? `<form method="post" action="/facturi/${factura.id}/anuleaza" class="inline-form" onsubmit="return confirm('Anulezi factura?')"><button type="submit" class="btn secondary">Anulează factura</button></form>`
@@ -806,10 +857,11 @@ function register(router) {
         <form method="post" action="/facturi/${factura.id}/sterge" class="inline-form" onsubmit="return confirm('Ștergi definitiv factura?')">
           <button type="submit" class="link-btn danger">Șterge factura</button>
         </form>
-      </div>
+      </div>`
+      }
     `;
     const emailuri = await inbox.blocEmailuri({ user: ctx.user, facturaId: factura.id });
-    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${factura.serie}-${factura.numar ?? factura.id}`, active: eVanzare ? "/facturi" : "/facturi/achizitii", body: body + emailuri }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${factura.serie}-${factura.numar ?? factura.id}`, active: doarCitire ? "/crm" : eVanzare ? "/facturi" : "/facturi/achizitii", body: body + emailuri }));
   });
 
   router.post("/facturi/:id/plata", async (ctx) => {
