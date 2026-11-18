@@ -812,6 +812,8 @@ function register(router) {
       const D = require("../lib/cod-din-denumire");
       const codVechi = String(vechi.cod || "").trim();
       if (!familieId) familieId = D.ghicesteFamilia(vechi.denumire, codVechi, await familii());
+      // Familia neghicită se spune: formularul se deschide pe prima din listă, care altfel ar părea aleasă.
+      vechi.faraFamilie = !familieId;
       valori = { unitate_masura: vechi.unitate_masura || "buc" };
       if (familieId) {
         const citite = D.completeaza(vechi.denumire, codVechi, await citesteCaracteristici(false, familieId));
@@ -1102,7 +1104,11 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto, vechi } = 
       vechi
         ? `<div class="flash" data-cod-nou-pentru="${Number(vechi.id)}" style="max-width:960px">
              <strong>Cod nou pentru:</strong> ${vechi.cod ? `<code>${esc(vechi.cod)}</code> ` : ""}${esc(vechi.denumire)}.
-             Familia și caracteristicile de mai jos sunt citite din denumirea lui: <strong>uită-te la fiecare</strong> și completează ce a rămas gol.
+             ${
+               vechi.faraFamilie
+                 ? `<strong style="color:var(--danger)">Familia n-am putut-o citi din denumire: alege-o din rândul de mai sus</strong>, apoi completează caracteristicile.`
+                 : `Familia și caracteristicile de mai jos sunt citite din denumirea lui: <strong>uită-te la fiecare</strong> și completează ce a rămas gol.`
+             }
              După „Adaugă produsul”, cel vechi se leagă de cel nou și ajungi la „Unifică”, unde vezi ce se mută.
            </div>`
         : ""

@@ -1413,6 +1413,35 @@ function register(router) {
          ORDER BY ${require("../lib/comenzi-ordine").sqlRang("c.status")}, c.id DESC`
       )
       .all(per.de, per.la + " 23:59:59");
+    // Marja fiecărei comenzi, cu vorba ei (Vali, 18.11.2026; lib/marja-comanda.js).
+    // Dacă liniile nu se pot citi, lista merge mai departe fără coloana asta.
+    const MJ = require("../lib/marja-comanda");
+    const liniiMarja = new Map();
+    for (const l of await db
+      .prepare(
+        `SELECT cl.comanda_id, cl.cantitate, cl.pret_unitar, cl.um, pr.unitate_masura AS produs_um, pr.cost_reteta, pr.pret_productie, pr.pret_achizitie
+           FROM comenzi_linii cl JOIN comenzi c ON c.id = cl.comanda_id LEFT JOIN produse pr ON pr.id = cl.produs_id
+          WHERE c.data >= ? AND c.data <= ?`
+      )
+      .all(per.de, per.la + " 23:59:59")
+      .catch((e) => {
+        console.error("[comenzi] marja din listă:", e.message);
+        return [];
+      })) {
+      if (!liniiMarja.has(Number(l.comanda_id))) liniiMarja.set(Number(l.comanda_id), []);
+      liniiMarja.get(Number(l.comanda_id)).push(l);
+    }
+    const celulaMarja = (c) => {
+      const moneda = String(c.moneda || "RON").toUpperCase();
+      const m = MJ.marja(liniiMarja.get(Number(c.id)) || [], moneda === "RON" ? 1 : Number(c.curs_bnr) > 0 ? Number(c.curs_bnr) : null);
+      if (!m.stiuta) return `<span data-marja="necunoscuta" style="font-size:12px;color:var(--text-muted)" title="${esc(m.motiv || "")}">necunoscută</span>`;
+      const t = MJ.treapta(m.pct);
+      const pct = m.pct.toLocaleString("ro-RO", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      return `<span data-marja="${t.cheie}" data-filtru="${m.pct.toFixed(1)}"><span class="badge ${t.culoare}">${pct}%</span>
+        <div style="font-size:12px;${t.culoare === "rosu" ? "color:var(--danger);font-weight:600" : "color:var(--text-muted)"}">${esc(t.text)}</div>${
+          m.faraCost ? `<div style="font-size:11px;color:var(--text-muted)">fără ${m.faraCost === 1 ? "un produs" : m.faraCost + " produse"} fără cost</div>` : ""
+        }</span>`;
+    };
     const body = `
       <div class="toolbar"><a href="/comenzi/nou" class="btn">+ Comandă nouă</a></div>
       <form class="filtre perioade" method="get" action="/comenzi">
@@ -1430,7 +1459,7 @@ function register(router) {
         În fiecare stadiu, cele mai noi sus. Un click pe capul unei coloane sortează altfel.
       </p>
       ${table(
-        ["Nr.", "Client", "Data", "Data solicitată", "Confirmată de producție", "Status", "Total", "Acțiuni"],
+        ["Nr.", "Client", "Data", "Data solicitată", "Confirmată de producție", "Status", "Total", "Marjă", "Acțiuni"],
         comenzi.map((c) => [
           `<a href="/comenzi/${c.id}">${esc(c.numar || "#" + c.id)}</a>`,
           esc(c.partener_nume),
@@ -1439,6 +1468,7 @@ function register(router) {
           celulaDataConfirmata(c),
           stari.eticheta(c.status),
           celulaTotal(c),
+          celulaMarja(c),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
         ]),
         // Filtre ca în Excel pe fiecare coloană (Vali, 06.11.2026: „Filtre te
