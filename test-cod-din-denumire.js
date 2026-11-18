@@ -126,7 +126,12 @@ const parametri = (r) => Object.fromEntries(new URLSearchParams(String(locatie(r
     [f("Banda adeziva acryl Alb 48mm x 60m"), f("CUTIE 360X240X300 IMP"), f("Punga curier, LDPE COEX 45 my"), f("Stretch standard automat 23mm", "SSA23/16/2000"), f("JUMBO JLP23NEGRUPF NegruCM"), f("Folie cu bule natur 40 my"), f("Folii debitate 500x700")],
     [6, 7, 2, 1, 1, 9, 8]);
   egal("fără un cuvânt numai al ei nu se alege nimic: „folie” singur, un tub, un sac care poate fi de două feluri", [f("Folie 500 mm"), f("SP 470 50/63 350 gr", "7441399"), f("Sac negru 780x1350"), f("", "")], [0, 0, 0, 0]);
+  egal("…și nici când lipsește unul din cuvintele care sunt numai ale familiei: plicul fără „AWB” nu e plic AWB, banda PET nu e bandă adezivă, punga fără „curier” nu e pungă de curier",
+    [D.ghicesteFamilia("Plic G/17 p.aer kraft 240x340", "", FAM.concat([{ id: 4, nume: "Plic AWB" }])), D.ghicesteFamilia("Plicuri autoadezive AWB C5", "", FAM.concat([{ id: 4, nume: "Plic AWB" }])), f("Banda PET 15.5*0.6 mm (1750M)"), f("cutie 390X590X100 CM cutie ambalare pungi A3")], [0, 4, 0, 7]);
   egal("…dar sacul spus pe nume, da; iar cel care le spune pe amândouă nu se alege", [f("Sac menajer 60 L negru"), f("Sac SGR 800x1200"), f("Sac SGR menajer")], [5, 3, 0]);
+  const FAM2 = FAM.concat([{ id: 10, nume: "LDPE" }, { id: 11, nume: "Tuburi" }, { id: 12, nume: "Placi carton" }]);
+  egal("la același scor câștigă familia cu mai multe cuvinte regăsite (punga de curier din LDPE e pungă, nu granulă); tuburile și plăcile se recunosc și scrise altfel",
+    [D.ghicesteFamilia("Punga curier, LDPE COEX multilayer, 45 my", "punga410", FAM2), D.ghicesteFamilia("LDPE EXXON MFI2 aditivat", "", FAM2), D.ghicesteFamilia("TUB 50 x 57 x 520 mm 200 gr", "", FAM2), D.ghicesteFamilia("SHEETS K2B1K2 ( 837 x 600 )-D9", "", FAM2)], [2, 10, 11, 12]);
 
   console.log("\n── Caracteristicile, din denumire ───────────────────────────");
   const BANDA = [
@@ -173,7 +178,7 @@ const parametri = (r) => Object.fromEntries(new URLSearchParams(String(locatie(r
     const simplu = await cer("/produse/nou-cu-cod", { query: {} });
     bine("configuratorul deschis fără produs vechi e ca până acum", !simplu.corp.includes("Cod nou pentru:") && !simplu.corp.includes('name="din"'));
     const fara = await cer("/produse/nou-cu-cod", { query: { din: String(FARA) } });
-    bine("produsul căruia nu i se poate ghici familia: configuratorul se deschide oricum, cu el ținut minte", fara.cod === 200 && fara.corp.includes(`name="din" value="${FARA}"`));
+    bine("produsul căruia nu i se poate ghici familia: configuratorul se deschide oricum, cu el ținut minte, și spune că familia trebuie aleasă", fara.cod === 200 && fara.corp.includes(`name="din" value="${FARA}"`) && fara.corp.includes("Familia n-am putut-o citi din denumire") && !r.corp.includes("Familia n-am putut-o citi"));
 
     // ce a rămas gol se completează ca un om: prima valoare din listă, un număr la cele numerice
     const corp = { familie: String(banda.id), din: String(VECHI), denumire: "", unitate_masura: "rola", cota_tva: "21" };

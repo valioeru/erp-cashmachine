@@ -138,7 +138,7 @@ function curata() {
     };
 
     console.log("\n2. Capul tabelului");
-    egal("▾ pe fiecare coloană, în afară de „Acțiuni”", await p.$$eval("table[data-filtre] thead th", (ths) => ths.map((th) => Boolean(th.querySelector(".filtru-btn")))), [true, true, true, true, true, true, true, false]);
+    egal("▾ pe fiecare coloană, în afară de „Acțiuni”", await p.$$eval("table[data-filtre] thead th", (ths) => ths.map((th) => Boolean(th.querySelector(".filtru-btn")))), [true, true, true, true, true, true, true, true, false]);
     egal("fără filtru se văd toate cele 5 comenzi", (await vazute()).length, 5);
     bine("bara: 5 rânduri și totalul lor", /5 rânduri/.test(await bara()) && /Total: 1\.380,50 lei/.test(await bara()), await bara());
     const ordine = await vazute();
