@@ -115,7 +115,9 @@ const badgeStatus = (s) => {
 async function liniile(comandaId) {
   return db
     .prepare(
-      `SELECT l.*, p.cod AS produs_cod, p.denumire AS produs_denumire
+      // Codul arătat peste tot în ERP: cel scris pe produs, altfel cel generat
+      // din caracteristici (produsele făcute din configurator n-au `cod`).
+      `SELECT l.*, COALESCE(NULLIF(TRIM(p.cod), ''), NULLIF(TRIM(p.cod_generat), '')) AS produs_cod, p.denumire AS produs_denumire
          FROM comenzi_furnizor_linii l
          LEFT JOIN produse p ON p.id = l.produs_id
         WHERE l.comanda_id = ? ORDER BY l.id`
@@ -2093,6 +2095,19 @@ function register(router) {
     }
 
     const coloanaEchiv = m === "RON" ? "În euro" : "În lei";
+    // Codul produsului, în coloana lui (Vali, 18.11.2026: „putem pune și cod
+    // produs aici"). Poziția scrisă de mână, fără produs ales din nomenclator,
+    // n-are de unde lua un cod — o spune și trimite la „Modifică", unde se
+    // alege produsul din listă.
+    const poateAlegeProdus = potiModifica;
+    const celulaCod = (l) =>
+      l.produs_cod
+        ? `<strong data-cod-produs style="font-family:Consolas,monospace;white-space:nowrap">${esc(l.produs_cod)}</strong>`
+        : l.produs_id
+          ? `<span data-cod-produs="lipsa" style="font-size:12px;color:var(--text-muted)">produs fără cod</span>`
+          : `<span data-cod-produs="fara-produs" style="font-size:12px;color:var(--text-muted)">scrisă de mână, fără produs</span>${
+              poateAlegeProdus ? `<br><a href="/procurement/comenzi/${c.id}/modifica" style="font-size:12px">alege produsul</a>` : ""
+            }`;
     const randuriLinii = linii.map((l) => {
       const v = L.valoareLinie(l);
       const ist = l.produs_id ? istorii.get(l.produs_id) || [] : [];
@@ -2109,7 +2124,8 @@ function register(router) {
       const e = v === null ? { ron: null, eur: null } : L.echivalente(v, cursObj);
       const echivLinie = m === "RON" ? e.eur : e.ron;
       return [
-        `${esc(l.denumire)}${l.produs_cod ? `<br><span style="font-size:12px;color:var(--text-muted)">cod ${esc(l.produs_cod)}</span>` : ""}`,
+        celulaCod(l),
+        esc(l.denumire),
         esc(nr(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 3 })) + (l.um ? " " + esc(l.um) : ""),
         l.pret_unitar === null || l.pret_unitar === undefined
           ? '<span style="color:var(--text-muted)">de confirmat</span>'
@@ -2267,7 +2283,7 @@ function register(router) {
       </div>
 
       <div class="tabel-scroll">
-      ${table(["Poziție", "Cantitate", "Preț unitar", "Valoare", coloanaEchiv, "Primit", "Față de ultima"], randuriLinii)}
+      ${table(["Cod", "Poziție", "Cantitate", "Preț unitar", "Valoare", coloanaEchiv, "Primit", "Față de ultima"], randuriLinii)}
       </div>
       ${c.observatii ? `<p><strong>Observații:</strong> ${esc(c.observatii)}</p>` : ""}
       <p style="font-size:12px;color:var(--text-muted)">Pe PDF și în email se pune singur și ${esc(L.orarDescarcare("ro").replace(/^O/, "o"))}.</p>
@@ -2321,11 +2337,12 @@ function register(router) {
         </p>
         <div class="tabel-scroll">
         <table class="tabel">
-          <thead><tr><th>Poziție</th><th>Comandat</th><th>Primit până acum</th><th>Primit acum (total)</th><th>Paleți (acum)</th><th>Pe un palet plin</th></tr></thead>
+          <thead><tr><th>Cod</th><th>Poziție</th><th>Comandat</th><th>Primit până acum</th><th>Primit acum (total)</th><th>Paleți (acum)</th><th>Pe un palet plin</th></tr></thead>
           <tbody>
             ${linii
               .map(
                 (l) => `<tr data-prez data-mod="total" data-inainte="${esc(String(nr(l.cantitate_primita)))}" data-comandat="${esc(String(nr(l.cantitate)))}">
+                  <td data-cod-receptie style="font-family:Consolas,monospace;white-space:nowrap">${l.produs_cod ? esc(l.produs_cod) : '<span style="color:var(--text-muted)">—</span>'}</td>
                   <td>${esc(l.denumire)}<div class="mic" data-hint style="color:var(--text-muted)"></div></td>
                   <td>${esc(nr(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 3 }))} ${esc(l.um || "")}</td>
                   <td>${esc(nr(l.cantitate_primita).toLocaleString("ro-RO", { maximumFractionDigits: 3 }))}</td>
