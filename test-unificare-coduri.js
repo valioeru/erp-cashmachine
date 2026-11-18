@@ -130,6 +130,7 @@ function curata() {
   for (const s of [
     `DELETE FROM retete_componente WHERE produs_id BETWEEN ${TOATE} OR componenta_id BETWEEN ${TOATE}`,
     `DELETE FROM concurenta_preturi WHERE produs_id BETWEEN ${TOATE}`,
+    `DELETE FROM ct_palet_corectii WHERE palet_id IN (SELECT id FROM ct_paleti WHERE cod LIKE 'TUC-PAL-%')`,
     `DELETE FROM ct_palet_linii WHERE palet_id IN (SELECT id FROM ct_paleti WHERE cod LIKE 'TUC-PAL-%')`,
     `DELETE FROM ct_paleti WHERE cod LIKE 'TUC-PAL-%'`,
     `DELETE FROM produse_asocieri WHERE vechi_id BETWEEN ${TOATE} OR nou_id BETWEEN ${TOATE}`,
@@ -238,7 +239,8 @@ const curat = (h) => String(h).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").tri
   let rand = randul(r.corp, V1);
   bine("banda veche își arată stocul: 150 rola pe 2 paleți", curat(rand).includes("150 rola · 2 paleți"), curat(rand).slice(0, 300));
   let pr = propunerea(rand, N1);
-  bine("…și e propusă în produsul cu cod nou care seamănă, cu motivul: numerele și cuvintele comune", /seamănă · potrivire mare/.test(pr) && curat(pr).includes("numere comune: 40, 48, 60") && curat(pr).includes("cuvinte comune:") && pr.includes(`href="${CALE}/unifica?vechi=${V1}&amp;nou=${N1}"`), curat(pr).slice(0, 400));
+  bine("…și e propusă în produsul cu cod nou care seamănă, cu motivul: numerele și cuvintele comune", /seamănă · potrivire mare/.test(pr) && curat(pr).includes("numere comune: 40, 48, 60") && curat(pr).includes("cuvinte comune:"), curat(pr).slice(0, 400));
+  bine("…dar „Unifică” e stins cât nimeni n-a asociat perechea: întâi pasul 2, „E același produs”", pr.includes("data-unifica-stins") && pr.includes('data-pasi="2"') && pr.includes(`name="nou" value="#${N1}"`) && !pr.includes(`href="${CALE}/unifica?vechi=${V1}`) && rand.includes("1. Fă codul nou…"), curat(pr).slice(0, 300));
   bine("…fără folia stretch, care e altă marfă", !rand.includes(`data-propunere="${N2}"`));
   rand = randul(r.corp, V2);
   pr = propunerea(rand, V3);
@@ -248,6 +250,17 @@ const curat = (h) => String(h).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").tri
   bine("lista de ales are produsele cu cod nou, cu codul în față", r.corp.includes(`<option value="TUCBAAT4860040 — TUC Bandă adezivă Acrilică Transparent 48 mm 60 m 40 microni">`) && !/<option value="TUC-1056/.test(r.corp));
   r = await cer(CALE, { query: { q: "TUC-Fragil" } });
   egal("căutarea ține și de codul propunerii", [...r.corp.matchAll(/<tr data-vechi="(\d+)">/g)].map((m) => Number(m[1])), [V2]);
+
+  console.log("\n── Pașii, în ordine ─────────────────────────────────────────");
+  const leaga = (v, n) => cer(`${CALE}/asociaza`, { metoda: "post", body: { vechi_id: String(v), nou: "#" + n } });
+  r = await cer(`${CALE}/unifica`, { query: { vechi: String(V1), nou: String(N1) } });
+  egal("perechea neasociată de un om nu ajunge la „ce se mută”", [String(locatie(r)).split("?")[0], /Întâi pasul 2: asociază/.test(parametri(r).eroare || "")], [CALE, true]);
+  r = await cer(`${CALE}/unifica`, { metoda: "post", body: { vechi_id: String(V1), nou_id: String(N1) } });
+  egal("…și nici nu se unifică prin POST: serverul refuză, nimic nu se mișcă", [/Întâi pasul 2: asociază/.test(parametri(r).eroare || ""), stare(V1), paletiPe(V1)], [true, [1, null], 2]);
+  for (const [v, n] of [[V1, N1], [V4, V5], [V2, N1], [V13, N4], [V12, N3]]) await leaga(v, n);
+  r = await cer(CALE, { query: { q: "TUC" } });
+  pr = propunerea(randul(r.corp, V1), N1);
+  bine("după asociere, pasul 3 se aprinde: „2. asociat ✓” și „3. Unifică…”", pr.includes('data-pasi="3"') && pr.includes("2. asociat ✓") && pr.includes(`href="${CALE}/unifica?vechi=${V1}&amp;nou=${N1}"`) && !pr.includes("data-unifica-stins"), curat(pr).slice(0, 300));
 
   console.log("\n── Ce se mută, înainte să se mute ───────────────────────────");
   r = await cer(`${CALE}/unifica`, { query: { vechi: String(V1), nou: String(N1) } });
@@ -387,16 +400,27 @@ const curat = (h) => String(h).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").tri
   console.log("\n── Perechea cu stoc, una câte una ───────────────────────────");
   // produsul vechi n-are rețetă, dar i-au rămas scrise o bază de rețetă și un flux: fără rețetă, ele nu trec
   exec(`UPDATE produse SET reteta_baza = 500, flux_id = 7 WHERE id = ${V2}`);
-  r = await cer(`${CALE}/unifica`, { metoda: "post", body: { vechi_id: String(V2), nou_id: String(V3) } });
-  egal("banda Fragil fără cod intră în cea cu codul: stocul ei (684 buc) trece pe produsul păstrat, cu prețurile celui vechi",
+  // cantitatea după verificare: paletul are 684 în sistem, la numărare au ieșit 650
+  exec(`INSERT INTO ct_palet_linii (palet_id, produs_id, produs_text, cantitate, um) SELECT id, ${V2}, 'TUC BANDA FRAGIL 50X60', 684, 'buc' FROM ct_paleti WHERE cod = 'TUC-PAL-3'`);
+  const linia = Number(q("SELECT pl.id, 1 AS x FROM ct_palet_linii pl JOIN ct_paleti p ON p.id = pl.palet_id WHERE p.cod = 'TUC-PAL-3'")[0].id);
+  r = await cer(`${CALE}/unifica`, { query: { vechi: String(V2), nou: String(V3) } });
+  bine("previzualizarea arată marfa palet cu palet, cu cantitatea din sistem propusă într-un câmp care se poate schimba, și totalul", r.cod === 200 && r.corp.includes("data-paleti-unificare") && r.corp.includes(`name="cant_${linia}" value="684"`) && r.corp.includes("TUC-PAL-3") && /Total după unificare<\/td><td>684<\/td>/.test(r.corp) && r.corp.includes("produsul vechi"), (r.corp.match(/<table class="table" data-paleti-unificare[\s\S]*?<\/table>/) || [""])[0].replace(/\s+/g, " ").slice(0, 500));
+  r = await cer(`${CALE}/unifica`, { metoda: "post", body: { vechi_id: String(V2), nou_id: String(V3), ["cant_" + linia]: "multe" } });
+  egal("cantitate care nu e număr: nu se corectează și nu se unifică nimic; omul se întoarce la previzualizare cu motivul", [String(locatie(r)).split("?")[0], /TUC-PAL-3: cantitatea „multe” nu e un număr/.test(parametri(r).eroare || ""), stare(V2), Number(q("SELECT cantitate, 1 AS x FROM ct_palet_linii WHERE id = ?", [linia])[0].cantitate)], [`${CALE}/unifica`, true, [1, null], 684]);
+  r = await cer(`${CALE}/unifica`, { query: { vechi: String(V2), nou: String(V3), eroare: "motivul refuzului" } });
+  bine("…motiv care se vede pe pagină", r.corp.includes('role="alert"') && r.corp.includes("motivul refuzului"));
+  r = await cer(`${CALE}/unifica`, { metoda: "post", body: { vechi_id: String(V2), nou_id: String(V3), ["cant_" + linia]: "650", cant_999999999: "5" } });
+  egal("banda Fragil fără cod intră în cea cu codul: stocul ei trece pe produsul păstrat cu cantitatea NUMĂRATĂ (650, nu 684), cu prețurile celui vechi",
     [stare(V2), paletiPe(V3), (await SP.citeste({ vedeTot: true })).filter((x) => Number(x.produs_id) === V3).map((x) => [x.stoc, x.um]), Number(produs(V3).pret_achizitie), Number(produs(V3).pret_vanzare), produs(V3).categorie],
-    [[0, V3], 1, [[684, "buc"]], 2.2, 4, "Benzi adezive"]);
+    [[0, V3], 1, [[650, "buc"]], 2.2, 4, "Benzi adezive"]);
+  egal("…corecția e scrisă în istoricul paletului, cu motivul, și spusă în mesaj", [q("SELECT camp, cantitate_veche, cantitate_noua, motiv FROM ct_palet_corectii WHERE palet_linie_id = ?", [linia]).map((x) => [x.camp, Number(x.cantitate_veche), Number(x.cantitate_noua), x.motiv]), /cantitate corectată după numărare pe TUC-PAL-3/.test(parametri(r).ok || "")], [[["cantitate", 684, 650, "numărat la unificarea codurilor"]], true]);
   egal("…dar baza de rețetă și fluxul nu vin, fiindcă nu vine nicio rețetă cu ele", [produs(V3).reteta_baza, produs(V3).flux_id, /baza rețetei|fluxul/.test(parametri(r).ok || "")], [null, null, false]);
 
   console.log("\n── Când motorul nu poate muta un loc ────────────────────────");
   // Motorul de unificare notează locul la care mutarea a căzut și merge mai departe. Pagina n-are voie să spună „gata”.
   const FZ = require(path.join(RAD, "lib", "produse-fuziune.js"));
   const fuzioneazaAdevarat = FZ.fuzioneaza;
+  await leaga(V9, N1);
   FZ.fuzioneaza = async (pastrat, inghitite) => ({ pastrat, inghitite, mutari: { "ct_paleti.produs_id": 1, "comenzi_linii.produs_id (eroare)": "nu s-a putut", "tabel_nou.produs_id (eroare)": "nu s-a putut" }, total: 1 });
   try {
     r = await cer(`${CALE}/unifica`, { metoda: "post", body: { vechi_id: String(V9), nou_id: String(N1) } });
