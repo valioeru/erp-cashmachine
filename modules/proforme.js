@@ -37,7 +37,7 @@ const CC = require("../lib/curs-comanda");
 const LM = require("../lib/livrare-mod");
 const { esc, layout, table, subnavComenzi } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
-const { areFacturare } = require("../lib/auth");
+const { areProforme } = require("../lib/auth");
 
 const SERIE_IMPLICITA = "PF";
 const URMATORUL_IMPLICIT = 1;
@@ -50,8 +50,9 @@ const nr = (v) => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 const eAdmin = (u) => Boolean(u && u.rol === "admin");
-// Vede și emite pentru oricine.
-const peToti = (u) => eAdmin(u) || areFacturare(u);
+// Vede și emite pentru oricine: administratorul, cine poate factura și cine
+// are bifa „Proforme” (lib/auth.js, areProforme).
+const peToti = (u) => eAdmin(u) || areProforme(u);
 
 // Condiția SQL „comanda e a omului ăsta". Trei semne de întrebare … de fapt patru.
 const SQL_A_LUI = (c, p) =>
