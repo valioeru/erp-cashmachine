@@ -41,6 +41,7 @@ require("./modules/ct-park").register(router);
 require("./modules/verificari").register(router);
 require("./modules/comenzi").register(router);
 require("./modules/proforme").register(router);
+require("./modules/facturile-mele").register(router);
 require("./modules/facturi").register(router);
 require("./modules/crm").register(router);
 require("./modules/oferte").register(router);

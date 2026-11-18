@@ -190,7 +190,12 @@ function refaContor() {
   egal("bifa Avize nu deschide Financiarul", auth.poateAccesa(GABI, "/financiar"), false);
   egal("fără bifa Avize, nu intră", auth.poateAccesa({ rol: "depozit", sectiuni: "/depozit" }, "/avize"), false);
   egal("rolul financiar are avizele din oficiu", auth.poateAccesa({ rol: "financiar" }, "/avize"), true);
-  egal("agentul de vânzări nu le are din oficiu", auth.poateAccesa({ rol: "vanzari" }, "/avize"), false);
+  // De la 18.11.2026 („lasă-i să facă și avize de însoțire"): agentul are lista,
+  // avizul nou și foaia — pe clienții lui, vezi test-avize-agent.js — dar nu
+  // contorul și nu anularea, și nu are Avizele întregi.
+  egal("agentul de vânzări: lista, avizul nou și foaia, fără contor și fără anulare; nu are Avizele întregi",
+    [["/avize", "/avize/nou", "/avize/12", "/avize/contor", "/avize/12/anuleaza"].map((p) => auth.poateAccesa({ rol: "vanzari" }, p)), auth.areAvize({ rol: "vanzari" }), auth.areAvize(GABI), auth.areAvize({ rol: "financiar" }), auth.areAvize({ rol: "depozit", sectiuni: "/depozit" })],
+    [[true, true, true, false, false], false, true, true, false]);
   egal("bifa Avize apare la utilizatori", auth.ZONE.some((z) => z.cheie === "/avize" && z.eticheta === "Avize"), true);
 
   // Gabi intră în Depozit prin CT-Park, unde bara de taburi e a lui CT-Park:
@@ -203,7 +208,8 @@ function refaContor() {
   // „Pune linkul în comenzi, ăla cu avize" (Vali, 03.11.2026).
   const R = require(path.join(RAD, "lib", "render.js"));
   contine("în Comenzi, linkul Avize apare cu bifa", R.subnavComenzi("/comenzi", GABI), ['href="/avize"']);
-  contine("…și lipsește fără bifă", R.subnavComenzi("/comenzi", { rol: "vanzari" }), [], ['href="/avize"']);
+  contine("…și la agentul de vânzări (18.11.2026); lipsește la cine n-are nici bifa, nici Vânzările", R.subnavComenzi("/comenzi", { rol: "vanzari" }), ['href="/avize"']);
+  contine("…depozitul fără bifă nu-l are", R.subnavComenzi("/comenzi", { rol: "depozit", sectiuni: "/depozit" }), [], ['href="/avize"']);
 
   // --- avizul manual ---------------------------------------------------------------------
   let r = await cer("get", "/avize/nou", { user: GABI });
