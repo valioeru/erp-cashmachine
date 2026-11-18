@@ -305,7 +305,7 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
   raspunsSB = async () => { throw new Error("SmartBill a răspuns cu eroare (400): țara trebuie specificată"); };
   exec(`UPDATE facturi SET status = 'ciorna', numar = NULL WHERE id = ${fe.id}`);
   r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fe.id) } });
-  bine("un refuz limpede (400) nu sperie degeaba", /\(400\): țara trebuie specificată$/.test(mesaj(r)), mesaj(r));
+  bine("un refuz limpede (400) nu sperie degeaba", /\(400\): țara trebuie specificată/.test(mesaj(r)) && !/Nu se știe dacă a ajuns/.test(mesaj(r)), mesaj(r));
   SB.isConfigured = cfg; SB.trimiteFactura = trm;
 
   curata();
