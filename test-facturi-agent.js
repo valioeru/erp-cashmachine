@@ -120,6 +120,7 @@ function curata() {
     "DELETE FROM comenzi WHERE partener_id IN (97701, 97702)",
     "DELETE FROM interactiuni WHERE partener_id IN (97701, 97702)",
     "DELETE FROM parteneri WHERE id IN (97701, 97702)",
+    "DELETE FROM miscari_stoc WHERE produs_id = 97721",
     "DELETE FROM produse WHERE id = 97721",
     "DELETE FROM utilizatori WHERE id BETWEEN 97711 AND 97719",
   ]) execFileSync("psql", ["-X", "-q", "-c", s], { env: ENV, stdio: ["ignore", "ignore", "pipe"] });
@@ -238,6 +239,74 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
   exec(`UPDATE facturi SET status = 'anulata' WHERE id = ${f1.id}`);
   bine("factura anulată: foaia o spune", />ANULATĂ</.test((await cer("/facturi/:id/tipar", { user: AGENT, params: { id: String(f1.id) } })).corp));
   SB.descarcaPdf = original;
+
+  console.log("\n── Validarea nu trimite a doua oară; ciorna nu pleacă nevalidată ──");
+  // Pe live, 18.11.2026: cinci ciorne erau deja în SmartBill (trimise cu butonul),
+  // iar validarea le-ar fi emis a doua oară.
+  const trimise = [];
+  const cfg = SB.isConfigured, trm = SB.trimiteFactura;
+  SB.isConfigured = () => true;
+  let raspunsSB = async () => ({ series: "CSHM", number: "4001" });
+  SB.trimiteFactura = async (f, l, a) => { trimise.push({ id: Number(f.id), coduri: l.map((x) => x.cod_smartbill), adresa: a && [a.tara, a.judet, a.localitate] }); return raspunsSB(); };
+  exec("UPDATE parteneri SET tara = 'Romania' WHERE id = 97701");
+  const ciornaNoua = async (comandaId, user) => { await cer("/comenzi/:id/factureaza", { metoda: "post", user: user || AGENT, params: { id: String(comandaId) } }); return q("SELECT * FROM facturi WHERE comanda_id = ? ORDER BY id DESC LIMIT 1", [comandaId])[0]; };
+  const mesaj = (r) => decodeURIComponent(String(locatie(r)).split("mesaj=")[1] || "");
+
+  // A. Ciornă deja trimisă cu butonul.
+  let fa = await ciornaNoua(977004);
+  exec(`UPDATE facturi SET smartbill_sync_la = '2026-11-18 09:00:00', smartbill_serie = 'CSHM', smartbill_numar = '3418', document_extern = 'CSHM3418' WHERE id = ${fa.id}`);
+  r = await cer("/facturi", { user: FIN });
+  bine("în coada de validat, ciorna deja trimisă e arătată ca atare", r.corp.includes(`data-deja-trimisa="${fa.id}">deja trimisă (CSHM-3418)`) && /nu se mai trimit o dată/.test(r.corp));
+  r = await cer("/facturi/:id", { user: FIN, params: { id: String(fa.id) } });
+  bine("pagina ei spune că e deja în SmartBill și că validarea nu o mai trimite", /data-ciorna-trimisa>A plecat deja în SmartBill \(CSHM-3418\)/.test(r.corp) && r.corp.includes("nu o mai trimite o dată") && r.corp.includes("E deja în SmartBill, deci nu se mai trimite."));
+  r = await cer("/facturile-mele", { user: AGENT });
+  bine("agentul o vede emisă în SmartBill (nevalidată în ERP), cu PDF", r.corp.includes(`data-factura="${fa.id}"><strong>CSHM 3418</strong>`) && r.corp.includes("emisă în SmartBill") && r.corp.includes("nevalidată în ERP") && r.corp.includes(`data-pdf="${fa.id}"`));
+  r = await cer("/facturi/:id/tipar", { user: AGENT, params: { id: String(fa.id) } });
+  bine("foaia ei poartă numărul fiscal, fără CIORNĂ", text(r.corp).includes("Seria CSHM nr. 3418") && !/data-filigran/.test(r.corp) && text(r.corp).includes("Copie din ERP a facturii CSHM 3418"));
+  r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fa.id) } });
+  let dupa = factura(fa.id);
+  egal("validată: capătă număr în ERP, dar în SmartBill NU mai pleacă o dată", [dupa.status, nr(dupa.numar) > 0, trimise.length, dupa.smartbill_numar, /era deja în SmartBill \(CSHM-3418\): n-am trimis-o a doua oară/.test(mesaj(r))], ["emisa", true, 0, "3418", true]);
+
+  // B. Ciornă nevalidată: butonul de trimitere nu o trimite.
+  exec("UPDATE comenzi SET factura_id = NULL, status = 'in_stoc_depozit' WHERE id = 977001");
+  exec(`UPDATE facturi SET activ = 0 WHERE id = ${f1.id}`);
+  let fb = await ciornaNoua(977001);
+  r = await cer("/facturi/:id/smartbill", { metoda: "post", user: FIN, params: { id: String(fb.id) }, body: {} });
+  egal("„Trimite în SmartBill” pe o ciornă: nu pleacă, i se spune să valideze", [trimise.length, factura(fb.id).smartbill_sync_la, /Factura e ciornă: n-am trimis-o\. Apasă „Validează și emite factura”/.test(mesaj(r))], [0, null, true]);
+  r = await cer("/facturi/:id/smartbill/client", { metoda: "post", user: FIN, params: { id: String(fb.id) }, body: { tara: "Romania", judet: "Dolj", localitate: "Craiova" } });
+  egal("… nici pe ușa cu datele clientului", [trimise.length, /Factura e ciornă/.test(mesaj(r))], [0, true]);
+  r = await cer("/facturi/:id", { user: FIN, params: { id: String(fb.id) } });
+  bine("pagina ciornei n-are buton de trimitere: spune că pleacă la validare", /data-smartbill-dupa-validare/.test(r.corp) && !r.corp.includes(`action="/facturi/${fb.id}/smartbill"`) && r.corp.includes(`action="/facturi/${fb.id}/valideaza"`));
+
+  // C. Validarea o trimite, o singură dată, cum o trimite și butonul.
+  r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fb.id) } });
+  dupa = factura(fb.id);
+  egal("validarea o emite și o trimite: cu codul produsului și cu țara, județul și localitatea clientului", [dupa.status, trimise, dupa.smartbill_serie, dupa.smartbill_numar, /Trimisă și în SmartBill/.test(mesaj(r))], ["emisa", [{ id: Number(fb.id), coduri: ["FA-1"], adresa: ["Romania", "Dolj", "Craiova"] }], "CSHM", "4001", true]);
+  r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fb.id) } });
+  r = await cer("/facturi/:id/smartbill", { metoda: "post", user: FIN, params: { id: String(fb.id) }, body: {} });
+  egal("a doua validare și butonul apăsat după: nimic nu mai pleacă", [trimise.length, /deja în SmartBill \(CSHM-4001\)/.test(mesaj(r))], [1, true]);
+  r = await cer("/facturi/:id", { user: FIN, params: { id: String(fb.id) } });
+  bine("factura validată are la loc butonul, ca „Retrimite”, cu întrebare", r.corp.includes(`action="/facturi/${fb.id}/smartbill"`) && r.corp.includes("Retrimite în SmartBill"));
+
+  // D. Client fără localitate și județ: validă la noi, netrimisă, cu motivul.
+  let fd = await ciornaNoua(977003, ALT);
+  r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fd.id) } });
+  egal("clientul n-are țară, județ, localitate: factura e validă în ERP și nu pleacă pe ghicite", [factura(fd.id).status, trimise.length, factura(fd.id).smartbill_sync_la, /N-a plecat în SmartBill: lipsesc țara, județul sau localitatea/.test(mesaj(r))], ["emisa", 1, null, true]);
+  r = await cer("/facturi/:id", { user: FIN, params: { id: String(fd.id) } });
+  bine("… și se trimite apoi cu butonul", r.corp.includes(`action="/facturi/${fd.id}/smartbill"`) && r.corp.includes("Trimite factura în SmartBill"));
+
+  // E. SmartBill cade fără răspuns limpede.
+  exec("UPDATE comenzi SET factura_id = NULL, status = 'in_stoc_depozit' WHERE id = 977004");
+  exec(`UPDATE facturi SET activ = 0 WHERE id = ${fa.id}`);
+  let fe = await ciornaNoua(977004);
+  raspunsSB = async () => { throw new Error("fetch failed"); };
+  r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fe.id) } });
+  egal("SmartBill cade la mijloc: factura e validă la noi, netrimisă, iar omul e trimis să se uite în SmartBill înainte de a retrimite", [factura(fe.id).status, factura(fe.id).smartbill_sync_la, /nu a plecat în SmartBill: fetch failed Nu se știe dacă a ajuns: uită-te în SmartBill/.test(mesaj(r))], ["emisa", null, true]);
+  raspunsSB = async () => { throw new Error("SmartBill a răspuns cu eroare (400): țara trebuie specificată"); };
+  exec(`UPDATE facturi SET status = 'ciorna', numar = NULL WHERE id = ${fe.id}`);
+  r = await cer("/facturi/:id/valideaza", { metoda: "post", user: FIN, params: { id: String(fe.id) } });
+  bine("un refuz limpede (400) nu sperie degeaba", /\(400\): țara trebuie specificată$/.test(mesaj(r)), mesaj(r));
+  SB.isConfigured = cfg; SB.trimiteFactura = trm;
 
   curata();
   console.log("\n" + interogari + " interogări SQL reale.");
