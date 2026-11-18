@@ -1,6 +1,49 @@
 "use strict";
 // Partea de rute a punții. Ține separat de logica de ingest (punte.js) doar
 // ca fișierul să rămână citibil.
+// Numerele curente din SmartBill, primite de la sincronizare: se țin minte
+// (ca paginile să le poată arăta) și, unde SmartBill e mai departe pe aceeași
+// serie, contorul ERP-ului urcă până acolo. Întoarce ce a făcut, pe tipuri.
+async function aplicaSerii(randuri, db) {
+  const SS = require("../lib/serii-smartbill");
+  const curate = SS.curata(randuri);
+  const la = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Bucharest" }).slice(0, 16);
+  const pune = "INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la";
+  const out = { citite: curate.length, urcate: {}, neatinse: {} };
+  for (const tip of Object.keys(SS.TIPURI)) {
+    const t = SS.TIPURI[tip];
+    const erpRanduri = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN (?, ?)").all(t.serie, t.urmator);
+    const erp = { serie: (erpRanduri.find((x) => x.cheie === t.serie) || {}).valoare, urmator: (erpRanduri.find((x) => x.cheie === t.urmator) || {}).valoare };
+    // Seria ERP-ului, dacă SmartBill o are; altfel prima serie de tipul ăsta, doar de ținut minte.
+    const aleTipului = curate.filter((x) => x.tip === tip);
+    if (!aleTipului.length) continue;
+    const sb = aleTipului.find((x) => x.serie === SS.cheieSerie(erp.serie)) || aleTipului[0];
+    await db.prepare(pune).run(`smartbill_${tip}_vazut`, JSON.stringify({ serie: sb.serie, urmator: sb.urmator, la }), la.slice(0, 10));
+    const h = SS.hotaraste(erp, sb);
+    if (h.urca !== null) {
+      // Doar în sus, și doar dacă între timp nu l-a urcat altcineva mai mult.
+      await db
+        .prepare("UPDATE setari_app SET valoare = ?, actualizat_la = ? WHERE cheie = ? AND CAST(valoare AS INTEGER) < ?")
+        .run(String(h.urca), la.slice(0, 10), t.urmator, h.urca);
+      out.urcate[tip] = { serie: sb.serie, de_la: Number(erp.urmator), la: h.urca };
+      console.log(`[punte] serii: ${tip} ${sb.serie} urcat de la ${erp.urmator} la ${h.urca} (SmartBill)`);
+    } else {
+      out.neatinse[tip] = h.motiv;
+    }
+  }
+  return out;
+}
+
+// Ce a văzut ultima sincronizare la seria unui tip: { serie, urmator, la } sau null.
+async function seriaVazuta(db, tip) {
+  try {
+    const r = await db.prepare("SELECT valoare FROM setari_app WHERE cheie = ?").get(`smartbill_${tip}_vazut`);
+    return r && r.valoare ? JSON.parse(r.valoare) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 module.exports = function registerRute(router, deps) {
   const { db, esc, layout, table, send, redirect, HANDLERE, acum, MAX_OCTETI, MAX_RANDURI, MAX_LOTURI_PASTRATE } = deps;
   // punte.js nu pasează money în deps, iar rapoartele de aici au nevoie de el
@@ -844,6 +887,17 @@ module.exports = function registerRute(router, deps) {
     };
     const b = ctx.body || {};
     const tip = String(b.tip || "");
+    // Numerele curente ale seriilor din SmartBill (proforme, avize): nu stau în
+    // așteptare ca un lot, se aplică pe loc — nu fac decât să urce contorul
+    // ERP-ului, cu salt mărginit. Vezi lib/serii-smartbill.js.
+    if (tip === "serii") {
+      try {
+        return raspunde(200, Object.assign({ ok: true, tip }, await aplicaSerii(b.randuri, db)));
+      } catch (e) {
+        console.error("[punte] serii:", e.message);
+        return raspunde(500, { ok: false, eroare: "seriile nu s-au putut scrie" });
+      }
+    }
     if (!HANDLERE[tip]) return raspunde(400, { ok: false, eroare: `tip necunoscut: ${tip}`, tipuri: Object.keys(HANDLERE) });
     const randuri = Array.isArray(b.randuri) ? b.randuri : [];
     if (!randuri.length) return raspunde(400, { ok: false, eroare: "randuri lipsă" });
@@ -865,3 +919,5 @@ module.exports = function registerRute(router, deps) {
     raspunde(200, { ok: true, tip, primite: randuri.length, lot: ins.lastInsertRowid, nota: "în așteptarea aprobării din ERP" });
   });
 };
+module.exports.aplicaSerii = aplicaSerii;
+module.exports.seriaVazuta = seriaVazuta;

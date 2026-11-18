@@ -218,9 +218,16 @@ function register(router) {
          </details>`
       : "";
 
+    // Unde e SmartBill pe aceeași serie (lib/serii-smartbill.js).
+    const SS = require("../lib/serii-smartbill");
+    const stSb = SS.stare(c, await require("./punte-rute").seriaVazuta(db, "aviz"), "aviz");
+    const blocSb = `<p data-smartbill-serie="${stSb.fel}" style="max-width:820px;font-size:13px;${
+      stSb.fel === "in-urma" ? "border-left:4px solid var(--warn);padding:8px 12px;background:var(--surface-2,#faf7ef)" : "color:var(--text-muted)"
+    }">${esc(stSb.text)}</p>`;
     const body = `
       ${subnav(ctx.user, "/avize")}
       ${mesaj}${eroare}
+      ${blocSb}
       <div class="toolbar">
         <a class="btn" href="/avize/nou">+ Aviz nou</a>
         <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următorul aviz: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>${

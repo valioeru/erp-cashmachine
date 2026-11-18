@@ -276,6 +276,12 @@ function register(router) {
     const q = ctx.query || {};
     const mesaj = q.ok ? `<div class="flash">${esc(q.ok)}</div>` : "";
     const eroare = q.eroare ? `<p style="color:var(--danger);max-width:760px" data-eroare>${esc(q.eroare)}</p>` : "";
+    // Unde e SmartBill pe aceeași serie (lib/serii-smartbill.js).
+    const SS = require("../lib/serii-smartbill");
+    const stSb = SS.stare(c, await require("./punte-rute").seriaVazuta(db, "proforma"), "proforma");
+    const blocSb = `<p data-smartbill-serie="${stSb.fel}" style="max-width:820px;font-size:13px;${
+      stSb.fel === "in-urma" ? "border-left:4px solid var(--warn);padding:8px 12px;background:var(--surface-2,#faf7ef)" : "color:var(--text-muted)"
+    }">${esc(stSb.text)}</p>`;
 
     const formContor = eAdmin(ctx.user)
       ? `<details style="margin-top:22px;max-width:760px">
@@ -296,6 +302,7 @@ function register(router) {
       ${subnavComenzi("/proforme", ctx.user)}
       <h1>Proforme</h1>
       ${mesaj}${eroare}
+      ${blocSb}
       <div class="toolbar">
         <a class="btn" href="/proforme/emite" data-emite-proforma>Emite proformă</a>
         <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următoarea proformă: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>
