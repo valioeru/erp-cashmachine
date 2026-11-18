@@ -150,6 +150,8 @@ const text = (h) => String(h).replace(/<script[\s\S]*?<\/script>/g, " ").replace
   egal("citește din tabelul de serii doar proformele și avizele, cu seria și numărul curent", fereastra.__sync.seriiDin(doc), [{ tip: "Proforma", serie: "CSHP", urmator: "0134" }, { tip: "Aviz", serie: "CHMA", urmator: "1455" }]);
   bine("seriile pleacă odată cu facturile, doar pe Cash Machine, iar o cădere a lor nu strică facturile",
     /if \(\/CASH\\s\*MACHINE\/i\.test\(String\(firma \|\| ""\)\)\) \{\s*try \{\s*await S\.serii\(\);\s*\} catch \(e\) \{\s*log\("serii: EȘUAT"/.test(cod));
+  bine("firma se ia din pagina de serii, nu din fila veche, iar pe altă firmă seriile nu se trimit",
+    /return r\.length \? \{ randuri: r, firma: S\.firmaDin\(d\) \} : null;/.test(cod) && /if \(!\/CASH\\s\*MACHINE\/i\.test\(String\(citit\.firma \|\| ""\)\)\) \{\s*log\("serii: netrimise, SmartBill e pe altă firmă"[\s\S]{0,120}return 0;/.test(cod));
   bine("scriptul doar citește pagina de serii: nu trimite nimic înapoi în SmartBill", !/serii\/[^"']*["'][^)]*method:\s*"POST"/.test(cod) && /cadru\.src = "\/core\/configurare\/serii\/"/.test(cod) && /ERP \+ "\/api\/ingest"[\s\S]{0,200}tip: "serii"/.test(cod));
 
   console.log("\n── În ERP ───────────────────────────────────────────────────");
@@ -182,8 +184,13 @@ const text = (h) => String(h).replace(/<script[\s\S]*?<\/script>/g, " ").replace
   egal("un număr aruncat (salt peste 2.000) nu mută contorul", [x.j.urcate, /salt prea mare/.test(x.j.neatinse.proforma), /salt prea mare/.test(x.j.neatinse.aviz), contoare()], [{}, true, true, ["137", "1463"]]);
   x = await ingest([{ tip: "Proforma", serie: "ALTA", urmator: "500" }, { tip: "Aviz", serie: "CHMA'; DELETE FROM setari_app; --", urmator: "1470" }, { tip: "Aviz", serie: "CHMA", urmator: "1470 OR 1=1" }]);
   egal("altă serie, serie cu semne, număr cu text: contoarele rămân", [x.j.citite, x.j.urcate, contoare(), setare("aviz_serie")], [1, {}, ["137", "1463"], "CHMA"]);
+  egal("seria străină (altă firmă din SmartBill) nici nu se ține minte: rămâne ce se știa despre seria ERP-ului", [JSON.parse(setare("smartbill_proforma_vazut")).serie, x.j.neatinse.proforma], ["CSHP", "altă serie decât în ERP"]);
+  x = await ingest([{ tip: "Proforma", serie: "MBR", urmator: "0003" }, { tip: "Aviz", serie: "MBRA", urmator: "0004" }]);
+  egal("ca pe live, 18.11: SmartBill era pe altă firmă (MBR, MBRA) — nimic urcat, nimic ținut minte", [x.j.urcate, x.j.neatinse, JSON.parse(setare("smartbill_aviz_vazut")).serie, contoare()], [{}, { proforma: "altă serie decât în ERP", aviz: "altă serie decât în ERP" }, "CHMA", ["137", "1463"]]);
+  pune("smartbill_proforma_vazut", JSON.stringify({ serie: "MBR", urmator: 3, la: "2026-11-18 18:19" }));
   r = await cer("/proforme");
-  bine("seria străină se ține minte doar ca să fie arătată: „ERP-ul e pe altă serie”", /data-smartbill-serie="alta-serie"/.test(r.corp) && text(r.corp).includes("SmartBill e la ALTA 500"));
+  bine("o citire veche pe altă serie, rămasă în bază, e spusă ca atare, nu ca număr al seriei ERP-ului", /data-smartbill-serie="alta-serie"/.test(r.corp) && text(r.corp).includes("Numărul seriei CSHP din SmartBill n-a fost citit încă (ultima citire a prins seria MBR)"));
+  pune("smartbill_proforma_vazut", JSON.stringify({ serie: "CSHP", urmator: 137, la: "2026-11-18 18:30" }));
   x = await ingest([]);
   egal("fără rânduri: nimic", [x.j.ok, x.j.citite, contoare()], [true, 0, ["137", "1463"]]);
   x = await ingest("ceva");
