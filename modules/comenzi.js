@@ -1931,6 +1931,9 @@ function register(router) {
     const PFM = require("./proforme");
     const proforme = await PFM.aleComenzii(comanda.id);
     const poateProforma = await PFM.poateEmite(ctx.user, comanda.id).catch(() => false);
+    // Avizul din comandă: cine are Avizele, sau agentul clientului (modules/avize.js).
+    const AVZ = require("./avize");
+    const poateAviz = require("../lib/auth").areAvize(ctx.user) || (await AVZ.eClientulLui(ctx.user, comanda.partener_id).catch(() => false));
 
     // Cum stă comanda față de stoc — aceeași socoteală pe care o vede și
     // depozitul, ca agentul să nu întrebe pe telefon „a venit marfa?”.
@@ -2254,6 +2257,11 @@ function register(router) {
             ? `<form method="post" action="/comenzi/${comanda.id}/proforma" class="inline-form"><button type="submit" class="btn secondary" data-emite-proforma>${
                 proforme.some((f) => Number(f.anulat) !== 1) ? "Emite proformă din nou" : "Emite proformă"
               }</button></form>`
+            : ""
+        }
+        ${
+          poateAviz && comanda.status !== "anulata" && linii.length
+            ? `<a class="btn secondary" href="/avize/nou?comanda=${comanda.id}" data-fa-aviz>Fă aviz de însoțire</a>`
             : ""
         }
         ${proforme

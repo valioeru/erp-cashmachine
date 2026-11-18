@@ -86,7 +86,8 @@ async function eFacturaAgentului(user, factura) {
   if (!user || !factura || factura.directie === "achizitie") return false;
   const id = Number(user.id);
   if (!(id > 0)) return false;
-  if (Number(factura.agent_id) === id) return true;
+  // …sau a făcut-o el, din comandă (ciorna care așteaptă validarea).
+  if (Number(factura.agent_id) === id || Number(factura.creata_de) === id) return true;
   const r = await db
     .prepare(
       `SELECT p.id FROM parteneri p
@@ -96,6 +97,27 @@ async function eFacturaAgentului(user, factura) {
     .get(factura.partener_id, id, id)
     .catch(() => null);
   return Boolean(r);
+}
+
+// Seria și numărul sub care factura există în SmartBill, dacă există: cele
+// primite la trimiterea din ERP, sau cele cu care a fost adusă de acolo.
+// null = n-are PDF în SmartBill (ciornă, anulată înainte de trimitere, scrisă
+// de mână și netrimisă, factură de achiziție).
+function pdfDinSmartbill(f) {
+  if (!f || f.directie === "achizitie") return null;
+  const s = String(f.smartbill_serie || "").trim();
+  const n = String(f.smartbill_numar || "").trim();
+  if (s && n) return { serie: s, numar: n };
+  if (String(f.sursa_import || "").trim() && String(f.serie || "").trim() && f.numar != null && String(f.numar).trim() !== "") {
+    return { serie: String(f.serie).trim(), numar: String(f.numar).trim() };
+  }
+  return null;
+}
+// Ce serie și ce număr se scriu pe foaia tipărită: cele fiscale, dacă le are.
+function numarFiscal(f) {
+  const sb = pdfDinSmartbill(f);
+  if (sb) return { serie: sb.serie, numar: sb.numar, fiscal: true };
+  return { serie: String(f.serie || "").trim() || "—", numar: f.numar == null ? "—" : String(f.numar), fiscal: false };
 }
 
 // Cum se numește factura pe pagina ei: cu numărul fiscal din SmartBill, dacă a
@@ -293,7 +315,7 @@ function register(router) {
              ${paginaCurenta < nrPagini ? `<a class="btn secondary small" href="${bazaUrl}${qs(paginaCurenta + 1)}">Următoare →</a>` : ""}
            </div>`;
 
-    const optiuniStatus = [["", "Toate statusurile"], ["emisa", "emise / neîncasate"], ["platita_partial", "încasate parțial"], ["platita", "încasate"], ["anulata", "anulate"]]
+    const optiuniStatus = [["", "Toate statusurile"], ["ciorna", "ciorne — de validat"], ["emisa", "emise / neîncasate"], ["platita_partial", "încasate parțial"], ["platita", "încasate"], ["anulata", "anulate"]]
       .map(([v, t]) => `<option value="${v}"${status === v ? " selected" : ""}>${t}</option>`)
       .join("");
 
@@ -350,7 +372,39 @@ function register(router) {
   router.get("/facturi", async (ctx) => {
     const { body: lista, totalRanduri } = await listaFacturi(ctx, "vanzare");
     const asteptare = await loturiInAsteptare();
+    // Ciornele făcute de agenți din comenzi, care așteaptă validarea
+    // (Vali, 18.11.2026: „din financiar, înainte de trimitere în SmartBill, se validează").
+    const deValidat = await db
+      .prepare(
+        `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client, u.nume AS facuta_de, c.numar AS comanda_numar, f.comanda_id,
+                COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva, 0) / 100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
+           FROM facturi f JOIN parteneri p ON p.id = f.partener_id
+           LEFT JOIN utilizatori u ON u.id = f.creata_de LEFT JOIN comenzi c ON c.id = f.comanda_id
+          WHERE f.activ = 1 AND f.directie = 'vanzare' AND f.status = 'ciorna'
+          ORDER BY f.id DESC LIMIT 50`
+      )
+      .all()
+      .catch(() => []);
+    const blocDeValidat = deValidat.length
+      ? `<div class="detail-box" data-de-validat style="border-left:4px solid var(--warn);margin-bottom:14px">
+           <strong>${deValidat.length} ${deValidat.length === 1 ? "factură ciornă așteaptă" : "facturi ciornă așteaptă"} validarea</strong>
+           <span style="font-size:13px;color:var(--text-muted)"> — făcute din comenzi; la validare capătă număr, scad stocul și pleacă în SmartBill.</span>
+           ${table(
+             ["Ciornă", "Client", "Comanda", "Făcută de", "Data", "Total cu TVA", ""],
+             deValidat.map((f) => [
+               `<a href="/facturi/${f.id}">${esc(`${f.serie || "FCT"}-${f.numar ?? f.id}`)}</a>`,
+               esc(f.client),
+               f.comanda_id ? `<a href="/comenzi/${f.comanda_id}">${esc(f.comanda_numar || "#" + f.comanda_id)}</a>` : "—",
+               esc(f.facuta_de || "—"),
+               esc(String(f.data_emiterii || "").slice(0, 10)),
+               money(f.total),
+               `<a class="btn small" href="/facturi/${f.id}">Deschide și validează</a>`,
+             ])
+           )}
+         </div>`
+      : "";
     const body = `
+      ${blocDeValidat}
       <div class="toolbar">
         <a href="/facturi/nou" class="btn">+ Factură nouă</a>
         ${
@@ -878,6 +932,14 @@ function register(router) {
           ? `<p style="font-size:13px;color:var(--text-muted);margin:0 0 10px">Vezi factura pentru că e a unui client de-al tău. Încasările, anularea și trimiterea în SmartBill rămân la facturare.</p>`
           : ""
       }
+      ${
+        eVanzare
+          ? `<div class="toolbar" data-tipar-factura>
+               <a class="btn secondary small" href="/facturi/${factura.id}/tipar" target="_blank">Tipărește / salvează ca PDF</a>
+               ${pdfDinSmartbill(factura) ? `<a class="btn secondary small" href="/facturi/${factura.id}/pdf" target="_blank">Descarcă PDF-ul din SmartBill</a>` : ""}
+             </div>`
+          : ""
+      }
       ${ctx.query.mesaj ? `<p style="color:var(--text-muted)">${esc(ctx.query.mesaj)}</p>` : ""}
       ${
         factura.status === "ciorna"
@@ -893,7 +955,7 @@ function register(router) {
                            onsubmit="return confirm('Validezi factura? Se emite, scade stocul și pleacă în SmartBill.')">
                        <button class="btn" type="submit">Validează și emite factura</button>
                      </form>`
-                  : `<span style="font-size:13px;color:var(--text-muted)">Nu ai drepturi de validare — anunță pe cineva de la facturare.</span>`
+                  : `<span style="font-size:13px;color:var(--text-muted)" data-asteapta-validarea>Nu ai drepturi de validare: factura așteaptă să fie validată de cineva de la facturare. După validare primește număr, pleacă în SmartBill și o poți tipări sau descărca de aici.</span>`
               }
             </div>`
           : ""
@@ -1048,6 +1110,105 @@ function register(router) {
     `;
     const emailuri = await inbox.blocEmailuri({ user: ctx.user, facturaId: factura.id });
     send(ctx.res, 200, layout({ user: ctx.user, title: `${eVanzare ? "Factură" : "Achiziție"} ${numeFactura(factura)}`, active: doarCitire ? "/crm" : eVanzare ? "/facturi" : "/facturi/achizitii", body: body + emailuri }));
+  });
+
+  // ---- Factura, de tipărit și de descărcat ---------------------------------------
+  //
+  // Vali, 18.11.2026: „când e gata văd factura emisă și o pot inclusiv downloada
+  // sau printa". Două uși, amândouă deschise și agentului facturii:
+  //   • /tipar — foaia făcută de ERP (aceeași ca proforma), pentru tipărit sau
+  //     „Salvează ca PDF". Merge și pe ciornă, cu CIORNĂ scris peste ea.
+  //   • /pdf — PDF-ul făcut de SmartBill, adică documentul fiscal, pentru
+  //     facturile care au ajuns acolo. Doar se citește din SmartBill.
+  async function facturaDeVazut(ctx) {
+    const factura = await db
+      .prepare(
+        `SELECT f.*, p.nume AS partener_nume, p.cui, p.adresa, p.judet, p.localitate, p.reg_com, p.telefon AS p_telefon, p.email AS p_email, p.persoana_contact
+           FROM (SELECT * FROM facturi WHERE activ = 1) f JOIN parteneri p ON p.id = f.partener_id WHERE f.id = ?`
+      )
+      .get(ctx.params.id);
+    if (!factura) {
+      send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/facturi", body: "<p>Factură inexistentă.</p>" }));
+      return null;
+    }
+    if (!poateAccesa(ctx.user, "/facturi") && !(await eFacturaAgentului(ctx.user, factura))) {
+      send(ctx.res, 403, layout({ user: ctx.user, title: "Factura altui client", active: "/crm", body: `<h1>Factura nu e a unui client de-al tău</h1><a class="btn secondary" href="/facturile-mele">Facturile mele</a>` }));
+      return null;
+    }
+    return factura;
+  }
+
+  router.get("/facturi/:id/tipar", async (ctx) => {
+    const factura = await facturaDeVazut(ctx);
+    if (!factura) return;
+    const PF = require("../lib/proforma");
+    const AV = require("../lib/aviz");
+    const linii = await db
+      .prepare(
+        `SELECT l.*, pr.unitate_masura AS um, COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS cod
+           FROM facturi_linii l LEFT JOIN produse pr ON pr.id = l.produs_id WHERE l.factura_id = ? ORDER BY l.id`
+      )
+      .all(factura.id);
+    const comanda = factura.comanda_id ? await db.prepare("SELECT numar FROM comenzi WHERE id = ?").get(factura.comanda_id).catch(() => null) : null;
+    const autor = factura.creata_de ? await db.prepare("SELECT nume FROM utilizatori WHERE id = ?").get(factura.creata_de).catch(() => null) : null;
+    const nr = numarFiscal(factura);
+    const ciorna = factura.status === "ciorna";
+    const anulata = factura.status === "anulata";
+    const doc = {
+      serie: nr.serie,
+      numar: nr.numar,
+      data: String(factura.data_emiterii || "").slice(0, 10),
+      data_scadenta: String(factura.data_scadenta || "").slice(0, 10) || null,
+      client_nume: factura.partener_nume,
+      client_cui: factura.cui || null,
+      client_regcom: String(factura.reg_com || "").trim() || null,
+      client_adresa: AV.adresaClient(factura) || null,
+      client_contact: String(factura.persoana_contact || "").trim() || null,
+      client_telefon: String(factura.p_telefon || "").trim() || null,
+      client_email: String(factura.p_email || "").trim() || null,
+      comanda_numar: comanda ? String(comanda.numar || "").trim() || "#" + factura.comanda_id : null,
+      moneda: "RON",
+      observatii: String(factura.observatii || "").trim() || null,
+      mentiune: Number(factura.upa) === 1 ? require("../lib/upa").mentiune(factura.partener_nume) : null,
+      creat_de: (autor && autor.nume) || "",
+      anulat: anulata ? 1 : 0,
+    };
+    const subsol = ciorna
+      ? "Ciornă: nu e încă factură. Capătă număr și pleacă în SmartBill la validarea făcută de financiar."
+      : nr.fiscal
+        ? `Copie din ERP a facturii ${nr.serie} ${nr.numar}. Documentul fiscal este cel emis din SmartBill.`
+        : "Factură emisă în ERP, netrimisă încă în SmartBill: numărul fiscal îl dă SmartBill.";
+    const bara = [
+      ctx.query.mesaj ? `<span class="eroare">${esc(ctx.query.mesaj)}</span>` : "",
+      `<button onclick="window.print()">Tipărește</button>`,
+      `<button onclick="window.print()" title="În fereastra de tipărire alege „Salvează ca PDF”">Descarcă PDF</button>`,
+      pdfDinSmartbill(factura) ? `<a href="/facturi/${factura.id}/pdf">PDF-ul din SmartBill</a>` : "",
+      `<a href="/facturi/${factura.id}">Înapoi la factură</a>`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    send(ctx.res, 200, PF.pagina(doc, linii, { bara, titlu: "FACTURĂ", numeFisier: "Factura", filigran: ciorna ? "CIORNĂ" : "", subsol }));
+  });
+
+  router.get("/facturi/:id/pdf", async (ctx) => {
+    const factura = await facturaDeVazut(ctx);
+    if (!factura) return;
+    const sb = pdfDinSmartbill(factura);
+    const inapoi = (t) => redirect(ctx.res, `/facturi/${factura.id}/tipar?mesaj=` + encodeURIComponent(t));
+    if (!sb) return inapoi("Factura n-a ajuns încă în SmartBill, deci n-are PDF acolo. Asta e foaia din ERP.");
+    try {
+      const buf = await smartbill.descarcaPdf(sb.serie, sb.numar);
+      ctx.res.writeHead(200, {
+        "Content-Type": "application/pdf",
+        "Content-Length": buf.length,
+        "Content-Disposition": `inline; filename="Factura-${String(sb.serie).replace(/[^A-Za-z0-9-]/g, "")}-${String(sb.numar).replace(/[^A-Za-z0-9-]/g, "")}.pdf"`,
+        "Cache-Control": "private, no-store",
+      });
+      return ctx.res.end(buf);
+    } catch (e) {
+      console.error("[facturi] PDF din SmartBill:", e.message);
+      return inapoi("PDF-ul din SmartBill n-a putut fi adus acum (" + e.message + "). Asta e foaia din ERP.");
+    }
   });
 
   router.post("/facturi/:id/plata", async (ctx) => {

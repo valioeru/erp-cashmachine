@@ -469,7 +469,11 @@ function subtabs(activ, user) {
     ["/stocuri/ct-park/plan", "Planul halei"],
   ];
   if (ARATA_SECTIUNEA_TEHNICA) toate.push(["/stocuri/ct-park/sectiune", "Secțiune tehnică"]);
-  const linkuri = user ? toate.filter(([h]) => poateAccesa(user, h)) : toate;
+  // Avizele, în bara depozitului, doar pentru cine are Avizele întregi: agentul
+  // de vânzări le face de la 18.11.2026 pentru clienții lui, dar le găsește în
+  // meniul Comenzi — pe „Stoc la zi" rămâne cu „Stoc la zi" și „Rezervări".
+  const { areAvize } = require("../lib/auth");
+  const linkuri = user ? toate.filter(([h]) => poateAccesa(user, h) && (!h.startsWith("/avize") || areAvize(user))) : toate;
   return `<div class="subnav" style="margin-top:-6px">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)
     .join("")}</div>`;

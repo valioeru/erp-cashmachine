@@ -22,9 +22,9 @@
 // se emite altul.
 const db = require("../lib/db");
 const AV = require("../lib/aviz");
-const { esc, layout, table, cautaClient, cautaClientScript, randuriClienti, subnavFinanciar, subnavDepozit } = require("../lib/render");
+const { esc, layout, table, cautaClient, cautaClientScript, randuriClienti, subnavFinanciar, subnavDepozit, subnavComenzi } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
-const { poateAccesa } = require("../lib/auth");
+const { poateAccesa, areAvize } = require("../lib/auth");
 
 const SERIE_IMPLICITA = "CHMA";
 const URMATORUL_IMPLICIT = 1389;
@@ -39,6 +39,26 @@ const nr = (v) => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 const eAdmin = (u) => Boolean(u && u.rol === "admin");
+
+// AGENTUL ȘI AVIZELE (Vali, 18.11.2026: „lasă-i să facă și avize de însoțire").
+// Cine are bifa „Avize" lucrează pe toți clienții, ca până acum. Agentul fără
+// bifă intră pe ușa din lib/auth.js și lucrează doar pe clienții lui: e agentul
+// de pe fișa clientului sau are clientul alocat. Vede avizele făcute de el și
+// pe cele ale clienților lui; contorul și anularea rămân la administrator.
+const SQL_CLIENT_AL_LUI = (p) =>
+  `(${p}.agent_id = ? OR EXISTS (SELECT 1 FROM alocari_clienti ac WHERE ac.partener_id = ${p}.id AND ac.utilizator_id = ?))`;
+async function eClientulLui(user, partenerId) {
+  const id = Number(user && user.id);
+  if (!(id > 0) || !nr(partenerId)) return false;
+  const r = await db.prepare(`SELECT p.id FROM parteneri p WHERE p.id = ? AND ${SQL_CLIENT_AL_LUI("p")}`).get(nr(partenerId), id, id).catch(() => null);
+  return Boolean(r);
+}
+async function poateVedea(user, aviz) {
+  if (areAvize(user)) return true;
+  if (!user || !aviz) return false;
+  if (Number(aviz.creat_de_id) === Number(user.id)) return true;
+  return eClientulLui(user, aviz.partener_id);
+}
 
 async function contor() {
   const r = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN ('aviz_serie', 'aviz_urmator')").all();
@@ -159,18 +179,22 @@ async function awbAviz(aviz) {
 function subnav(user, activ) {
   if (poateAccesa(user, "/financiar")) return subnavFinanciar(activ, user);
   if (poateAccesa(user, "/depozit")) return subnavDepozit(activ, user);
-  return "";
+  return subnavComenzi(activ, user);
 }
 
 function register(router) {
   // ---- Lista ---------------------------------------------------------------
   router.get("/avize", async (ctx) => {
+    const tot = areAvize(ctx.user);
+    const eu = Number(ctx.user && ctx.user.id) || 0;
     const lista = await db
       .prepare(
         `SELECT a.*, (SELECT COUNT(*) FROM avize_linii l WHERE l.aviz_id = a.id) AS nr_linii
-           FROM avize a ORDER BY a.serie, a.numar DESC LIMIT 300`
+           FROM avize a LEFT JOIN parteneri p ON p.id = a.partener_id
+          WHERE ${tot ? "1 = 1" : `(a.creat_de_id = ? OR ${SQL_CLIENT_AL_LUI("p")})`}
+          ORDER BY a.serie, a.numar DESC LIMIT 300`
       )
-      .all();
+      .all(...(tot ? [] : [eu, eu, eu]));
     const c = await contor();
     const q = ctx.query || {};
     const mesaj = q.ok ? `<div class="flash">${esc(q.ok)}</div>` : "";
@@ -199,7 +223,9 @@ function register(router) {
       ${mesaj}${eroare}
       <div class="toolbar">
         <a class="btn" href="/avize/nou">+ Aviz nou</a>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următorul aviz: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong></span>
+        <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următorul aviz: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>${
+          tot ? "" : ` · <span data-doar-ale-mele>vezi avizele tale și ale clienților tăi</span>`
+        }</span>
       </div>
       ${
         lista.length
@@ -245,7 +271,11 @@ function register(router) {
   // ---- Avizul manual -----------------------------------------------------------
   async function formular(ctx, { eroare, valori } = {}) {
     const v = valori || {};
-    const parteneri = await db.prepare("SELECT id, nume, cui, agent_id FROM parteneri WHERE tip != 'furnizor' ORDER BY nume").all();
+    const tot = areAvize(ctx.user);
+    const eu = Number(ctx.user && ctx.user.id) || 0;
+    const parteneri = await db
+      .prepare(`SELECT p.id, p.nume, p.cui, p.agent_id FROM parteneri p WHERE p.tip != 'furnizor' AND ${tot ? "1 = 1" : SQL_CLIENT_AL_LUI("p")} ORDER BY p.nume`)
+      .all(...(tot ? [] : [eu, eu]));
     const agenti = await db.prepare("SELECT id, nume FROM utilizatori ORDER BY nume").all();
     const produse = await db
       .prepare(
@@ -254,8 +284,8 @@ function register(router) {
       )
       .all();
     const comenzi = await db
-      .prepare(`SELECT c.numar, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.numar IS NOT NULL AND c.numar <> '' ORDER BY c.id DESC LIMIT 300`)
-      .all()
+      .prepare(`SELECT c.numar, p.nume AS client FROM comenzi c JOIN parteneri p ON p.id = c.partener_id WHERE c.numar IS NOT NULL AND c.numar <> '' AND ${tot ? "1 = 1" : SQL_CLIENT_AL_LUI("p")} ORDER BY c.id DESC LIMIT 300`)
+      .all(...(tot ? [] : [eu, eu]))
       .catch(() => []);
     const c = await contor();
     const linii = Array.isArray(v.linii) && v.linii.length ? v.linii : [{}, {}, {}];
@@ -276,7 +306,7 @@ function register(router) {
       ${eroare ? `<p class="alerta" style="max-width:820px;color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 12px">${esc(eroare)}</p>` : ""}
       <h1 style="margin:6px 0 2px">Aviz de însoțire nou</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
-        Fără prețuri: clientul, produsele și cantitățile. Va primi numărul <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>
+        ${tot ? "" : `<span data-doar-clientii-mei>Poți face avize pentru clienții tăi.</span> `}Fără prețuri: clientul, produsele și cantitățile. Va primi numărul <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>
         (același șir ca avizele scoase din depozit) și data de azi, ${esc(AV.dataAviz(aziRo()))}.
       </p>
       <form method="post" action="/avize" class="form" style="max-width:980px">
@@ -331,8 +361,32 @@ function register(router) {
     send(ctx.res, 200, layout({ user: ctx.user, title: "Aviz nou", active: "/avize", body }));
   }
 
+  // „Fă aviz" de pe pagina comenzii: /avize/nou?comanda=<id> vine cu clientul,
+  // numărul comenzii și liniile ei gata scrise; omul le îndreaptă și emite.
+  async function valoriDinComanda(ctx) {
+    const id = nr(ctx.query && ctx.query.comanda);
+    if (!id) return null;
+    const c = await db.prepare("SELECT id, numar, partener_id, status FROM comenzi WHERE id = ?").get(id).catch(() => null);
+    if (!c) return null;
+    if (!areAvize(ctx.user) && !(await eClientulLui(ctx.user, c.partener_id))) return { eroare: "Comanda nu e a unui client de-al tău: poți face avize doar pentru clienții tăi." };
+    const linii = await db
+      .prepare(
+        `SELECT cl.cantitate, cl.um, pr.denumire, pr.unitate_masura, COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS cod
+           FROM comenzi_linii cl JOIN produse pr ON pr.id = cl.produs_id WHERE cl.comanda_id = ? ORDER BY cl.id`
+      )
+      .all(c.id);
+    return {
+      valori: {
+        partener_id: c.partener_id,
+        comanda_numar: String(c.numar || "").trim(),
+        linii: linii.map((l) => ({ produs: (l.cod ? l.cod + " — " : "") + l.denumire, um: String(l.um || l.unitate_masura || ""), cantitate: String(Number(l.cantitate)).replace(".", ",") })),
+      },
+    };
+  }
+
   router.get("/avize/nou", async (ctx) => {
-    await formular(ctx);
+    const d = await valoriDinComanda(ctx);
+    await formular(ctx, d ? { eroare: d.eroare, valori: d.valori } : undefined);
   });
 
   // Produsul scris în căsuță: „COD — Denumire” din listă, codul singur, sau
@@ -368,6 +422,9 @@ function register(router) {
     const inapoi = (eroare) => formular(ctx, { eroare, valori });
 
     if (!nr(b.partener_id)) return inapoi("Alege clientul din listă — avizul nu poate pleca fără el.");
+    if (!areAvize(ctx.user) && !(await eClientulLui(ctx.user, b.partener_id))) {
+      return inapoi("Poți face avize doar pentru clienții tăi. Pentru alt client, vorbește cu agentul lui sau cu cineva care are Avizele.");
+    }
     const linii = [];
     for (let i = 0; i < produseScrise.length; i++) {
       const text = String(produseScrise[i] || "").trim();
@@ -417,6 +474,15 @@ function register(router) {
     const r = await citeste(ctx.params.id);
     if (!r) return send(ctx.res, 404, layout({ user: ctx.user, title: "Aviz negăsit", active: "/avize", body: "<p>Avizul nu există.</p>" }));
     const { aviz, linii } = r;
+    // Pe ușa agentului (/avize/:id) se văd doar avizele lui și ale clienților
+    // lui. Adresa depozitului (/stocuri/ct-park/aviz/:id) are drepturile ei.
+    if (inapoi.anulare && !(await poateVedea(ctx.user, aviz))) {
+      return send(
+        ctx.res,
+        403,
+        layout({ user: ctx.user, title: "Avizul altui client", active: "/avize", body: `${subnav(ctx.user, "/avize")}<h1>Avizul nu e al unui client de-al tău</h1><p>Poți deschide avizele făcute de tine și pe cele ale clienților tăi.</p><a class="btn secondary" href="/avize">Înapoi la avize</a>` })
+      );
+    }
     const q = ctx.query || {};
     const paleti = String(q.paleti || "").replace(/[^0-9,]/g, "");
     const bara = [
@@ -456,4 +522,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, emite, citeste, contor, aziRo, awbAviz };
+module.exports = { register, emite, citeste, contor, aziRo, awbAviz, eClientulLui, poateVedea };

@@ -462,4 +462,4 @@ function register(router) {
   });
 }
 
-module.exports = { register, emite, dinComanda, citeste, aleComenzii, poateEmite, poateVedea, contor, SERIE_IMPLICITA, URMATORUL_IMPLICIT };
+module.exports = { SQL_A_LUI, patru, peToti, register, emite, dinComanda, citeste, aleComenzii, poateEmite, poateVedea, contor, SERIE_IMPLICITA, URMATORUL_IMPLICIT };
