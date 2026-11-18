@@ -915,6 +915,10 @@ const CAMPURI_FISA = [
   { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },
   { name: "gestiune", label: "Gestiune", datalist: true, ajutor: "Gestiunea din contabilitate în care stă produsul." },
   { name: "unitate_masura", label: "Unitate de măsură", default: "buc", ajutor: "La hârtie se pune singură: cutie sau top." },
+  // Text liber cu sugestii din ce s-a mai scris (Vali, 18.11.2026).
+  { name: "greutate_neta", label: "Greutate netă", datalist: true, ajutor: "Scrie liber (ex. 12,5 kg) sau alege din cele deja introduse." },
+  { name: "greutate_bruta", label: "Greutate brută", datalist: true, ajutor: "Scrie liber (ex. 13,2 kg) sau alege din cele deja introduse." },
+  { name: "mod_ambalare", label: "Mod ambalare", datalist: true, ajutor: "Scrie liber (ex. 6 role/cutie) sau alege din cele deja introduse." },
   { name: "pret_achizitie", label: "Preț achiziție", type: "number", default: 0, ajutor: "Pentru marfa pe care o cumpărăm." },
   { name: "pret_productie", label: "Cost de producție", type: "number", ajutor: "Pentru ce facem noi. Lasă gol dacă produsul va avea rețetă — atunci costul se ia din ea." },
   { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", ajutor: "Lasă gol ca să folosească adaosul implicit al firmei." },
@@ -1132,6 +1136,7 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto, vechi } = 
         </label>
       </div>
       ${rand(["categorie", "gestiune", "unitate_masura"])}
+      ${rand(["greutate_neta", "greutate_bruta", "mod_ambalare"])}
       <div class="field" style="margin:6px 0"><span style="display:block;font-size:13px">Ai prețul în euro sau dolari?</span>${trecere}</div>
       ${rand(["pret_achizitie", "pret_productie", "adaos_lista"])}
       ${rand(["pret_minim", "pret_vanzare", "cota_tva", "stoc_minim"])}
@@ -1259,8 +1264,9 @@ async function scrieProdusul(r, familieId, extra = {}) {
       .prepare(
         `INSERT INTO produse (cod, cod_generat, denumire, unitate_masura, pret_vanzare, stoc_minim, cod_familie_id,
                               categorie, gestiune, pret_achizitie, pret_productie, adaos_lista, pret_minim, cota_tva,
-                              creat_de, creat_la, cod_semnatura, furnizor_id, pret_nota)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
+                              creat_de, creat_la, cod_semnatura, furnizor_id, pret_nota,
+                              greutate_neta, greutate_bruta, mod_ambalare)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`
       )
       .run(
         r.cod, r.cod, denumire, unitate,
@@ -1274,7 +1280,8 @@ async function scrieProdusul(r, familieId, extra = {}) {
         Number(e.creat_de) || null, acum,
         r.contor ? r.semnatura : null,
         furnizorId,
-        text(e.pret_nota)
+        text(e.pret_nota),
+        text(e.greutate_neta), text(e.greutate_bruta), text(e.mod_ambalare)
       );
   const furnizorId = await furnizorulScris(r);
   // La textul liber, numărul de ordine se ia din nou chiar înainte de scriere:

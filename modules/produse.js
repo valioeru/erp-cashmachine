@@ -310,6 +310,12 @@ function register(router) {
       { name: "categorie", label: "Categorie", datalist: true, ajutor: "Scrie una nouă sau alege din cele existente." },
       { name: "gestiune", label: "Gestiune", datalist: true, ajutor: "Gestiunea din contabilitate în care stă produsul." },
       { name: "unitate_masura", label: "Unitate de măsură", default: "buc" },
+      // Text liber cu sugestii din ce s-a mai scris pe alte produse (Vali,
+      // 18.11.2026): alegi din listă sau scrii altceva — ce scrii nou apare
+      // în listă la următorul produs.
+      { name: "greutate_neta", label: "Greutate netă", datalist: true, ajutor: "Scrie liber (ex. 12,5 kg) sau alege din cele deja introduse." },
+      { name: "greutate_bruta", label: "Greutate brută", datalist: true, ajutor: "Scrie liber (ex. 13,2 kg) sau alege din cele deja introduse." },
+      { name: "mod_ambalare", label: "Mod ambalare", datalist: true, ajutor: "Scrie liber (ex. 6 role/cutie) sau alege din cele deja introduse." },
       { name: "_valuta", label: "Ai prețul în euro sau dolari?", type: "calculat", calc: () => trecereDinValuta(bnrCurent) },
       { name: "pret_achizitie", label: "Preț achiziție", type: "number", step: "0.0001", default: 0, ajutor: "Pentru marfa pe care o cumpărăm. În lei." },
       { name: "pret_productie", label: "Cost de producție", type: "number", step: "0.0001", ajutor: "Pentru ce facem noi. Lasă gol dacă produsul are rețetă — atunci costul se ia din ea." },
@@ -693,6 +699,9 @@ function register(router) {
           <div><div class="k">Preț achiziție</div>${money(produs.pret_achizitie)}</div>
           <div><div class="k">TVA</div>${esc(produs.cota_tva)}%</div>
           <div><div class="k">Stoc minim</div>${esc(produs.stoc_minim)} ${esc(produs.unitate_masura)}</div>
+          ${String(produs.greutate_neta || "").trim() ? `<div><div class="k">Greutate netă</div>${esc(produs.greutate_neta)}</div>` : ""}
+          ${String(produs.greutate_bruta || "").trim() ? `<div><div class="k">Greutate brută</div>${esc(produs.greutate_bruta)}</div>` : ""}
+          ${String(produs.mod_ambalare || "").trim() ? `<div><div class="k">Mod ambalare</div>${esc(produs.mod_ambalare)}</div>` : ""}
           <div><div class="k">Stoc CT-Park</div>${cantStoc(stoc.ctPark)}</div>
           <div><div class="k">Stoc fulfillment</div>${cantStoc(stoc.fulfillment)}</div>
           ${furnizor ? `<div><div class="k">Furnizor</div><a href="/parteneri/${Number(furnizor.id)}">${esc(furnizor.nume)}</a></div>` : ""}
