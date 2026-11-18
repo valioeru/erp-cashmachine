@@ -921,7 +921,7 @@ const CAMPURI_FISA = [
   { name: "mod_ambalare", label: "Mod ambalare", datalist: true, ajutor: "Scrie liber (ex. 6 role/cutie) sau alege din cele deja introduse." },
   { name: "pret_achizitie", label: "Preț achiziție", type: "number", default: 0, ajutor: "Pentru marfa pe care o cumpărăm." },
   { name: "pret_productie", label: "Cost de producție", type: "number", ajutor: "Pentru ce facem noi. Lasă gol dacă produsul va avea rețetă — atunci costul se ia din ea." },
-  { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", ajutor: "Lasă gol ca să folosească adaosul implicit al firmei." },
+  { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", ajutor: "Lasă gol ca să folosească adaosul categoriei, iar dacă n-are unul, pe cel implicit al firmei." },
   { name: "pret_minim", label: "Preț minim de vânzare", type: "number", ajutor: "Sub prețul ăsta pagina te avertizează. Lasă gol dacă n-ai o limită." },
   { name: "pret_vanzare", label: "Preț vânzare (fără TVA)", type: "number", default: 0, ajutor: "Prețul folosit efectiv în oferte și facturi." },
   { name: "cota_tva", label: "Cotă TVA (%)", type: "number", default: 21 },

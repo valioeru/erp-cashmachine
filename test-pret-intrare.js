@@ -561,7 +561,7 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   bine("depozitul are coloana „Preț intrare”, după „În stoc”", />În stoc<[\s\S]{0,300}>Preț intrare<[\s\S]{0,300}>Disponibil</.test(pag));
   bine("…cu prețul pe unitate, valoarea și ce n-are preț", /0,4169 lei \/ buc/.test(pag) && /valoare 5\.002,85 lei/.test(pag) && /100 buc fără preț — <a href="\/stocuri\/ct-park\/paleti\?fara_pret=1&amp;q=TPI%20Eticheta%20marunta">pune-l<\/a>/.test(pag), (pag.match(/lei \/ buc[\s\S]{0,400}/) || [""])[0]);
   bine("…cardul cu valoarea stocului", pag.includes('id="card-valoare"') && /Valoarea stocului/.test(pag));
-  bine("…și tabelul are cheia lui de filtre", pag.includes('data-filtre="stoc-la-zi-pret"'));
+  bine("…și tabelul are cheia lui de filtre", pag.includes('data-filtre="stoc-la-zi-pret-pv"'));
   // PG: 600 buc la 0,5, 50 buc la 9 și 50 buc (pe paletul cu două produse) fără preț.
   pag = (await cer("get", "/stocuri/ct-park/stoc", DEP, { query: { q: `${PREFIX} Plic` } })).corp;
   bine("media ține seama de cât e la fiecare preț: (600 × 0,5 + 50 × 9) / 650", /1,15 lei \/ buc/.test(pag) && /valoare 750,00 lei/.test(pag) && /50 buc fără preț/.test(pag), (pag.match(/lei \/ buc[\s\S]{0,300}/) || [""])[0]);
@@ -570,7 +570,13 @@ const coduri = (html) => (fara(html).match(new RegExp(`${PREFIX}-PAL-\\d+`, "g")
   pag = (await cer("get", "/stocuri/ct-park/stoc", AGENT, { query: { q: `${PREFIX} Eticheta` } })).corp;
   bine("agentul vede produsul și stocul…", pag.includes(`${PREFIX} Eticheta marunta`) && /12\.100 buc/.test(pag));
   bine("…dar nici coloana, nici prețul, nici valoarea", !pag.includes("Preț intrare") && !/0,4169/.test(pag) && !/5\.002,85/.test(pag) && !pag.includes("card-valoare") && !pag.includes("fără preț"), (pag.match(/Preț intrare[\s\S]{0,100}|0,4169[\s\S]{0,60}|fără preț[\s\S]{0,60}/) || [""])[0]);
-  bine("…iar tabelul lui rămâne cu cheia veche de filtre", pag.includes('data-filtre="stoc-la-zi"'));
+  bine("…iar tabelul lui rămâne cu cheia veche de filtre", pag.includes('data-filtre="stoc-la-zi-pv"'));
+  // Prețul de vânzare din nomenclator îl vede și agentul (Vali, 18.11.2026:
+  // „să afișeze prețul de vânzare inclusiv în stoc la zi, pe o coloană nouă").
+  bine("…dar are coloana „Preț vânzare”, după „Disponibil”", />Disponibil<[\s\S]{0,400}>Preț vânzare<[\s\S]{0,400}>Stare</.test(pag));
+  q(`UPDATE produse SET pret_vanzare = 0.75 WHERE id = ${PH}`);
+  pag = (await cer("get", "/stocuri/ct-park/stoc", AGENT, { query: { q: `${PREFIX} Eticheta` } })).corp;
+  bine("…cu prețul de vânzare al produsului, pe unitate", /0,75 lei \/ buc/.test(pag), (pag.match(/Disponibil[\s\S]{0,200}/) || [""])[0]);
 
   // Pentru o privire la pagini: SALVEAZA_PAGINI=/un/dosar
   if (process.env.SALVEAZA_PAGINI) {

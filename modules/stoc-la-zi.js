@@ -104,8 +104,17 @@ function textRezervare(z, um) {
 const pretRo = (v) => (Number(v) || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: (Number(v) || 0) < 1 ? 4 : 2 });
 const leiRo = (v) => (Number(v) || 0).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " lei";
 
-function celule(r, ctx, inapoi, poateRez, vedeTot) {
+function celule(r, ctx, inapoi, poateRez, vedeTot, preturi) {
   const user = ctx.user;
+  // Prețul de vânzare din nomenclator (Vali, 18.11.2026: „să afișeze prețul
+  // de vânzare inclusiv în stoc la zi, pe o coloană nouă"). Îl vede oricine
+  // vede pagina — agentul vinde din ea. Dedesubt, prețul de listă calculat
+  // din cost și adaos (al produsului, al categoriei sau cel implicit).
+  const pv = (preturi && r.produs_id && preturi.get(Number(r.produs_id))) || null;
+  const pretVanzare = pv
+    ? (pv.vanzare > 0 ? `${pretRo(pv.vanzare)} lei${pv.um ? " / " + esc(pv.um) : ""}` : "—") +
+      (pv.lista > 0 ? mic(`listă ${pretRo(pv.lista)} lei (adaos ${pv.adaos}%)`) : "")
+    : "—";
   // Denumirea lungă se rupe pe 2–3 rânduri (lib/render.js, numeLung).
   const produs =
     numeLung(esc(r.denumire)) +
@@ -231,6 +240,7 @@ function celule(r, ctx, inapoi, poateRez, vedeTot) {
     inStoc + alte,
     ...(vedeTot ? [pret] : []),
     disponibil + (actiune ? `<div style="margin-top:4px">${actiune}</div>` : ""),
+    pretVanzare,
     stare,
     promis,
     rezervat,
@@ -370,8 +380,33 @@ async function pagina(ctx, opt) {
       </script>`;
   }
 
-  const cap = ["Produs", "Categorie nomenclator", "Categorie", "În stoc", ...(vedeTot ? ["Preț intrare"] : []), "Disponibil", "Stare", "Promis pe comenzi", "Rezervat", "Urmează să intre", "Sosire"];
-  const randuri = vizibile.map((r) => celule(r, ctx, inapoi, poateRez, vedeTot));
+  // Prețurile de vânzare ale produselor de pe pagină, dintr-o singură citire.
+  const preturi = new Map();
+  try {
+    const PR = require("./produse");
+    const implicit = await PR.adaosImplicit();
+    const peCat = await PR.adaosuriCategorii();
+    const ids = [...new Set(vizibile.map((r) => Number(r.produs_id)).filter((x) => x > 0))];
+    if (ids.length) {
+      const prod = await db
+        .prepare(`SELECT id, unitate_masura, categorie, pret_vanzare, pret_achizitie, pret_productie, cost_reteta, adaos_lista FROM produse WHERE id IN (${ids.join(",")})`)
+        .all();
+      for (const p of prod) {
+        const lista = PR.pretLista(p, implicit, peCat);
+        preturi.set(Number(p.id), {
+          vanzare: Number(p.pret_vanzare) || 0,
+          lista: lista == null ? 0 : lista,
+          adaos: PR.adaosProdus(p, implicit, peCat).valoare,
+          um: String(p.unitate_masura || "").trim(),
+        });
+      }
+    }
+  } catch (e) {
+    console.error("[stoc-la-zi] preturi de vanzare:", e.message);
+  }
+
+  const cap = ["Produs", "Categorie nomenclator", "Categorie", "În stoc", ...(vedeTot ? ["Preț intrare"] : []), "Disponibil", "Preț vânzare", "Stare", "Promis pe comenzi", "Rezervat", "Urmează să intre", "Sosire"];
+  const randuri = vizibile.map((r) => celule(r, ctx, inapoi, poateRez, vedeTot, preturi));
   // Lista din care se alege categoria din nomenclator: cele folosite deja.
   const listaCategorii = poateCategorii(user)
     ? `<datalist id="categorii-nomenclator">${(await SC.categoriiNomenclator()).map((c) => `<option value="${esc(c)}">`).join("")}</datalist>`
@@ -427,7 +462,8 @@ async function pagina(ctx, opt) {
           // valorile greșite de dinainte ar fi ascuns tot tabelul.
           // Cu coloana de preț, tabelul are altă cheie: filtrele ținute minte
           // merg pe numărul coloanei, iar o coloană în plus le-ar muta.
-          `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: vedeTot ? "stoc-la-zi-pret" : "stoc-la-zi" })}</div>`
+          // La fel cu „Preț vânzare" (18.11.2026): cheile au primit „-pv".
+          `${listaCategorii}<div class="tabel-scroll">${table(cap, randuri, { filtre: vedeTot ? "stoc-la-zi-pret-pv" : "stoc-la-zi-pv" })}</div>`
         : `<p style="margin-top:18px">${cauta || tip || arata ? "Nimic nu se potrivește cu ce ai ales." : "Depozitul e gol și nu urmează să intre nimic."}</p>`
     }
     ${scriptClienti}

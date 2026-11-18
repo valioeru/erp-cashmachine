@@ -97,17 +97,52 @@ function costBaza(p) {
   return { valoare: 0, sursa: null };
 }
 
-function adaosProdus(p, implicit) {
+// ADAOSUL se ia în trei trepte (Vali, 18.11.2026: „adaos să fie pus pe
+// categorie de produse"):
+//   1. adaosul propriu al produsului (adaos_lista), dacă e scris;
+//   2. adaosul categoriei lui (tabela adaos_categorii), dacă are unul;
+//   3. adaosul implicit al firmei.
+// `peCategorie` e Map-ul întors de adaosuriCategorii(); fără el, rămân
+// treptele 1 și 3, ca înainte.
+const cheieCategorie = (c) => String(c == null ? "" : c).trim().toLowerCase();
+
+function adaosProdus(p, implicit, peCategorie) {
   const a = Number((p && p.adaos_lista) != null ? p.adaos_lista : NaN);
-  if (Number.isFinite(a) && a >= 0) return { valoare: a, propriu: true };
-  return { valoare: Number(implicit) || 0, propriu: false };
+  if (Number.isFinite(a) && a >= 0) return { valoare: a, propriu: true, sursa: "propriu" };
+  const k = cheieCategorie(p && p.categorie);
+  if (k && peCategorie && peCategorie.has(k)) return { valoare: peCategorie.get(k), propriu: false, sursa: "categorie" };
+  return { valoare: Number(implicit) || 0, propriu: false, sursa: "implicit" };
 }
 
-function pretLista(p, implicit) {
+function pretLista(p, implicit, peCategorie) {
   const c = costBaza(p);
   if (!(c.valoare > 0)) return null;
-  const a = adaosProdus(p, implicit);
+  const a = adaosProdus(p, implicit, peCategorie);
   return c.valoare * (1 + a.valoare / 100);
+}
+
+// De unde vine adaosul, în cuvinte, pentru lângă cifră.
+const sursaAdaos = (a) => (a.sursa === "propriu" ? "" : a.sursa === "categorie" ? "pe categorie" : "implicit");
+
+// Adaosurile scrise pe categorii: Map „categorie cu litere mici" → procent.
+async function adaosuriCategorii() {
+  const r = await db.prepare("SELECT categorie, adaos FROM adaos_categorii").all().catch(() => []);
+  const m = new Map();
+  for (const x of r) {
+    const v = Number(x.adaos);
+    const k = cheieCategorie(x.categorie);
+    if (k && Number.isFinite(v) && v >= 0) m.set(k, v);
+  }
+  return m;
+}
+
+// Un procent scris de om: gol = fără adaos pe categorie (null); altfel un
+// număr între 0 și 1000. Ce nu se poate citi întoarce undefined.
+function procentScris(brut) {
+  const t = String(brut == null ? "" : brut).trim().replace(/\s+/g, "").replace(",", ".").replace(/%$/, "");
+  if (t === "") return null;
+  const v = Number(t);
+  return Number.isFinite(v) && v >= 0 && v < 1000 ? v : undefined;
 }
 
 // Marja rezultată din preț, ca procent din prețul de vânzare. E cealaltă
@@ -254,6 +289,7 @@ function register(router) {
   // Adaosul implicit se citește o dată per cerere și se ține aici, ca să nu
   // facem o interogare pentru fiecare dintre cele peste patru mii de rânduri.
   let adaosCurent = ADAOS_IMPLICIT;
+  let adaosCat = new Map();
   let bnrCurent = {};
 
   registerCrud(router, {
@@ -270,6 +306,7 @@ function register(router) {
     ordine: "denumire",
     inainte: async () => {
       adaosCurent = await adaosImplicit();
+      adaosCat = await adaosuriCategorii();
       // Cursul BNR al zilei, pentru trecerea unui preț din valută în lei (mai jos).
       bnrCurent = await require("../lib/pret-valuta").bnrAzi(require("./curs").laZiua).catch(() => ({}));
     },
@@ -298,7 +335,49 @@ function register(router) {
             Preț listă = cost × (1 + adaos/100). Se aplică produselor care n-au adaos propriu.
           </span>
         </form>`;
-      return tva + setare;
+      // Adaosul pe categorii: câte un procent pentru fiecare categorie din
+      // nomenclator. Gol = categoria merge pe adaosul implicit.
+      const eAdminAici = Boolean(ctx && ctx.user && ctx.user.rol === "admin");
+      const cat = await db
+        .prepare("SELECT categorie AS c, COUNT(*) AS n FROM produse WHERE categorie IS NOT NULL AND TRIM(categorie) <> '' GROUP BY categorie ORDER BY 1")
+        .all()
+        .catch(() => []);
+      // Aceeași categorie scrisă cu litere mari și mici e una singură.
+      const peCheie = new Map();
+      for (const x of cat) {
+        const k = cheieCategorie(x.c);
+        const e = peCheie.get(k);
+        if (e) e.n += Number(x.n) || 0;
+        else peCheie.set(k, { nume: String(x.c).trim(), n: Number(x.n) || 0 });
+      }
+      const randuriCat = [...peCheie.entries()];
+      const cuAdaos = randuriCat.filter(([k]) => adaosCat.has(k)).length;
+      const peCategorii = randuriCat.length
+        ? `<details class="adaos-categorii" style="margin-bottom:12px"${ctx && ctx.query && ctx.query.adaos_cat ? " open" : ""}>
+            <summary style="cursor:pointer;font-size:14px"><strong>Adaos pe categorii</strong>
+              <span style="font-size:12px;color:var(--text-muted)">— ${cuAdaos} din ${randuriCat.length} categorii au adaosul lor; restul merg pe cel implicit (${esc(adaosCurent)}%)</span></summary>
+            <form method="post" action="/produse/adaos-categorii" style="margin-top:8px">
+              <input type="hidden" name="n" value="${randuriCat.length}">
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 16px;max-width:1100px">
+                ${randuriCat
+                  .map(
+                    ([k, x], i) => `<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:0">
+                      <span style="flex:1 1 auto;min-width:0">${esc(x.nume)} <span style="color:var(--text-muted);font-size:11px">(${x.n})</span></span>
+                      <input type="hidden" name="cat_${i}" value="${esc(x.nume)}">
+                      <input type="text" inputmode="decimal" name="adaos_${i}" value="${adaosCat.has(k) ? esc(adaosCat.get(k)) : ""}" placeholder="${esc(adaosCurent)}" style="width:70px"${eAdminAici ? "" : " disabled"}> %
+                    </label>`
+                  )
+                  .join("")}
+              </div>
+              <div style="margin-top:8px;font-size:12px;color:var(--text-muted)">
+                Ordinea: adaosul propriu al produsului, apoi al categoriei, apoi cel implicit. Lasă gol ca o categorie să meargă pe cel implicit.
+                Schimbă prețul de listă calculat; prețul de vânzare scris pe produs rămâne cum e.
+              </div>
+              ${eAdminAici ? '<button class="btn small" type="submit" style="margin-top:6px">Salvează adaosurile pe categorii</button>' : ""}
+            </form>
+          </details>`
+        : "";
+      return tva + setare + peCategorii;
     },
     fields: [
       {
@@ -328,16 +407,16 @@ function register(router) {
           return c.sursa ? `${money(c.valoare)} <span style="font-weight:400;color:var(--text-muted)">(${c.sursa})</span>` : "necunoscut";
         },
       },
-      { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", step: "0.1", ajutor: "Lasă gol ca să folosească adaosul implicit al firmei." },
+      { name: "adaos_lista", label: "Adaos propriu (%)", type: "number", step: "0.1", ajutor: "Lasă gol ca să folosească adaosul categoriei, iar dacă n-are unul, pe cel implicit al firmei." },
       {
         name: "_lista",
         label: "Preț de listă (calculat)",
         type: "calculat",
         calc: (r) => {
-          const pl = pretLista(r, adaosCurent);
+          const pl = pretLista(r, adaosCurent, adaosCat);
           if (pl == null) return 'necunoscut — produsul n-are cost';
-          const a = adaosProdus(r, adaosCurent);
-          return `${money(pl)} <span style="font-weight:400;color:var(--text-muted)">(adaos ${a.valoare}%${a.propriu ? "" : ", implicit"})</span>`;
+          const a = adaosProdus(r, adaosCurent, adaosCat);
+          return `${money(pl)} <span style="font-weight:400;color:var(--text-muted)">(adaos ${a.valoare}%${a.propriu ? "" : ", " + sursaAdaos(a)})</span>`;
         },
       },
       { name: "pret_minim", label: "Preț minim de vânzare", type: "number", step: "0.0001", ajutor: "Sub prețul ăsta pagina te avertizează. Lasă gol dacă n-ai o limită." },
@@ -365,15 +444,15 @@ function register(router) {
         key: "_adaos",
         label: "Adaos",
         render: (r) => {
-          const a = adaosProdus(r, adaosCurent);
-          return `${a.valoare}%${a.propriu ? "" : '<br><span style="font-size:11px;color:var(--text-muted)">implicit</span>'}`;
+          const a = adaosProdus(r, adaosCurent, adaosCat);
+          return `${a.valoare}%${a.propriu ? "" : `<br><span style="font-size:11px;color:var(--text-muted)">${sursaAdaos(a)}</span>`}`;
         },
       },
       {
         key: "_lista",
         label: "Preț listă",
         render: (r) => {
-          const pl = pretLista(r, adaosCurent);
+          const pl = pretLista(r, adaosCurent, adaosCat);
           if (pl == null) return '<span style="color:var(--text-muted)">—</span>';
           const pv = Number(r.pret_vanzare) || 0;
           const sub = pv > 0 && pv < pl * 0.995;
@@ -413,6 +492,25 @@ function register(router) {
     const v = Number(String((ctx.body && ctx.body.adaos) || "").replace(",", "."));
     if (Number.isFinite(v) && v >= 0 && v < 1000) await scrieSetare("adaos_lista_implicit", v);
     return redirect(ctx.res, "/produse");
+  });
+
+  // Adaosurile pe categorii, toate dintr-un formular: cat_<i> + adaos_<i>.
+  // Gol șterge adaosul categoriei (merge pe cel implicit); o valoare care nu
+  // se poate citi nu schimbă nimic la categoria ei.
+  router.post("/produse/adaos-categorii", async (ctx) => {
+    if (!ctx.user || ctx.user.rol !== "admin") return redirect(ctx.res, "/produse");
+    const b = ctx.body || {};
+    const n = Math.min(Math.max(parseInt(b.n, 10) || 0, 0), 2000);
+    const acum = new Date().toISOString();
+    for (let i = 0; i < n; i++) {
+      const nume = String(b["cat_" + i] == null ? "" : b["cat_" + i]).trim();
+      if (!nume) continue;
+      const v = procentScris(b["adaos_" + i]);
+      if (v === undefined) continue;
+      await db.prepare("DELETE FROM adaos_categorii WHERE LOWER(TRIM(categorie)) = ?").run(cheieCategorie(nume));
+      if (v !== null) await db.prepare("INSERT INTO adaos_categorii (categorie, adaos, actualizat_la) VALUES (?, ?, ?)").run(nume, v, acum);
+    }
+    return redirect(ctx.res, "/produse?adaos_cat=1");
   });
 
   // ---- produsul scris direct pe comandă ---------------------------------
@@ -891,4 +989,7 @@ function register(router) {
   });
 }
 
-module.exports = { register, poateConfirma, verificaCodul, produsulCuCodul, trecereDinValuta };
+module.exports = {
+  register, poateConfirma, verificaCodul, produsulCuCodul, trecereDinValuta,
+  costBaza, adaosProdus, pretLista, adaosImplicit, adaosuriCategorii, procentScris, cheieCategorie,
+};
