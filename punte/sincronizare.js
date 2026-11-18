@@ -461,7 +461,7 @@
     cadru.src = "/core/configurare/serii/";
     document.body.appendChild(cadru);
     try {
-      const randuri = await asteapta(
+      const citit = await asteapta(
         () => {
           let d = null;
           try {
@@ -470,15 +470,24 @@
             d = null;
           }
           const r = d ? S.seriiDin(d) : [];
-          return r.length ? r : null;
+          // Firma se citește din pagina de serii însăși, nu din fila de față:
+          // dacă cineva a schimbat firma în SmartBill, fila veche încă arată
+          // firma dinainte, iar seriile citite sunt ale celei noi (18.11.2026:
+          // fila arăta CASH MACHINE, seriile erau ale altei firme).
+          return r.length ? { randuri: r, firma: S.firmaDin(d) } : null;
         },
         "Configurare → Serii n-a arătat seriile de proforme și avize în timp util.",
         20000
       );
+      const randuri = citit.randuri;
+      if (!/CASH\s*MACHINE/i.test(String(citit.firma || ""))) {
+        log("serii: netrimise, SmartBill e pe altă firmă", { firma: String(citit.firma || "necunoscută").slice(0, 60) });
+        return 0;
+      }
       const r = await fetch(ERP + "/api/ingest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tip: "serii", sursa: `sincronizare ${S.firma()} — serii`, randuri }),
+        body: JSON.stringify({ tip: "serii", sursa: `sincronizare ${citit.firma} — serii`, randuri }),
       });
       const t = await r.text();
       let j = null;
