@@ -414,9 +414,18 @@ function register(router) {
     // Termenul de plată: doar un număr întreg de zile. Câmpul generic de
     // număr ar fi primit și „30,5" sau „abc" (care devenea gol, în tăcere),
     // deci se verifică textul scris, nu valoarea deja convertită.
-    valideaza: async (valori, { ctx }) => {
-      const t = TP.citeste(ctx && ctx.body ? ctx.body.termen_plata_zile : valori.termen_plata_zile);
-      return t.ok ? null : esc(t.eroare);
+    valideaza: async (valori, { ctx, id }) => {
+      const scrisTermen = ctx && ctx.body ? ctx.body.termen_plata_zile : valori.termen_plata_zile;
+      const t = TP.citeste(scrisTermen);
+      if (!t.ok) return esc(t.eroare);
+      // Partenerul NOU se scrie întreg (Vali, 18.11.2026): nume, CUI, localitate,
+      // adresă, telefon, email, persoană de contact și termen de plată. Cei
+      // de dinainte se pot modifica fără să li se ceară tot ce le lipsește.
+      if (id === null || id === undefined) {
+        const lipsa = require("../lib/client-nou").lipsuri(Object.assign({}, valori, { termen_plata_zile: scrisTermen }));
+        if (lipsa.length) return esc(`La un partener nou mai trebuie: ${lipsa.join(", ")}.`);
+      }
+      return null;
     },
     listColumns: [
       { key: "nume", label: "Nume", render: (r) => `<a href="/parteneri/${r.id}">${esc(r.nume)}</a>` },
@@ -444,7 +453,11 @@ function register(router) {
 
     const CN = require("../lib/client-nou");
     const v = CN.verifica(ctx.body || {});
-    if (!v.ok) return raspunde(400, { gresite: v.gresite });
+    // Întâi se caută firma: dacă există deja, nu i se mai cer agentului
+    // localitatea, adresa și restul — acelea se cer doar unui partener NOU.
+    // O greșeală adevărată (CUI stricat, email stricat) oprește oricum.
+    const doarLipsuri = v.gresite.every((g) => /lipsește\.$/.test(g));
+    if (!v.ok && !(doarLipsuri && v.date.nume && v.date.cui)) return raspunde(400, { gresite: v.gresite });
 
     // Căutarea dublurii se face pe TOȚI partenerii, nu doar pe clienți: un
     // furnizor poate deveni și client, iar a doua fișă pe același CUI ar rupe
@@ -468,11 +481,14 @@ function register(router) {
       });
     }
 
+    // Firma nu există: e un partener nou, deci se scrie întreg.
+    if (!v.ok) return raspunde(400, { gresite: v.gresite });
+
     const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
     const ins = await db
       .prepare(
-        `INSERT INTO parteneri (tip, nume, cui, email, telefon, persoana_contact, adresa, stare, sursa, agent_id, creat_la)
-         VALUES ('client', ?, ?, ?, ?, ?, ?, 'client_activ', ?, ?, ?) RETURNING id`
+        `INSERT INTO parteneri (tip, nume, cui, email, telefon, persoana_contact, adresa, stare, sursa, agent_id, creat_la, localitate, termen_plata_zile)
+         VALUES ('client', ?, ?, ?, ?, ?, ?, 'client_activ', ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         v.date.nume,
@@ -483,7 +499,9 @@ function register(router) {
         v.date.adresa || null,
         "comandă",
         ctx.user.id,
-        acum
+        acum,
+        v.date.localitate || null,
+        v.date.termen_plata_zile === "" || v.date.termen_plata_zile == null ? null : Number(v.date.termen_plata_zile)
       )
       .catch(() => null);
     if (!ins) return raspunde(500, { gresite: ["Nu am putut scrie clientul. Încearcă din nou."] });

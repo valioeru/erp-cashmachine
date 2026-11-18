@@ -363,7 +363,8 @@ function register(router) {
         ["Nr.", "Client", "Cerut pe", "Status", "Acoperire stoc", "Livrare parțială", "Valoare", ""],
         comenzi.map((c) => [
           esc(c.numar || "#" + c.id),
-          esc(c.partener_nume),
+          // Sub client, cum se face livrarea (lib/livrare-mod.js): depozitul vede din listă cine vine după marfă.
+          `${esc(c.partener_nume)}<div data-livrare-mod-depozit style="font-size:12px;color:var(--text-muted)">${esc(require("../lib/livrare-mod").text(c))}</div>`,
           esc(c.data_livrare_ceruta || "—"),
           stari.eticheta(c.status),
           stareStoc(c.id),
