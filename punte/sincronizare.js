@@ -422,7 +422,76 @@
       }
     }
     log("facturi: citite", { citite: toate.length, din_fereastra: ales.noi, mai_vechi_cu_starea_schimbata: ales.vechi });
+    // Odată cu facturile pleacă și numerele curente ale seriilor de proforme și
+    // avize — așa le prinde fiecare rulare de 30 de minute, fără alt pas. Doar
+    // pe Cash Machine: seriile ERP-ului sunt ale ei. O cădere aici nu strică
+    // facturile: rămâne scrisă în jurnal.
+    if (/CASH\s*MACHINE/i.test(String(firma || ""))) {
+      try {
+        await S.serii();
+      } catch (e) {
+        log("serii: EȘUAT", { motiv: String((e && e.message) || e).slice(0, 200) });
+      }
+    }
     return ales.randuri.length;
+  };
+
+  // ---- numerele curente ale seriilor (proforme, avize) ---------------------
+  //
+  // Vali, 18.11.2026: proformele și avizele se emit o vreme și din SmartBill,
+  // și din ERP, pe aceeași serie. ERP-ul trebuie să sară peste ce s-a emis
+  // aici. Pagina Configurare → Serii arată „Număr curent" — următorul număr —
+  // pentru fiecare serie; tabelul se umple din JavaScript, deci se citește
+  // dintr-un cadru ascuns, după ce s-a desenat. Doar se citește.
+  S.seriiDin = function (doc) {
+    const out = [];
+    for (const tr of doc.querySelectorAll("table tr")) {
+      const c = [...tr.querySelectorAll("td")].map((x) => String(x.innerText || x.textContent || "").replace(/\s+/g, " ").trim());
+      if (c.length < 5) continue;
+      if (!/^(Proforma|Proformă|Aviz)$/i.test(c[0])) continue;
+      if (!c[2] || !/^\d+$/.test(c[4])) continue;
+      out.push({ tip: c[0], serie: c[2], urmator: c[4] });
+    }
+    return out;
+  };
+
+  S.serii = async function () {
+    const cadru = document.createElement("iframe");
+    cadru.style.cssText = "position:fixed;left:-9999px;top:0;width:1200px;height:800px;border:0";
+    cadru.src = "/core/configurare/serii/";
+    document.body.appendChild(cadru);
+    try {
+      const randuri = await asteapta(
+        () => {
+          let d = null;
+          try {
+            d = cadru.contentDocument;
+          } catch (e) {
+            d = null;
+          }
+          const r = d ? S.seriiDin(d) : [];
+          return r.length ? r : null;
+        },
+        "Configurare → Serii n-a arătat seriile de proforme și avize în timp util.",
+        20000
+      );
+      const r = await fetch(ERP + "/api/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tip: "serii", sursa: `sincronizare ${S.firma()} — serii`, randuri }),
+      });
+      const t = await r.text();
+      let j = null;
+      try {
+        j = JSON.parse(t);
+      } catch (e) {
+        j = null;
+      }
+      log("serii: trimise", { serii: randuri.map((x) => `${x.tip} ${x.serie} ${x.urmator}`).join(", "), urcate: j && j.urcate, raspuns: j && j.ok ? undefined : t.slice(0, 200) });
+      return randuri.length;
+    } finally {
+      cadru.remove();
+    }
   };
 
   // ---- încasări -----------------------------------------------------------
