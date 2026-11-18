@@ -135,7 +135,10 @@ const curat = (h) => String(h).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").tri
   egal("linia fără cost nu intră: marja se socotește pe restul și se spune câte lipsesc", [r1(mixt), mixt.faraCost, Math.round(mixt.acoperire * 100)], [10, 1, 67]);
   egal("sub jumătate din valoare cu cost: marja nu se spune", [r1(MJ.marja([{ cantitate: 1, pret_unitar: 40, pret_achizitie: 30 }, { cantitate: 1, pret_unitar: 60 }], 1)), r1(MJ.marja([{ cantitate: 1, pret_unitar: 40 }, { cantitate: 1, pret_unitar: 60 }], 1))], ["un produs n-are cost", "2 produse n-au cost"]);
   egal("linia vândută în altă unitate decât produsul (kg față de rolă) nu se socotește; aceeași unitate scrisă altfel, da", [r1(MJ.marja([{ cantitate: 1, pret_unitar: 10, um: "kg", produs_um: "rola", pret_achizitie: 5 }], 1)), r1(MJ.marja([{ cantitate: 1, pret_unitar: 10, um: "BUC.", produs_um: "buc", pret_achizitie: 5 }], 1)), r1(MJ.marja([{ cantitate: 1, pret_unitar: 10, um: "", produs_um: "buc", pret_achizitie: 5 }], 1))], ["un produs n-are cost", 50, 50]);
-  egal("costul de peste cinci ori vânzarea e greșeală de date, nu marjă; pierderea adevărată se vede", [r1(MJ.marja([{ cantitate: 100, pret_unitar: 1, pret_achizitie: 1720 }], 1)), r1(MJ.marja([{ cantitate: 1000, pret_unitar: 10, pret_achizitie: 12 }], 1))], ["un produs n-are cost", -20]);
+  egal("costul de peste o dată și jumătate vânzarea e greșeală de date (cost pe altă unitate), nu marjă, și o spune; pierderea adevărată se vede, până la hotar",
+    [r1(MJ.marja([{ cantitate: 100, pret_unitar: 1, pret_achizitie: 1720 }], 1)), r1(MJ.marja([{ cantitate: 1, pret_unitar: 10, pret_achizitie: 15.1 }], 1)), r1(MJ.marja([{ cantitate: 1, pret_unitar: 10, pret_achizitie: 15 }], 1)), r1(MJ.marja([{ cantitate: 1000, pret_unitar: 10, pret_achizitie: 12 }], 1))],
+    ["costul de pe produs e de necrezut față de prețul vândut: verifică unitatea de măsură și costul din fișa produsului", "costul de pe produs e de necrezut față de prețul vândut: verifică unitatea de măsură și costul din fișa produsului", -50, -20]);
+  egal("un produs fără cost și unul cu cost de necrezut: se spune că n-au cost", r1(MJ.marja([{ cantitate: 1, pret_unitar: 10 }, { cantitate: 1, pret_unitar: 10, pret_achizitie: 99 }], 1)), "2 produse n-au cost");
 
   console.log("\n── Lista de comenzi ─────────────────────────────────────────");
   curata();
