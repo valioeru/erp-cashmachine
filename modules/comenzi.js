@@ -1927,6 +1927,10 @@ function register(router) {
       .prepare("SELECT id, serie, numar, status FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE comanda_id = ? ORDER BY id")
       .all(comanda.id);
     const factura = facturi[0] || null;
+    // Proformele comenzii și dacă omul are voie să emită una (modules/proforme.js).
+    const PFM = require("./proforme");
+    const proforme = await PFM.aleComenzii(comanda.id);
+    const poateProforma = await PFM.poateEmite(ctx.user, comanda.id).catch(() => false);
 
     // Cum stă comanda față de stoc — aceeași socoteală pe care o vede și
     // depozitul, ca agentul să nu întrebe pe telefon „a venit marfa?”.
@@ -2020,6 +2024,12 @@ function register(router) {
 
     const body = `
       ${baraStatus(comanda, { cuProductie: productie.length > 0 || aprovizionari.some((a) => a.sursa === "productie") })}
+      ${
+        ctx.query.eroare_proforma
+          ? `<div class="detail-box" data-eroare-proforma style="border-left:4px solid var(--danger,#b42318);max-width:820px;margin-bottom:12px">
+               <strong style="color:var(--danger,#b42318)">Proforma nu s-a emis.</strong> ${esc(String(ctx.query.eroare_proforma))}</div>`
+          : ""
+      }
       ${
         intarziere
           ? `<div class="detail-box intarziere-plata" style="border-left:4px solid var(--danger,#b42318);max-width:820px;margin-bottom:12px">
@@ -2239,6 +2249,19 @@ function register(router) {
               ? `<form method="post" action="/comenzi/${comanda.id}/factureaza" class="inline-form"><button type="submit" class="btn">Facturează</button></form>`
               : `<span style="color:var(--text-muted);font-size:13px">Facturarea se deblochează la statusul „în stoc depozit”.</span>`
         }
+        ${
+          poateProforma && comanda.status !== "anulata" && linii.length
+            ? `<form method="post" action="/comenzi/${comanda.id}/proforma" class="inline-form"><button type="submit" class="btn secondary" data-emite-proforma>${
+                proforme.some((f) => Number(f.anulat) !== 1) ? "Emite proformă din nou" : "Emite proformă"
+              }</button></form>`
+            : ""
+        }
+        ${proforme
+          .map(
+            (f) =>
+              `<a href="/proforme/${f.id}" target="_blank" class="btn secondary" data-proforma="${f.id}">Proforma ${esc(f.serie)} ${esc(String(f.numar))}${Number(f.anulat) === 1 ? " (anulată)" : ""}</a>`
+          )
+          .join(" ")}
         ${
           vedeEtichete
             ? `<a class="btn secondary" href="/productie/etichete/comanda/${comanda.id}">Etichete produs${
