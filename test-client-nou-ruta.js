@@ -32,7 +32,7 @@ function fals(sql) {
       if (/INSERT INTO parteneri/i.test(s)) {
         const id = ++urm;
         BAZA.parteneri.push({ id, tip: "client", nume: a[0], cui: a[1], email: a[2], telefon: a[3],
-          persoana_contact: a[4], adresa: a[5], sursa: a[6], agent_id: a[7] });
+          persoana_contact: a[4], adresa: a[5], sursa: a[6], agent_id: a[7], localitate: a[9], termen_plata_zile: a[10] });
         return { lastInsertRowid: id };
       }
       if (/UPDATE parteneri SET tip = 'ambele'/i.test(s)) { const p = BAZA.parteneri.find(x=>x.id===Number(a[0])); if (p) p.tip = "ambele"; }
@@ -60,7 +60,7 @@ const AGENT = { id: 44, nume: "Agent Nou", rol: "agent" };
   const bine=(d,c,det)=>{ if(c) console.log("  ok     "+d); else { console.log("  ESEC   "+d+(det!==undefined?"  -> "+JSON.stringify(det).slice(0,200):"")); e++; } };
 
   console.log("Clientul chiar nou");
-  let r = await cheama({ nume:"Firma Chiar Noua SRL", cui:"RO1590082", telefon:"0722000000" }, AGENT);
+  let r = await cheama({ nume:"Firma Chiar Noua SRL", cui:"RO1590082", telefon:"0722000000", localitate:"Sector 2", adresa:"Str. Test 1", email:"a@firma.ro", persoana_contact:"Ana Test", termen_plata_zile:"45" }, AGENT);
   bine("se scrie", r.stare===200 && r.j.id>0, r.j);
   bine("NU e marcat ca reutilizat", r.j.reutilizat === false);
   const p = BAZA.parteneri.find(x=>x.id===r.j.id);
@@ -68,6 +68,9 @@ const AGENT = { id: 44, nume: "Agent Nou", rol: "agent" };
   bine("pe numele agentului care l-a scris", Number(p.agent_id)===44, p.agent_id);
   bine("cu sursa „comanda”", p.sursa==="comandă", p.sursa);
   bine("CUI-ul scris doar cu cifre", p.cui==="1590082", p.cui);
+  bine("cu localitatea si termenul de plata scrise", p.localitate==="Sector 2" && Number(p.termen_plata_zile)===45, [p.localitate, p.termen_plata_zile]);
+  const incomplet = await cheama({ nume:"Firma Fara Date SRL", cui:"RO5022670" }, AGENT);
+  bine("clientul nou fara localitate, adresa, telefon, email, contact si termen NU se scrie", incomplet.stare===400 && incomplet.j.gresite.length===6, incomplet.j);
 
   console.log("Dubluri");
   const cate = BAZA.parteneri.length;
@@ -77,6 +80,7 @@ const AGENT = { id: 44, nume: "Agent Nou", rol: "agent" };
   r = await cheama({ nume:"S.C. SAMEDAY COURIER S.R.L.", cui:"RO5022670" }, AGENT);
   bine("firma care exista se gaseste dupa nume", r.j.reutilizat===true && r.j.id===3, r.j);
   bine("si NU se scrie a doua oara", BAZA.parteneri.length===cate, BAZA.parteneri.length);
+  // firma gasita NU cere localitate, adresa si restul: acelea se cer doar unui partener nou (apelul de mai sus le-a lasat goale)
   bine("se spune ca e a altui agent", r.j.alAltuia===true, r.j);
   bine("si NU i se fura clientul colegului", BAZA.parteneri.find(x=>x.id===3).agent_id===22);
 
@@ -91,7 +95,7 @@ const AGENT = { id: 44, nume: "Agent Nou", rol: "agent" };
   r = await cheama({ nume:"Fara CUI SRL", cui:"" }, AGENT);
   bine("fara CUI nu trece", r.stare===400 && r.j.gresite.length>0, r.j);
   r = await cheama({ nume:"Cu CUI Gresit SRL", cui:"RO14399841" }, AGENT);
-  bine("un CUI cu o cifra gresita nu trece", r.stare===400 && /control/.test(r.j.gresite[0]), r.j);
+  bine("un CUI cu o cifra gresita nu trece", r.stare===400 && r.j.gresite.some(g=>/control/.test(g)), r.j);
   bine("si nimic n-a intrat in baza", BAZA.parteneri.length===c2, BAZA.parteneri.length);
   r = await cheama({ nume:"X SRL", cui:"RO1590082" }, null);
   bine("nelogat nu poate", r.stare===401);

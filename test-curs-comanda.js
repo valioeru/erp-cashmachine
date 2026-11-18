@@ -135,7 +135,7 @@ const comanda = (id) => q("SELECT * FROM comenzi WHERE id = ?", [id])[0];
 const istoric = (id) => q("SELECT ce, vechi, nou FROM comenzi_istoric WHERE comanda_id = ? ORDER BY id", [id]);
 const corp = (moneda, curs, extra) =>
   Object.assign(
-    { partener_id: String(CLIENT), numar: "", livrare_partiala: "nu", branding: "nepersonalizat", moneda, curs,
+    { partener_id: String(CLIENT), numar: "", livrare_partiala: "nu", livrare_mod: "intern", branding: "nepersonalizat", moneda, curs,
       "produs_id[]": [String(PRODUS)], "cantitate[]": ["100"], "pret_unitar[]": ["1,2345"], "um[]": ["buc"] },
     extra || {}
   );

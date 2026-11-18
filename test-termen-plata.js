@@ -147,7 +147,7 @@ const corpComanda = (partener, termen, extra) =>
     {
       partener_id: String(partener),
       numar: "",
-      livrare_partiala: "nu",
+      livrare_partiala: "nu", livrare_mod: "intern",
       branding: "nepersonalizat",
       moneda: "RON",
       termen_plata_zile: termen,
@@ -198,16 +198,19 @@ const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) ||
   console.log("\n── Fișa partenerului ────────────────────────────────────────");
   const formP = await cer("/parteneri/nou");
   are(formP.corp, 'name="termen_plata_zile"', "formularul de partener are câmpul");
-  let r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT NOU", termen_plata_zile: "45" } });
+  let r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT NOU", cui: "RO97405", localitate: "Sector 2", adresa: "Str. Test 1", telefon: "0722000000", email: "a@firma.ro", persoana_contact: "Ana Test", termen_plata_zile: "45" } });
   egal("partenerul nou se scrie cu termenul", nr((q("SELECT termen_plata_zile FROM parteneri WHERE nume = 'TP-TEST CLIENT NOU'")[0] || {}).termen_plata_zile), 45);
   r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT RAU", termen_plata_zile: "30,5" } });
   egal("„30,5” nu se salvează", q("SELECT id FROM parteneri WHERE nume = 'TP-TEST CLIENT RAU'").length, 0);
   egal("…și se spune de ce", [r.cod, r.corp.includes("număr întreg de zile")], [400, true]);
-  r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT GOL", termen_plata_zile: "" } });
-  // Două coloane, nu una: un rând cu o singură coloană NULL iese din psql ca
-  // rând gol și s-ar pierde la citire.
+  // Vali, 18.11.2026: partenerul NOU se scrie întreg — cu termen de plată cu tot.
+  r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT GOL", cui: "RO97406", localitate: "Sector 2", adresa: "Str. Test 1", telefon: "0722000000", email: "a@firma.ro", persoana_contact: "Ana Test", termen_plata_zile: "" } });
+  egal("partenerul nou fără termen de plată nu se salvează, iar formularul spune ce lipsește", [q("SELECT id FROM parteneri WHERE nume = 'TP-TEST CLIENT GOL'").length, r.cod, r.corp.includes("La un partener nou mai trebuie: Termen de plată (zile).")], [0, 400, true]);
+  r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT GOL", termen_plata_zile: "0" } });
+  egal("…și nici fără restul: le spune pe toate o dată", [q("SELECT id FROM parteneri WHERE nume = 'TP-TEST CLIENT GOL'").length, r.corp.includes("La un partener nou mai trebuie: CUI / CIF, Localitatea, Adresa, Telefon, Email, Persoană de contact.")], [0, true]);
+  r = await cer("/parteneri", { metoda: "post", body: { tip: "client", nume: "TP-TEST CLIENT GOL", cui: "RO97406", localitate: "Sector 2", adresa: "Str. Test 1", telefon: "0722000000", email: "a@firma.ro", persoana_contact: "Ana Test", termen_plata_zile: "0" } });
   const randGol = q("SELECT id, termen_plata_zile FROM parteneri WHERE nume = 'TP-TEST CLIENT GOL'");
-  egal("gol rămâne nedefinit (NULL), nu 0", [randGol.length, randGol[0] && randGol[0].termen_plata_zile], [1, null]);
+  egal("cu toate scrise și termen 0 (plată la factură) se salvează", [randGol.length, nr(randGol[0] && randGol[0].termen_plata_zile)], [1, 0]);
   const idGol = Number(q("SELECT id FROM parteneri WHERE nume = 'TP-TEST CLIENT GOL'")[0].id);
   exec(`UPDATE parteneri SET termen_plata_zile = 20 WHERE id = ${idGol}`);
   r = await cer("/parteneri/:id/editare", { metoda: "post", params: { id: String(idGol) }, body: { tip: "client", nume: "TP-TEST CLIENT GOL", termen_plata_zile: "abc" } });

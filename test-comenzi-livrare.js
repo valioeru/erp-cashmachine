@@ -155,6 +155,7 @@ async function plaseaza(raspuns, linii) {
   };
   if (raspuns !== undefined) body.livrare_partiala = raspuns;
   body.branding = "cash_machine";
+  body.livrare_mod = "intern";
   const r = await cer("/comenzi", { metoda: "post", body });
   // Confirmarea de salvare (27.10.2026) a adăugat „?ok=plasata" la redirect.
   // Testul cerea adresa curată și cădea cu „comanda nu s-a salvat", deși se
@@ -183,8 +184,8 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
 
   // ---------------------------------------------------------------- regula pură
   console.log("\nRegula, fără bază de date:");
-  egal("„da” înseamnă că se poate parțial", livrare.acceptaPartial({ livrare_partiala: "da" }), true);
-  egal("„nu” nu se poate", livrare.acceptaPartial({ livrare_partiala: "nu" }), false);
+  egal("„da” înseamnă că se poate parțial", livrare.acceptaPartial({ livrare_partiala: "da", livrare_mod: "intern" }), true);
+  egal("„nu” nu se poate", livrare.acceptaPartial({ livrare_partiala: "nu", livrare_mod: "intern" }), false);
   egal("fără răspuns NU se poate", livrare.acceptaPartial({}), false);
   egal("fără răspuns nu se citește ca „nu”", livrare.raspuns({}), null);
   egal("un răspuns inventat nu e valid", livrare.valid("poate"), null);
@@ -265,20 +266,20 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
   // ------------------------------------------------- răspunsul se poate schimba
   console.log("\nRăspunsul schimbat pe parcurs:");
   await cer("/comenzi/:id/livrare-partiala", {
-    metoda: "post", params: { id: String(idNu) }, body: { livrare_partiala: "da" },
+    metoda: "post", params: { id: String(idNu) }, body: { livrare_partiala: "da", livrare_mod: "intern" },
   });
   egal("clientul se răzgândește → comanda se redeschide", statusul(idNu), "in_stoc_depozit");
   egal("răspunsul nou e în bază",
     (q("SELECT livrare_partiala FROM comenzi WHERE id = ?", [idNu])[0] || {}).livrare_partiala, "da");
 
   await cer("/comenzi/:id/livrare-partiala", {
-    metoda: "post", params: { id: String(idNu) }, body: { livrare_partiala: "nu" },
+    metoda: "post", params: { id: String(idNu) }, body: { livrare_partiala: "nu", livrare_mod: "intern" },
   });
   egal("și înapoi: un „nu” o trimite iar la așteptare", statusul(idNu), "asteapta_marfa");
 
   // Depozitul nu scrie răspunsul clientului — el doar îl citește.
   await cer("/comenzi/:id/livrare-partiala", {
-    metoda: "post", user: MARIUS, params: { id: String(idNu) }, body: { livrare_partiala: "da" },
+    metoda: "post", user: MARIUS, params: { id: String(idNu) }, body: { livrare_partiala: "da", livrare_mod: "intern" },
   });
   egal("depozitul nu poate schimba răspunsul clientului",
     (q("SELECT livrare_partiala FROM comenzi WHERE id = ?", [idNu])[0] || {}).livrare_partiala, "nu");
@@ -337,7 +338,7 @@ const statusul = (id) => (q("SELECT status FROM comenzi WHERE id = ?", [id])[0] 
   const inainteLinii = Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ?", [CLIENT])[0].n);
   const rGol = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: String(CLIENT), livrare_partiala: "da",
+    body: { partener_id: String(CLIENT), livrare_partiala: "da", livrare_mod: "intern",
             "produs_id[]": [""], "cantitate[]": ["3"], "pret_unitar[]": ["10"] },
   });
   egal("cantitate fără produs ales nu salvează nimic",

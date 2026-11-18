@@ -50,7 +50,7 @@ console.log("\nCoduri din alte țări");
   bine("DE… la fel", C.eStrain("DE811234567"));
   bine("RO… NU e străin", !C.eStrain("RO14399840"));
   bine("un cod fără prefix nu e străin", !C.eStrain("14399840"));
-  const r = C.verifica({ nume: "Kft Budapesta", cui: "HU 12345678" });
+  const r = C.verifica({ nume: "Kft Budapesta", cui: "HU 12345678", localitate: "Sector 2", adresa: "Str. Test 1", telefon: "0722000000", email: "a@firma.ro", persoana_contact: "Ana Test", termen_plata_zile: "30" });
   bine("un cod străin trece fără să fie măsurat cu formula noastră", r.ok, r.gresite);
   bine("și se păstrează cu prefixul lui", r.date.cui === "HU12345678", r.date.cui);
 }
@@ -60,20 +60,23 @@ console.log("\nCe se cere");
   const camp = (n) => C.CAMPURI.find((c) => c.nume === n);
   bine("numele e obligatoriu", camp("nume").obligatoriu);
   bine("CUI-ul e obligatoriu", camp("cui").obligatoriu);
-  bine("telefonul NU e obligatoriu", !camp("telefon").obligatoriu);
-  bine("emailul NU e obligatoriu", !camp("email").obligatoriu);
-  bine("adresa NU e obligatorie", !camp("adresa").obligatoriu);
+  // Vali, 18.11.2026: partenerul nou se scrie întreg.
+  bine("localitatea, adresa, telefonul, emailul, persoana de contact și termenul de plată sunt obligatorii", ["localitate", "adresa", "telefon", "email", "persoana_contact", "termen_plata_zile"].every((n) => camp(n) && camp(n).obligatoriu));
 
   const gol = C.verifica({});
   bine("formularul gol cade", !gol.ok);
-  bine("și spune AMÂNDOUĂ lipsurile deodată", gol.gresite.length === 2, gol.gresite);
+  bine("și spune TOATE cele opt lipsuri deodată", gol.gresite.length === 8, gol.gresite);
 
   bine("un nume de două litere cade", !C.verifica({ nume: "AB", cui: "RO14399840" }).ok);
-  const e = C.verifica({ nume: "Firma Test SRL", cui: "RO14399840", email: "nu-i email" });
+  const intreg = { nume: "Firma Test SRL", cui: "RO14399840", localitate: "Sector 2", adresa: "Str. Test 1", telefon: "0722000000", email: "a@firma.ro", persoana_contact: "Ana Test", termen_plata_zile: "30" };
+  const e = C.verifica(Object.assign({}, intreg, { email: "nu-i email" }));
   bine("un email stricat cade", !e.ok && /email/.test(e.gresite[0]), e.gresite);
-  bine("dar emailul lăsat gol nu deranjează", C.verifica({ nume: "Firma Test SRL", cui: "RO14399840" }).ok);
+  bine("fiecare câmp lăsat gol oprește, pe numele lui", ["localitate", "adresa", "telefon", "email", "persoana_contact", "termen_plata_zile"].every((n) => { const r = C.verifica(Object.assign({}, intreg, { [n]: " " })); return !r.ok && r.gresite.length === 1 && r.gresite[0].endsWith("lipsește."); }));
+  const t0 = C.verifica(Object.assign({}, intreg, { termen_plata_zile: "0" }));
+  bine("termenul de plată 0 (plată la factură) e o valoare, nu un gol; „30,5” nu e termen", t0.ok && t0.date.termen_plata_zile === 0 && !C.verifica(Object.assign({}, intreg, { termen_plata_zile: "30,5" })).ok && C.verifica(intreg).date.termen_plata_zile === 30, t0.gresite);
+  bine("lipsurile unui partener nou, pe nume; zero la termen nu e lipsă", JSON.stringify(C.lipsuri({ nume: "X", cui: "1", termen_plata_zile: 0 })) === JSON.stringify(["Localitatea", "Adresa", "Telefon", "Email", "Persoană de contact"]) && C.lipsuri(intreg).length === 0, C.lipsuri({ nume: "X", cui: "1", termen_plata_zile: 0 }));
 
-  const bun = C.verifica({ nume: "  Firma Test SRL  ", cui: " ro 14.399.840 ", telefon: " 0722 000 000 " });
+  const bun = C.verifica({ nume: "  Firma Test SRL  ", cui: " ro 14.399.840 ", telefon: " 0722 000 000 ", localitate: "Sector 2", adresa: "Str. Test 1", email: "a@firma.ro", persoana_contact: "Ana Test", termen_plata_zile: "30" });
   bine("completat corect, trece", bun.ok, bun.gresite);
   bine("numele se curăță de spații", bun.date.nume === "Firma Test SRL", bun.date.nume);
   bine("CUI-ul se scrie doar cu cifre", bun.date.cui === "14399840", bun.date.cui);

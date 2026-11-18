@@ -124,7 +124,7 @@ function curata() {
 }
 const comanda = (id) => q("SELECT * FROM comenzi WHERE id = ?", [id])[0];
 const factura = (id) => q("SELECT * FROM facturi WHERE id = ?", [id])[0];
-const corp = (extra) => Object.assign({ partener_id: String(CLIENT), numar: "", livrare_partiala: "nu", branding: "nepersonalizat", moneda: "RON", termen_plata_zile: "", "produs_id[]": [String(PRODUS)], "cantitate[]": ["5"], "pret_unitar[]": ["12"], "um[]": ["buc"] }, extra || {});
+const corp = (extra) => Object.assign({ partener_id: String(CLIENT), numar: "", livrare_partiala: "nu", livrare_mod: "intern", branding: "nepersonalizat", moneda: "RON", termen_plata_zile: "", "produs_id[]": [String(PRODUS)], "cantitate[]": ["5"], "pret_unitar[]": ["12"], "um[]": ["buc"] }, extra || {});
 const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) || [])[1] || 0);
 
 (async () => {

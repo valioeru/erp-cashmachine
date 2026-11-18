@@ -199,7 +199,7 @@ function corpComanda(linii, extra) {
   return Object.assign(
     {
       partener_id: String(CLIENT), client_cautat: "TFC Client SRL", numar: "TFC", observatii: "", data_livrare_ceruta: "2099-12-01",
-      livrare_partiala: "da", branding: "cash_machine", moneda: "RON",
+      livrare_partiala: "da", livrare_mod: "intern", branding: "cash_machine", moneda: "RON",
       "produs_id[]": linii.map((l) => String(l[0] || "")),
       "cantitate[]": linii.map((l) => String(l[1] == null ? "" : l[1])),
       "pret_unitar[]": linii.map(() => "10"),

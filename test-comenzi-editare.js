@@ -35,7 +35,7 @@ function bine(d, cond, det) {
 const BAZA = {
   comenzi: [
     { id: 5, partener_id: 3, numar: "CMD-5", data: "2026-10-20", status: "noua", observatii: "urgent",
-      agent_id: 11, moneda: "RON", livrare_partiala: "da", branding: "nepersonalizat", data_livrare_ceruta: "2026-11-02", factura_id: null },
+      agent_id: 11, moneda: "RON", livrare_partiala: "da", livrare_mod: "intern", branding: "nepersonalizat", data_livrare_ceruta: "2026-11-02", factura_id: null },
   ],
   parteneri: [
     { id: 3, nume: "Sameday Courier SRL", cui: "RO1", agent_id: 22, tip: "client" },
@@ -158,7 +158,7 @@ const DEPOZIT = { id: 78, nume: "Depozit", rol: "depozit" };
 
 const formular = (linii, extra) => ({
   partener_id: "3", numar: "CMD-5", data_livrare_ceruta: "2026-11-02",
-  livrare_partiala: "da", branding: "nepersonalizat", moneda: "RON", observatii: "urgent",
+  livrare_partiala: "da", livrare_mod: "intern", branding: "nepersonalizat", moneda: "RON", observatii: "urgent",
   "produs_id[]": linii.map((l) => String(l[0])),
   "cantitate[]": linii.map((l) => String(l[1])),
   "pret_unitar[]": linii.map((l) => String(l[2])),

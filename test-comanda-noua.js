@@ -204,7 +204,7 @@ const cateComenzi = () => Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE part
   for (const br of [undefined, "", "altceva"]) {
     r = await cer("/comenzi", {
       metoda: "post",
-      body: { partener_id: "96302", numar: "CMD-BR", livrare_partiala: "nu", branding: br,
+      body: { partener_id: "96302", numar: "CMD-BR", livrare_partiala: "nu", livrare_mod: "intern", branding: br,
               "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
     });
     egal(`fără branding ales (${JSON.stringify(br)}) nu se salvează`, cateComenzi(), 0);
@@ -218,7 +218,7 @@ const cateComenzi = () => Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE part
   // --- comanda bună trece ------------------------------------------------------
   r = await cer("/comenzi", {
     metoda: "post",
-    body: { partener_id: "96302", numar: "CMD-2", livrare_partiala: "nu", branding: "Cash_Machine",
+    body: { partener_id: "96302", numar: "CMD-2", livrare_partiala: "nu", livrare_mod: "intern", branding: "Cash_Machine",
             "produs_id[]": ["96401"], "cantitate[]": ["5"], "pret_unitar[]": ["12"] },
   });
   egal("comanda bună se salvează", cateComenzi(), 1);
