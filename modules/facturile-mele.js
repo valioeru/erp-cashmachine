@@ -64,7 +64,8 @@ function register(router) {
       return f.status === "ciorna" ? "ciornă" : String(f.document_extern || "").trim() || `${f.serie || ""}-${f.numar ?? f.id}`;
     };
     const arePdf = (f) => Boolean((String(f.smartbill_serie || "").trim() && String(f.smartbill_numar || "").trim()) || (String(f.sursa_import || "").trim() && f.serie && f.numar != null));
-    const ciorne = facturi.filter((f) => f.status === "ciorna").length;
+    const inSmartbill = (f) => Boolean(String(f.smartbill_serie || "").trim() && String(f.smartbill_numar || "").trim());
+    const ciorne = facturi.filter((f) => f.status === "ciorna" && !inSmartbill(f)).length;
 
     const body = `
       ${subnavComenzi("/facturile-mele", ctx.user)}
@@ -100,9 +101,9 @@ function register(router) {
                 esc(String(f.data_emiterii || "").slice(0, 10)),
                 esc(String(f.data_scadenta || "").slice(0, 10)) || "—",
                 money(f.total),
-                STARE[f.status] || esc(f.status),
+                f.status === "ciorna" && inSmartbill(f) ? '<span class="badge verde">emisă în SmartBill</span> <span class="badge gri">nevalidată în ERP</span>' : STARE[f.status] || esc(f.status),
                 `<a class="btn secondary small" href="/facturi/${f.id}/tipar" target="_blank">Tipărește</a>${
-                  arePdf(f) && f.status !== "ciorna" ? ` <a class="btn secondary small" href="/facturi/${f.id}/pdf" target="_blank" data-pdf="${f.id}">Descarcă PDF</a>` : ""
+                  arePdf(f) && (f.status !== "ciorna" || inSmartbill(f)) ? ` <a class="btn secondary small" href="/facturi/${f.id}/pdf" target="_blank" data-pdf="${f.id}">Descarcă PDF</a>` : ""
                 }`,
               ])
             )

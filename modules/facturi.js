@@ -376,7 +376,7 @@ function register(router) {
     // (Vali, 18.11.2026: „din financiar, înainte de trimitere în SmartBill, se validează").
     const deValidat = await db
       .prepare(
-        `SELECT f.id, f.serie, f.numar, f.data_emiterii, p.nume AS client, u.nume AS facuta_de, c.numar AS comanda_numar, f.comanda_id,
+        `SELECT f.id, f.serie, f.numar, f.data_emiterii, f.smartbill_sync_la, f.smartbill_serie, f.smartbill_numar, p.nume AS client, u.nume AS facuta_de, c.numar AS comanda_numar, f.comanda_id,
                 COALESCE((SELECT SUM(l.cantitate * l.pret_unitar * (1 + COALESCE(l.cota_tva, 0) / 100.0)) FROM facturi_linii l WHERE l.factura_id = f.id), 0) AS total
            FROM facturi f JOIN parteneri p ON p.id = f.partener_id
            LEFT JOIN utilizatori u ON u.id = f.creata_de LEFT JOIN comenzi c ON c.id = f.comanda_id
@@ -388,9 +388,10 @@ function register(router) {
     const blocDeValidat = deValidat.length
       ? `<div class="detail-box" data-de-validat style="border-left:4px solid var(--warn);margin-bottom:14px">
            <strong>${deValidat.length} ${deValidat.length === 1 ? "factură ciornă așteaptă" : "facturi ciornă așteaptă"} validarea</strong>
-           <span style="font-size:13px;color:var(--text-muted)"> — făcute din comenzi; la validare capătă număr, scad stocul și pleacă în SmartBill.</span>
+           <span style="font-size:13px;color:var(--text-muted)"> — făcute din comenzi; la validare capătă număr, scad stocul și pleacă în SmartBill.
+             Cele deja trimise în SmartBill nu se mai trimit o dată: validarea le dă doar numărul din ERP și scade stocul.</span>
            ${table(
-             ["Ciornă", "Client", "Comanda", "Făcută de", "Data", "Total cu TVA", ""],
+             ["Ciornă", "Client", "Comanda", "Făcută de", "Data", "Total cu TVA", "SmartBill", ""],
              deValidat.map((f) => [
                `<a href="/facturi/${f.id}">${esc(`${f.serie || "FCT"}-${f.numar ?? f.id}`)}</a>`,
                esc(f.client),
@@ -398,6 +399,9 @@ function register(router) {
                esc(f.facuta_de || "—"),
                esc(String(f.data_emiterii || "").slice(0, 10)),
                money(f.total),
+               f.smartbill_sync_la
+                 ? `<span class="badge verde" data-deja-trimisa="${f.id}">deja trimisă (${esc([f.smartbill_serie, f.smartbill_numar].filter(Boolean).join("-"))})</span>`
+                 : '<span class="badge gri">netrimisă</span>',
                `<a class="btn small" href="/facturi/${f.id}">Deschide și validează</a>`,
              ])
            )}
@@ -946,13 +950,18 @@ function register(router) {
           ? `<div class="detail-box" style="border-left:4px solid var(--warn)">
               <strong>Factură ciornă.</strong>
               <p style="margin:6px 0 10px;max-width:660px;font-size:13px;color:var(--text-muted)">
-                Nu are încă număr, nu a scăzut stocul și nu a plecat în SmartBill. Toate astea se întâmplă
-                la validare — pe care o face cineva cu drepturi pe facturare.
+                ${
+                  factura.smartbill_sync_la
+                    ? `<span data-ciorna-trimisa>A plecat deja în SmartBill (${esc([factura.smartbill_serie, factura.smartbill_numar].filter(Boolean).join("-"))}), dar în ERP a rămas nevalidată:
+                       n-are număr la noi și n-a scăzut stocul. Validarea le face pe acestea două și <strong>nu o mai trimite o dată</strong> în SmartBill.</span>`
+                    : `Nu are încă număr, nu a scăzut stocul și nu a plecat în SmartBill. Toate astea se întâmplă
+                       la validare — pe care o face cineva cu drepturi pe facturare.`
+                }
               </p>
               ${
                 areFacturare(ctx.user)
                   ? `<form method="post" action="/facturi/${factura.id}/valideaza" class="inline-form"
-                           onsubmit="return confirm('Validezi factura? Se emite, scade stocul și pleacă în SmartBill.')">
+                           onsubmit="return confirm('${factura.smartbill_sync_la ? "Validezi factura? Capătă număr în ERP și scade stocul. E deja în SmartBill, deci nu se mai trimite." : "Validezi factura? Se emite, scade stocul și pleacă în SmartBill."}')">
                        <button class="btn" type="submit">Validează și emite factura</button>
                      </form>`
                   : `<span style="font-size:13px;color:var(--text-muted)" data-asteapta-validarea>Nu ai drepturi de validare: factura așteaptă să fie validată de cineva de la facturare. După validare primește număr, pleacă în SmartBill și o poți tipări sau descărca de aici.</span>`
@@ -1079,7 +1088,9 @@ function register(router) {
         eVanzare && !doarCitire
           ? `<h2>Integrare SmartBill</h2>
       ${
-        smartbill.isConfigured()
+        factura.status === "ciorna" && !factura.smartbill_sync_la
+          ? `<p style="color:var(--text-muted);font-size:13px" data-smartbill-dupa-validare>Factura pleacă în SmartBill la validare. O ciornă nu se trimite.</p>`
+          : smartbill.isConfigured()
           ? `<form method="post" action="/facturi/${factura.id}/smartbill" class="inline-form" id="spre-smartbill"${
               factura.smartbill_sync_la
                 ? ` onsubmit="if (!confirm('Factura e deja în SmartBill. Dacă o trimiți din nou, SmartBill emite încă o factură. O trimiți din nou?')) return false; this.querySelector('button').disabled = true;"`
@@ -1152,7 +1163,9 @@ function register(router) {
     const comanda = factura.comanda_id ? await db.prepare("SELECT numar FROM comenzi WHERE id = ?").get(factura.comanda_id).catch(() => null) : null;
     const autor = factura.creata_de ? await db.prepare("SELECT nume FROM utilizatori WHERE id = ?").get(factura.creata_de).catch(() => null) : null;
     const nr = numarFiscal(factura);
-    const ciorna = factura.status === "ciorna";
+    // Ciorna deja trimisă în SmartBill e, pentru client, factură emisă: poartă
+    // numărul fiscal și nu poartă „CIORNĂ” (a rămas doar nevalidată în ERP).
+    const ciorna = factura.status === "ciorna" && !nr.fiscal;
     const anulata = factura.status === "anulata";
     const doc = {
       serie: nr.serie,
@@ -1334,18 +1347,43 @@ function register(router) {
 
     // Trimite în SmartBill, dacă e configurat. Dacă nu, factura rămâne validă
     // la noi și se poate retrimite oricând din pagina ei.
+    //
+    // O FACTURĂ NU PLEACĂ DE DOUĂ ORI (18.11.2026). Până azi validarea trimitea
+    // fără să se uite dacă factura e deja acolo. Pe live erau cinci ciorne
+    // trimise deja cu butonul „Trimite factura în SmartBill” (CSHM 3413, 3414,
+    // 3416, 3417, 3418): validarea oricăreia ar fi emis-o a doua oară — un al
+    // doilea document fiscal. Acum validarea trece prin aceleași două paze ca
+    // butonul (deja trimisă / pe drum) și pleacă exact ca de la buton: cu
+    // codurile produselor și cu țara, județul și localitatea clientului. Fără
+    // ele SmartBill o refuza oricum („țara trebuie specificată”, „nu are codul
+    // specificat”), deci validarea nu trimitea de fapt niciodată.
     let mesajSmartbill = "";
-    if (smartbill.isConfigured()) {
+    const inSmartbill = await db.prepare("SELECT smartbill_sync_la, smartbill_serie, smartbill_numar FROM facturi WHERE id = ?").get(factura.id);
+    if (inSmartbill && inSmartbill.smartbill_sync_la) {
+      const care = [inSmartbill.smartbill_serie, inSmartbill.smartbill_numar].filter(Boolean).join("-");
+      mesajSmartbill = `Factura era deja în SmartBill${care ? " (" + care + ")" : ""}: n-am trimis-o a doua oară.`;
+    } else if (peDrum.has(Number(factura.id))) {
+      mesajSmartbill = "Factura se trimite chiar acum în SmartBill: n-am trimis-o a doua oară.";
+    } else if (smartbill.isConfigured()) {
+      peDrum.add(Number(factura.id));
       try {
-        const proaspata = await db.prepare("SELECT * FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE id = ?").get(factura.id);
-        const rezultat = await smartbill.trimiteFactura(proaspata, linii);
-        // `series` și `number`: așa le întoarce lib/smartbill.js. Aici se citeau
-        // `serie` și `numar`, care nu există — factura ar fi rămas „trimisă”,
-        // dar fără numărul ei din SmartBill.
-        await scrieTrimisa(factura.id, rezultat, new Date().toISOString().slice(0, 19).replace("T", " "));
-        mesajSmartbill = "Trimisă și în SmartBill.";
+        const deTrimis = await facturaPentruSmartBill(factura.id);
+        const a = ADR.pentruSmartBill(deTrimis);
+        if (!a.sigur) {
+          mesajSmartbill = "Factura e validă la noi. N-a plecat în SmartBill: lipsesc țara, județul sau localitatea clientului — apasă „Trimite factura în SmartBill” și completează-le.";
+        } else {
+          const rezultat = await smartbill.trimiteFactura(deTrimis, await liniiPentruSmartBill(factura.id), a);
+          // `series` și `number`: așa le întoarce lib/smartbill.js.
+          await scrieTrimisa(factura.id, rezultat, new Date().toISOString().slice(0, 19).replace("T", " "));
+          mesajSmartbill = "Trimisă și în SmartBill.";
+        }
       } catch (e) {
-        mesajSmartbill = "Factura e validă la noi, dar nu a plecat în SmartBill: " + e.message;
+        mesajSmartbill =
+          "Factura e validă la noi, dar nu a plecat în SmartBill: " +
+          e.message +
+          (eRefuzLimpede(e.message) ? "" : " Nu se știe dacă a ajuns: uită-te în SmartBill înainte să o trimiți din nou.");
+      } finally {
+        peDrum.delete(Number(factura.id));
       }
     } else {
       mesajSmartbill = "SmartBill nu e configurat, așa că factura a rămas doar la noi.";
@@ -1453,6 +1491,22 @@ function register(router) {
 
   const opritaDeLaADouaTrimitere = (ctx, factura) => ePeDrum(ctx, factura) || eDejaTrimisa(ctx, factura);
 
+  // Ciorna nu pleacă în SmartBill: întâi o validează financiarul (Vali,
+  // 18.11.2026: „din financiar, înainte de trimitere în SmartBill, se
+  // validează"). Validarea o și trimite; butonul rămâne pentru factura validată
+  // care n-a plecat (SmartBill oprit, date de client lipsă) și pentru retrimitere.
+  function opritaNevalidata(ctx, factura) {
+    if (factura.status !== "ciorna") return false;
+    inapoiCuMesaj(
+      ctx,
+      factura,
+      areFacturare(ctx.user)
+        ? "Factura e ciornă: n-am trimis-o. Apasă „Validează și emite factura” — validarea o trimite și în SmartBill."
+        : "Factura e ciornă: n-am trimis-o. Întâi o validează cineva de la facturare; validarea o trimite și în SmartBill."
+    );
+    return true;
+  }
+
   async function trimiteInSmartBill(ctx, factura, adresa) {
     if (ePeDrum(ctx, factura)) return;
     peDrum.add(Number(factura.id));
@@ -1549,6 +1603,7 @@ function register(router) {
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
 
     if (opritaDeLaADouaTrimitere(ctx, factura)) return;
+    if (opritaNevalidata(ctx, factura)) return;
 
     const a = ADR.pentruSmartBill(factura);
     if (!a.sigur) return formularAdresa(ctx, factura, a);
@@ -1571,6 +1626,7 @@ function register(router) {
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
 
     if (opritaDeLaADouaTrimitere(ctx, factura)) return;
+    if (opritaNevalidata(ctx, factura)) return;
 
     const v = ADR.verifica(ctx.body);
     if (!v.ok) {
