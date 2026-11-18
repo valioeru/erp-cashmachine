@@ -14,10 +14,15 @@ async function aplicaSerii(randuri, db) {
     const t = SS.TIPURI[tip];
     const erpRanduri = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN (?, ?)").all(t.serie, t.urmator);
     const erp = { serie: (erpRanduri.find((x) => x.cheie === t.serie) || {}).valoare, urmator: (erpRanduri.find((x) => x.cheie === t.urmator) || {}).valoare };
-    // Seria ERP-ului, dacă SmartBill o are; altfel prima serie de tipul ăsta, doar de ținut minte.
+    // Doar seria ERP-ului. O altă serie e a altei firme din SmartBill ori una
+    // nefolosită de ERP: nu se ține minte și nu atinge nimic.
     const aleTipului = curate.filter((x) => x.tip === tip);
     if (!aleTipului.length) continue;
-    const sb = aleTipului.find((x) => x.serie === SS.cheieSerie(erp.serie)) || aleTipului[0];
+    const sb = aleTipului.find((x) => x.serie === SS.cheieSerie(erp.serie));
+    if (!sb) {
+      out.neatinse[tip] = "altă serie decât în ERP";
+      continue;
+    }
     await db.prepare(pune).run(`smartbill_${tip}_vazut`, JSON.stringify({ serie: sb.serie, urmator: sb.urmator, la }), la.slice(0, 10));
     const h = SS.hotaraste(erp, sb);
     if (h.urca !== null) {
