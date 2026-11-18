@@ -305,7 +305,7 @@ function register(router) {
 
     const cuPropunere = s.cuStoc.filter((x) => x.propuneri.length).length;
     const carduri = `<div class="cards">
-        <div class="card"><div class="label">Produse cu cod nou</div><div class="value">${s.noi.length}</div><div class="ct-sub">făcute din configurator</div></div>
+        <div class="card"><div class="label">Coduri bune</div><div class="value">${s.noi.length}</div><div class="ct-sub">din configurator sau trecute ca „E bun așa”</div></div>
         <div class="card"><div class="label">Produse vechi cu stoc</div><div class="value">${s.cuStoc.length}</div><div class="ct-sub">${cuPropunere} cu o propunere</div></div>
         <div class="card"><div class="label">Scrise de două ori, fără stoc</div><div class="value">${s.faraStoc.length}</div><div class="ct-sub">se unifică în bloc</div></div>
         <div class="card"><div class="label">Cod vechi, fără stoc</div><div class="value">${s.vechiFaraStoc.length}</div><div class="ct-sub">la alegere apar cu „nu selecta”</div></div>
@@ -342,7 +342,8 @@ function register(router) {
           „scris de două ori”, ce a asociat un om, sau produsele cu cod nou care seamănă. <strong>„Unifică”</strong> arată
           întâi ce se mută și abia apoi mută: stocul, paleții, comenzile, facturile și rețetele trec pe produsul care rămâne,
           iar cel vechi dispare din liste. <strong>„Nu e același produs”</strong> scoate propunerea și n-o mai aduce.
-          Dacă produsul n-are încă frate cu cod nou, fă-l din <a href="/produse/nou-cu-cod">Produs nou</a> și asociază-l aici.
+          Dacă produsul n-are încă frate cu cod nou, apasă <strong>„Fă codul nou…”</strong>: configuratorul se deschide cu familia și
+          caracteristicile citite din denumirea lui, codul iese după convenția nouă, iar după salvare produsul vechi e legat de cel nou.
         </p>
         <datalist id="produse-noi">${optiuniNoi}</datalist>
         ${
@@ -383,6 +384,9 @@ function register(router) {
                           <input name="nou" list="produse-noi" placeholder="cod nou sau #id" autocomplete="off" style="width:170px" aria-label="Produsul în care intră">
                           <button class="btn secondary small" type="submit">Asociază</button>
                         </form>
+                        <div style="margin-top:6px">
+                          <a class="btn secondary small" data-fa-cod-nou href="/produse/nou-cu-cod?din=${x.p.id}" title="Deschide configuratorul cu familia și caracteristicile citite din denumire: codul iese după convenția nouă">Fă codul nou…</a>
+                        </div>
                         <form method="post" action="${CALE}/excepta" class="inline-form" style="margin-top:6px"
                               onsubmit="return confirm('Produsul rămâne cum e și iese din lista asta. Continui?')">
                           <input type="hidden" name="produs_id" value="${x.p.id}"><input type="hidden" name="pe" value="1">

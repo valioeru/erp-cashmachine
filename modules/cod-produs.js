@@ -802,7 +802,23 @@ function register(router) {
       ? "Formularul vechi de produs nou nu mai scrie produse: codul se generează acum din caracteristici. " +
         "Ce scriseseși acolo nu s-a salvat — completează aici."
       : "";
-    const body = await formularProdusNou({ familieId: Number(q.familie) || 0, mesaj: esc(mesaj) });
+    // Codul nou pentru un produs vechi (Configurări → Unificare coduri, „Fă
+    // codul nou"): familia și caracteristicile se citesc din denumirea lui
+    // (lib/cod-din-denumire.js). Codul îl face tot configuratorul, din ele.
+    const vechi = await produsulVechi(q.din);
+    let familieId = Number(q.familie) || 0;
+    let valori;
+    if (vechi) {
+      const D = require("../lib/cod-din-denumire");
+      const codVechi = String(vechi.cod || "").trim();
+      if (!familieId) familieId = D.ghicesteFamilia(vechi.denumire, codVechi, await familii());
+      valori = { unitate_masura: vechi.unitate_masura || "buc" };
+      if (familieId) {
+        const citite = D.completeaza(vechi.denumire, codVechi, await citesteCaracteristici(false, familieId));
+        for (const k of Object.keys(citite)) valori["c_" + k] = citite[k];
+      }
+    }
+    const body = await formularProdusNou({ familieId, valori, mesaj: esc(mesaj), vechi });
     send(ctx.res, 200, layout({ user: ctx.user, title: "Produs nou", active: "/produse", body }));
   });
 
@@ -832,15 +848,21 @@ function register(router) {
     // Ce nu e bun se spune tot o dată, deasupra formularului, care revine cu
     // tot ce a scris omul — nu o pagină de eroare cu „Înapoi" după care
     // prețurile, categoria și gestiunea trebuie tastate din nou.
+    const vechi = await produsulVechi(b.din);
     const refuza = async (mesaj) =>
       send(
         ctx.res,
         400,
         layout({
           user: ctx.user, title: "Produs nou", active: "/produse",
-          body: await formularProdusNou({ familieId, valori: b, mesaj, denAuto: !den || den === r.denumire }),
+          body: await formularProdusNou({ familieId, valori: b, mesaj, denAuto: !den || den === r.denumire, vechi }),
         })
       );
+    // Codul nou al unui produs vechi există deja: nu se face a doua oară, se
+    // leagă cel vechi de el.
+    if (vechi && r.exista && Number(r.exista.id) !== Number(vechi.id)) {
+      return redirect(ctx.res, await asociazaCuVechiul(vechi, r.exista.id, ctx.user));
+    }
     const existent = (p) =>
       `Produsul există deja: <a href="/produse/${Number(p.id)}">${esc(p.denumire)}</a>` +
       ` (cod ${esc(p.cod || p.cod_generat || "—")}). Nu l-am mai făcut a doua oară.`;
@@ -873,6 +895,7 @@ function register(router) {
       }
       throw e;
     }
+    if (vechi) return redirect(ctx.res, await asociazaCuVechiul(vechi, scris.id, ctx.user));
     redirect(ctx.res, `/produse/${scris.id}`);
   });
 }
@@ -964,7 +987,29 @@ async function sugestiiText(c) {
 // Formularul de produs nou: familia, caracteristicile ei, codul care iese și
 // fișa produsului. `valori` e ce a trimis omul, când formularul revine după
 // un refuz; `mesaj` e HTML gata scăpat.
-async function formularProdusNou({ familieId, valori, mesaj, denAuto } = {}) {
+// Produsul vechi pentru care se face codul nou: activ și neunificat.
+async function produsulVechi(id) {
+  const n = parseInt(id, 10);
+  if (!(n > 0)) return null;
+  return await db
+    .prepare("SELECT id, cod, denumire, unitate_masura FROM produse WHERE id = ? AND COALESCE(activ, 1) = 1 AND fuzionat_in IS NULL")
+    .get(n)
+    .catch(() => null);
+}
+
+// Leagă produsul vechi de cel cu cod nou, ca propunere, și duce la „ce se
+// mută". Unificarea rămâne de validat acolo.
+async function asociazaCuVechiul(vechi, nouId, user) {
+  await db
+    .prepare(
+      `INSERT INTO produse_asocieri (vechi_id, nou_id, stare, fel, facut_de) VALUES (?, ?, 'propusa', 'de_mana', ?)
+       ON CONFLICT (vechi_id, nou_id) DO UPDATE SET stare = 'propusa', fel = 'de_mana', facut_de = EXCLUDED.facut_de, facut_la = to_char(now(), 'YYYY-MM-DD HH24:MI:SS')`
+    )
+    .run(vechi.id, nouId, user ? user.id : null);
+  return `/configurari/unificare-coduri/unifica?vechi=${Number(vechi.id)}&nou=${Number(nouId)}`;
+}
+
+async function formularProdusNou({ familieId, valori, mesaj, denAuto, vechi } = {}) {
   const fam = await familii();
   const fid = fam.some((f) => Number(f.id) === Number(familieId)) ? Number(familieId) : fam[0] ? Number(fam[0].id) : 0;
   const familia = fam.find((f) => Number(f.id) === fid) || null;
@@ -1048,13 +1093,23 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto } = {}) {
       fam.length > 1
         ? `<div class="toolbar" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">
              <span style="font-size:13px;color:var(--text-muted);align-self:center">Familia:</span>
-             ${fam.map((f) => `<a class="btn small ${Number(f.id) === fid ? "" : "secondary"}" href="/produse/nou-cu-cod?familie=${f.id}">${esc(f.nume)}</a>`).join("")}
+             ${fam.map((f) => `<a class="btn small ${Number(f.id) === fid ? "" : "secondary"}" href="/produse/nou-cu-cod?familie=${f.id}${vechi ? "&amp;din=" + Number(vechi.id) : ""}">${esc(f.nume)}</a>`).join("")}
            </div>`
         : ""
     }
     ${fara}
+    ${
+      vechi
+        ? `<div class="flash" data-cod-nou-pentru="${Number(vechi.id)}" style="max-width:960px">
+             <strong>Cod nou pentru:</strong> ${vechi.cod ? `<code>${esc(vechi.cod)}</code> ` : ""}${esc(vechi.denumire)}.
+             Familia și caracteristicile de mai jos sunt citite din denumirea lui: <strong>uită-te la fiecare</strong> și completează ce a rămas gol.
+             După „Adaugă produsul”, cel vechi se leagă de cel nou și ajungi la „Unifică”, unde vezi ce se mută.
+           </div>`
+        : ""
+    }
     <form method="post" action="/produse/nou-cu-cod" class="form" style="max-width:960px" id="f-produs">
       <input type="hidden" name="familie" id="f-familie" value="${fid}">
+      ${vechi ? `<input type="hidden" name="din" value="${Number(vechi.id)}">` : ""}
       <h3 style="margin:8px 0 6px">Caracteristici${familia ? " · " + esc(familia.nume) : ""}</h3>
       <div style="display:flex;gap:10px;flex-wrap:wrap">${campuri}</div>
       <div class="card" style="margin:12px 0;max-width:620px">
