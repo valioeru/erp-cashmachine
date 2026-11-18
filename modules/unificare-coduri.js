@@ -109,6 +109,8 @@ function socoteste(d) {
   const noi = d.produse.filter(eBun);
   const frati = U.perechi(d.produse).filter((x) => !d.respinse.has(`${x.vechi.id}:${x.nou.id}`));
   const frateLui = new Map(frati.map((x) => [Number(x.vechi.id), x]));
+  // Perechile asociate de un om: doar ele se pot unifica una câte una.
+  const asociate = new Map(d.deMana.map((h) => [`${h.vechi_id}:${h.nou_id}`, h]));
 
   // 1. Produsele vechi cu stoc, cu propunerile lor.
   const cuStoc = [];
@@ -119,6 +121,9 @@ function socoteste(d) {
     const pune = (x) => {
       if (dejaPus.has(Number(x.nou.id))) return;
       dejaPus.add(Number(x.nou.id));
+      const h = asociate.get(`${p.id}:${x.nou.id}`);
+      x.asociat = Boolean(h);
+      if (h && !x.de) x.de = h.facut_de;
       propuneri.push(x);
     };
     const frate = frateLui.get(Number(p.id));
@@ -249,6 +254,51 @@ async function completeazaDinVechi(nouId, vechiId, opt) {
 }
 
 // Se poate unifica `vechi` în `nou`? Întoarce textul piedicii sau "".
+// Pasul 2 înaintea pasului 3: perechea se unifică doar după ce un om a asociat-o
+// (Vali, 18.11.2026: „activează butoanele abia după ce pasul anterior a fost făcut").
+function neasociat(d, vechi, nou) {
+  const e = d.deMana.some((h) => Number(h.vechi_id) === Number(vechi.id) && Number(h.nou_id) === Number(nou.id));
+  return e ? "" : "Întâi pasul 2: asociază cele două produse (un om confirmă că e aceeași marfă). Abia apoi se pot unifica.";
+}
+
+// Marfa celor două produse, palet cu palet, cât e încă în depozit.
+async function paletiiLor(vechiId, nouId) {
+  return await db
+    .prepare(
+      `SELECT pl.id AS linie_id, pl.palet_id, p.cod AS palet, pl.produs_id, pl.cantitate, COALESCE(NULLIF(TRIM(pl.um), ''), pr.unitate_masura) AS um
+         FROM ct_palet_linii pl JOIN ct_paleti p ON p.id = pl.palet_id LEFT JOIN produse pr ON pr.id = pl.produs_id
+        WHERE pl.produs_id IN (?, ?) AND p.data_iesire IS NULL AND COALESCE(pl.cantitate, 0) > 0
+        ORDER BY (pl.produs_id = ?) DESC, p.cod, pl.id`
+    )
+    .all(vechiId, nouId, vechiId)
+    .catch(() => []);
+}
+
+// Cantitățile scrise la previzualizare (`cant_<linie>`), unde diferă de ce e
+// în bază, se corectează pe palet, cu urmă în istoricul lui (aceeași corecție
+// ca din fișa paletului). Se ating doar liniile celor două produse.
+async function corecteazaPaletii(vechi, nou, corp, user) {
+  const b = corp || {};
+  const paleti = await paletiiLor(vechi.id, nou.id);
+  const pePalet = new Map();
+  for (const l of paleti) {
+    const scris = String(b["cant_" + l.linie_id] == null ? "" : b["cant_" + l.linie_id]).trim();
+    if (scris === "") continue;
+    const n = Number(scris.replace(/ /g, "").replace(",", "."));
+    if (!Number.isFinite(n) || n < 0) return { eroare: `Paletul ${l.palet}: cantitatea „${scris}” nu e un număr. Scrie-o ca 1151 sau 12,5.`, corectate: [] };
+    if (Math.abs(n - nr(l.cantitate)) < 0.0005) continue;
+    if (!pePalet.has(l.palet_id)) pePalet.set(l.palet_id, { palet: l.palet, linii: {} });
+    pePalet.get(l.palet_id).linii[l.linie_id] = { cantitate: String(n) };
+  }
+  const corectate = [];
+  for (const [paletId, x] of pePalet) {
+    const r = await require("./ct-park").corecteazaMarfa(user, paletId, { linii: x.linii, motiv: "numărat la unificarea codurilor" });
+    if (r.eroare) return { eroare: `${r.eroare}${corectate.length ? ` (Corectate înainte de oprire: ${corectate.join(", ")}.)` : ""}`, corectate };
+    corectate.push(x.palet);
+  }
+  return { corectate };
+}
+
 function piedica(vechi, nou) {
   if (!vechi || !nou) return "Unul dintre produse nu mai există sau a fost deja unificat.";
   if (Number(vechi.id) === Number(nou.id)) return "E același produs.";
@@ -339,7 +389,9 @@ function register(router) {
       corp = `
         <p style="max-width:900px;color:var(--text-muted)">
           Produse cu cod vechi care au marfă în CT-Park. Lângă fiecare, produsul în care ar trebui să intre: fratele lui
-          „scris de două ori”, ce a asociat un om, sau produsele cu cod nou care seamănă. <strong>„Unifică”</strong> arată
+          „scris de două ori”, ce a asociat un om, sau produsele cu cod nou care seamănă. Pașii merg în ordine, iar butoanele se aprind pe rând:
+          <strong>1. codul nou</strong> (dacă nu există), <strong>2. asocierea</strong> (un om confirmă că e aceeași marfă, și la propunerile
+          făcute de pagină), <strong>3. unificarea</strong>. <strong>„Unifică”</strong> arată
           întâi ce se mută și abia apoi mută: stocul, paleții, comenzile, facturile și rețetele trec pe produsul care rămâne,
           iar cel vechi dispare din liste. <strong>„Nu e același produs”</strong> scoate propunerea și n-o mai aduce.
           Dacă produsul n-are încă frate cu cod nou, apasă <strong>„Fă codul nou…”</strong>: configuratorul se deschide cu familia și
@@ -366,8 +418,17 @@ function register(router) {
                                   } · ${stocText(d.stoc.get(Number(y.nou.id)))}${y.motive && y.motive.length ? " · " + esc(y.motive.join("; ")) : ""}${
                                     y.altele ? ` · mai sunt ${y.altele} cu același cod` : ""
                                   }</div>
-                                  <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
-                                    <a class="btn small" href="${CALE}/unifica?vechi=${x.p.id}&amp;nou=${y.nou.id}">Unifică…</a>
+                                  <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center" data-pasi="${y.asociat ? "3" : "2"}">
+                                    ${
+                                      y.asociat
+                                        ? `<span class="badge verde" title="Asociat de ${esc(y.de || "cineva")}">2. asociat ✓</span>
+                                           <a class="btn small" href="${CALE}/unifica?vechi=${x.p.id}&amp;nou=${y.nou.id}">3. Unifică…</a>`
+                                        : `<form method="post" action="${CALE}/asociaza" class="inline-form">
+                                             <input type="hidden" name="vechi_id" value="${x.p.id}"><input type="hidden" name="nou" value="#${y.nou.id}">
+                                             <button class="btn small" type="submit" title="Confirmi că e aceeași marfă. Abia apoi se poate unifica.">2. E același produs — asociază</button>
+                                           </form>
+                                           <button class="btn small" type="button" disabled data-unifica-stins title="Întâi pasul 2: asociază">3. Unifică…</button>`
+                                    }
                                     <form method="post" action="${CALE}/respinge" class="inline-form">
                                       <input type="hidden" name="vechi_id" value="${x.p.id}"><input type="hidden" name="nou_id" value="${y.nou.id}">
                                       <button class="btn secondary small" type="submit">Nu e același produs</button>
@@ -382,10 +443,10 @@ function register(router) {
                         <form method="post" action="${CALE}/asociaza" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
                           <input type="hidden" name="vechi_id" value="${x.p.id}">
                           <input name="nou" list="produse-noi" placeholder="cod nou sau #id" autocomplete="off" style="width:170px" aria-label="Produsul în care intră">
-                          <button class="btn secondary small" type="submit">Asociază</button>
+                          <button class="btn secondary small" type="submit">2. Asociază</button>
                         </form>
                         <div style="margin-top:6px">
-                          <a class="btn secondary small" data-fa-cod-nou href="/produse/nou-cu-cod?din=${x.p.id}" title="Deschide configuratorul cu familia și caracteristicile citite din denumire: codul iese după convenția nouă">Fă codul nou…</a>
+                          <a class="btn secondary small" data-fa-cod-nou href="/produse/nou-cu-cod?din=${x.p.id}" title="Deschide configuratorul cu familia și caracteristicile citite din denumire: codul iese după convenția nouă">1. Fă codul nou…</a>
                         </div>
                         <form method="post" action="${CALE}/excepta" class="inline-form" style="margin-top:6px"
                               onsubmit="return confirm('Produsul rămâne cum e și iese din lista asta. Continui?')">
@@ -552,9 +613,10 @@ function register(router) {
     const d = await citeste();
     const vechi = d.dupaId.get(idDin(ctx.query.vechi));
     const nou = d.dupaId.get(idDin(ctx.query.nou));
-    const p = piedica(vechi, nou);
+    const p = piedica(vechi, nou) || neasociat(d, vechi, nou);
     if (p) return redirect(ctx.res, `${CALE}?eroare=${encodeURIComponent(p)}`);
     const prev = await FZ.previzualizeaza(nou.id, [vechi.id]);
+    const paleti = await paletiiLor(vechi.id, nou.id);
     const rt = await reteteleLor(vechi.id, nou.id);
     const douaRetete = rt.vechi > 0 && rt.nou > 0;
     // Doar ce chiar se mută: motorul întoarce și tabelele cu zero rânduri.
@@ -609,6 +671,47 @@ function register(router) {
       </p>
       <form method="post" action="${CALE}/unifica" onsubmit="return confirm('Unific? Produsul vechi dispare din liste, iar tot ce ține de el trece pe celălalt.')">
         <input type="hidden" name="vechi_id" value="${vechi.id}"><input type="hidden" name="nou_id" value="${nou.id}">
+        ${ctx.query.eroare ? `<div class="flash flash-rosu" role="alert" style="max-width:980px;background:#f8e5e3;border-color:#efc9c4;color:var(--danger)">${esc(String(ctx.query.eroare))}</div>` : ""}
+        ${
+          paleti.length
+            ? `<h2>Cantitatea după verificare</h2>
+               <p style="max-width:900px;font-size:13px;color:var(--text-muted)">
+                 Marfa celor două produse, palet cu palet. Propus e ce scrie acum în sistem (totalul = suma). Dacă la numărare a ieșit altceva,
+                 schimbă cantitatea pe paletul respectiv: se corectează la unificare, cu urmă în istoricul paletului.
+               </p>
+               <div class="tabel-scroll"><table class="table" data-paleti-unificare style="max-width:760px">
+                 <thead><tr><th>Palet</th><th>Acum pe</th><th>În sistem</th><th>Numărat</th></tr></thead>
+                 <tbody>${paleti
+                   .map(
+                     (l) => `<tr>
+                       <td><a href="/stocuri/ct-park/palet/${l.palet_id}" target="_blank" rel="noopener">${esc(l.palet)}</a></td>
+                       <td>${Number(l.produs_id) === Number(vechi.id) ? "produsul vechi" : "produsul care rămâne"}</td>
+                       <td>${esc(cant(l.cantitate))} ${esc(l.um || "")}</td>
+                       <td><input type="text" inputmode="decimal" name="cant_${l.linie_id}" value="${esc(String(nr(l.cantitate)))}" data-cant-sistem="${nr(l.cantitate)}" style="width:110px" aria-label="Cantitatea numărată pe ${esc(l.palet)}"> ${esc(l.um || "")}</td>
+                     </tr>`
+                   )
+                   .join("")}</tbody>
+                 <tfoot><tr style="font-weight:600"><td colspan="2">Total după unificare</td><td>${esc(cant(paleti.reduce((a, l) => a + nr(l.cantitate), 0)))}</td><td><span data-total-numarat>${esc(cant(paleti.reduce((a, l) => a + nr(l.cantitate), 0)))}</span> <span data-total-diferenta style="font-weight:400;color:var(--warn,#b5760b)"></span></td></tr></tfoot>
+               </table></div>
+               ${(sv && sv.dePus > SP.EPS) || (sn && sn.dePus > SP.EPS) ? `<p style="font-size:13px;color:var(--text-muted)">Pe lângă paleți, mai e marfă recepționată și încă nepusă pe raft; ea se numără când se pune pe palet.</p>` : ""}
+               <script>
+                 (function () {
+                   var t = document.querySelector("[data-paleti-unificare]");
+                   if (!t) return;
+                   var nr = function (v) { var n = Number(String(v).trim().split(" ").join("").replace(",", ".")); return isFinite(n) && n >= 0 ? n : NaN; };
+                   var ro = function (x) { return x.toLocaleString("ro-RO", { maximumFractionDigits: 3 }); };
+                   var refa = function () {
+                     var s = 0, sis = 0, rau = false;
+                     t.querySelectorAll("input[data-cant-sistem]").forEach(function (i) { var n = nr(i.value); if (isNaN(n)) rau = true; else s += n; sis += Number(i.getAttribute("data-cant-sistem")); });
+                     t.querySelector("[data-total-numarat]").textContent = rau ? "—" : ro(s);
+                     var d = s - sis;
+                     t.querySelector("[data-total-diferenta]").textContent = rau ? "o cantitate nu e număr" : Math.abs(d) < 0.0005 ? "" : "(" + (d > 0 ? "+" : "") + ro(d) + " față de sistem)";
+                   };
+                   t.addEventListener("input", refa);
+                 })();
+               </script>`
+            : ""
+        }
         <div class="form-actions">
           ${douaRetete ? "" : '<button class="btn" type="submit">Unifică</button>'}
           <a class="btn secondary" href="${CALE}">${douaRetete ? "Înapoi" : "Renunță"}</a>
@@ -621,8 +724,12 @@ function register(router) {
     const d = await citeste();
     const vechi = d.dupaId.get(idDin(ctx.body.vechi_id));
     const nou = d.dupaId.get(idDin(ctx.body.nou_id));
-    const p = piedica(vechi, nou);
+    const p = piedica(vechi, nou) || neasociat(d, vechi, nou);
     if (p) return redirect(ctx.res, `${CALE}?eroare=${encodeURIComponent(p)}`);
+    // Cantitățile numărate la verificare: se corectează paleții ÎNAINTE de
+    // unificare, ca o cantitate greșită să oprească tot, nu să rămână pe jumătate.
+    const numarat = await corecteazaPaletii(vechi, nou, ctx.body, ctx.user);
+    if (numarat.eroare) return redirect(ctx.res, `${CALE}/unifica?vechi=${vechi.id}&nou=${nou.id}&eroare=${encodeURIComponent(numarat.eroare)}`);
     let r;
     try {
       r = await unifica(vechi, nou, ctx.user, "validata");
@@ -632,7 +739,7 @@ function register(router) {
     }
     const text = `„${vechi.denumire}” a intrat în ${codulLui(nou) ? codulLui(nou) + " · " : ""}„${nou.denumire}”: ${r.total} ${r.total === 1 ? "rând mutat" : "rânduri mutate"}${
       r.completate.length ? "; completat din cel vechi: " + r.completate.join(", ") : ""
-    }.`;
+    }${numarat.corectate.length ? `; cantitate corectată după numărare pe ${numarat.corectate.join(", ")}` : ""}.`;
     if (r.cazute.length) {
       const ramase = ` Atenție: n-au putut fi mutate: ${r.cazute.join(", ")}. Au rămas pe produsul vechi — anunță-l pe Vali, cu numele produsului.`;
       return redirect(ctx.res, `${CALE}?eroare=${encodeURIComponent((text.slice(0, 500) + ramase).slice(0, 900))}`);

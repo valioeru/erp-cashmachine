@@ -138,7 +138,7 @@ const CATEGORII = [
     descriere: "Marfă și execuție: stocuri, comenzi, ce e blocat.",
     rapoarte: [
       { href: "/rapoarte/stocuri", nume: "Situația stocurilor", desc: "Stoc curent pe produs și pe depozit, cu alertă la produsele sub stocul minim." },
-      { href: "/rapoarte/comenzi", nume: "Comenzi pe status", desc: "Câte comenzi sunt în fiecare stadiu și care sunt cele mai vechi nefinalizate." },
+      { href: "/rapoarte/comenzi", nume: "Comenzi pe status", desc: "Câte comenzi și ce valoare are fiecare stadiu, de la ce agent vin, pe perioada aleasă; plus cele mai vechi nefinalizate." },
       {
         href: "/rapoarte/comenzi-la-zi",
         nume: "Comenzi consumabile la zi (Sameday)",
@@ -2412,7 +2412,27 @@ function register(router) {
 
   // ---- Operațional: comenzi --------------------------------------------
   router.get("/rapoarte/comenzi", async (ctx) => {
-    const peStatus = await db.prepare("SELECT status, COUNT(*) AS nr FROM comenzi GROUP BY status ORDER BY nr DESC").all();
+    // Vali, 18.11.2026: „La raportul comenzi pe status vreau și sume și
+    // totaluri pe categorii de comenzi și de la ce agent vin" și „să pot alege
+    // eu perioada". Valoarea e fără TVA, în lei: comanda în valută intră la
+    // cursul ei, iar cea fără curs nu se adună (se numără separat).
+    const CO = require("../lib/comenzi-ordine");
+    const CS = require("../lib/comenzi-stari");
+    const CC = require("../lib/curs-comanda");
+    const interval = intervalDinQuery(ctx, 12, "luna_curenta");
+    const randuri = await db
+      .prepare(
+        `SELECT c.status, COALESCE(NULLIF(TRIM(u.nume), ''), 'fără agent') AS agent, COUNT(*) AS nr,
+                COALESCE(SUM(COALESCE(v.val, 0) * ${CC.sqlFactorLei("c")}), 0) AS valoare,
+                SUM(CASE WHEN UPPER(COALESCE(c.moneda, 'RON')) <> 'RON' AND COALESCE(c.curs_bnr, 0) <= 0 THEN 1 ELSE 0 END) AS fara_curs
+           FROM comenzi c
+           LEFT JOIN utilizatori u ON u.id = c.agent_id
+           LEFT JOIN (SELECT comanda_id, SUM(cantitate * pret_unitar) AS val FROM comenzi_linii GROUP BY comanda_id) v ON v.comanda_id = c.id
+          WHERE LEFT(c.data::text, 10) >= ? AND LEFT(c.data::text, 10) <= ?
+          GROUP BY c.status, COALESCE(NULLIF(TRIM(u.nume), ''), 'fără agent')`
+      )
+      .all(interval.deLa, interval.panaLa);
+    const R = CO.aduna(randuri);
     const vechi = await db
       .prepare(
         `SELECT c.id, c.numar, c.data, c.status, p.nume AS partener_nume, p.id AS partener_id
@@ -2421,41 +2441,76 @@ function register(router) {
          ORDER BY c.data ASC LIMIT 50`
       )
       .all();
-    const total = peStatus.reduce((s, r) => s + Number(r.nr), 0);
-    const maxStatus = Math.max(1, ...peStatus.map((r) => Number(r.nr)));
+    const stare = (s) => CS.STATUS_LABEL[s] || esc(s || "—");
+    const pct = (x) => (x * 100).toLocaleString("ro-RO", { maximumFractionDigits: 1 }) + "%";
+    const inLucru = R.peStatus.filter((s) => !["livrata", "anulata"].includes(s.status));
+    const anulate = R.peStatus.find((s) => s.status === "anulata") || { nr: 0, valoare: 0 };
+    const maxVal = Math.max(1, ...R.peStatus.map((s) => s.valoare));
 
     const continut = `
-      <div class="cards">
-        <div class="card"><div class="label">Comenzi în total</div><div class="value">${total}</div></div>
-        <div class="card"><div class="label">Nefinalizate</div><div class="value">${vechi.length}</div></div>
+      ${selectorPerioada("/rapoarte/comenzi", interval)}
+      <p style="font-size:13px;color:var(--text-muted);margin:6px 0 10px">Comenzile cu data între ${esc(interval.deLa)} și ${esc(interval.panaLa)}. Valorile sunt în lei, fără TVA; comanda în euro sau dolari intră la cursul ei.</p>
+      <div class="cards" data-raport-comenzi>
+        <div class="card"><div class="label">Comenzi</div><div class="value">${R.total.nr}</div><div class="ct-sub">${money(R.total.valoare)}</div></div>
+        <div class="card"><div class="label">Încă în lucru</div><div class="value">${inLucru.reduce((a, s) => a + s.nr, 0)}</div><div class="ct-sub">${money(inLucru.reduce((a, s) => a + s.valoare, 0))}</div></div>
+        <div class="card"><div class="label">Anulate</div><div class="value">${anulate.nr}</div><div class="ct-sub">${money(anulate.valoare)}</div></div>
+        <div class="card"><div class="label">Agenți</div><div class="value">${R.peAgent.length}</div><div class="ct-sub">cu comenzi în perioadă</div></div>
       </div>
       ${
-        total === 0
-          ? '<p>Nu există încă comenzi în ERP. Le poți adăuga din <a href="/comenzi">Comenzi</a>.</p>'
+        R.total.faraCurs
+          ? `<div class="flash flash-rosu" role="alert">${R.total.faraCurs} ${R.total.faraCurs === 1 ? "comandă în valută n-are curs și nu e adunată" : "comenzi în valută n-au curs și nu sunt adunate"} la valoare. Scrie-le cursul din „Modifică comanda”.</div>`
+          : ""
+      }
+      ${
+        R.total.nr === 0
+          ? "<p>Nicio comandă în perioada aleasă.</p>"
           : `
-      <h2>Comenzi pe status</h2>
-      <div class="chart">
-        ${peStatus
+      <h2>Pe status</h2>
+      <div class="tabel-scroll"><table class="table" data-pe-status>
+        <thead><tr><th>Status</th><th style="text-align:right">Comenzi</th><th style="text-align:right">Valoare (lei, fără TVA)</th><th style="text-align:right">Din total</th><th></th></tr></thead>
+        <tbody>${R.peStatus
           .map(
-            (r) => `<div class="chart-row">
-              <div class="chart-label" style="width:auto">${esc(r.status)}</div>
-              <div class="chart-bars">${bar((Number(r.nr) / maxStatus) * 100, "verde")}</div>
-              <div class="chart-values">${r.nr} comenzi</div>
-            </div>`
+            (s) => `<tr data-status="${esc(s.status)}"><td>${stare(s.status)}</td><td style="text-align:right">${s.nr}</td><td style="text-align:right">${money(s.valoare)}</td>
+              <td style="text-align:right">${pct(s.parte)}</td><td style="min-width:160px"><div class="chart-bars">${bar((s.valoare / maxVal) * 100, "verde")}</div></td></tr>`
           )
-          .join("")}
-      </div>
+          .join("")}</tbody>
+        <tfoot><tr style="font-weight:600;border-top:2px solid var(--border)"><td>Total</td><td style="text-align:right">${R.total.nr}</td><td style="text-align:right">${money(R.total.valoare)}</td><td style="text-align:right">100%</td><td></td></tr></tfoot>
+      </table></div>
+
+      <h2>Pe agent</h2>
+      <p style="font-size:13px;color:var(--text-muted);margin-top:-4px">De la ce agent vin comenzile și în ce stadiu sunt. În fiecare căsuță: valoarea, iar dedesubt numărul de comenzi.</p>
+      <div class="tabel-scroll"><table class="table" data-pe-agent>
+        <thead><tr><th>Agent</th><th style="text-align:right">Comenzi</th><th style="text-align:right">Valoare</th><th style="text-align:right">Din total</th>${R.stari.map((s) => `<th style="text-align:right">${stare(s)}</th>`).join("")}</tr></thead>
+        <tbody>${R.peAgent
+          .map(
+            (a) => `<tr data-agent="${esc(a.agent)}"><td>${esc(a.agent)}</td><td style="text-align:right">${a.nr}</td><td style="text-align:right;font-weight:600">${money(a.valoare)}</td><td style="text-align:right">${pct(a.parte)}</td>${R.stari
+              .map((s) => {
+                const x = a.peStatus[s];
+                return `<td style="text-align:right">${x ? `${money(x.valoare)}<div style="font-size:12px;color:var(--text-muted)">${x.nr} ${x.nr === 1 ? "comandă" : "comenzi"}</div>` : '<span style="color:var(--text-muted)">—</span>'}</td>`;
+              })
+              .join("")}</tr>`
+          )
+          .join("")}</tbody>
+        <tfoot><tr style="font-weight:600;border-top:2px solid var(--border)"><td>Total</td><td style="text-align:right">${R.total.nr}</td><td style="text-align:right">${money(R.total.valoare)}</td><td style="text-align:right">100%</td>${R.peStatus
+          .map((s) => `<td style="text-align:right">${money(s.valoare)}<div style="font-size:12px;font-weight:400;color:var(--text-muted)">${s.nr}</div></td>`)
+          .join("")}</tr></tfoot>
+      </table></div>`
+      }
 
       <h2>Cele mai vechi comenzi nefinalizate</h2>
-      ${table(
-        ["Comandă", "Client", "Data", "Status"],
-        vechi.map((c) => [
-          `<a href="/comenzi/${c.id}">#${esc(String(c.numar || c.id))}</a>`,
-          `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume)}</a>`,
-          esc((c.data || "").slice(0, 10)),
-          esc(c.status),
-        ])
-      )}`
+      <p style="font-size:13px;color:var(--text-muted);margin-top:-4px">Din toate timpurile, nu doar din perioada aleasă.</p>
+      ${
+        vechi.length
+          ? table(
+              ["Comandă", "Client", "Data", "Status"],
+              vechi.map((c) => [
+                `<a href="/comenzi/${c.id}">#${esc(String(c.numar || c.id))}</a>`,
+                `<a href="/parteneri/${c.partener_id}">${esc(c.partener_nume)}</a>`,
+                esc((c.data || "").slice(0, 10)),
+                stare(c.status),
+              ])
+            )
+          : "<p>Nicio comandă nefinalizată.</p>"
       }
     `;
     send(ctx.res, 200, pagina(ctx, "Comenzi pe status", "/rapoarte/comenzi", continut));

@@ -1392,6 +1392,9 @@ function register(router) {
 
   router.get("/comenzi", async (ctx) => {
     const per = perioadaDin(ctx.query, "tot");
+    // Ordinea implicită (Vali, 18.11.2026): după stadiu — noi, așteaptă marfă,
+    // în producție, în stoc depozit, facturate, livrate, anulate — și, în
+    // fiecare stadiu, cele mai noi sus. Vezi lib/comenzi-ordine.js.
     const comenzi = await db
       .prepare(
         `SELECT c.*, p.nume AS partener_nume,
@@ -1407,7 +1410,7 @@ function register(router) {
                   WHERE a.comanda_id = c.id AND a.sursa = 'productie' AND a.status = 'refuzata') AS cereri_refuzate
          FROM comenzi c JOIN parteneri p ON p.id = c.partener_id
          WHERE c.data >= ? AND c.data <= ?
-         ORDER BY c.id DESC`
+         ORDER BY ${require("../lib/comenzi-ordine").sqlRang("c.status")}, c.id DESC`
       )
       .all(per.de, per.la + " 23:59:59");
     const body = `
@@ -1422,6 +1425,10 @@ function register(router) {
           <button class="chip${per.cheie === "custom" ? " activ" : ""}" type="submit" name="perioada" value="custom">Aplică</button>
         </span>
       </form>
+      <p data-ordine-comenzi style="font-size:13px;color:var(--text-muted);margin:6px 0">
+        Ordinea: întâi comenzile noi, apoi cele care așteaptă marfă, în producție, în stoc depozit, facturate, livrate și, la urmă, anulate.
+        În fiecare stadiu, cele mai noi sus. Un click pe capul unei coloane sortează altfel.
+      </p>
       ${table(
         ["Nr.", "Client", "Data", "Data solicitată", "Confirmată de producție", "Status", "Total", "Acțiuni"],
         comenzi.map((c) => [
