@@ -60,16 +60,25 @@ async function poateVedea(user, aviz) {
   return eClientulLui(user, aviz.partener_id);
 }
 
-async function contor() {
-  const r = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN ('aviz_serie', 'aviz_urmator')").all();
+// Seria și numărul următor ale firmei care emite. Fiecare firmă are șirul ei
+// (Vali, 19.11.2026): Cash Machine pe cheile vechi, Warehouse All pe „_wa".
+function cheiContor(firma) {
+  const f = AV.firmaEmitenta(firma);
+  return { f, cSerie: "aviz_serie" + f.sufix, cUrmator: "aviz_urmator" + f.sufix };
+}
+async function contor(firma) {
+  const { f, cSerie, cUrmator } = cheiContor(firma);
+  const r = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN (?, ?)").all(cSerie, cUrmator);
   const m = {};
   for (const x of r || []) m[x.cheie] = x.valoare;
-  return { serie: String(m.aviz_serie || SERIE_IMPLICITA), urmator: Number(m.aviz_urmator) || URMATORUL_IMPLICIT };
+  return { serie: String(m[cSerie] || f.serieAviz), urmator: Number(m[cUrmator]) || f.urmatorAviz };
 }
 
 // Emiterea unui aviz. `linii` = [{ produs_id, denumire, cod, um, cantitate, palet }].
 // Întoarce { id, serie, numar }. Aruncă o eroare cu mesaj de om dacă nu se poate.
-async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, creatDeId, sursa, delegat, transport, observatii }) {
+// `firma` = 'cm' (Cash Machine, și când lipsește) sau 'wa' (Warehouse All).
+async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, creatDeId, sursa, delegat, transport, observatii, firma }) {
+  const { f: FE, cSerie, cUrmator } = cheiContor(firma);
   const curate = AV.agrega(linii);
   if (!curate.length) throw new Error("Avizul n-are nicio linie cu produs și cantitate.");
   const p = nr(partenerId)
@@ -80,9 +89,9 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
   const azi = aziRo();
   // Rândurile contorului le pune migrarea; aici e doar plasa, ca o bază fără
   // ele să nu dea „avizul n-a primit număr”.
-  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('aviz_serie', ?, ?) ON CONFLICT (cheie) DO NOTHING").run(SERIE_IMPLICITA, azi);
-  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('aviz_urmator', ?, ?) ON CONFLICT (cheie) DO NOTHING").run(String(URMATORUL_IMPLICIT), azi);
-  const { serie } = await contor();
+  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO NOTHING").run(cSerie, FE.serieAviz, azi);
+  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO NOTHING").run(cUrmator, String(FE.urmatorAviz), azi);
+  const { serie } = await contor(FE.cheie);
 
   let rand;
   try {
@@ -90,16 +99,17 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
       .prepare(
         `WITH nr AS (
            UPDATE setari_app SET valoare = CAST(CAST(valoare AS INTEGER) + 1 AS TEXT), actualizat_la = ?
-            WHERE cheie = 'aviz_urmator'
+            WHERE cheie = ?
             RETURNING CAST(valoare AS INTEGER) - 1 AS numar
          )
          INSERT INTO avize (serie, numar, data, partener_id, comanda_id, comanda_numar, client_nume, client_cui, client_regcom, client_adresa,
-                            furnizor, sursa, delegat, mijloc_transport, observatii, creat_de, creat_de_id)
-         SELECT ?, nr.numar, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM nr
+                            furnizor, firma, sursa, delegat, mijloc_transport, observatii, creat_de, creat_de_id)
+         SELECT ?, nr.numar, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM nr
          RETURNING id, serie, numar`
       )
       .get(
         azi,
+        cUrmator,
         serie,
         azi,
         p.id,
@@ -109,7 +119,8 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
         p.cui || null,
         String(p.reg_com || "").trim() || null,
         AV.adresaClient(p) || null,
-        JSON.stringify(AV.FURNIZOR),
+        JSON.stringify(FE.date),
+        FE.cheie,
         sursa === "depozit" ? "depozit" : "manual",
         String(delegat || "").trim() || null,
         String(transport || "").trim() || null,
@@ -119,9 +130,9 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
       );
   } catch (e) {
     if (/ux_avize_serie_numar|duplicate key/i.test(String(e.message))) {
-      const { urmator } = await contor().catch(() => ({ urmator: "?" }));
+      const { urmator } = await contor(FE.cheie).catch(() => ({ urmator: "?" }));
       throw new Error(
-        `Numărul ${urmator} din seria ${serie} e deja folosit pe alt aviz. Un administrator trebuie să corecteze contorul din Avize.`
+        `Numărul ${urmator} din seria ${serie} (${FE.eticheta}) e deja folosit pe alt aviz. Un administrator trebuie să corecteze contorul din Avize.`
       );
     }
     throw e;
@@ -136,7 +147,7 @@ async function emite({ partenerId, comandaId, comandaNumar, linii, creatDe, crea
     })
     .join(", ");
   await db.prepare(`INSERT INTO avize_linii (aviz_id, produs_id, denumire, cod, um, cantitate, paleti) VALUES ${semne}`).run(...valori);
-  console.log(`[avize] ${rand.serie} ${rand.numar} pentru ${p.nume} (${sursa || "manual"}) de ${creatDe || "?"}`);
+  console.log(`[avize] ${rand.serie} ${rand.numar} (${FE.eticheta}) pentru ${p.nume} (${sursa || "manual"}) de ${creatDe || "?"}`);
   return { id: Number(rand.id), serie: rand.serie, numar: Number(rand.numar) };
 }
 
@@ -200,16 +211,35 @@ function register(router) {
     const mesaj = q.ok ? `<div class="flash">${esc(q.ok)}</div>` : "";
     const eroare = q.eroare ? `<p style="color:var(--danger);max-width:760px">${esc(q.eroare)}</p>` : "";
 
+    // Contoarele celorlalte firme care emit (Warehouse All).
+    const alte = [];
+    for (const f of AV.FIRME_EMITENTE.slice(1)) alte.push({ f, c: await contor(f.cheie) });
     const formContor = eAdmin(ctx.user)
       ? `<details style="margin-top:22px;max-width:760px">
            <summary style="cursor:pointer;font-weight:600">Seria și numărul următor (doar administratorul)</summary>
-           <form method="post" action="/avize/contor" class="form" style="margin-top:10px">
-             <div style="display:grid;grid-template-columns:160px 200px auto;gap:12px;align-items:end">
+           ${alte
+             .map(
+               (x) => `<form method="post" action="/avize/contor" class="form" style="margin-top:10px" data-contor-firma="${x.f.cheie}">
+             <input type="hidden" name="firma" value="${x.f.cheie}">
+             <div style="display:grid;grid-template-columns:160px 160px 200px auto;gap:12px;align-items:end">
+               <div style="font-weight:600;padding-bottom:8px">${esc(x.f.eticheta)}</div>
+               <label class="field"><span>Seria</span><input name="serie" value="${esc(x.c.serie)}" maxlength="10" required></label>
+               <label class="field"><span>Următorul număr</span><input name="urmator" type="number" min="1" step="1" value="${esc(String(x.c.urmator))}" required></label>
+               <div><button class="btn" type="submit">Salvează</button></div>
+             </div>
+           </form>`
+             )
+             .join("")}
+           <form method="post" action="/avize/contor" class="form" style="margin-top:10px" data-contor-firma="cm">
+             <input type="hidden" name="firma" value="cm">
+             <div style="display:grid;grid-template-columns:160px 160px 200px auto;gap:12px;align-items:end">
+               <div style="font-weight:600;padding-bottom:8px">Cash Machine</div>
                <label class="field"><span>Seria</span><input name="serie" value="${esc(c.serie)}" maxlength="10" required></label>
                <label class="field"><span>Următorul număr</span><input name="urmator" type="number" min="1" step="1" value="${esc(String(c.urmator))}" required></label>
                <div><button class="btn" type="submit">Salvează</button></div>
              </div>
              <p class="ajutor" style="margin-top:8px">
+               Fiecare firmă are seria și numerele ei; două firme nu pot avea aceeași serie.
                Numerotarea continuă de la avizele din SmartBill (CHMA 1388). Dacă se mai emit avize pe aceeași serie și din
                SmartBill, numerele se dublează — scoate avizele pe seria asta doar de aici, sau folosește aici altă serie.
                Un număr deja folosit în seria aleasă nu se poate pune.
@@ -230,16 +260,19 @@ function register(router) {
       ${blocSb}
       <div class="toolbar">
         <a class="btn" href="/avize/nou">+ Aviz nou</a>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următorul aviz: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>${
+        <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următorul aviz: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>${alte
+          .map((x) => ` · ${esc(x.f.eticheta)}: <strong>${esc(x.c.serie)} ${esc(String(x.c.urmator))}</strong>`)
+          .join("")}${
           tot ? "" : ` · <span data-doar-ale-mele>vezi avizele tale și ale clienților tăi</span>`
         }</span>
       </div>
       ${
         lista.length
           ? table(
-              ["Aviz", "Data", "Client", "Comanda", "Linii", "De unde", "Întocmit de", "Stare"],
+              ["Aviz", "Firma", "Data", "Client", "Comanda", "Linii", "De unde", "Întocmit de", "Stare"],
               lista.map((a) => [
                 `<a href="/avize/${a.id}" target="_blank"><strong>${esc(a.serie)} ${esc(String(a.numar))}</strong></a>`,
+                esc(AV.firmaEmitenta(a.firma).eticheta),
                 esc(AV.dataAviz(a.data)),
                 esc(a.client_nume || "—"),
                 esc(a.comanda_numar || "—"),
@@ -259,9 +292,17 @@ function register(router) {
   // ---- Contorul (doar admin) ---------------------------------------------------
   router.post("/avize/contor", async (ctx) => {
     if (!eAdmin(ctx.user)) return redirect(ctx.res, "/avize?eroare=" + encodeURIComponent("Doar administratorul poate schimba seria și numărul."));
+    const { f: FE, cSerie, cUrmator } = cheiContor(ctx.body.firma);
     const serie = String(ctx.body.serie || "").trim().toUpperCase();
     const urmator = nr(ctx.body.urmator);
     if (!/^[A-Z0-9-]{1,10}$/.test(serie)) return redirect(ctx.res, "/avize?eroare=" + encodeURIComponent("Seria: litere, cifre sau cratimă, cel mult 10."));
+    // Două firme nu pot împărți o serie: numerele s-ar călca între ele.
+    for (const alta of AV.FIRME_EMITENTE) {
+      if (alta.cheie === FE.cheie) continue;
+      if ((await contor(alta.cheie)).serie === serie) {
+        return redirect(ctx.res, "/avize?eroare=" + encodeURIComponent(`Seria ${serie} e a firmei ${alta.eticheta}. Alege altă serie pentru ${FE.eticheta}.`));
+      }
+    }
     if (!urmator) return redirect(ctx.res, "/avize?eroare=" + encodeURIComponent("Următorul număr trebuie să fie un întreg mai mare ca 0."));
     const max = await db.prepare("SELECT MAX(numar) AS m FROM avize WHERE serie = ?").get(serie);
     const ultim = Number((max && max.m) || 0);
@@ -269,10 +310,10 @@ function register(router) {
       return redirect(ctx.res, "/avize?eroare=" + encodeURIComponent(`În seria ${serie} există deja avize până la nr. ${ultim}. Următorul poate fi cel puțin ${ultim + 1}.`));
     }
     const azi = aziRo();
-    await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('aviz_serie', ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la").run(serie, azi);
-    await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('aviz_urmator', ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la").run(String(urmator), azi);
-    console.log(`[avize] contor schimbat: ${serie} ${urmator} de ${ctx.user.nume}`);
-    redirect(ctx.res, "/avize?ok=" + encodeURIComponent(`Următorul aviz va fi ${serie} ${urmator}.`));
+    await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la").run(cSerie, serie, azi);
+    await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la").run(cUrmator, String(urmator), azi);
+    console.log(`[avize] contor schimbat (${FE.eticheta}): ${serie} ${urmator} de ${ctx.user.nume}`);
+    redirect(ctx.res, "/avize?ok=" + encodeURIComponent(`Următorul aviz ${FE.eticheta} va fi ${serie} ${urmator}.`));
   });
 
   // ---- Avizul manual -----------------------------------------------------------
@@ -313,10 +354,14 @@ function register(router) {
       ${eroare ? `<p class="alerta" style="max-width:820px;color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 12px">${esc(eroare)}</p>` : ""}
       <h1 style="margin:6px 0 2px">Aviz de însoțire nou</h1>
       <p style="margin:0 0 14px;color:var(--text-muted);font-size:13px;max-width:820px">
-        ${tot ? "" : `<span data-doar-clientii-mei>Poți face avize pentru clienții tăi.</span> `}Fără prețuri: clientul, produsele și cantitățile. Va primi numărul <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>
-        (același șir ca avizele scoase din depozit) și data de azi, ${esc(AV.dataAviz(aziRo()))}.
+        ${tot ? "" : `<span data-doar-clientii-mei>Poți face avize pentru clienții tăi.</span> `}Fără prețuri: clientul, produsele și cantitățile. Primește numărul următor din seria firmei alese
+        (la Cash Machine, același șir ca avizele scoase din depozit) și data de azi, ${esc(AV.dataAviz(aziRo()))}.
       </p>
       <form method="post" action="/avize" class="form" style="max-width:980px">
+        ${AV.alegeFirma(v.firma)}
+        <p class="ajutor" style="margin:-4px 0 12px">${(
+          await Promise.all(AV.FIRME_EMITENTE.map(async (f) => `${esc(f.eticheta)}: următorul număr <strong>${esc((await contor(f.cheie)).serie)} ${esc(String((await contor(f.cheie)).urmator))}</strong>`))
+        ).join(" · ")}. Pe aviz apar datele firmei alese.</p>
         <label class="field"><span>Client</span>
           ${cautaClient({ nume: "client_cautat", obligatoriu: true, partenerId: v.partener_id, valoare: (parteneri.find((p) => String(p.id) === String(v.partener_id)) || {}).nume })}
         </label>
@@ -419,6 +464,7 @@ function register(router) {
     const umuri = [].concat(b["um[]"] || b.um || []);
     const cantitati = [].concat(b["cantitate[]"] || b.cantitate || []);
     const valori = {
+      firma: AV.firmaEmitenta(b.firma).cheie,
       partener_id: b.partener_id,
       comanda_numar: b.comanda_numar,
       delegat: b.delegat,
@@ -463,6 +509,7 @@ function register(router) {
         creatDe: ctx.user ? ctx.user.nume : null,
         creatDeId: ctx.user ? ctx.user.id : null,
         sursa: "manual",
+        firma: valori.firma,
         delegat: b.delegat,
         transport: b.transport,
         observatii: b.observatii,

@@ -2254,7 +2254,7 @@ function register(router) {
         }
         ${
           poateProforma && comanda.status !== "anulata" && linii.length
-            ? `<form method="post" action="/comenzi/${comanda.id}/proforma" class="inline-form"><button type="submit" class="btn secondary" data-emite-proforma>${
+            ? `<form method="post" action="/comenzi/${comanda.id}/proforma" class="inline-form" style="display:inline-flex;gap:6px;align-items:center">${require("../lib/aviz").alegeFirma("cm", { compact: true })}<button type="submit" class="btn secondary" data-emite-proforma>${
                 proforme.some((f) => Number(f.anulat) !== 1) ? "Emite proformă din nou" : "Emite proformă"
               }</button></form>`
             : ""

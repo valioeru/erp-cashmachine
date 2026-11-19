@@ -91,11 +91,18 @@ async function poateVedea(user, pf) {
   return Boolean(r);
 }
 
-async function contor() {
-  const r = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN ('proforma_serie', 'proforma_urmator')").all();
+// Seria și numărul următor ale firmei care emite (Vali, 19.11.2026): Cash
+// Machine pe cheile vechi, Warehouse All pe „_wa" — ca la avize.
+function cheiContor(firma) {
+  const f = AV.firmaEmitenta(firma);
+  return { f, cSerie: "proforma_serie" + f.sufix, cUrmator: "proforma_urmator" + f.sufix };
+}
+async function contor(firma) {
+  const { f, cSerie, cUrmator } = cheiContor(firma);
+  const r = await db.prepare("SELECT cheie, valoare FROM setari_app WHERE cheie IN (?, ?)").all(cSerie, cUrmator);
   const m = {};
   for (const x of r || []) m[x.cheie] = x.valoare;
-  return { serie: String(m.proforma_serie || SERIE_IMPLICITA), urmator: Number(m.proforma_urmator) || URMATORUL_IMPLICIT };
+  return { serie: String(m[cSerie] || f.serieProforma), urmator: Number(m[cUrmator]) || f.urmatorProforma };
 }
 
 // Datele proformei, citite din comandă. Aruncă o eroare cu mesaj de om.
@@ -169,21 +176,24 @@ async function dinComanda(comandaId) {
 // Emite proforma comenzii. Întoarce { id, serie, numar, existenta }.
 // `existenta: true` = comanda nu s-a schimbat de la ultima proformă neanulată,
 // deci n-a primit alt număr.
-async function emite(comandaId, user, { observatii } = {}) {
+// `firma` = 'cm' (Cash Machine, și când lipsește) sau 'wa' (Warehouse All).
+// Aceeași comandă, neschimbată, dar pe altă firmă = altă proformă.
+async function emite(comandaId, user, { observatii, firma } = {}) {
+  const { f: FE, cSerie, cUrmator } = cheiContor(firma);
   const { doc, linii } = await dinComanda(comandaId);
   const obs = String(observatii || "").trim().slice(0, 500) || null;
   const amprenta = PF.amprenta(doc, linii);
   const ultima = await db
-    .prepare("SELECT id, serie, numar, amprenta, observatii FROM proforme WHERE comanda_id = ? AND anulat = 0 ORDER BY id DESC LIMIT 1")
+    .prepare("SELECT id, serie, numar, amprenta, observatii, firma FROM proforme WHERE comanda_id = ? AND anulat = 0 ORDER BY id DESC LIMIT 1")
     .get(doc.comanda_id);
-  if (ultima && ultima.amprenta === amprenta && String(ultima.observatii || "") === String(obs || "")) {
+  if (ultima && ultima.amprenta === amprenta && String(ultima.observatii || "") === String(obs || "") && AV.firmaEmitenta(ultima.firma).cheie === FE.cheie) {
     return { id: Number(ultima.id), serie: ultima.serie, numar: Number(ultima.numar), existenta: true };
   }
 
   const azi = aziRo();
-  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('proforma_serie', ?, ?) ON CONFLICT (cheie) DO NOTHING").run(SERIE_IMPLICITA, azi);
-  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('proforma_urmator', ?, ?) ON CONFLICT (cheie) DO NOTHING").run(String(URMATORUL_IMPLICIT), azi);
-  const { serie } = await contor();
+  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO NOTHING").run(cSerie, FE.serieProforma, azi);
+  await db.prepare("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO NOTHING").run(cUrmator, String(FE.urmatorProforma), azi);
+  const { serie } = await contor(FE.cheie);
   const T = PF.totaluri(linii);
 
   let rand;
@@ -192,25 +202,25 @@ async function emite(comandaId, user, { observatii } = {}) {
       .prepare(
         `WITH nr AS (
            UPDATE setari_app SET valoare = CAST(CAST(valoare AS INTEGER) + 1 AS TEXT), actualizat_la = ?
-            WHERE cheie = 'proforma_urmator'
+            WHERE cheie = ?
             RETURNING CAST(valoare AS INTEGER) - 1 AS numar
          )
          INSERT INTO proforme (serie, numar, data, partener_id, comanda_id, comanda_numar, client_nume, client_cui, client_regcom, client_adresa,
-                               client_contact, client_telefon, client_email, furnizor, moneda, curs, curs_nota, termen_plata_zile, livrare, data_livrare,
+                               client_contact, client_telefon, client_email, furnizor, firma, moneda, curs, curs_nota, termen_plata_zile, livrare, data_livrare,
                                upa, mentiune, observatii, subtotal, tva, total, amprenta, agent_id, agent_email, creat_de, creat_de_id)
-         SELECT ?, nr.numar, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM nr
+         SELECT ?, nr.numar, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM nr
          RETURNING id, serie, numar`
       )
       .get(
-        azi, serie, azi, doc.partener_id, doc.comanda_id, doc.comanda_numar, doc.client_nume, doc.client_cui, doc.client_regcom, doc.client_adresa,
-        doc.client_contact, doc.client_telefon, doc.client_email, JSON.stringify(AV.FURNIZOR), doc.moneda, doc.curs, doc.curs_nota, doc.termen_plata_zile,
+        azi, cUrmator, serie, azi, doc.partener_id, doc.comanda_id, doc.comanda_numar, doc.client_nume, doc.client_cui, doc.client_regcom, doc.client_adresa,
+        doc.client_contact, doc.client_telefon, doc.client_email, JSON.stringify(FE.date), FE.cheie, doc.moneda, doc.curs, doc.curs_nota, doc.termen_plata_zile,
         doc.livrare, doc.data_livrare, doc.upa, doc.mentiune, obs, T.subtotal, T.tva, T.total, amprenta, doc.agent_id,
         String((user && (user.email_expeditor || user.email)) || "").trim() || null, (user && user.nume) || null, nr(user && user.id)
       );
   } catch (e) {
     if (/ux_proforme_serie_numar|duplicate key/i.test(String(e.message))) {
-      const { urmator } = await contor().catch(() => ({ urmator: "?" }));
-      throw new Error(`Numărul ${urmator} din seria ${serie} e deja folosit pe altă proformă. Un administrator trebuie să corecteze contorul din Proforme.`);
+      const { urmator } = await contor(FE.cheie).catch(() => ({ urmator: "?" }));
+      throw new Error(`Numărul ${urmator} din seria ${serie} (${FE.eticheta}) e deja folosit pe altă proformă. Un administrator trebuie să corecteze contorul din Proforme.`);
     }
     throw e;
   }
@@ -228,7 +238,7 @@ async function emite(comandaId, user, { observatii } = {}) {
     .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
     .run(doc.partener_id, `Proformă ${rand.serie} ${rand.numar} din comanda ${doc.comanda_numar}`, `Total ${PF.bani(T.total)} ${PF.SIMBOL[doc.moneda]}.`, nr(user && user.id))
     .catch((e) => console.error("[proforme] interacțiunea nu s-a scris:", e.message));
-  console.log(`[proforme] ${rand.serie} ${rand.numar} pentru ${doc.client_nume}, comanda ${doc.comanda_numar}, de ${(user && user.nume) || "?"}`);
+  console.log(`[proforme] ${rand.serie} ${rand.numar} (${FE.eticheta}) pentru ${doc.client_nume}, comanda ${doc.comanda_numar}, de ${(user && user.nume) || "?"}`);
   return { id: Number(rand.id), serie: rand.serie, numar: Number(rand.numar), existenta: false };
 }
 
@@ -284,16 +294,33 @@ function register(router) {
       stSb.fel === "in-urma" ? "border-left:4px solid var(--warn);padding:8px 12px;background:var(--surface-2,#faf7ef)" : "color:var(--text-muted)"
     }">${esc(stSb.text)}</p>`;
 
+    const alte = [];
+    for (const f of AV.FIRME_EMITENTE.slice(1)) alte.push({ f, c: await contor(f.cheie) });
     const formContor = eAdmin(ctx.user)
       ? `<details style="margin-top:22px;max-width:760px">
            <summary style="cursor:pointer;font-weight:600">Seria și numărul următor (doar administratorul)</summary>
-           <form method="post" action="/proforme/contor" class="form" style="margin-top:10px">
-             <div style="display:grid;grid-template-columns:160px 200px auto;gap:12px;align-items:end">
+           ${alte
+             .map(
+               (x) => `<form method="post" action="/proforme/contor" class="form" style="margin-top:10px" data-contor-firma="${x.f.cheie}">
+             <input type="hidden" name="firma" value="${x.f.cheie}">
+             <div style="display:grid;grid-template-columns:160px 160px 200px auto;gap:12px;align-items:end">
+               <div style="font-weight:600;padding-bottom:8px">${esc(x.f.eticheta)}</div>
+               <label class="field"><span>Seria</span><input name="serie" value="${esc(x.c.serie)}" maxlength="10" required></label>
+               <label class="field"><span>Următorul număr</span><input name="urmator" type="number" min="1" step="1" value="${esc(String(x.c.urmator))}" required></label>
+               <div><button class="btn" type="submit">Salvează</button></div>
+             </div>
+           </form>`
+             )
+             .join("")}
+           <form method="post" action="/proforme/contor" class="form" style="margin-top:10px" data-contor-firma="cm">
+             <input type="hidden" name="firma" value="cm">
+             <div style="display:grid;grid-template-columns:160px 160px 200px auto;gap:12px;align-items:end">
+               <div style="font-weight:600;padding-bottom:8px">Cash Machine</div>
                <label class="field"><span>Seria</span><input name="serie" value="${esc(c.serie)}" maxlength="10" required></label>
                <label class="field"><span>Următorul număr</span><input name="urmator" type="number" min="1" step="1" value="${esc(String(c.urmator))}" required></label>
                <div><button class="btn" type="submit">Salvează</button></div>
              </div>
-             <p class="ajutor" style="margin-top:8px">Un singur șir de numere pentru toți cei care emit proforme. Dacă mai emiteți proforme și din
+             <p class="ajutor" style="margin-top:8px">Fiecare firmă are seria și numerele ei; două firme nu pot avea aceeași serie. Un singur șir de numere pe firmă, pentru toți cei care emit proforme. Dacă mai emiteți proforme și din
                SmartBill, folosiți aici altă serie decât acolo, ca numerele să nu se dubleze. Un număr deja folosit în seria aleasă nu se poate pune.</p>
            </form>
          </details>`
@@ -306,15 +333,18 @@ function register(router) {
       ${blocSb}
       <div class="toolbar">
         <a class="btn" href="/proforme/emite" data-emite-proforma>Emite proformă</a>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următoarea proformă: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>
+        <span style="color:var(--text-muted);font-size:13px;margin-left:8px">Următoarea proformă: <strong>${esc(c.serie)} ${esc(String(c.urmator))}</strong>${alte
+            .map((x) => ` · ${esc(x.f.eticheta)}: <strong>${esc(x.c.serie)} ${esc(String(x.c.urmator))}</strong>`)
+            .join("")}
           · ${toti ? "vezi proformele tuturor" : "vezi proformele tale și ale clienților tăi"}</span>
       </div>
       ${
         lista.length
           ? table(
-              ["Proformă", "Data", "Client", "Comanda", "Total", "Emisă de", "Stare"],
+              ["Proformă", "Firma", "Data", "Client", "Comanda", "Total", "Emisă de", "Stare"],
               lista.map((f) => [
                 `<a href="/proforme/${f.id}" target="_blank" data-proforma="${f.id}"><strong>${esc(f.serie)} ${esc(String(f.numar))}</strong></a>`,
+                esc(AV.firmaEmitenta(f.firma).eticheta),
                 esc(AV.dataAviz(f.data)),
                 esc(f.client_nume || "—"),
                 f.comanda_id ? `<a href="/comenzi/${f.comanda_id}">${esc(f.comanda_numar || "#" + f.comanda_id)}</a>` : esc(f.comanda_numar || "—"),
@@ -351,7 +381,7 @@ function register(router) {
       ${subnavComenzi("/proforme/emite", ctx.user)}
       <h1>Emite proformă</h1>
       ${eroare}
-      <p style="max-width:760px;color:var(--text-muted)">Alege comanda. Proforma ia din ea clientul, produsele, cantitățile, prețurile, moneda, termenul de plată
+      <p style="max-width:760px;color:var(--text-muted)">Alege comanda și firma care emite (Cash Machine sau Warehouse All). Proforma ia din ea clientul, produsele, cantitățile, prețurile, moneda, termenul de plată
         și livrarea, primește numărul următor și se deschide gata de tipărit sau de salvat ca PDF.
         ${toti ? "Vezi comenzile tuturor." : "Vezi comenzile tale și ale clienților tăi."}</p>
       <div class="toolbar"><input type="search" id="cauta-comanda" placeholder="Caută după client sau număr de comandă…" style="max-width:420px;width:100%"></div>
@@ -367,7 +397,7 @@ function register(router) {
                 `${esc(PF.bani(c.total))} ${esc(PF.SIMBOL[PF.moneda(c.moneda)])}`,
                 c.pf_id ? `<a href="/proforme/${c.pf_id}" target="_blank">${esc(c.pf_nume)}</a>` : `<span style="color:var(--text-muted)">—</span>`,
                 Number(c.nr_linii) > 0
-                  ? `<form method="post" action="/comenzi/${c.id}/proforma" class="inline-form"><button class="btn" type="submit" data-emite="${c.id}">${c.pf_id ? "Emite din nou" : "Emite proformă"}</button></form>`
+                  ? `<form method="post" action="/comenzi/${c.id}/proforma" class="inline-form" style="display:flex;gap:6px;align-items:center">${AV.alegeFirma("cm", { compact: true })}<button class="btn" type="submit" data-emite="${c.id}">${c.pf_id ? "Emite din nou" : "Emite proformă"}</button></form>`
                   : `<span style="color:var(--text-muted);font-size:12px">comandă fără linii</span>`,
               ])
             )
@@ -392,19 +422,25 @@ function register(router) {
   router.post("/proforme/contor", async (ctx) => {
     const inapoi = (t) => redirect(ctx.res, "/proforme?eroare=" + encodeURIComponent(t));
     if (!eAdmin(ctx.user)) return inapoi("Doar administratorul poate schimba seria și numărul.");
+    const { f: FE, cSerie, cUrmator } = cheiContor(ctx.body.firma);
     const serie = String(ctx.body.serie || "").trim().toUpperCase();
     const urmator = nr(ctx.body.urmator);
     if (!/^[A-Z0-9-]{1,10}$/.test(serie)) return inapoi("Seria: litere, cifre sau cratimă, cel mult 10.");
+    // Două firme nu pot împărți o serie: numerele s-ar călca între ele.
+    for (const alta of AV.FIRME_EMITENTE) {
+      if (alta.cheie === FE.cheie) continue;
+      if ((await contor(alta.cheie)).serie === serie) return inapoi(`Seria ${serie} e a firmei ${alta.eticheta}. Alege altă serie pentru ${FE.eticheta}.`);
+    }
     if (!urmator) return inapoi("Următorul număr trebuie să fie un întreg mai mare ca 0.");
     const max = await db.prepare("SELECT MAX(numar) AS m FROM proforme WHERE serie = ?").get(serie);
     const ultim = Number((max && max.m) || 0);
     if (urmator <= ultim) return inapoi(`În seria ${serie} există deja proforme până la nr. ${ultim}. Următorul poate fi cel puțin ${ultim + 1}.`);
     const azi = aziRo();
     const pune = "INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la";
-    await db.prepare(pune).run("proforma_serie", serie, azi);
-    await db.prepare(pune).run("proforma_urmator", String(urmator), azi);
-    console.log(`[proforme] contor schimbat: ${serie} ${urmator} de ${ctx.user.nume}`);
-    redirect(ctx.res, "/proforme?ok=" + encodeURIComponent(`Următoarea proformă va fi ${serie} ${urmator}.`));
+    await db.prepare(pune).run(cSerie, serie, azi);
+    await db.prepare(pune).run(cUrmator, String(urmator), azi);
+    console.log(`[proforme] contor schimbat (${FE.eticheta}): ${serie} ${urmator} de ${ctx.user.nume}`);
+    redirect(ctx.res, "/proforme?ok=" + encodeURIComponent(`Următoarea proformă ${FE.eticheta} va fi ${serie} ${urmator}.`));
   });
 
   // ---- Emiterea din comandă ---------------------------------------------------------
@@ -416,7 +452,7 @@ function register(router) {
       return nuAiVoie(ctx, "Comanda nu e a unui client de-al tău", "Poți emite proforme pentru comenzile tale și ale clienților alocați ție. Pentru celelalte, vorbește cu agentul comenzii, cu financiarul sau cu administratorul.");
     }
     try {
-      const r = await emite(id, ctx.user, { observatii: ctx.body && ctx.body.observatii });
+      const r = await emite(id, ctx.user, { observatii: ctx.body && ctx.body.observatii, firma: ctx.body && ctx.body.firma });
       return redirect(ctx.res, `/proforme/${r.id}${r.existenta ? "?nou=0" : "?nou=1"}`);
     } catch (e) {
       console.error("[proforme] emitere:", e.message);

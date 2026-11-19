@@ -137,9 +137,9 @@ const CURATENIE = [
   "DELETE FROM produse WHERE id BETWEEN 97501 AND 97509",
   "DELETE FROM parteneri WHERE id BETWEEN 97101 AND 97109",
 ];
-const contorVechi = q("SELECT cheie, valoare FROM setari_app WHERE cheie IN ('aviz_serie','aviz_urmator')");
+const contorVechi = q("SELECT cheie, valoare FROM setari_app WHERE cheie IN ('aviz_serie','aviz_urmator','aviz_serie_wa','aviz_urmator_wa')");
 function refaContor() {
-  exec("DELETE FROM setari_app WHERE cheie IN ('aviz_serie','aviz_urmator')");
+  exec("DELETE FROM setari_app WHERE cheie IN ('aviz_serie','aviz_urmator','aviz_serie_wa','aviz_urmator_wa')");
   for (const r of contorVechi) exec(`INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (${lit(r.cheie)}, ${lit(r.valoare)}, '2026-11-03')`);
 }
 
@@ -316,6 +316,35 @@ function refaContor() {
   egal("avizul parțial are doar ce a plecat", mp ? q(`SELECT denumire, um, cantitate FROM avize_linii WHERE aviz_id = ${mp[1]}`).map((x) => [x.denumire, x.um, Number(x.cantitate)]) : null,
     [["Folie stretch TEST 23my", "kg", 30]]);
   egal("pe palet rămâne restul", Number(unul("SELECT cantitate FROM ct_palet_linii WHERE palet_id = 97484")), 50);
+
+  // --- firma care emite (Vali, 19.11.2026) -------------------------------------
+  // „La avize și proforme, fă să alegi firma după care emiți: Cash Machine sau
+  // Warehouse All." Fiecare firmă are seria și numerele ei, iar pe foaie apar
+  // datele firmei alese — nu telefonul sau contul celeilalte.
+  exec("DELETE FROM setari_app WHERE cheie IN ('aviz_serie_wa','aviz_urmator_wa')");
+  exec("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('aviz_serie_wa','TSW','2026-11-19'), ('aviz_urmator_wa','71','2026-11-19')");
+  const cmInainte = unul("SELECT valoare FROM setari_app WHERE cheie = 'aviz_urmator'");
+  const w1 = await avize.emite({ partenerId: 97101, linii: [{ produs_id: 97501, denumire: "Cutii", um: "buc", cantitate: 3 }], creatDe: "Vali", sursa: "manual", firma: "wa" });
+  const w2 = await avize.emite({ partenerId: 97101, linii: [{ produs_id: 97501, denumire: "Cutii", um: "buc", cantitate: 4 }], creatDe: "Vali", sursa: "manual", firma: "wa" });
+  egal("Warehouse All: seria și numerele ei, la rând", [w1.serie, w1.numar, w2.numar], ["TSW", 71, 72]);
+  egal("…fără să miște contorul Cash Machine", unul("SELECT valoare FROM setari_app WHERE cheie = 'aviz_urmator'"), cmInainte);
+  const rw = q(`SELECT firma, furnizor FROM avize WHERE id = ${w1.id}`)[0];
+  egal("firma și datele ei se țin pe aviz", [rw.firma, JSON.parse(rw.furnizor).nume, JSON.parse(rw.furnizor).cif, JSON.parse(rw.furnizor).iban], ["wa", "WAREHOUSE ALL SRL", "RO44140650", "RO34UGBI0000172035560RON"]);
+  const c1 = await avize.emite({ partenerId: 97101, linii: [{ produs_id: 97501, denumire: "Cutii", um: "buc", cantitate: 5 }], creatDe: "Vali", sursa: "manual" });
+  egal("fără firmă aleasă: Cash Machine, pe seria ei", [c1.serie, unul(`SELECT firma FROM avize WHERE id = ${c1.id}`), JSON.parse(unul(`SELECT furnizor FROM avize WHERE id = ${c1.id}`)).cif], ["TST", "cm", "RO27244210"]);
+  egal("o firmă necunoscută e tot Cash Machine", AV.firmaEmitenta("altceva").cheie, "cm");
+  r = await cer("get", "/avize/:id", { params: { id: String(w1.id) } });
+  contine("foaia avizului Warehouse All are datele ei, nu ale Cash Machine", r.corp,
+    ["WAREHOUSE ALL SRL", "J13/1311/2021", "RO44140650", "Limanu", "RO34UGBI0000172035560RON", "GARANTIBANK"],
+    ["CASH MACHINE", "RO27244210", "RO10BRDE450SV99442324500", "office@cashmachine.ro", "162 460"]);
+  r = await cer("get", "/avize/nou", {});
+  contine("formularul de aviz are alegerea firmei, cu Cash Machine pusă dinainte", r.corp, ['name="firma" value="cm" checked', 'name="firma" value="wa"', "Warehouse All", "TSW 73"]);
+  r = await cer("get", "/avize", {});
+  contine("lista arată firma și următorul număr al fiecăreia", r.corp, ["Warehouse All: <strong>TSW 73</strong>", ">Warehouse All<", ">Cash Machine<"]);
+  r = await cer("post", "/avize/contor", { body: { firma: "wa", serie: "TST", urmator: "9000" } });
+  egal("două firme nu pot avea aceeași serie", [/e a firmei Cash Machine/.test(decodeURIComponent(locatie(r))), unul("SELECT valoare FROM setari_app WHERE cheie = 'aviz_serie_wa'")], [true, "TSW"]);
+  r = await cer("post", "/avize/contor", { body: { firma: "wa", serie: "TSW", urmator: "200" } });
+  egal("contorul Warehouse All se schimbă separat", [unul("SELECT valoare FROM setari_app WHERE cheie = 'aviz_urmator_wa'"), unul("SELECT valoare FROM setari_app WHERE cheie = 'aviz_urmator'")], ["200", String(Number(cmInainte) + 1)]);
 
   for (const s of CURATENIE) exec(s);
   refaContor();

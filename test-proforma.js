@@ -286,7 +286,7 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
 
   console.log("\n── Pagina comenzii ──────────────────────────────────────────");
   r = await cer("/comenzi/:id", { user: AGENT, params: { id: "976001" } });
-  bine("agentul comenzii are butonul și legăturile spre proformele emise", /action="\/comenzi\/976001\/proforma"[\s\S]{0,200}Emite proformă din nou/.test(r.corp) && r.corp.includes(`data-proforma="${p1}">Proforma PFT 501<`) && r.corp.includes(`data-proforma="${p1b}">Proforma PFT 505<`));
+  bine("agentul comenzii are butonul și legăturile spre proformele emise", /action="\/comenzi\/976001\/proforma"[\s\S]{0,700}Emite proformă din nou/.test(r.corp) && r.corp.includes(`data-proforma="${p1}">Proforma PFT 501<`) && r.corp.includes(`data-proforma="${p1b}">Proforma PFT 505<`));
   r = await cer("/comenzi/:id", { user: ALT, params: { id: "976001" } });
   bine("alt agent nu are butonul", !r.corp.includes('action="/comenzi/976001/proforma"'));
   r = await cer("/comenzi/:id", { user: AGENT, params: { id: "976004" } });
@@ -321,7 +321,7 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
   r = await pune(ADMIN, "pf t", "1");
   egal("seria: doar litere, cifre, cratimă", contor(), ["PFT", "507"]);
   r = await pune(ADMIN, "pft", "600");
-  egal("administratorul îl mută înainte", [contor(), /Următoarea proformă va fi PFT 600/.test(decodeURIComponent(locatie(r)))], [["PFT", "600"], true]);
+  egal("administratorul îl mută înainte", [contor(), /Următoarea proformă Cash Machine va fi PFT 600/.test(decodeURIComponent(locatie(r)))], [["PFT", "600"], true]);
   exec("UPDATE comenzi_linii SET cantitate = 12 WHERE comanda_id = 976003");
   r = await emite(976003, ALT);
   egal("următoarea proformă ia numărul pus", nr((pfDe(idDinLocatie(r)) || {}).numar), 600);
@@ -330,6 +330,48 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
   const inainte = cate();
   r = await emite(976003, ALT);
   egal("contor dat înapoi de mână, în bază: numărul dublat e refuzat cu mesaj, nu scris a doua oară", [/e deja folosit pe altă proformă/.test(decodeURIComponent(locatie(r))), cate() === inainte, Number(q("SELECT COUNT(*) AS n, 1 AS x FROM proforme WHERE serie = 'PFT' AND numar = 600")[0].n)], [true, true, 1]);
+
+  console.log("\n── Firma care emite ─────────────────────────────────────────");
+  // Vali, 19.11.2026: „La avize și proforme, fă să alegi firma după care
+  // emiți: Cash Machine sau Warehouse All."
+  const waVechi = q("SELECT cheie, valoare FROM setari_app WHERE cheie IN ('proforma_serie_wa','proforma_urmator_wa') ORDER BY cheie");
+  const refaWa = () => {
+    exec("DELETE FROM setari_app WHERE cheie IN ('proforma_serie_wa','proforma_urmator_wa')");
+    for (const x of waVechi) exec(`INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('${x.cheie}', '${x.valoare}', '2026-11-19')`);
+  };
+  try {
+    exec("DELETE FROM setari_app WHERE cheie IN ('proforma_serie_wa','proforma_urmator_wa')");
+    exec("INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES ('proforma_serie_wa','PWT','2026-11-19'), ('proforma_urmator_wa','31','2026-11-19')");
+    exec("UPDATE setari_app SET valoare = '700' WHERE cheie = 'proforma_urmator'");
+    exec("UPDATE comenzi_linii SET cantitate = 14 WHERE comanda_id = 976003");
+    r = await emite(976003, ALT);
+    const pc = pfDe(idDinLocatie(r));
+    egal("fără firmă aleasă: Cash Machine, pe seria ei", [pc.serie, nr(pc.numar), pc.firma, JSON.parse(pc.furnizor).cif], ["PFT", 700, "cm", "RO27244210"]);
+    r = await emite(976003, ALT, { firma: "wa" });
+    const pw = pfDe(idDinLocatie(r));
+    egal("aceeași comandă, pe Warehouse All: altă proformă, pe seria ei", [pw.serie, nr(pw.numar), pw.firma, JSON.parse(pw.furnizor).nume, JSON.parse(pw.furnizor).iban, /nou=1/.test(locatie(r))], ["PWT", 31, "wa", "WAREHOUSE ALL SRL", "RO34UGBI0000172035560RON", true]);
+    egal("…fără să miște contorul Cash Machine", contor(), ["PFT", "701"]);
+    r = await emite(976003, ALT, { firma: "wa" });
+    egal("a doua oară pe aceeași firmă, comanda neschimbată: aceeași proformă", [idDinLocatie(r), /nou=0/.test(locatie(r))], [Number(pw.id), true]);
+    r = await cer("/proforme/:id", { user: ADMIN, params: { id: String(pw.id) } });
+    const tw = text(r.corp);
+    bine("foaia proformei Warehouse All are datele ei, nu ale Cash Machine",
+      tw.includes("WAREHOUSE ALL SRL") && tw.includes("J13/1311/2021") && tw.includes("RO44140650") && tw.includes("RO34UGBI0000172035560RON") && tw.includes("GARANTIBANK") &&
+        !tw.includes("CASH MACHINE S.R.L.") && !tw.includes("RO10BRDE450SV99442324500") && !tw.includes("office@cashmachine.ro") && !tw.includes("162 460"),
+      (tw.match(/Furnizor[\s\S]{0,400}/) || [""])[0]);
+    r = await cer("/proforme/emite", { user: ADMIN });
+    bine("la „Emite proformă” se alege firma, cu Cash Machine pusă dinainte", /<select name="firma"[^>]*>\s*<option value="cm" selected>Cash Machine<\/option><option value="wa">Warehouse All<\/option>/.test(r.corp));
+    r = await cer("/comenzi/:id", { user: ADMIN, params: { id: "976003" } });
+    bine("…și pe pagina comenzii", /action="\/comenzi\/976003\/proforma"[\s\S]{0,400}<select name="firma"/.test(r.corp));
+    r = await cer("/proforme", { user: ADMIN });
+    bine("lista arată firma și următorul număr al fiecăreia", r.corp.includes("Warehouse All: <strong>PWT 32</strong>") && />Warehouse All</.test(r.corp) && />Cash Machine</.test(r.corp));
+    r = await cer("/proforme/contor", { metoda: "post", user: ADMIN, body: { firma: "wa", serie: "PFT", urmator: "9000" } });
+    egal("două firme nu pot avea aceeași serie", [/e a firmei Cash Machine/.test(decodeURIComponent(locatie(r))), q("SELECT valoare FROM setari_app WHERE cheie = 'proforma_serie_wa'")[0].valoare], [true, "PWT"]);
+    r = await cer("/proforme/contor", { metoda: "post", user: ADMIN, body: { firma: "wa", serie: "PWT", urmator: "90" } });
+    egal("contorul Warehouse All se schimbă separat", [q("SELECT valoare FROM setari_app WHERE cheie = 'proforma_urmator_wa'")[0].valoare, contor()], ["90", ["PFT", "701"]]);
+  } finally {
+    refaWa();
+  }
 
   curata();
   exec(`UPDATE setari_app SET valoare = '${contorVechi[0]}' WHERE cheie = 'proforma_serie'`);
