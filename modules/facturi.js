@@ -9,6 +9,9 @@ const smartbill = require("../lib/smartbill");
 const TP = require("../lib/termen-plata");
 const ADR = require("../lib/adresa-client");
 const SCAN = require("../lib/scan");
+// Firma care emite factura și numerele Warehouse All (Vali, 19.11.2026).
+const FF = require("../lib/factura-firma");
+const AVZ = require("../lib/aviz");
 // Cine validează o factură: administratorul, rolul financiar și cine are bifa
 // „Facturare” (lib/auth.js, areFacturare).
 const { areFacturare, poateAccesa } = require("../lib/auth");
@@ -535,6 +538,27 @@ function register(router) {
     redirect(ctx.res, `/facturi/${facturaId}`);
   });
 
+  // Seria și numărul următor ale facturilor Warehouse All (doar admin).
+  router.post("/facturi/contor-wa", async (ctx) => {
+    const b = ctx.body || {};
+    const tinta = /^\d+$/.test(String(b.inapoi || "")) ? `/facturi/${b.inapoi}` : "/facturi";
+    const inapoi = (m) => redirect(ctx.res, `${tinta}?mesaj=${encodeURIComponent(m)}`);
+    if (!ctx.user || ctx.user.rol !== "admin") return inapoi("Doar administratorul poate schimba seria și numărul.");
+    const serie = String(b.serie || "").trim().toUpperCase();
+    const urmator = parseInt(String(b.urmator || ""), 10);
+    if (!/^[A-Z0-9-]{1,10}$/.test(serie)) return inapoi("Seria: litere, cifre sau cratimă, cel mult 10.");
+    if (!(urmator > 0)) return inapoi("Următorul număr trebuie să fie un întreg mai mare ca 0.");
+    const max = await db.prepare("SELECT COALESCE(MAX(numar), 0) AS n FROM facturi WHERE activ = 1 AND directie = 'vanzare' AND UPPER(TRIM(COALESCE(serie, ''))) = ?").get(serie);
+    const ultim = Number((max && max.n) || 0);
+    if (urmator <= ultim) return inapoi(`În seria ${serie} există deja facturi până la nr. ${ultim}. Următorul poate fi cel puțin ${ultim + 1}.`);
+    const azi = new Date().toISOString().slice(0, 10);
+    const pune = "INSERT INTO setari_app (cheie, valoare, actualizat_la) VALUES (?, ?, ?) ON CONFLICT (cheie) DO UPDATE SET valoare = EXCLUDED.valoare, actualizat_la = EXCLUDED.actualizat_la";
+    await db.prepare(pune).run("factura_serie_wa", serie, azi);
+    await db.prepare(pune).run("factura_urmator_wa", String(urmator), azi);
+    console.log(`[facturi] contor Warehouse All: ${serie} ${urmator} de ${ctx.user.nume}`);
+    return inapoi(`Următoarea factură Warehouse All va fi ${serie} ${urmator}.`);
+  });
+
   router.get("/facturi/nou", async (ctx) => {
     const parteneri = await db.prepare("SELECT id, nume FROM parteneri WHERE tip != 'furnizor' ORDER BY nume").all();
     // Fără produsele parcate; cele cu cod vechi fără stoc poartă eticheta în denumire (lib/cod-vechi.js).
@@ -551,6 +575,8 @@ function register(router) {
       produse.map((p) => `<option value="${p.id}" data-pret="${p.pret_vanzare}" data-tva="${p.cota_tva}">${esc(p.denumire)}</option>`).join("");
 
     const body = `<form method="post" action="/facturi" class="form" style="max-width:900px">
+      ${AVZ.alegeFirma("cm")}
+      <p class="ajutor" style="margin:-4px 0 12px">Warehouse All: factura ia numărul următor din seria ei și se introduce de mână în SmartBill, cu același număr.</p>
       <label class="field"><span>Client</span>
         <select name="partener_id" required>${parteneri.map((p) => `<option value="${p.id}">${esc(p.nume)}</option>`).join("")}</select>
       </label>
@@ -612,6 +638,15 @@ function register(router) {
       .prepare("INSERT INTO facturi (numar, partener_id, directie, data_scadenta, observatii, status) VALUES (?, ?, 'vanzare', ?, ?, 'emisa') RETURNING id")
       .run(maxNumar + 1, partener_id, scadentaVanzare || "", cuNotaDeCurs(observatii, valuta));
     const facturaId = info.lastInsertRowid;
+    // Firma aleasă în formular (Vali, 19.11.2026). Warehouse All: firma ei și
+    // numărul următor din seria ei, în locul celui de mai sus.
+    if (AVZ.firmaEmitenta(ctx.body.firma).cheie === "wa") {
+      const idWa = await FF.idFirma("wa");
+      if (idWa) {
+        await db.prepare("UPDATE facturi SET firma_id = ? WHERE id = ?").run(idWa, facturaId);
+        await FF.numeroteazaWa(facturaId);
+      }
+    }
 
     const insertLinie = db.prepare(
       "INSERT INTO facturi_linii (factura_id, produs_id, denumire, cantitate, pret_unitar, cota_tva) VALUES (?, ?, ?, ?, ?, ?)"
@@ -915,6 +950,48 @@ function register(router) {
       .catch(() => null);
     const restant = Math.max(0, total - platit);
     const eVanzare = factura.directie !== "achizitie";
+    // Firma care emite (Vali, 19.11.2026). Se alege cât factura e ciornă și
+    // n-a plecat în SmartBill; după aceea doar se arată.
+    const firmaCheie = eVanzare ? await FF.cheie(factura) : "cm";
+    const eWa = firmaCheie === "wa";
+    const cWa = eVanzare ? await FF.contorWa() : null;
+    const firmaSeAlege = eVanzare && factura.status === "ciorna" && !factura.smartbill_sync_la && areFacturare(ctx.user);
+    const blocFirma = !eVanzare
+      ? ""
+      : `<div class="detail-box" data-firma-factura="${firmaCheie}" style="border-left:4px solid ${eWa ? "#1a7f42" : "var(--primary,#2f5d9c)"};max-width:820px">
+          ${
+            firmaSeAlege
+              ? `<form method="post" action="/facturi/${factura.id}/firma" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+                   ${AVZ.alegeFirma(firmaCheie)}
+                   <button class="btn secondary small" type="submit">Schimbă firma</button>
+                 </form>`
+              : `<div><span class="k">Firma care emite</span> <strong>${esc(AVZ.firmaEmitenta(firmaCheie).eticheta)}</strong></div>`
+          }
+          <p style="margin:8px 0 0;font-size:13px;color:var(--text-muted)">${
+            eWa
+              ? factura.status === "ciorna"
+                ? `La validare primește numărul <strong>${esc(cWa.serie)} ${esc(String(cWa.urmator))}</strong>${
+                    cWa.ultim ? ` (ultimul adus din SmartBill pe seria asta: ${esc(cWa.serie)} ${esc(String(cWa.ultim))})` : ""
+                  }. <strong>Nu pleacă din ERP în SmartBill</strong>: o introduceți acolo de mână, pe Warehouse All, cu același număr.`
+                : `Factură Warehouse All <strong>${esc(String(factura.serie || ""))} ${esc(String(factura.numar ?? ""))}</strong>. Nu pleacă din ERP în SmartBill: se introduce acolo de mână, cu același număr. Când e adusă înapoi din SmartBill, nu se scrie a doua oară.`
+              : factura.status === "ciorna"
+                ? "Cash Machine: pleacă în SmartBill la validare, iar numărul fiscal îl dă SmartBill."
+                : "Cash Machine: numărul fiscal e cel dat de SmartBill."
+          }</p>
+          ${
+            eWa && ctx.user && ctx.user.rol === "admin" && factura.status === "ciorna"
+              ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px">Seria și numărul următor Warehouse All (doar administratorul)</summary>
+                   <form method="post" action="/facturi/contor-wa" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
+                     <input type="hidden" name="inapoi" value="${factura.id}">
+                     <label class="field" style="margin:0"><span>Seria</span><input name="serie" value="${esc(cWa.serie)}" maxlength="10" required style="width:110px"></label>
+                     <label class="field" style="margin:0"><span>Următorul număr</span><input name="urmator" type="number" min="1" step="1" value="${esc(String(cWa.urmator))}" required style="width:130px"></label>
+                     <button class="btn secondary small" type="submit">Salvează</button>
+                   </form>
+                   <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">Pune aici numărul de după ultima factură Warehouse All din SmartBill, dacă SmartBill e mai departe decât ERP-ul. Nu poate coborî sub un număr deja folosit.</p>
+                 </details>`
+              : ""
+          }
+        </div>`;
     const listaInapoi = eVanzare ? "/facturi" : "/facturi/achizitii";
 
     // Agentul creditat cu factura asta (contează la comision).
@@ -945,6 +1022,7 @@ function register(router) {
           : ""
       }
       ${ctx.query.mesaj ? `<p style="color:var(--text-muted)">${esc(ctx.query.mesaj)}</p>` : ""}
+      ${blocFirma}
       ${
         factura.status === "ciorna"
           ? `<div class="detail-box" style="border-left:4px solid var(--warn)">
@@ -1088,7 +1166,9 @@ function register(router) {
         eVanzare && !doarCitire
           ? `<h2>Integrare SmartBill</h2>
       ${
-        factura.status === "ciorna" && !factura.smartbill_sync_la
+        eWa
+          ? `<p style="color:var(--text-muted);font-size:13px" data-smartbill-wa>Factura e pe Warehouse All: nu se trimite din ERP în SmartBill. Se introduce acolo de mână, cu numărul ei din ERP.</p>`
+          : factura.status === "ciorna" && !factura.smartbill_sync_la
           ? `<p style="color:var(--text-muted);font-size:13px" data-smartbill-dupa-validare>Factura pleacă în SmartBill la validare. O ciornă nu se trimite.</p>`
           : smartbill.isConfigured()
           ? `<form method="post" action="/facturi/${factura.id}/smartbill" class="inline-form" id="spre-smartbill"${
@@ -1186,7 +1266,14 @@ function register(router) {
       creat_de: (autor && autor.nume) || "",
       anulat: anulata ? 1 : 0,
     };
-    const subsol = ciorna
+    // Pe foaie, datele firmei care emite (Vali, 19.11.2026).
+    const tiparWa = (await FF.cheie(factura)) === "wa";
+    if (tiparWa) doc.furnizor = AV.FURNIZOR_WA;
+    const subsol = tiparWa
+      ? ciorna
+        ? "Ciornă Warehouse All: nu e încă factură. Capătă număr la validare și se introduce de mână în SmartBill, cu același număr."
+        : `Copie din ERP a facturii Warehouse All ${nr.serie} ${nr.numar}. Documentul fiscal este cel din SmartBill, introdus cu același număr.`
+      : ciorna
       ? "Ciornă: nu e încă factură. Capătă număr și pleacă în SmartBill la validarea făcută de financiar."
       : nr.fiscal
         ? `Copie din ERP a facturii ${nr.serie} ${nr.numar}. Documentul fiscal este cel emis din SmartBill.`
@@ -1222,6 +1309,25 @@ function register(router) {
       console.error("[facturi] PDF din SmartBill:", e.message);
       return inapoi("PDF-ul din SmartBill n-a putut fi adus acum (" + e.message + "). Asta e foaia din ERP.");
     }
+  });
+
+  // Firma care emite factura: doar pe ciornă, doar cine facturează, și doar
+  // cât n-a plecat în SmartBill.
+  router.post("/facturi/:id/firma", async (ctx) => {
+    const id = ctx.params.id;
+    const inapoi = (m) => redirect(ctx.res, `/facturi/${id}?mesaj=${encodeURIComponent(m)}`);
+    if (!areFacturare(ctx.user)) return inapoi("Firma care emite o schimbă cineva cu drepturi pe facturare.");
+    const f = await db.prepare("SELECT id, status, directie, smartbill_sync_la FROM facturi WHERE activ = 1 AND id = ?").get(id);
+    if (!f) return redirect(ctx.res, "/facturi");
+    if (f.directie === "achizitie") return redirect(ctx.res, `/facturi/${id}`);
+    if (f.status !== "ciorna") return inapoi("Factura e deja emisă: firma nu se mai schimbă.");
+    if (f.smartbill_sync_la) return inapoi("Factura a plecat deja în SmartBill: firma nu se mai schimbă.");
+    const aleasa = AVZ.firmaEmitenta((ctx.body || {}).firma);
+    const firmaId = await FF.idFirma(aleasa.cheie);
+    if (!firmaId) return inapoi(`Firma ${aleasa.eticheta} nu e în lista de firme a ERP-ului.`);
+    await db.prepare("UPDATE facturi SET firma_id = ? WHERE id = ? AND status = 'ciorna'").run(firmaId, f.id);
+    console.log(`[facturi] ciorna ${f.id} pusă pe ${aleasa.eticheta} de ${(ctx.user && ctx.user.nume) || "?"}`);
+    return inapoi(`Factura se emite pe ${aleasa.eticheta}.`);
   });
 
   router.post("/facturi/:id/plata", async (ctx) => {
@@ -1305,9 +1411,21 @@ function register(router) {
       }
     }
 
+    // Factura Warehouse All ia numărul din seria ei și NU pleacă în SmartBill
+    // (lib/factura-firma.js). E hotărât înainte de orice trimitere.
+    const validareWa = (await FF.cheie(factura)) === "wa";
+    if (validareWa && factura.smartbill_sync_la) {
+      return redirect(ctx.res, `/facturi/${factura.id}?mesaj=${encodeURIComponent("Factura e pusă pe Warehouse All, dar a plecat deja în SmartBill pe Cash Machine. N-am validat-o: pune-o înapoi pe Cash Machine sau storneaz-o în SmartBill.")}`);
+    }
+
     // Numărul se dă abia acum: o ciornă nu consumă un număr de factură.
     let numar = factura.numar;
-    if (!numar) {
+    if (validareWa) {
+      const nw = await FF.numeroteazaWa(factura.id);
+      numar = nw.numar;
+      factura.serie = nw.serie;
+      factura.numar = nw.numar;
+    } else if (!numar) {
       const m = await db
         .prepare("SELECT COALESCE(MAX(numar), 0) AS n FROM (SELECT * FROM facturi WHERE activ = 1) facturi WHERE directie = 'vanzare' AND COALESCE(serie,'') = ?")
         .get(factura.serie || "FCT");
@@ -1359,7 +1477,9 @@ function register(router) {
     // specificat”), deci validarea nu trimitea de fapt niciodată.
     let mesajSmartbill = "";
     const inSmartbill = await db.prepare("SELECT smartbill_sync_la, smartbill_serie, smartbill_numar FROM facturi WHERE id = ?").get(factura.id);
-    if (inSmartbill && inSmartbill.smartbill_sync_la) {
+    if (validareWa) {
+      mesajSmartbill = `Factura Warehouse All ${factura.serie} ${numar} e emisă în ERP. Nu pleacă în SmartBill din ERP: introduceți-o acolo, pe Warehouse All, cu același număr.`;
+    } else if (inSmartbill && inSmartbill.smartbill_sync_la) {
       const care = [inSmartbill.smartbill_serie, inSmartbill.smartbill_numar].filter(Boolean).join("-");
       mesajSmartbill = `Factura era deja în SmartBill${care ? " (" + care + ")" : ""}: n-am trimis-o a doua oară.`;
     } else if (peDrum.has(Number(factura.id))) {
@@ -1521,7 +1641,16 @@ function register(router) {
     }
   }
 
+  // Factura Warehouse All nu pleacă pe legătura cu SmartBill a Cash Machine:
+  // ar ieși factură fiscală pe firma greșită (lib/factura-firma.js).
+  async function opritaWarehouseAll(ctx, factura) {
+    if ((await FF.cheie(factura)) !== "wa") return false;
+    inapoiCuMesaj(ctx, factura, "Factura e pe Warehouse All: nu se trimite din ERP în SmartBill. Introduceți-o acolo de mână, cu numărul ei din ERP.");
+    return true;
+  }
+
   async function trimiteAcum(ctx, factura, adresa) {
+    if (await opritaWarehouseAll(ctx, factura)) return;
     const linii = await liniiPentruSmartBill(factura.id);
     try {
       const rezultat = await smartbill.trimiteFactura(factura, linii, adresa);
@@ -1601,6 +1730,7 @@ function register(router) {
     const factura = await facturaPentruSmartBill(ctx.params.id);
     if (!factura) return redirect(ctx.res, "/facturi");
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
+    if (await opritaWarehouseAll(ctx, factura)) return;
 
     if (opritaDeLaADouaTrimitere(ctx, factura)) return;
     if (opritaNevalidata(ctx, factura)) return;
@@ -1624,6 +1754,7 @@ function register(router) {
     const factura = await facturaPentruSmartBill(ctx.params.id);
     if (!factura) return redirect(ctx.res, "/facturi");
     if (factura.directie === "achizitie") return redirect(ctx.res, `/facturi/${ctx.params.id}`);
+    if (await opritaWarehouseAll(ctx, factura)) return;
 
     if (opritaDeLaADouaTrimitere(ctx, factura)) return;
     if (opritaNevalidata(ctx, factura)) return;
