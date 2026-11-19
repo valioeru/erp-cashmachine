@@ -104,6 +104,7 @@ function egal(eticheta, avut, asteptat) {
   if (a !== b) rau(eticheta, "am " + a + ", așteptam " + b); else ok(eticheta + " = " + b);
 }
 const are = (html, ce, eticheta) => (String(html).includes(ce) ? ok(eticheta || "pagina conține „" + ce + "”") : rau("lipsește din pagină", eticheta || ce));
+const bine = (eticheta, conditie, detaliu) => (conditie ? ok(eticheta) : rau(eticheta, detaliu));
 const fara = (html, ce, eticheta) => (String(html).includes(ce) ? rau("nu trebuia să apară", eticheta || ce) : ok(eticheta || "nu apare „" + ce + "”"));
 const nr = (v) => (v === null || v === undefined ? null : Number(v));
 
@@ -185,7 +186,11 @@ const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) ||
   // ===== 2. comanda nouă =====================================================
   console.log("\n── Comanda nouă ─────────────────────────────────────────────");
   const form = await cer("/comenzi/nou");
-  are(form.corp, 'name="curs"', "formularul are câmpul de curs");
+  // Vali, 19.11.2026: „pune moneda pe fiecare articol. Nu generală, sus."
+  // Comanda nouă nu mai are moneda generală cu cursul ei; comenzile vechi
+  // în valută le păstrează la modificare (mai jos).
+  are(form.corp, 'name="moneda_linie[]"', "formularul are moneda pe fiecare articol");
+  fara(form.corp, 'name="curs"', "…și nu mai are moneda generală cu cursul ei");
   are(form.corp, '"EUR":{"valoare":' + EUR.valoare, "BNR-ul de azi e în pagină, pentru propunere");
   let r = await cer("/comenzi", { metoda: "post", body: corp("EUR", "") });
   const c1 = idDinLocatie(r);
@@ -205,7 +210,6 @@ const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) ||
   r = await cer("/comenzi", { metoda: "post", body: corp("EUR", "cinci") });
   egal("curs scris greșit → comanda nu se salvează", Number(q("SELECT COUNT(*) AS n FROM comenzi WHERE partener_id = ?", [CLIENT])[0].n), cate);
   are(r.corp, "Cursul nu e un număr pozitiv", "…și se spune de ce");
-  are(r.corp, 'value="cinci"', "…cu ce scrisese omul întors în câmp");
 
   const pag1 = await cer("/comenzi/:id", { params: { id: String(c1) } });
   const ziRo = (d) => String(d || "").split("-").reverse().join(".");
@@ -312,6 +316,40 @@ const idDinLocatie = (r) => Number((String(locatie(r)).match(/\/(\d+)(\?|$)/) ||
   are(randComanda(c1), 'data-filtru="648,11 lei"', "…pe care îl adună filtrele din capul tabelului");
   egal("comanda în euro fără curs: suma în euro, fără echivalent, și nu intră în totalul în lei", [randComanda(c4).includes("20,00 €"), randComanda(c4).includes("≈"), randComanda(c4).includes('data-filtru="fără curs"')], [true, false, true]);
   egal("comanda în lei: ca până acum", [randComanda(c3).includes("123,45 lei"), randComanda(c3).includes("data-filtru"), randComanda(c3).includes("≈")], [true, false, false]);
+
+  // ===== moneda pe fiecare articol =============================================
+  // Vali, 19.11.2026: „pune moneda pe fiecare articol" · totalul: „Totul în lei".
+  console.log("\n── Moneda pe fiecare articol ────────────────────────────────");
+  const ML = require(path.join(RAD, "lib", "moneda-linie.js"));
+  {
+    const x = await ML.inLei({ preturi: [{ ok: true, valoare: 2 }, { ok: true, valoare: 7 }, { ok: true, valoare: 3 }], monede: ["EUR", "", "usd"], produse: [1, 2, 3], cursAzi: async (m) => ({ EUR: { valoare: 5 }, USD: { valoare: 4.5 } })[m] });
+    egal("fără bază: euro și dolari trec în lei, leii rămân", [x.preturi.map((p) => p.valoare), x.extra.map((e) => [e.moneda, e.pret_valuta, e.curs]), x.eroare], [[10, 7, 13.5], [["EUR", 2, 5], ["RON", null, null], ["USD", 3, 4.5]], ""]);
+    const y = await ML.inLei({ preturi: [{ ok: true, valoare: 2 }], monede: ["EUR"], produse: [1], vechi: new Map([[1, { moneda: "EUR", pret_valuta: 2, curs: 4.9, pret_unitar: 9.8 }]]), cursAzi: async () => ({ valoare: 5 }) });
+    egal("prețul în valută neatins rămâne cu leii și cursul de la plasare", [y.preturi[0].valoare, y.extra[0].curs], [9.8, 4.9]);
+    const z = await ML.inLei({ preturi: [{ ok: true, valoare: 2 }], monede: ["EUR"], produse: [1], cursAzi: async () => null });
+    bine("fără curs BNR: se spune, nu se ghicește", /Nu am cursul BNR pentru EUR/.test(z.eroare));
+  }
+  const corpLinii = (extra) => Object.assign(corp("RON", ""), { "produs_id[]": [String(PRODUS)], "cantitate[]": ["100"], "pret_unitar[]": ["2"], "moneda_linie[]": ["EUR"] }, extra || {});
+  r = await cer("/comenzi", { metoda: "post", body: corpLinii() });
+  const cl = idDinLocatie(r);
+  const linia = () => q("SELECT pret_unitar, moneda, pret_valuta, curs FROM comenzi_linii WHERE comanda_id = ?", [cl]).map((x) => [Number(x.pret_unitar), x.moneda, x.pret_valuta == null ? null : Number(x.pret_valuta), x.curs == null ? null : Number(x.curs)])[0];
+  egal("comanda rămâne în lei, fără curs pe ea", q("SELECT moneda, curs_bnr FROM comenzi WHERE id = ?", [cl]).map((x) => [x.moneda, x.curs_bnr])[0], ["RON", null]);
+  egal("linia: prețul în lei la BNR-ul zilei, cu moneda, prețul în euro și cursul ținute minte (2 € × 5,0912)", linia(), [10.1824, "EUR", 2, 5.0912]);
+  r = await cer("/comenzi/:id", { params: { id: String(cl) } });
+  bine("pagina comenzii arată leii și, dedesubt, prețul în euro cu cursul", /data-pret-valuta>2,00 EUR · curs 5,0912</.test(r.corp) && r.corp.includes("10,1824"), (r.corp.match(/data-pret-valuta[^<]*/) || [""])[0]);
+  r = await cer("/comenzi/:id/editare", { params: { id: String(cl) } });
+  bine("la modificare, rândul vine cu prețul în euro și moneda lui, fără moneda generală", /name="pret_unitar\[\]"[^>]*value="2"/.test(r.corp.replace(/\s+/g, " ")) && /<option value="EUR" selected>/.test(r.corp) && !r.corp.includes('name="curs"') && r.corp.includes('name="moneda" value="RON"'), (r.corp.match(/name="pret_unitar\[\]"[\s\S]{0,160}/) || [""])[0]);
+  exec(`UPDATE cursuri_bnr SET valoare = 5.2 WHERE moneda = 'EUR' AND data = '${azi}' AND luat_la = 'test-curs-comanda'`);
+  await cer("/comenzi/:id/editare", { metoda: "post", params: { id: String(cl) }, body: corpLinii({ "cantitate[]": ["150"], "pret_exact[]": ["2"] }) });
+  egal("altă cantitate, preț neatins: leii și cursul rămân cele de la plasare, deși BNR-ul s-a mișcat", [linia(), Number(q("SELECT cantitate FROM comenzi_linii WHERE comanda_id = ?", [cl])[0].cantitate)], [[10.1824, "EUR", 2, 5.0912], 150]);
+  await cer("/comenzi/:id/editare", { metoda: "post", params: { id: String(cl) }, body: corpLinii({ "cantitate[]": ["150"], "pret_unitar[]": ["3"], "pret_exact[]": [""] }) });
+  egal("alt preț în euro: se trece în lei la BNR-ul de azi (3 € × 5,2)", linia(), [15.6, "EUR", 3, 5.2]);
+  bine("…și schimbarea e în istoricul comenzii", q("SELECT ce, vechi, nou FROM comenzi_istoric WHERE comanda_id = ? ORDER BY id", [cl]).some((x) => /^Monedă · /.test(x.ce) && /2,00 EUR/.test(x.vechi) && /3,00 EUR/.test(x.nou)));
+  await cer("/comenzi/:id/editare", { metoda: "post", params: { id: String(cl) }, body: corpLinii({ "cantitate[]": ["150"], "pret_unitar[]": ["12,5"], "pret_exact[]": [""], "moneda_linie[]": ["RON"] }) });
+  egal("trecut pe lei: prețul e cel scris, fără valută și fără curs", linia(), [12.5, "RON", null, null]);
+  exec(`UPDATE cursuri_bnr SET valoare = 5.0912 WHERE moneda = 'EUR' AND data = '${azi}' AND luat_la = 'test-curs-comanda'`);
+  r = await cer("/comenzi/:id/editare", { params: { id: String(c1) } });
+  bine("comanda veche în euro își păstrează moneda generală și cursul, fără monedă pe rânduri", r.corp.includes('<select name="moneda">') && r.corp.includes('name="curs"') && !r.corp.includes('class="moneda-linie"'));
 
   curata();
   console.log("\n" + interogari + " interogări SQL reale.");
