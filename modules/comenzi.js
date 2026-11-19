@@ -524,8 +524,8 @@ function blocLinii(produse, linii, { vechi, peLinii } = {}) {
           <td data-eticheta="Preț unitar">${campPret(l)}</td>
           ${
             peLinii
-              ? `<td data-eticheta="Moneda">${ML.camp(l.moneda_linie, esc)}</td>`
-              : `<td style="display:none"><input type="hidden" name="moneda_linie[]" value=""></td>`
+              ? `<td data-eticheta="Moneda și curs">${ML.camp(l.moneda_linie, esc, l.curs_linie)}</td>`
+              : `<td style="display:none"><input type="hidden" name="moneda_linie[]" value=""><input type="hidden" name="curs_linie[]" value=""></td>`
           }
           <td data-eticheta=""><button type="button" class="link-btn danger" onclick="comenziRemoveRow(this)">Șterge</button></td>
         </tr>`;
@@ -533,7 +533,7 @@ function blocLinii(produse, linii, { vechi, peLinii } = {}) {
   const randuri = (Array.isArray(linii) && linii.length ? linii : [{}]).map(randLinie).join("");
   return `
       <table class="table lines-table">
-        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:110px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:120px">Preț unitar</th>${peLinii ? '<th style="min-width:80px">Moneda</th>' : '<th style="display:none"></th>'}<th></th></tr></thead>
+        <thead><tr><th>Categorie</th><th>Produs</th><th style="min-width:110px">Cantitate</th><th style="min-width:96px">UM</th><th style="min-width:120px">Preț unitar</th>${peLinii ? '<th style="min-width:96px">Moneda și curs</th>' : '<th style="display:none"></th>'}<th></th></tr></thead>
         <tbody id="linii-body">${randuri}</tbody>
       </table>
       <button type="button" class="btn secondary small" onclick="comenziAddRow()">+ Adaugă linie</button>`;
@@ -604,7 +604,7 @@ function lineRowsScript(produse, familii, eAdmin, stocuri) {
       // rândului trece pe lei.
       var r = camp.closest ? camp.closest('tr') : null;
       var m = r ? r.querySelector('select.moneda-linie') : null;
-      if (m) m.value = 'RON';
+      if (m) { m.value = 'RON'; if (window.comenziMonedaLinie) window.comenziMonedaLinie(m, true); }
     }
     (function () {
       var fara = function (s) {
@@ -1616,7 +1616,7 @@ function register(router) {
 
       <h2>Produse comandate</h2>
       <p style="margin:0 0 6px;font-size:13px;color:var(--text-muted);max-width:820px" data-moneda-pe-linii>
-        Moneda se alege pe fiecare articol. Prețul scris în euro sau dolari se trece în lei la cursul BNR de azi; comanda, proforma și factura ies în lei.</p>
+        Moneda se alege pe fiecare articol. La euro sau dolari, cursul vine completat cu BNR-ul de azi și îl poți schimba; prețul se trece în lei la cursul de pe rând. Comanda, proforma și factura ies în lei.</p>
       ${blocLinii(produse, linii, { peLinii: true })}
 
       <div class="form-actions">
@@ -1628,6 +1628,7 @@ function register(router) {
     ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
     ${TP.scriptCamp(TP.hartaTermene(parteneri))}
     ${scriptCursComanda(await cursuriAzi())}
+    ${ML.script(await cursuriAzi())}
     ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(ctx.res, 200, layout({ user: ctx.user, title: "Comandă nouă", active: "/comenzi", body }));
   }
@@ -1732,8 +1733,9 @@ function register(router) {
     // Moneda pe fiecare articol (lib/moneda-linie.js): prețurile în valută se
     // trec în lei; comanda e în lei.
     const monedeLinie = asArray(ctx.body["moneda_linie[]"]);
+    const cursuriLinie = asArray(ctx.body["curs_linie[]"]);
     const conversie = moneda === "RON"
-      ? await ML.inLei({ preturi: preturiCitite, monede: monedeLinie, produse: produsIds, cursAzi: cursAziPentru })
+      ? await ML.inLei({ preturi: preturiCitite, monede: monedeLinie, produse: produsIds, cursAzi: cursAziPentru, cursuri: cursuriLinie })
       : { preturi: preturiCitite, extra: [], eroare: "" };
     preturiCitite = conversie.preturi.length === preturiCitite.length ? conversie.preturi : preturiCitite;
 
@@ -1766,6 +1768,7 @@ function register(router) {
         cantitate: cantitati[i],
         pret_unitar: preturi[i],
         moneda_linie: monedeLinie[i],
+        curs_linie: String(cursuriLinie[i] == null ? "" : cursuriLinie[i]),
         um: unitati[i],
         furnizor_ales: alegeriFurnizor[i] || "",
       })),
@@ -2421,7 +2424,7 @@ function register(router) {
       linii: liniiBaza.map((l) => {
         const inValuta = String(comanda.moneda || "RON") === "RON" && ML.valid(l.moneda) !== "RON" && Number(l.pret_valuta) > 0;
         return inValuta
-          ? { ...l, pret_unitar: l.pret_valuta, pret_exact: l.pret_valuta, moneda_linie: ML.valid(l.moneda) }
+          ? { ...l, pret_unitar: l.pret_valuta, pret_exact: l.pret_valuta, moneda_linie: ML.valid(l.moneda), curs_linie: Number(l.curs) > 0 ? Number(l.curs) : "" }
           : { ...l, pret_exact: l.pret_unitar, moneda_linie: "RON" };
       }),
     };
@@ -2504,7 +2507,7 @@ function register(router) {
         ${
           String(comanda.moneda || "RON") === "RON"
             ? `<p style="margin:0 0 6px;font-size:13px;color:var(--text-muted);max-width:820px" data-moneda-pe-linii>
-                 Moneda se alege pe fiecare articol. Un preț în valută lăsat neatins rămâne cu leii și cursul de la plasare; schimbat, se trece în lei la cursul BNR de azi.</p>`
+                 Moneda se alege pe fiecare articol. Un articol în valută lăsat neatins rămâne cu leii și cursul de la plasare; dacă îi schimbi prețul sau cursul, se trece din nou în lei, la cursul de pe rând.</p>`
             : ""
         }
         ${blocLinii(produse, v.linii, { vechi: furnizorVechi, peLinii: String(comanda.moneda || "RON") === "RON" })}
@@ -2522,6 +2525,7 @@ function register(router) {
       ${cautaClientScript(randuriClienti(parteneri, agentiToti, mentiuni))}
       ${TP.scriptCamp(TP.hartaTermene(parteneri))}
       ${scriptCursComanda(await cursuriAzi())}
+    ${ML.script(await cursuriAzi())}
       ${lineRowsScript(produse, familiiPagina, Boolean(ctx.user && ctx.user.rol === "admin"), await stocPentruCautare())}`;
     send(
       ctx.res,
@@ -2667,13 +2671,14 @@ function register(router) {
     // Moneda pe fiecare articol (lib/moneda-linie.js), doar la comenzile în
     // lei. Linia cu prețul în valută neatins rămâne cu leii și cursul ei.
     const monedeLinie = asArray(b["moneda_linie[]"]);
+    const cursuriLinie = asArray(b["curs_linie[]"]);
     const peLiniiMonede = String(comanda.moneda || "RON") === "RON" && moneda === "RON";
     const liniiCuMoneda = peLiniiMonede
       ? await db.prepare("SELECT cl.produs_id, cl.moneda, cl.pret_valuta, cl.curs, cl.pret_unitar, p.denumire FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ?").all(comanda.id)
       : [];
     const monedaVeche = new Map(liniiCuMoneda.map((l) => [Number(l.produs_id), l]));
     const conversie = peLiniiMonede
-      ? await ML.inLei({ preturi: preturiCitite, monede: monedeLinie, produse: produsIds, vechi: monedaVeche, cursAzi: cursAziPentru })
+      ? await ML.inLei({ preturi: preturiCitite, monede: monedeLinie, produse: produsIds, vechi: monedaVeche, cursAzi: cursAziPentru, cursuri: cursuriLinie })
       : { preturi: preturiCitite, extra: [], eroare: "" };
     preturiCitite = conversie.preturi.length === preturiCitite.length ? conversie.preturi : preturiCitite;
     // `i` = rândul din formular: după el se găsește furnizorul verificat mai jos.
@@ -2706,6 +2711,7 @@ function register(router) {
         pret_unitar: preturi[i],
         pret_exact: exacte[i],
         moneda_linie: monedeLinie[i],
+        curs_linie: String(cursuriLinie[i] == null ? "" : cursuriLinie[i]),
         um: unitati[i],
         furnizor_ales: alegeriFurnizor[i] || "",
       })),
@@ -2867,15 +2873,16 @@ function register(router) {
     // Moneda sau prețul în valută schimbate pe un articol intră în istoric cu
     // ce era și ce a rămas, chiar dacă suma în lei iese la fel.
     if (peLiniiMonede) {
-      const scris = (m, pv) => (ML.valid(m) === "RON" || !(Number(pv) > 0) ? "lei" : ML.nota({ moneda: m, pret_valuta: pv }));
+      // Cu tot cu curs: și un curs schimbat de om, la același preț, e o schimbare.
+      const scris = (x) => (ML.valid(x.moneda) === "RON" || !(Number(x.pret_valuta) > 0) ? "lei" : ML.nota(x));
       for (let i = 0; i < produsIds.length; i++) {
         const pid = parseInt(produsIds[i], 10);
         const e = conversie.extra[i];
         const v = monedaVeche.get(pid);
         if (!pid || !e || !v || !(Number(cantitati[i] || 0) > 0)) continue;
-        const era = scris(v.moneda, v.pret_valuta);
-        const ramane = scris(e.moneda, e.pret_valuta);
-        if (era !== ramane) schimbari.push({ ce: "Monedă · " + (v.denumire || "produs #" + pid), vechi: era, nou: ramane + (e.curs ? `, curs ${Number(e.curs).toLocaleString("ro-RO", { minimumFractionDigits: 4, maximumFractionDigits: 4 })}` : "") });
+        const era = scris(v);
+        const ramane = scris(e);
+        if (era !== ramane) schimbari.push({ ce: "Monedă · " + (v.denumire || "produs #" + pid), vechi: era, nou: ramane });
       }
     }
 
