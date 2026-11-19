@@ -364,6 +364,7 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
     r = await cer("/comenzi/:id", { user: ADMIN, params: { id: "976003" } });
     bine("…și pe pagina comenzii", /action="\/comenzi\/976003\/proforma"[\s\S]{0,400}<select name="firma"/.test(r.corp));
     r = await cer("/proforme", { user: ADMIN });
+    bine("lista de proforme are butonul „PDF” pe fiecare rând", r.corp.includes(`href="/proforme/${pw.id}?pdf=1"`));
     bine("lista arată firma și următorul număr al fiecăreia", r.corp.includes("Warehouse All: <strong>PWT 32</strong>") && />Warehouse All</.test(r.corp) && />Cash Machine</.test(r.corp));
     r = await cer("/proforme/contor", { metoda: "post", user: ADMIN, body: { firma: "wa", serie: "PFT", urmator: "9000" } });
     egal("două firme nu pot avea aceeași serie", [/e a firmei Cash Machine/.test(decodeURIComponent(locatie(r))), q("SELECT valoare FROM setari_app WHERE cheie = 'proforma_serie_wa'")[0].valoare], [true, "PWT"]);

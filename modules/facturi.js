@@ -1016,7 +1016,8 @@ function register(router) {
       ${
         eVanzare
           ? `<div class="toolbar" data-tipar-factura>
-               <a class="btn secondary small" href="/facturi/${factura.id}/tipar" target="_blank">Tipărește / salvează ca PDF</a>
+               <a class="btn secondary small" href="/facturi/${factura.id}/tipar" target="_blank">Tipărește</a>
+               <a class="btn secondary small" href="/facturi/${factura.id}/tipar?pdf=1" target="_blank" data-pdf-erp>Salvează PDF</a>
                ${pdfDinSmartbill(factura) ? `<a class="btn secondary small" href="/facturi/${factura.id}/pdf" target="_blank">Descarcă PDF-ul din SmartBill</a>` : ""}
              </div>`
           : ""

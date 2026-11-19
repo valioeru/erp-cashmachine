@@ -337,6 +337,11 @@ function refaContor() {
   contine("foaia avizului Warehouse All are datele ei, nu ale Cash Machine", r.corp,
     ["WAREHOUSE ALL SRL", "J13/1311/2021", "RO44140650", "Limanu", "RO34UGBI0000172035560RON", "GARANTIBANK"],
     ["CASH MACHINE", "RO27244210", "RO10BRDE450SV99442324500", "office@cashmachine.ro", "162 460"]);
+  // Vali, 19.11.2026: „la facturi, avize, proforme să poți și salva PDF;
+  // orice user care le vede poate." Butonul stă în bara foii.
+  contine("foaia avizului are butonul de PDF și pornește singură salvarea când vine de pe „PDF”", r.corp, ["data-pdf-aviz", "Descarcă PDF", "pdf=1", "window.print()"]);
+  r = await cer("get", "/avize", {});
+  contine("lista de avize are butonul „PDF” pe fiecare rând", r.corp, [`href="/avize/${w1.id}?pdf=1"`]);
   r = await cer("get", "/avize/nou", {});
   contine("formularul de aviz are alegerea firmei, cu Cash Machine pusă dinainte", r.corp, ['name="firma" value="cm" checked', 'name="firma" value="wa"', "Warehouse All", "TSW 73"]);
   r = await cer("get", "/avize", {});

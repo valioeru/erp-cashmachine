@@ -271,7 +271,8 @@ function register(router) {
           ? table(
               ["Aviz", "Firma", "Data", "Client", "Comanda", "Linii", "De unde", "Întocmit de", "Stare"],
               lista.map((a) => [
-                `<a href="/avize/${a.id}" target="_blank"><strong>${esc(a.serie)} ${esc(String(a.numar))}</strong></a>`,
+                `<a href="/avize/${a.id}" target="_blank"><strong>${esc(a.serie)} ${esc(String(a.numar))}</strong></a>
+                 <a href="/avize/${a.id}?pdf=1" target="_blank" class="btn secondary small" data-pdf="${a.id}" title="Deschide avizul și fereastra de salvare ca PDF" style="margin-left:6px">PDF</a>`,
                 esc(AV.firmaEmitenta(a.firma).eticheta),
                 esc(AV.dataAviz(a.data)),
                 esc(a.client_nume || "—"),
@@ -542,6 +543,10 @@ function register(router) {
     const bara = [
       `<strong>Aviz ${esc(aviz.serie)} nr. ${esc(String(aviz.numar))}</strong>${Number(aviz.anulat) === 1 ? ' · <span class="eroare">ANULAT</span>' : ""}`,
       `<button onclick="window.print()">Tipărește</button>`,
+      // Vali, 19.11.2026: „la facturi, avize, proforme să poți și salva PDF;
+      // orice user care le vede poate." Butonul e în bara foii, deci îl are
+      // oricine poate deschide avizul.
+      `<button onclick="window.print()" title="În fereastra de tipărire alege „Salvează ca PDF”" data-pdf-aviz>Descarcă PDF</button>`,
       `<a href="${esc(inapoi.href)}">${esc(inapoi.text)}</a>`,
       paleti ? `<a href="/stocuri/ct-park/etichete?paleti=${esc(paleti)}" target="_blank">etichetele paleților (A4)</a>` : "",
       q.mesaj ? `<span>${esc(q.mesaj)}</span>` : "",

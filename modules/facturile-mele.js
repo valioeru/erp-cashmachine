@@ -103,7 +103,10 @@ function register(router) {
                 money(f.total),
                 f.status === "ciorna" && inSmartbill(f) ? '<span class="badge verde">emisă în SmartBill</span> <span class="badge gri">nevalidată în ERP</span>' : STARE[f.status] || esc(f.status),
                 `<a class="btn secondary small" href="/facturi/${f.id}/tipar" target="_blank">Tipărește</a>${
-                  arePdf(f) && (f.status !== "ciorna" || inSmartbill(f)) ? ` <a class="btn secondary small" href="/facturi/${f.id}/pdf" target="_blank" data-pdf="${f.id}">Descarcă PDF</a>` : ""
+                  arePdf(f) && (f.status !== "ciorna" || inSmartbill(f))
+                    ? ` <a class="btn secondary small" href="/facturi/${f.id}/pdf" target="_blank" data-pdf="${f.id}">Descarcă PDF</a>`
+                    : // Fără PDF în SmartBill (ciornă, factură Warehouse All): foaia din ERP, cu salvarea ca PDF deschisă.
+                      ` <a class="btn secondary small" href="/facturi/${f.id}/tipar?pdf=1" target="_blank" data-pdf-erp="${f.id}">Salvează PDF</a>`
                 }`,
               ])
             )

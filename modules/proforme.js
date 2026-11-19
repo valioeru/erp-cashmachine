@@ -343,7 +343,8 @@ function register(router) {
           ? table(
               ["Proformă", "Firma", "Data", "Client", "Comanda", "Total", "Emisă de", "Stare"],
               lista.map((f) => [
-                `<a href="/proforme/${f.id}" target="_blank" data-proforma="${f.id}"><strong>${esc(f.serie)} ${esc(String(f.numar))}</strong></a>`,
+                `<a href="/proforme/${f.id}" target="_blank" data-proforma="${f.id}"><strong>${esc(f.serie)} ${esc(String(f.numar))}</strong></a>
+                 <a href="/proforme/${f.id}?pdf=1" target="_blank" class="btn secondary small" data-pdf="${f.id}" title="Deschide proforma și fereastra de salvare ca PDF" style="margin-left:6px">PDF</a>`,
                 esc(AV.firmaEmitenta(f.firma).eticheta),
                 esc(AV.dataAviz(f.data)),
                 esc(f.client_nume || "—"),
