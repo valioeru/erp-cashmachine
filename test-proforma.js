@@ -331,6 +331,21 @@ const text = (h) => String(h).replace(/<style[\s\S]*?<\/style>/g, " ").replace(/
   r = await emite(976003, ALT);
   egal("contor dat înapoi de mână, în bază: numărul dublat e refuzat cu mesaj, nu scris a doua oară", [/e deja folosit pe altă proformă/.test(decodeURIComponent(locatie(r))), cate() === inainte, Number(q("SELECT COUNT(*) AS n, 1 AS x FROM proforme WHERE serie = 'PFT' AND numar = 600")[0].n)], [true, true, 1]);
 
+  console.log("\n── Foaia comenzii ───────────────────────────────────────────");
+  // Vali, 19.11.2026: „și la comenzi, te rog" — tipărit și salvat ca PDF.
+  r = await cer("/comenzi/:id/tipar", { user: AGENT, params: { id: "976001" } });
+  const tc = text(r.corp);
+  bine("foaia comenzii: titlul, numărul fără „Seria”, clientul, liniile și totalul",
+    r.cod === 200 && tc.includes("COMANDĂ") && tc.includes("Nr. PF-CMD-1") && !/Seria\s+nr\./.test(tc) && tc.includes("PF-TEST Redenumit SRL") && tc.includes("Pungă curier PF") && /data-total>/.test(r.corp) && tc.includes("Nu este document fiscal"),
+    tc.slice(0, 400));
+  bine("…cu butonul de PDF, salvarea pornită de „?pdf=1” și numele fișierului în titlu", r.corp.includes("data-pdf-comanda") && r.corp.includes("pdf=1") && /<title>Comanda PF-CMD-1 - PF-TEST Redenumit SRL<\/title>/.test(r.corp), (r.corp.match(/<title>[^<]*/) || [""])[0]);
+  r = await cer("/comenzi/:id/tipar", { user: ALT, params: { id: "976004" } });
+  bine("o comandă cu o linie fără preț se tipărește și spune asta", r.cod === 200 && text(r.corp).includes("1 poziție e încă fără preț"));
+  r = await cer("/comenzi/:id/tipar", { user: ALT, params: { id: "976005" } });
+  bine("comanda anulată poartă „ANULATĂ” pe foaie", />ANULATĂ</.test(r.corp));
+  r = await cer("/comenzi/:id", { user: AGENT, params: { id: "976001" } });
+  bine("pagina comenzii are „Tipărește comanda” și „Salvează PDF”", r.corp.includes('href="/comenzi/976001/tipar"') && r.corp.includes('href="/comenzi/976001/tipar?pdf=1"'));
+
   console.log("\n── Firma care emite ─────────────────────────────────────────");
   // Vali, 19.11.2026: „La avize și proforme, fă să alegi firma după care
   // emiți: Cash Machine sau Warehouse All."

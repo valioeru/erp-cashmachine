@@ -2271,6 +2271,8 @@ function register(router) {
             ? `<a class="btn secondary" href="/avize/nou?comanda=${comanda.id}" data-fa-aviz>Fă aviz de însoțire</a>`
             : ""
         }
+        <a class="btn secondary" href="/comenzi/${comanda.id}/tipar" target="_blank" data-tipar-comanda>Tipărește comanda</a>
+        <a class="btn secondary" href="/comenzi/${comanda.id}/tipar?pdf=1" target="_blank" data-pdf-comanda>Salvează PDF</a>
         ${proforme
           .map(
             (f) =>
@@ -2509,6 +2511,81 @@ function register(router) {
     }
     return comanda;
   }
+
+  // ---- foaia comenzii: de tipărit sau de salvat ca PDF ---------------------
+  // Vali, 19.11.2026: „la facturi, avize, proforme să poți și salva PDF; orice
+  // user care le vede poate" · „și la comenzi, te rog". Aceeași foaie ca
+  // proforma (lib/proforma.js), cu titlul „COMANDĂ". O deschide oricine poate
+  // deschide pagina comenzii. Liniile fără preț apar cu 0 — comanda se poate
+  // scrie și înainte de preț.
+  router.get("/comenzi/:id/tipar", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
+    if (!c) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/comenzi", body: "<p>Comandă inexistentă.</p>" }));
+    const PF = require("../lib/proforma");
+    const AV = require("../lib/aviz");
+    const LM = require("../lib/livrare-mod");
+    const p = (await db.prepare("SELECT id, nume, cui, reg_com, adresa, judet, localitate, tara, telefon, email, persoana_contact, termen_plata_zile FROM parteneri WHERE id = ?").get(c.partener_id)) || {};
+    const linii = (
+      await db
+        .prepare(
+          `SELECT cl.produs_id, cl.cantitate, cl.pret_unitar, cl.um, pr.denumire, pr.unitate_masura, pr.cota_tva,
+                  COALESCE(NULLIF(TRIM(pr.cod), ''), pr.cod_generat) AS cod
+             FROM comenzi_linii cl JOIN produse pr ON pr.id = cl.produs_id WHERE cl.comanda_id = ? ORDER BY cl.id`
+        )
+        .all(c.id)
+    )
+      .filter((l) => Number(l.cantitate) > 0)
+      .map((l) => ({
+        produs_id: Number(l.produs_id),
+        denumire: String(l.denumire || "").trim(),
+        cod: l.cod || null,
+        um: String(l.um || l.unitate_masura || "").trim() || null,
+        cantitate: Number(l.cantitate),
+        pret_unitar: Number(l.pret_unitar) || 0,
+        cota_tva: l.cota_tva == null ? 0 : Number(l.cota_tva),
+      }));
+    const moneda = PF.moneda(c.moneda);
+    const curs = moneda !== "RON" && Number(c.curs_bnr) > 0 ? Number(c.curs_bnr) : null;
+    const termen = TP.efectiv(c, { termen_plata_zile: p.termen_plata_zile });
+    const agent = c.agent_id ? await db.prepare("SELECT nume FROM utilizatori WHERE id = ?").get(c.agent_id).catch(() => null) : null;
+    const numar = String(c.numar || "").trim() || "#" + c.id;
+    const upa = require("../lib/upa").eUpa(c);
+    const doc = {
+      serie: "",
+      numar,
+      data: String(c.data || "").slice(0, 10),
+      client_nume: p.nume || "",
+      client_cui: p.cui || null,
+      client_regcom: String(p.reg_com || "").trim() || null,
+      client_adresa: AV.adresaClient(p) || null,
+      client_contact: String(p.persoana_contact || "").trim() || null,
+      client_telefon: String(p.telefon || "").trim() || null,
+      client_email: String(p.email || "").trim() || null,
+      moneda,
+      curs,
+      curs_nota: curs ? (Number(c.curs_manual) === 1 ? "pus pe comandă" : "BNR" + (c.curs_bnr_data ? " din " + AV.dataAviz(c.curs_bnr_data) : "")) : null,
+      termen_plata_zile: termen == null ? null : Number(termen),
+      livrare: LM.valid(c.livrare_mod) ? LM.text(c) : null,
+      data_livrare: String(c.data_livrare_ceruta || "").slice(0, 10) || null,
+      observatii: String(c.observatii || "").trim() || null,
+      mentiune: upa ? require("../lib/upa").mentiune(p.nume) : null,
+      creat_de: (agent && agent.nume) || "",
+      anulat: String(c.status) === "anulata" ? 1 : 0,
+    };
+    const faraPret = linii.filter((l) => !(l.pret_unitar > 0)).length;
+    const bara = [
+      `<strong>Comanda ${esc(numar)}</strong>`,
+      `<button onclick="window.print()">Tipărește</button>`,
+      `<button onclick="window.print()" title="În fereastra de tipărire alege „Salvează ca PDF”" data-pdf-comanda>Descarcă PDF</button>`,
+      `<a href="/comenzi/${c.id}">Înapoi la comandă</a>`,
+    ].join(" ");
+    const subsol =
+      "Comandă înregistrată în ERP. Nu este document fiscal și nu ține loc de factură." +
+      (faraPret ? ` ${faraPret} ${faraPret === 1 ? "poziție e" : "poziții sunt"} încă fără preț.` : "");
+    ctx.res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store" });
+    return ctx.res.end(PF.pagina(doc, linii, { bara, titlu: "COMANDĂ", numeFisier: "Comanda", numarSimplu: true, subsol, textAnulat: "ANULATĂ" }));
+  });
 
   router.get("/comenzi/:id/editare", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
