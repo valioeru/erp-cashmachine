@@ -778,7 +778,13 @@ function register(router) {
     // le aduce la zi; vezi lib/stadiu-comanda.js.
     const inUrma = ctx.user && ctx.user.rol === "admin" ? await STADIU.ramaseInUrma().catch(() => []) : [];
 
+    // Modificările cerute pe comenzi preluate în producție: sus, de revalidat
+    // (Vali, 19.11.2026; lib/acord-productie.js).
+    const ACP = require("../lib/acord-productie");
+    const deRevalidat = require("../lib/acord-productie-html").deRevalidat({ user: ctx.user, cereri: await ACP.deRevalidat(), query: ctx.query });
+
     const body = `
+      ${deRevalidat}
       ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:760px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
       ${
         inUrma.length

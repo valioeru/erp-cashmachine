@@ -43,6 +43,9 @@ function campBranding(v) {
 // lib/furnizor-linie.js, citirile din bază în lib/furnizor-comanda.js.
 const FL = require("../lib/furnizor-linie");
 const FC = require("../lib/furnizor-comanda");
+// Comanda preluată în producție se modifică doar cu acordul producției (Vali, 19.11.2026).
+const ACP = require("../lib/acord-productie");
+const ACP_HTML = require("../lib/acord-productie-html");
 
 // Scrie în istoric ce s-a schimbat.
 //
@@ -1988,6 +1991,10 @@ function register(router) {
       .catch(() => null);
     const potiModifica = IST.poateEdita(ctx.user, comanda, clientFisa);
     const istoric = await citesteIstoric(comanda.id);
+    // Acordul producției (lib/acord-productie.js): ce așteaptă și tot istoricul.
+    const cereri = await ACP.aleComenzii(comanda.id);
+    const preluata = await ACP.preluataInProductie(comanda.id);
+    const blocuriAcord = ACP_HTML.peComanda({ user: ctx.user, cereri, preluata, query: ctx.query });
 
     // Clientul are facturi trecute de scadență? Comanda nu se oprește (Vali,
     // 03.11.2026) — doar se spune, sus, ca să știe oricine se uită pe ea.
@@ -2286,6 +2293,7 @@ function register(router) {
             : ""
         }
       </div>
+      ${blocuriAcord.istoric}
       ${
         istoric.length
           ? `<h2>Ce s-a modificat pe comandă</h2>
@@ -2316,9 +2324,10 @@ function register(router) {
       }. ${linii.length} ${linii.length === 1 ? "linie" : "linii"}, total ${sumaIn(total, comanda.moneda)}.`,
       modificat: `Salvat. ${n} ${n === 1 ? "schimbare scrisă" : "schimbări scrise"} în istoricul comenzii.`,
       nimic: "N-a fost nimic de schimbat — comanda a rămas cum era.",
+      asteapta_productia: `Comanda e preluată în producție: modificarea (${n} ${n === 1 ? "schimbare" : "schimbări"}) NU s-a aplicat încă. A plecat la producție, de revalidat — comanda rămâne cum era până o aprobă.`,
     };
     const flash = MESAJE[String(ctx.query.ok || "")] || null;
-    send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body, flash }));
+    send(ctx.res, 200, layout({ user: ctx.user, title: `Comandă ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body: blocuriAcord.sus + body, flash }));
   });
 
   // Validarea unei ciorne născute dintr-un email. O poate apăsa agentul comenzii
@@ -2465,7 +2474,12 @@ function register(router) {
     send(
       ctx.res,
       200,
-      layout({ user: ctx.user, title: `Modifici comanda ${comanda.numar || "#" + comanda.id}`, active: "/comenzi", body })
+      layout({
+        user: ctx.user,
+        title: `Modifici comanda ${comanda.numar || "#" + comanda.id}`,
+        active: "/comenzi",
+        body: ACP_HTML.peFormular({ user: ctx.user, preluata: await ACP.preluataInProductie(comanda.id), asteapta: await ACP.inAsteptare(comanda.id) }) + body,
+      })
     );
   }
 
@@ -2503,7 +2517,10 @@ function register(router) {
     await formularEditare(ctx, comanda);
   });
 
-  router.post("/comenzi/:id/editare", async (ctx) => {
+  // Salvarea modificării. E o funcție cu nume ca să poată fi chemată și la
+  // aprobarea producției (mai jos), cu formularul ținut în cerere:
+  // `ctx.acord` = { validator, eroare } spune că salvarea vine de acolo.
+  const editeazaComanda = async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/");
     const comanda = await comandaSiDreptul(ctx);
     if (!comanda) return;
@@ -2553,7 +2570,15 @@ function register(router) {
         furnizor_ales: alegeriFurnizor[i] || "",
       })),
     };
-    const opreste = (mesaj) => formularEditare(ctx, comanda, { eroare: mesaj, valori });
+    // La aprobarea producției nu e niciun formular de arătat: se ține minte
+    // de ce n-a trecut, iar cererea rămâne în așteptare.
+    const opreste = (mesaj) => {
+      if (ctx.acord) {
+        ctx.acord.eroare = mesaj;
+        return undefined;
+      }
+      return formularEditare(ctx, comanda, { eroare: mesaj, valori });
+    };
 
     const idClient = parseInt(b.partener_id, 10);
     if (!idClient) return await opreste("Alege clientul — o comandă nu poate exista fără el.");
@@ -2700,6 +2725,32 @@ function register(router) {
 
     if (!schimbari.length) return redirect(ctx.res, `/comenzi/${comanda.id}?ok=nimic`);
 
+    // ACORDUL PRODUCȚIEI (lib/acord-productie.js). Comanda preluată în
+    // producție nu se schimbă de aici decât de cine are Producția; ceilalți
+    // lasă o cerere, iar comanda rămâne cum era până o aprobă producția.
+    const inProductie = ctx.acord ? [] : await ACP.preluataInProductie(comanda.id);
+    if (inProductie.length && !ACP.eProductie(ctx.user)) {
+      if (await ACP.inAsteptare(comanda.id)) {
+        return await opreste("Pe comanda asta e deja o modificare care așteaptă acordul producției. Până nu e aprobată sau respinsă (ori retrasă de cine a cerut-o), nu se poate cere alta.");
+      }
+      const motivCerere = String(b.motiv || "").slice(0, 200).trim();
+      await ACP.cere({ comandaId: comanda.id, user: ctx.user, corp: b, schimbari, motiv: motivCerere });
+      console.log(`[comenzi] ${comanda.numar || "#" + comanda.id}: modificare cerută de ${(ctx.user && ctx.user.nume) || "?"}, așteaptă acordul producției (${schimbari.length} schimbări)`);
+      return redirect(ctx.res, `/comenzi/${comanda.id}?ok=asteapta_productia&n=${schimbari.length}`);
+    }
+    // Cine are Producția modifică direct: acordul e al lui, și se scrie.
+    if (inProductie.length) {
+      schimbari.push({ ce: "Acordul producției", vechi: "", nou: `comandă preluată în producție, modificată direct de ${(ctx.user && ctx.user.nume) || "?"}` });
+    }
+    if (ctx.acord && ctx.acord.cerere) {
+      const z = ctx.acord.cerere;
+      schimbari.push({
+        ce: "Acordul producției",
+        vechi: `cerută de ${z.solicitat_de_nume || "?"} la ${z.solicitat_la || "?"}`,
+        nou: `aprobată de ${(ctx.acord.validator && ctx.acord.validator.nume) || "?"} la ${ACP.acum()}`,
+      });
+    }
+
     await db
       .prepare(
         `UPDATE comenzi SET partener_id = ?, numar = ?, observatii = ?, data_livrare_ceruta = ?,
@@ -2763,8 +2814,65 @@ function register(router) {
     const motiv = String(b.motiv || "").slice(0, 200).trim();
     if (motiv) schimbari.push({ ce: "Motivul modificării", vechi: "", nou: motiv });
     await scrieIstoric(comanda.id, ctx.user, schimbari);
+    if (ctx.acord) ctx.acord.aplicat = schimbari.length;
 
     redirect(ctx.res, `/comenzi/${comanda.id}?ok=modificat&n=${schimbari.length}`);
+  };
+  router.post("/comenzi/:id/editare", editeazaComanda);
+
+  // ---- acordul producției pe o modificare cerută --------------------------
+  // Aprobarea aplică modificarea prin editeazaComanda, pe numele celui care a
+  // cerut-o și cu formularul lui, pe starea de acum a comenzii.
+  const inapoiLaCerere = (ctx, z, mesaj, eroare) => {
+    const b = ctx.body || {};
+    const tinta = String(b.inapoi || "") === "productie" ? "/productie" : `/comenzi/${z ? z.comanda_id : ""}`;
+    return redirect(ctx.res, `${tinta}?${eroare ? "eroare_acord" : "ok_acord"}=${encodeURIComponent(mesaj)}`);
+  };
+  router.post("/comenzi/modificari/:id/aproba", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const z = await ACP.citeste(ctx.params.id);
+    if (!z) return redirect(ctx.res, "/productie");
+    if (!ACP.eProductie(ctx.user)) return inapoiLaCerere(ctx, z, "Modificarea o aprobă cineva de la producție.", true);
+    if (z.stare !== "asteapta") return inapoiLaCerere(ctx, z, `Cererea e deja ${ACP.STARI[z.stare] || z.stare}.`, true);
+    const cel = z.solicitat_de_id ? await db.prepare("SELECT * FROM utilizatori WHERE id = ?").get(z.solicitat_de_id).catch(() => null) : null;
+    if (!cel) return inapoiLaCerere(ctx, z, "Cel care a cerut modificarea nu mai e în ERP. Respinge cererea și modifică direct comanda.", true);
+    const acord = { validator: ctx.user, cerere: z, eroare: "", aplicat: 0 };
+    // Răspunsul salvării nu pleacă la om: îl citim noi.
+    const prins = { cod: 0, loc: "" };
+    const res = { writeHead: (c, h) => { prins.cod = c; prins.loc = String((h && (h.Location || h.location)) || ""); return res; }, setHeader: () => {}, end: () => {} };
+    await editeazaComanda({ user: cel, params: { id: String(z.comanda_id) }, query: {}, body: ACP.corpul(z), res, req: ctx.req, acord });
+    const nimic = /ok=nimic/.test(prins.loc);
+    if (!acord.aplicat && !nimic) {
+      const deCe = acord.eroare || (prins.cod === 403 ? `${z.solicitat_de_nume || "Cel care a cerut-o"} nu mai are drept pe comanda asta.` : "Salvarea n-a trecut.");
+      return inapoiLaCerere(ctx, z, `Modificarea nu s-a putut aplica: ${deCe} Cererea a rămas în așteptare.`, true);
+    }
+    await ACP.inchide(z.id, "aprobata", ctx.user, nimic ? "comanda arăta deja așa" : (ctx.body || {}).raspuns);
+    console.log(`[comenzi] modificarea #${z.id} pe comanda ${z.comanda_id} aprobată de ${ctx.user.nume}`);
+    return inapoiLaCerere(ctx, z, nimic ? "Aprobată. Comanda arăta deja așa, n-a fost nimic de schimbat." : `Aprobată și aplicată: ${acord.aplicat} schimbări scrise în istoricul comenzii.`);
+  });
+  router.post("/comenzi/modificari/:id/respinge", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const z = await ACP.citeste(ctx.params.id);
+    if (!z) return redirect(ctx.res, "/productie");
+    if (!ACP.eProductie(ctx.user)) return inapoiLaCerere(ctx, z, "Modificarea o respinge cineva de la producție.", true);
+    if (z.stare !== "asteapta") return inapoiLaCerere(ctx, z, `Cererea e deja ${ACP.STARI[z.stare] || z.stare}.`, true);
+    const motiv = String((ctx.body || {}).raspuns || "").trim();
+    if (!motiv) return inapoiLaCerere(ctx, z, "Scrie de ce respingi modificarea — cel care a cerut-o trebuie să știe.", true);
+    await ACP.inchide(z.id, "respinsa", ctx.user, motiv);
+    await scrieIstoric(z.comanda_id, ctx.user, [{ ce: "Acordul producției", vechi: `modificare cerută de ${z.solicitat_de_nume || "?"} la ${z.solicitat_la || "?"}`, nou: `respinsă: ${motiv}` }]);
+    console.log(`[comenzi] modificarea #${z.id} pe comanda ${z.comanda_id} respinsă de ${ctx.user.nume}: ${motiv}`);
+    return inapoiLaCerere(ctx, z, "Modificarea a fost respinsă. Comanda a rămas cum era.");
+  });
+  // Cel care a cerut-o (sau administratorul) o poate retrage cât așteaptă.
+  router.post("/comenzi/modificari/:id/retrage", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const z = await ACP.citeste(ctx.params.id);
+    if (!z) return redirect(ctx.res, "/comenzi");
+    const alLui = Number(z.solicitat_de_id) === Number(ctx.user.id);
+    if (!alLui && ctx.user.rol !== "admin") return inapoiLaCerere(ctx, z, "Cererea o retrage cel care a făcut-o.", true);
+    if (z.stare !== "asteapta") return inapoiLaCerere(ctx, z, `Cererea e deja ${ACP.STARI[z.stare] || z.stare}.`, true);
+    await ACP.inchide(z.id, "retrasa", ctx.user, (ctx.body || {}).raspuns);
+    return inapoiLaCerere(ctx, z, "Cererea de modificare a fost retrasă.");
   });
 
   router.post("/comenzi/:id/valideaza", async (ctx) => {
