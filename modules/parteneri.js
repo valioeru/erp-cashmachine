@@ -10,6 +10,7 @@ const tsk = require("./taskuri");
 const XLS = require("../lib/export-xlsx");
 const ADR = require("../lib/adresa-client");
 const TP = require("../lib/termen-plata");
+const AL = require("../lib/adresa-livrare");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
 const STARE_LABEL = {
@@ -391,6 +392,9 @@ function register(router) {
       { name: "sursa", label: "Sursă (de unde a venit)" },
       { name: "data_nastere", label: "Zi de naștere persoană de contact (pentru urări)", type: "date" },
       { name: "adresa", label: "Adresă", type: "textarea" },
+      // Adresa de livrare, cu bifa „aceeași cu adresa partenerului"
+      // (Vali, 23.11.2026; lib/adresa-livrare.js). Goală în bază = aceeași.
+      { name: "adresa_livrare", label: "Adresa de livrare", html: (v) => AL.campFormular(v) },
       // Cerute de SmartBill pe factură (vezi lib/adresa-client.js). La
       // clienții importați din SmartBill se completează singure la prima
       // factură trimisă, din adresă; aici se pot corecta.
@@ -417,6 +421,15 @@ function register(router) {
     valideaza: async (valori, { ctx, id }) => {
       const scrisTermen = ctx && ctx.body ? ctx.body.termen_plata_zile : valori.termen_plata_zile;
       const t = TP.citeste(scrisTermen);
+      // Adresa de livrare: bifată „aceeași" se scrie goală; debifată, trebuie
+      // scrisă. Bifa se ține pe valori ca formularul refuzat s-o arate cum a
+      // lăsat-o omul (nu e coloană, deci nu ajunge în bază).
+      const livrare = AL.dinFormular(Object.assign({}, (ctx && ctx.body) || {}, { adresa: valori.adresa }));
+      if (!livrare.ok) {
+        valori.livrare_identica = "0";
+        return esc(livrare.eroare);
+      }
+      valori.adresa_livrare = livrare.valoare;
       if (!t.ok) return esc(t.eroare);
       // Partenerul NOU se scrie întreg (Vali, 18.11.2026): nume, CUI, localitate,
       // adresă, telefon, email, persoană de contact și termen de plată. Cei
@@ -456,8 +469,10 @@ function register(router) {
     // Întâi se caută firma: dacă există deja, nu i se mai cer agentului
     // localitatea, adresa și restul — acelea se cer doar unui partener NOU.
     // O greșeală adevărată (CUI stricat, email stricat) oprește oricum.
+    // Adresa de livrare: bifa „aceeași" sau adresa scrisă (lib/adresa-livrare.js).
+    const livrare = AL.dinFormular(Object.assign({}, ctx.body || {}, { adresa: v.date.adresa }));
     const doarLipsuri = v.gresite.every((g) => /lipsește\.$/.test(g));
-    if (!v.ok && !(doarLipsuri && v.date.nume && v.date.cui)) return raspunde(400, { gresite: v.gresite });
+    if (!v.ok && !(doarLipsuri && v.date.nume && v.date.cui)) return raspunde(400, { gresite: v.gresite.concat(livrare.ok ? [] : [livrare.eroare]) });
 
     // Căutarea dublurii se face pe TOȚI partenerii, nu doar pe clienți: un
     // furnizor poate deveni și client, iar a doua fișă pe același CUI ar rupe
@@ -481,14 +496,15 @@ function register(router) {
       });
     }
 
-    // Firma nu există: e un partener nou, deci se scrie întreg.
-    if (!v.ok) return raspunde(400, { gresite: v.gresite });
+    // Firma nu există: e un partener nou, deci se scrie întreg — cu adresa de
+    // livrare cu tot (unei firme care există deja nu i se cere).
+    if (!v.ok || !livrare.ok) return raspunde(400, { gresite: v.gresite.concat(livrare.ok ? [] : [livrare.eroare]) });
 
     const acum = new Date().toISOString().slice(0, 19).replace("T", " ");
     const ins = await db
       .prepare(
-        `INSERT INTO parteneri (tip, nume, cui, email, telefon, persoana_contact, adresa, stare, sursa, agent_id, creat_la, localitate, termen_plata_zile)
-         VALUES ('client', ?, ?, ?, ?, ?, ?, 'client_activ', ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO parteneri (tip, nume, cui, email, telefon, persoana_contact, adresa, stare, sursa, agent_id, creat_la, localitate, termen_plata_zile, adresa_livrare)
+         VALUES ('client', ?, ?, ?, ?, ?, ?, 'client_activ', ?, ?, ?, ?, ?, ?) RETURNING id`
       )
       .run(
         v.date.nume,
@@ -501,7 +517,8 @@ function register(router) {
         ctx.user.id,
         acum,
         v.date.localitate || null,
-        v.date.termen_plata_zile === "" || v.date.termen_plata_zile == null ? null : Number(v.date.termen_plata_zile)
+        v.date.termen_plata_zile === "" || v.date.termen_plata_zile == null ? null : Number(v.date.termen_plata_zile),
+        livrare.valoare || null
       )
       .catch(() => null);
     if (!ins) return raspunde(500, { gresite: ["Nu am putut scrie clientul. Încearcă din nou."] });
@@ -659,6 +676,11 @@ function register(router) {
           }</div>
           <div><div class="k">Sursă</div>${esc(partener.sursa) || "—"}</div>
           <div><div class="k">Adresă</div>${esc(partener.adresa) || "—"}</div>
+          <div data-adresa-livrare-fisa><div class="k">Adresa de livrare</div>${
+            AL.eIdentica(partener)
+              ? `<span style="color:var(--text-muted)">${esc(AL.ETICHETA_BIFA)}</span>`
+              : esc(AL.efectiva(partener))
+          }</div>
           <div><div class="k">Localitate · județ · țară</div>${
             [partener.localitate, partener.judet, partener.tara].filter(Boolean).map((x) => esc(x)).join(" · ") ||
             '<span style="color:var(--text-muted)">se completează la prima factură trimisă în SmartBill</span>'
