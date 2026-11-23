@@ -135,6 +135,7 @@ const sumaIn = (v, moneda) =>
 // zecimale — la 500.000 de bucăți, rotunjirea la 0,42 pierde 1.750 de lei pe
 // o singură linie. Totalurile rămân pe două: sunt bani de încasat, nu prețuri.
 const BNR = require("../lib/curs-bnr");
+const LL = require("../lib/livrare-la");
 // Cum se arată și cum se citește prețul din câmp. Povestea — câmpul care
 // primea doar 0.16005859375 și refuza 0,16 — e în lib/pret-camp.js.
 const PC = require("../lib/pret-camp");
@@ -1401,6 +1402,21 @@ const STARE_CERERE = {
   anulata: "anulată",
 };
 
+// Ce are partenerul pentru „Livrare la": adresele lui și persoanele de contact
+// (cea de pe fișă și cele trecute la Contacte). null dacă partenerul nu există.
+async function livrareLaPartener(partenerId) {
+  if (!(partenerId > 0)) return null;
+  const p = await db
+    .prepare("SELECT id, nume, adresa, localitate, judet, adresa_livrare, persoana_contact, telefon, email FROM parteneri WHERE id = ?")
+    .get(partenerId);
+  if (!p) return null;
+  const contacte = await db
+    .prepare("SELECT nume, functie, telefon, email FROM mk_contacte WHERE partener_id = ? AND COALESCE(activ, 1) = 1 ORDER BY id")
+    .all(partenerId)
+    .catch(() => []);
+  return LL.optiuni(p, contacte);
+}
+
 function register(router) {
   // Totalul unei comenzi în listă, în moneda ei.
   //
@@ -1610,6 +1626,7 @@ function register(router) {
           Întreabă clientul acum, nu peste trei zile. Depozitul nu are voie să trimită jumătate de comandă fără răspunsul ăsta.
         </div>
       </fieldset>
+      ${LL.bloc(v, { completeaza: true })}
       ${campBranding(v)}
 
       <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
@@ -1701,6 +1718,16 @@ function register(router) {
     });
   });
 
+  // „Livrare la" (Vali, 23.11.2026; lib/livrare-la.js): adresele și persoanele
+  // de contact ale clientului ales, cu ce se completează din start. Ruta stă
+  // ÎNAINTEA lui /comenzi/:id, din același motiv ca cele de mai sus.
+  router.get("/comenzi/livrare-la.json", async (ctx) => {
+    if (!ctx.user) return trimiteJson(ctx, 403, { eroare: "Nu ești autentificat." });
+    const o = await livrareLaPartener(parseInt(ctx.query.partener, 10) || 0);
+    if (!o) return trimiteJson(ctx, 404, { eroare: "Clientul nu există." });
+    return trimiteJson(ctx, 200, o);
+  });
+
   // Furnizorii produsului de pe stoc, pentru linia comenzii: cere furnizor,
   // dintre care și cu cât. Ruta stă ÎNAINTEA lui /comenzi/:id, din același
   // motiv ca cele de mai sus.
@@ -1759,6 +1786,11 @@ function register(router) {
       livrare_partiala: livrare.valid(ctx.body.livrare_partiala),
       upa: String(ctx.body.upa || "") === "1" ? 1 : 0,
       livrare_mod: require("../lib/livrare-mod").valid(ctx.body.livrare_mod),
+      // „Livrare la", cum a venit din formular: se întoarce cu omul la o eroare.
+      livrare_adresa: ctx.body.livrare_adresa,
+      livrare_contact: ctx.body.livrare_contact,
+      livrare_telefon: ctx.body.livrare_telefon,
+      livrare_email: ctx.body.livrare_email,
       branding: BR.valid(ctx.body.branding),
       moneda,
       curs: moneda === "RON" ? "" : ctx.body.curs,
@@ -1788,6 +1820,11 @@ function register(router) {
     const termenCitit = TP.citeste(ctx.body.termen_plata_zile);
     if (!termenCitit.ok) return await formularComandaNoua(ctx, { eroare: termenCitit.eroare, valori });
     const termenPlata = termenCitit.zile !== null ? termenCitit.zile : TP.normal(client.termen_plata_zile);
+    // „Livrare la": ce a scris omul; ce n-a venit deloc din formular se ia din
+    // ale clientului (lib/livrare-la.js).
+    const aleClientului = await livrareLaPartener(idClient);
+    const livrareLa = LL.dinFormular(ctx.body, aleClientului ? aleClientului.implicit : {});
+    if (!livrareLa.ok) return await formularComandaNoua(ctx, { eroare: livrareLa.eroare, valori });
     // Cursul scris de om (Vali, 17.11.2026): gol = BNR-ul zilei. Vezi lib/curs-comanda.js.
     const cursCitit = moneda === "RON" ? { ok: true, valoare: null } : CC.citeste(ctx.body.curs);
     if (!cursCitit.ok) return await formularComandaNoua(ctx, { eroare: CC.MESAJ_CURS, valori });
@@ -1891,6 +1928,9 @@ function register(router) {
     // Bifa de unitate protejată: factura făcută din comandă pleacă pe seria UPA (lib/upa.js).
     if (valori.upa) await db.prepare("UPDATE comenzi SET upa = 1 WHERE id = ?").run(comandaId);
     await db.prepare("UPDATE comenzi SET livrare_mod = ? WHERE id = ?").run(valori.livrare_mod, comandaId);
+    await db
+      .prepare("UPDATE comenzi SET livrare_adresa = ?, livrare_contact = ?, livrare_telefon = ?, livrare_email = ? WHERE id = ?")
+      .run(livrareLa.valori.livrare_adresa || null, livrareLa.valori.livrare_contact || null, livrareLa.valori.livrare_telefon || null, livrareLa.valori.livrare_email || null, comandaId);
 
     const insertLinie = db.prepare(
       `INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um, furnizor_id, furnizor_text, furnizor_sursa)
@@ -2099,6 +2139,11 @@ function register(router) {
           }</div>
           <div><div class="k">Branding</div>${BR.eticheta(comanda)}</div>
           <div data-livrare-mod-comanda><div class="k">Livrarea</div>${esc(require("../lib/livrare-mod").text(comanda))}</div>
+          <div data-livrare-la-comanda><div class="k">Livrare la</div>${
+            LL.randuri(comanda).length
+              ? LL.randuri(comanda).map((r) => `<div><span style="color:var(--text-muted);font-size:12px">${esc(r.eticheta)}:</span> ${esc(r.valoare)}</div>`).join("")
+              : `<span style="color:var(--text-muted)">nescris${potiModifica ? ` · <a href="/comenzi/${comanda.id}/editare">pune-l</a>` : ""}</span>`
+          }</div>
           <div data-upa-comanda><div class="k">Factura</div>${Number(comanda.upa) === 1 ? '<span class="badge albastru">unitate protejată (UPA)</span>' : "serie normală"}</div>
           <div><div class="k">Observații</div>${esc(comanda.observatii) || "—"}</div>
         </div>
@@ -2413,6 +2458,10 @@ function register(router) {
       livrare_partiala: livrare.raspuns(comanda),
       upa: Number(comanda.upa) === 1 ? 1 : 0,
       livrare_mod: require("../lib/livrare-mod").valid(comanda.livrare_mod),
+      livrare_adresa: comanda.livrare_adresa,
+      livrare_contact: comanda.livrare_contact,
+      livrare_telefon: comanda.livrare_telefon,
+      livrare_email: comanda.livrare_email,
       branding: BR.valid(comanda.branding),
       moneda: comanda.moneda,
       // Cursul de pe comandă, ca număr: câmpul îl scrie cu virgulă.
@@ -2500,6 +2549,7 @@ function register(router) {
             <span>Nu — doar comanda completă</span>
           </label>
         </fieldset>
+        ${LL.bloc(v, { completeaza: false })}
         ${campBranding(v)}
         <label class="field"><span>Observații</span><textarea name="observatii" rows="2">${esc(v.observatii || "")}</textarea></label>
 
@@ -2700,6 +2750,11 @@ function register(router) {
       upa: String(b.upa || "") === "1" ? 1 : 0,
       // Nealeasă la modificare (comandă de dinainte, formular vechi): rămâne ce era.
       livrare_mod: require("../lib/livrare-mod").valid(b.livrare_mod) || require("../lib/livrare-mod").valid(comanda.livrare_mod),
+      // „Livrare la": ce n-a venit deloc din formular rămâne cum era pe comandă.
+      livrare_adresa: b.livrare_adresa === undefined ? comanda.livrare_adresa : b.livrare_adresa,
+      livrare_contact: b.livrare_contact === undefined ? comanda.livrare_contact : b.livrare_contact,
+      livrare_telefon: b.livrare_telefon === undefined ? comanda.livrare_telefon : b.livrare_telefon,
+      livrare_email: b.livrare_email === undefined ? comanda.livrare_email : b.livrare_email,
       branding: BR.valid(b.branding),
       moneda,
       curs: moneda === "RON" ? "" : b.curs,
@@ -2737,6 +2792,8 @@ function register(router) {
     if (!cursCitit.ok) return await opreste(CC.MESAJ_CURS);
     const termenCitit = TP.citeste(b.termen_plata_zile);
     if (!termenCitit.ok) return await opreste(termenCitit.eroare);
+    const livrareLa = LL.dinFormular(b, comanda);
+    if (!livrareLa.ok) return await opreste(livrareLa.eroare);
     const termenPlata = TP.laModificare({
       citit: termenCitit.zile,
       vechi: comanda.termen_plata_zile,
@@ -2768,6 +2825,10 @@ function register(router) {
       // Tot ca text: „serie normală → unitate protejată (UPA)".
       upa: require("../lib/upa").eticheta(comanda),
       livrare_mod: require("../lib/livrare-mod").text(comanda),
+      livrare_adresa: String(comanda.livrare_adresa || ""),
+      livrare_contact: String(comanda.livrare_contact || ""),
+      livrare_telefon: String(comanda.livrare_telefon || ""),
+      livrare_email: String(comanda.livrare_email || ""),
       moneda: comanda.moneda,
       // În istoric, ca text: „30 de zile → 45 de zile".
       termen_plata_zile: TP.normal(comanda.termen_plata_zile) === null ? "" : TP.zileText(comanda.termen_plata_zile),
@@ -2818,6 +2879,10 @@ function register(router) {
       branding: BR.text({ branding: valori.branding }),
       upa: require("../lib/upa").eticheta({ upa: valori.upa }),
       livrare_mod: require("../lib/livrare-mod").text({ livrare_mod: valori.livrare_mod }),
+      livrare_adresa: livrareLa.valori.livrare_adresa,
+      livrare_contact: livrareLa.valori.livrare_contact,
+      livrare_telefon: livrareLa.valori.livrare_telefon,
+      livrare_email: livrareLa.valori.livrare_email,
       moneda,
       termen_plata_zile: termenPlata === null ? "" : TP.zileText(termenPlata),
       observatii: b.observatii || "",
@@ -2921,6 +2986,9 @@ function register(router) {
       )
       .run(dupa.partener_id, dupa.numar, dupa.observatii, dupa.data_livrare_ceruta, dupa.livrare_partiala, valori.branding, dupa.moneda, curs, cursData, termenPlata, cursNou.manual, comanda.id);
     if (valori.livrare_mod !== require("../lib/livrare-mod").valid(comanda.livrare_mod)) await db.prepare("UPDATE comenzi SET livrare_mod = ? WHERE id = ?").run(valori.livrare_mod, comanda.id);
+    await db
+      .prepare("UPDATE comenzi SET livrare_adresa = ?, livrare_contact = ?, livrare_telefon = ?, livrare_email = ? WHERE id = ?")
+      .run(dupa.livrare_adresa || null, dupa.livrare_contact || null, dupa.livrare_telefon || null, dupa.livrare_email || null, comanda.id);
     // Bifa de unitate protejată se poate schimba cât comanda se mai poate modifica.
     if ((Number(comanda.upa) === 1 ? 1 : 0) !== valori.upa) {
       await db.prepare("UPDATE comenzi SET upa = ? WHERE id = ?").run(valori.upa, comanda.id);
