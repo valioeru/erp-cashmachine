@@ -781,27 +781,54 @@ function register(router) {
   });
 
   // --- aprovizionare: lista mare ------------------------------------------
+  //
+  // CE AȘTEAPTĂ SUS, CE S-A ÎNCHIS JOS (Vali, 24.11.2026: „la comandă nouă cu
+  // produs care nu se regăsește în depozit și așteaptă marfă, unde o mai
+  // găsesc apoi? Că dispare cumva"). Pagina arăta ultimele 300 de cereri, de
+  // orice fel, în ordinea în care au fost făcute: pe live erau 106 deschise
+  // printre 194 închise (intrate în stoc, refuzate, anulate), iar o cerere
+  // deschisă mai veche ieșea de tot din pagină după a 300-a. Acum cererile
+  // care așteaptă sunt sus, TOATE, cele mai grabnice întâi; cele închise stau
+  // dedesubt, strânse, ultimele 200.
   router.get("/depozit/aprovizionare", async (ctx) => {
-    const aprov = await db
-      .prepare(
-        `SELECT a.*, p.denumire AS produs, ${UMC.SQL_UM} AS unitate_masura, f.nume AS furnizor, c.numar AS comanda_numar,
-                cl.nume AS client, c.data_livrare_promisa, c.data_livrare_ceruta
+    const SQL_APROV = `SELECT a.*, p.denumire AS produs, ${UMC.SQL_UM} AS unitate_masura, f.nume AS furnizor, c.numar AS comanda_numar,
+                cl.nume AS client, c.data_livrare_promisa, c.data_livrare_ceruta, c.status AS comanda_status
          FROM aprovizionari a
          JOIN produse p ON p.id = a.produs_id
          ${UMC.JOIN_UM}
          LEFT JOIN parteneri f ON f.id = a.furnizor_id
          LEFT JOIN comenzi c ON c.id = a.comanda_id
-         LEFT JOIN parteneri cl ON cl.id = c.partener_id
-         ORDER BY a.id DESC
-         LIMIT 300`
+         LEFT JOIN parteneri cl ON cl.id = c.partener_id`;
+    // Deschisă = cerută, confirmată sau de preluat din producție. Și cea
+    // refuzată, cât comanda ei încă n-are marfa: cineva trebuie s-o ceară din
+    // nou sau să vorbească cu clientul, deci nu e un lucru terminat.
+    const E_DESCHISA = `(a.status IN ('ceruta', 'confirmata', 'gata')
+                         OR (a.status = 'refuzata' AND c.status IN ('noua', 'confirmata', 'asteapta_marfa')))`;
+    const aprovDeschise = await db
+      .prepare(
+        `${SQL_APROV}
+         WHERE ${E_DESCHISA}
+         ORDER BY CASE WHEN COALESCE(NULLIF(a.termen_confirmat, ''), NULLIF(a.termen_cerut, '')) IS NULL THEN 0 ELSE 1 END,
+                  COALESCE(NULLIF(a.termen_confirmat, ''), NULLIF(a.termen_cerut, '')), a.id
+         LIMIT 3000`
       )
       .all();
+    const aprovInchise = await db
+      .prepare(
+        `${SQL_APROV}
+         WHERE NOT ${E_DESCHISA}
+         ORDER BY a.id DESC
+         LIMIT 200`
+      )
+      .all();
+    const aprov = aprovDeschise.concat(aprovInchise);
+    // La fel și materia primă cerută de producție: ce așteaptă, întâi.
     const materii = await db
       .prepare(
         `SELECT m.*, p.denumire AS produs FROM cereri_materie_prima m
          LEFT JOIN produse p ON p.id = m.produs_id
-         ORDER BY m.id DESC
-         LIMIT 200`
+         ORDER BY CASE WHEN m.status IN ('ceruta', 'confirmata') THEN 0 ELSE 1 END, m.id DESC
+         LIMIT 300`
       )
       .all();
     const depozite = await db.prepare("SELECT id, denumire FROM depozite ORDER BY id").all();
@@ -882,6 +909,7 @@ function register(router) {
       ];
     });
 
+    const COLOANE_APROV = ["Produs", "Cantitate", "Sursă", "Furnizor", "Pentru comanda", "Termen cerut", "Răspunsul furnizorului", "Status", ""];
     const randuriM = materii.map((m) => {
       const actiuni =
         poateDepozit(ctx.user) && m.status === "ceruta"
@@ -948,7 +976,34 @@ function register(router) {
       }
       ${ctx.query.eroare ? `<p class="badge rosu" style="display:inline-block;white-space:normal;max-width:720px;line-height:1.5">${esc(ctx.query.eroare)}</p>` : ""}
       ${ctx.query.ok ? `<p class="badge verde" style="display:inline-block;white-space:normal;max-width:720px;line-height:1.5">${esc(ctx.query.ok)}</p>` : ""}
-      ${table(["Produs", "Cantitate", "Sursă", "Furnizor", "Pentru comanda", "Termen cerut", "Răspunsul furnizorului", "Status", ""], randuriA)}
+      <h2 id="asteapta" data-aprov-deschise="${aprovDeschise.length}">Așteaptă marfa — ${aprovDeschise.length} ${aprovDeschise.length === 1 ? "cerere" : "cereri"}</h2>
+      <p style="max-width:760px;color:var(--text-muted);font-size:13px;margin-top:-4px">
+        Toate cererile care n-au intrat încă în stoc, cele cu termenul cel mai apropiat întâi (cele fără termen, chiar sus).
+        O cerere refuzată rămâne aici cât comanda ei încă n-are marfa.
+      </p>
+      <div class="toolbar"><input type="search" id="cauta-aprov" placeholder="Caută după produs, client, număr de comandă sau furnizor…" style="max-width:460px;width:100%"></div>
+      ${
+        aprovDeschise.length
+          ? `<div id="aprov-deschise">${table(COLOANE_APROV, randuriA.slice(0, aprovDeschise.length))}</div>`
+          : `<p style="color:var(--text-muted)" data-nimic-deschis>Nicio cerere în așteptare: tot ce s-a cerut a intrat în stoc sau a fost închis.</p>`
+      }
+      <details style="margin-top:16px" data-aprov-inchise="${aprovInchise.length}">
+        <summary style="cursor:pointer;font-weight:600">Închise — ultimele ${aprovInchise.length} (intrate în stoc, refuzate, anulate)</summary>
+        ${table(COLOANE_APROV, randuriA.slice(aprovDeschise.length))}
+      </details>
+      <script>
+        (function () {
+          var c = document.getElementById("cauta-aprov");
+          var cutie = document.getElementById("aprov-deschise");
+          if (!c || !cutie) return;
+          c.addEventListener("input", function () {
+            var t = c.value.toLowerCase().trim();
+            cutie.querySelectorAll("tbody tr").forEach(function (r) {
+              r.style.display = !t || r.textContent.toLowerCase().indexOf(t) !== -1 ? "" : "none";
+            });
+          });
+        })();
+      </script>
       <h2 id="materii">Materie primă cerută de producție</h2>
       ${table(["Produs / descriere", "Cantitate", "Cerut de", "Termen cerut", "Termen dat", "Status", ""], randuriM)}
     `;
