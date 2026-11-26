@@ -125,6 +125,7 @@ require("./modules/decont").register(router);
 require("./modules/configurari").register(router);
 // Unificarea codurilor de produs (17.11.2026): pagina ei, sub Configurări.
 require("./modules/unificare-coduri").register(router);
+require("./modules/unificare-clienti").register(router);
 require("./modules/forecast").register(router);
 require("./modules/comision").register(router);
 require("./modules/ghid").register(router);
