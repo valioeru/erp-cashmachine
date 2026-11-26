@@ -17,7 +17,7 @@
 
 const db = require("../lib/db");
 const cost = require("../lib/cost");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 // Furnizorul materialului se alege aici, la alocarea materialului — aceeași
 // casetă ca pe pagina comenzii de producție (lib/furnizor-comanda.js).
@@ -161,7 +161,7 @@ function register(router) {
                  `<a href="/productie/retete/${p.id}">${esc(p.denumire)}</a>`,
                  `${Number(p.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 2 })} ${esc(um(p))}`,
                  money(p.vanzari),
-                 Number(p.pret_vanzare) > 0 ? money(p.pret_vanzare) : "—",
+                 Number(p.pret_vanzare) > 0 ? pretLei(p.pret_vanzare) : "—",
                  `<a class="btn small" href="/productie/retete/${p.id}">Scrie rețeta</a>`,
                ])
              )}`
@@ -243,14 +243,14 @@ function register(router) {
           <div><div class="k">Cod</div>${esc(p.cod || "—")}</div>
           <div><div class="k">Unitate de măsură</div>${esc(um(p) || "—")}</div>
           <div><div class="k">Cost din rețetă, pe bucată</div>${d.total > 0 ? `<strong>${bani4(d.total)}</strong>` : "—"}</div>
-          <div><div class="k">Preț de referință</div>${pretReper > 0 ? money(pretReper) : "—"}<br><span style="color:var(--text-muted);font-size:11px">${r && r.mediu > 0 ? `media a ${r.linii} linii facturate` : "preț de catalog"}</span></div>
+          <div><div class="k">Preț de referință</div>${pretReper > 0 ? pretLei(pretReper) : "—"}<br><span style="color:var(--text-muted);font-size:11px">${r && r.mediu > 0 ? `media a ${r.linii} linii facturate` : "preț de catalog"}</span></div>
           <div><div class="k">Marjă la prețul ăsta</div>${
             marja === null
               ? "—"
               : `<strong style="color:${marja >= 0 ? "var(--success)" : "var(--danger)"}">${bani4(pretReper - d.total)}</strong> <span style="color:var(--text-muted);font-size:11px">${marja.toFixed(1)}%</span>`
           }</div>
           <div><div class="k">Stare</div><span class="badge ${v.clasa}">${esc(v.text)}</span></div>
-          <div><div class="k">Preț de achiziție scris pe produs</div>${Number(p.pret_achizitie) > 0 ? money(p.pret_achizitie) : "—"}</div>
+          <div><div class="k">Preț de achiziție scris pe produs</div>${Number(p.pret_achizitie) > 0 ? pretLei(p.pret_achizitie) : "—"}</div>
           <div><div class="k">Cost real din contabilitate</div>${Number(p.cost_rata) > 0 && pretReper > 0 ? `${money(Number(p.cost_rata) * pretReper)}<br><span style="color:var(--text-muted);font-size:11px">${(Number(p.cost_rata) * 100).toFixed(1)}% din preț</span>` : "—"}</div>
         </div>
       </div>

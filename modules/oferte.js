@@ -9,7 +9,7 @@
 // obligatoriu: din orice pas se poate sări direct la contract sau la comandă.
 // Un client care sună și comandă pe loc n-are nevoie de ofertă.
 const db = require("../lib/db");
-const { esc, layout, table, money, subnavCrm, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
+const { esc, layout, table, money, subnavCrm, cautaClient, cautaClientScript, randuriClienti, pretLei } = require("../lib/render");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
 const { send, redirect } = require("../lib/router");
 const concurenta = require("./concurenta");
@@ -229,7 +229,7 @@ function register(router) {
     // Moneda ofertei: în ea sunt scrise prețurile liniilor și totalul.
     const mo = monedaOfertei(o);
     const bani = (v) => (mo === "RON" ? money(v) : esc(CC.suma(v, mo)));
-    const pretul = (v) => (mo === "RON" ? money(v) : esc(CC.pret(v, mo)));
+    const pretul = (v) => (mo === "RON" ? pretLei(v) : esc(CC.pret(v, mo)));
 
     // Blocul de piață: cu ce prețuri ne bate concurența la clientul ăsta.
     // Îl umplu cu liniile ofertei ca referință, ca diferența să se vadă pe loc,

@@ -33,7 +33,7 @@
 // o valoare a lipsurilor calculată pe un preț inventat e mai rea decât una
 // lipsă, fiindcă arată credibil.
 const db = require("../lib/db");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { SUB_STOC } = require("../lib/stoc");
 
@@ -488,7 +488,7 @@ function register(router) {
           ? '<span style="color:var(--success)">0</span>'
           : `<strong style="color:${dif > 0 ? "var(--success)" : "var(--danger)"}">${dif > 0 ? "+" : ""}${Math.round(dif * 1000) / 1000}</strong>`,
         val === null ? "—" : money(val),
-        `<span style="font-size:11px;color:var(--text-muted)">${esc(l.pret_din || "—")}${nr(l.pret_intrare) ? ` · ${money(l.pret_intrare)}` : ""}</span>`,
+        `<span style="font-size:11px;color:var(--text-muted)">${esc(l.pret_din || "—")}${nr(l.pret_intrare) ? ` · ${pretLei(l.pret_intrare)}` : ""}</span>`,
       ];
     });
 

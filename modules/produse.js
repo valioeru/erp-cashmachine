@@ -1,7 +1,7 @@
 "use strict";
 const db = require("../lib/db");
 const { registerCrud } = require("../lib/crud");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const fuziune = require("../lib/produse-fuziune");
 const produsRapid = require("../lib/produs-rapid");
@@ -793,8 +793,8 @@ function register(router) {
       <div class="detail-box">
         <div class="detail-grid">
           <div><div class="k">Cod</div>${esc(codAfisat) || "—"}</div>
-          <div><div class="k">Preț vânzare</div>${money(produs.pret_vanzare)}</div>
-          <div><div class="k">Preț achiziție</div>${money(produs.pret_achizitie)}</div>
+          <div><div class="k">Preț vânzare</div>${pretLei(produs.pret_vanzare)}</div>
+          <div><div class="k">Preț achiziție</div>${pretLei(produs.pret_achizitie)}</div>
           <div><div class="k">TVA</div>${esc(produs.cota_tva)}%</div>
           <div><div class="k">Stoc minim</div>${esc(produs.stoc_minim)} ${esc(produs.unitate_masura)}</div>
           ${String(produs.greutate_neta || "").trim() ? `<div><div class="k">Greutate netă</div>${esc(produs.greutate_neta)}</div>` : ""}

@@ -10,7 +10,7 @@
 // numere, numele câmpurilor, + - * / ( ) și funcțiile min/max/rotund. Ce nu
 // recunoaște, refuză — o formulă e o formulă, nu un loc de rulat cod.
 const db = require("../lib/db");
-const { esc, money, layout, table, subnavCrm, selectorCalculator, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
+const { esc, money, layout, table, subnavCrm, selectorCalculator, cautaClient, cautaClientScript, randuriClienti, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 // --- evaluator de formule -------------------------------------------------
@@ -207,10 +207,10 @@ function register(router) {
         : cost === null
           ? ""
           : `<div class="cards">
-               <div class="card"><div class="label">Cost producție / bucată</div><div class="value">${money(cost)}</div></div>
+               <div class="card"><div class="label">Cost producție / bucată</div><div class="value">${pretLei(cost)}</div></div>
                <div class="card"><div class="label">Marjă</div><div class="value">${esc(String(marja))}%</div>
                  <div style="font-size:12px;color:var(--text-muted)">adaos ${adaos === null ? "—" : money(adaos)}</div></div>
-               <div class="card"><div class="label">Preț de vânzare</div><div class="value">${pret === null ? "—" : money(pret)}</div>
+               <div class="card"><div class="label">Preț de vânzare</div><div class="value">${pret === null ? "—" : pretLei(pret)}</div>
                  <div style="font-size:12px;color:var(--text-muted)">fără TVA</div></div>
                <div class="card"><div class="label">Total pe ${esc(String(cantitate))} ${esc(cat.um || "buc")}</div>
                  <div class="value">${pret === null ? "—" : money(pret * cantitate)}</div></div>

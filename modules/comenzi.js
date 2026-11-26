@@ -360,7 +360,7 @@ async function anuntaComandaNoua(comandaId, user) {
     `Livrare cerută: ${c.data_livrare_ceruta || "—"}`,
     ``,
     `Produse:`,
-    ...linii.map((l) => `  - ${l.denumire} — ${l.cantitate} ${l.um || l.unitate_masura || "buc"} × ${lei(l.pret_unitar)} = ${lei(Number(l.cantitate) * Number(l.pret_unitar))}`),
+    ...linii.map((l) => `  - ${l.denumire} — ${l.cantitate} ${l.um || l.unitate_masura || "buc"} × ${pretIn(l.pret_unitar, c.moneda)} = ${lei(Number(l.cantitate) * Number(l.pret_unitar))}`),
     ``,
     `Total fără TVA: ${lei(total)}`,
     c.observatii ? `\nObservații: ${c.observatii}` : "",

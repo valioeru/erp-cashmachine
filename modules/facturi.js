@@ -1,6 +1,6 @@
 "use strict";
 const db = require("../lib/db");
-const { esc, money, layout, table, actionLinks } = require("../lib/render");
+const { esc, money, layout, table, actionLinks, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const inbox = require("./inbox");
 const { perioadaDin, chipuriPerioada } = require("../lib/perioada");
@@ -1127,7 +1127,7 @@ function register(router) {
 
       ${table(
         ["Denumire", "Cantitate", "Preț unitar", "TVA %", "Subtotal"],
-        linii.map((l) => [esc(l.denumire), l.cantitate, money(l.pret_unitar), `${l.cota_tva}%`, money(l.cantitate * l.pret_unitar)])
+        linii.map((l) => [esc(l.denumire), l.cantitate, pretLei(l.pret_unitar), `${l.cota_tva}%`, money(l.cantitate * l.pret_unitar)])
       )}
       <div class="totals">
         <div>Subtotal: ${money(subtotal)}</div>

@@ -24,7 +24,7 @@
 const fs = require("fs");
 const path = require("path");
 const db = require("../lib/db");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const rapoarte = require("./rapoarte");
 const cc = require("../lib/clienti-curierat");
@@ -1736,16 +1736,16 @@ function formularLegare(consumabile, date) {
             x.p.cod ? ` [${esc(x.p.cod)}]` : ""
           } — ${
             nr(x.p.cost_reteta) > 0
-              ? "rețetă " + money(x.p.cost_reteta)
+              ? "rețetă " + pretLei(x.p.cost_reteta)
               : nr(x.p.pret_achizitie) > 0
-                ? "achiziție " + money(x.p.pret_achizitie)
+                ? "achiziție " + pretLei(x.p.pret_achizitie)
                 : "fără cost"
           }</option>`
       )
       .join("");
     return [
       esc(c.denumire),
-      money(c.pret),
+      pretLei(c.pret),
       `<select name="l_${c.id}" style="max-width:420px"><option value="">— nelegat —</option>${legatNesugerat}${opt}</select>
        <input name="alt_${c.id}" list="lista-nomenclator" autocomplete="off" placeholder="alt produs: scrie numele sau codul și alege-l" style="display:block;width:100%;max-width:420px;margin-top:4px;font-size:12px">`,
       // Un cost mai mare decât prețul de vânzare trece de plasa de 5× dar e
@@ -1753,7 +1753,7 @@ function formularLegare(consumabile, date) {
       // un cost de 19 bani ar da marjă negativă fără să pară o eroare. Se vede.
       c.cost == null
         ? '<span style="color:var(--text-muted)">—</span>'
-        : money(c.cost) + (nr(c.cost) > nr(c.pret) ? ' <span class="badge rosu">peste preț</span>' : ""),
+        : pretLei(c.cost) + (nr(c.cost) > nr(c.pret) ? ' <span class="badge rosu">peste preț</span>' : ""),
       `<span style="font-size:12px;color:var(--text-muted)">${esc(c.cost_sursa || "")}</span>`,
     ];
   });
@@ -2393,7 +2393,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
         d && d.linii
           ? `<h2>Pe produs</h2>${table(
               ["Produs", "Cantitate", "Preț", "Valoare"],
-              d.linii.map((l) => [esc(l.denumire || ""), nr(l.cantitate).toLocaleString("ro-RO"), money(l.pret), money(l.valoare)])
+              d.linii.map((l) => [esc(l.denumire || ""), nr(l.cantitate).toLocaleString("ro-RO"), pretLei(l.pret), money(l.valoare)])
             )}
              <p><strong>Total ${money(d.venit)}</strong>${d.exista_deja ? ` — ziua există deja (sursa „${esc(d.sursa_existenta || "")}”) și se rescrie` : ""}</p>`
           : ""
@@ -2465,7 +2465,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
                 (d) =>
                   `<h3>${dataRo(d.zi)} — pe produs</h3>${table(
                     ["Produs", "Cantitate", "Preț", "Valoare"],
-                    d.linii.map((l) => [esc(l.denumire), nr(l.cantitate).toLocaleString("ro-RO"), money(l.pret), money(l.valoare)])
+                    d.linii.map((l) => [esc(l.denumire), nr(l.cantitate).toLocaleString("ro-RO"), pretLei(l.pret), money(l.valoare)])
                   )}`
               )
               .join("")

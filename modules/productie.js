@@ -5,7 +5,7 @@
 // pentru că le stabilesc oameni diferiți — exact ce era ținut până acum în
 // Excelul "Comenzi_in_lucru.xlsx".
 const db = require("../lib/db");
-const { esc, money, cantitate, unitate, layout, table, dateleInText, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
+const { esc, money, pretLei, cantitate, unitate, layout, table, dateleInText, cautaClient, cautaClientScript, randuriClienti } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const { parseFisier, normalizeHeader, gasesteColoana } = require("../lib/import-utils");
 const T = require("../lib/termene");
@@ -2157,7 +2157,7 @@ function register(router) {
             : costPeBucata > 0
             ? `<p style="margin-top:12px">
                  <strong>Cost din rețetă:</strong>
-                 ${money(costPeBucata)} pe bucată${costComanda > 0 ? ` · <strong>${money(costComanda)}</strong> pe toată comanda` : ""}
+                 ${pretLei(costPeBucata)} pe bucată${costComanda > 0 ? ` · <strong>${money(costComanda)}</strong> pe toată comanda` : ""}
                  ${Number(produsComanda.cost_reteta_lipsa) > 0 ? `<span style="color:var(--warn);font-size:12px"> — ${produsComanda.cost_reteta_lipsa} ${Number(produsComanda.cost_reteta_lipsa) === 1 ? "componentă n-are" : "componente n-au"} cost, deci e o limită de jos</span>` : ""}
                  <a class="link-btn" href="/productie/retete/${produsComanda.id}" style="margin-left:8px">vezi rețeta →</a>
                  <a class="btn small" href="/productie/${c.id}/necesar" style="margin-left:8px">Necesar de materie primă</a>

@@ -11,7 +11,7 @@
 // Totul e citire. Nimic nu se șterge de aici: mai întâi te uiți la ce a
 // găsit, abia apoi se decide ce se face cu ele.
 const db = require("../lib/db");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const FS = require("../lib/firma-serie");
 
@@ -570,8 +570,8 @@ const VERIFICARI = [
           esc(String(r.data_emiterii || "").slice(0, 10)),
           `<a href="/produse/${r.produs_id}">${esc(r.denumire)}</a>${r.cod ? ` <span style="color:var(--text-muted)">(${esc(r.cod)})</span>` : ""}`,
           `${nr(r.cantitate)} ${esc(r.unitate_masura || "")}`,
-          money(r.pret_unitar),
-          `<strong style="color:var(--danger)">${money(r.pret_achizitie)}</strong>`,
+          pretLei(r.pret_unitar),
+          `<strong style="color:var(--danger)">${pretLei(r.pret_achizitie)}</strong>`,
           `<strong style="color:var(--danger)">${money(r.cost)}</strong>`,
           money(r.venit),
         ]),
@@ -1027,7 +1027,7 @@ function register(router) {
         deReparat.slice(0, LIMITA).map((p) => [
           `<a href="/produse/${p.id}">${esc(p.denumire)}</a>${p.cod ? ` <span style="color:var(--text-muted)">(${esc(p.cod)})</span>` : ""}`,
           money(p.referinta),
-          `<span style="color:var(--danger)">${money(p.pret_achizitie)}</span>`,
+          `<span style="color:var(--danger)">${pretLei(p.pret_achizitie)}</span>`,
           p.nou > 0 ? `<strong style="color:var(--success)">${money(p.nou)}</strong>` : "—",
           esc(p.sursa),
         ])
@@ -1380,8 +1380,8 @@ function register(router) {
           `<a href="/facturi/${r.factura_id}">${doc(r)}</a>`,
           esc(String(r.data_emiterii || "").slice(0, 10)),
           `<a href="/produse/${r.produs_id}">${esc(r.produs)}</a>${r.cod ? ` <span style="color:var(--text-muted)">(${esc(r.cod)})</span>` : ""}`,
-          `<span style="color:var(--danger)">${nr(r.cant)} × ${money(r.pret)}</span>`,
-          `<strong style="color:var(--success)">${nr(r.cantNoua)} × ${money(r.pretNou)}</strong>`,
+          `<span style="color:var(--danger)">${nr(r.cant)} × ${pretLei(r.pret)}</span>`,
+          `<strong style="color:var(--success)">${nr(r.cantNoua)} × ${pretLei(r.pretNou)}</strong>`,
           money(r.total),
           `<span style="color:var(--danger)">${money(r.costVechi)}</span>`,
           money(r.costNou),
@@ -1403,7 +1403,7 @@ function register(router) {
                  `<a href="/facturi/${r.factura_id}">${doc(r)}</a>`,
                  esc(String(r.data_emiterii || "").slice(0, 10)),
                  `<a href="/produse/${r.produs_id}">${esc(r.produs)}</a>`,
-                 `${nr(r.cant)} × ${money(r.pret)}`,
+                 `${nr(r.cant)} × ${pretLei(r.pret)}`,
                  money(r.total),
                ])
              )}`

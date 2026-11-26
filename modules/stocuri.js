@@ -2,7 +2,7 @@
 const db = require("../lib/db");
 const { SUB_STOC } = require("../lib/stoc");
 const { registerCrud } = require("../lib/crud");
-const { esc, money, layout, table, actionLinks } = require("../lib/render");
+const { esc, money, layout, table, actionLinks, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 // Prețul scris în lei sau în valută, cu cursul lui (Vali, 17.11.2026).
 const PV = require("../lib/pret-valuta");
@@ -136,7 +136,7 @@ function register(router) {
           esc(m.depozit),
           m.tip === "intrare" ? '<span class="badge verde">intrare</span>' : '<span class="badge rosu">ieșire</span>',
           m.cantitate,
-          money(m.pret_unitar),
+          pretLei(m.pret_unitar),
           esc(m.document_ref),
           actionLinks([
             { href: `/stocuri/miscare/${m.id}/sterge`, label: "Șterge", method: "post", danger: true, confirm: "Ștergi această mișcare de stoc?" },

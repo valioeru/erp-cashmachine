@@ -14,7 +14,7 @@
 // rămâne, dar arată aceeași pagină ca cea din Procurement — două forecasturi
 // cu cifre diferite ar fi mai rele decât unul.
 const F = require("../lib/forecast-aprovizionare");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send } = require("../lib/router");
 
 const nr = (v) => Number(v) || 0;
@@ -178,7 +178,7 @@ async function pagina(ctx, dinDepozit) {
          .slice(0, 12)
          .map(
            (x) =>
-             `<a href="/productie/retete/${x.produs_id}">${esc(x.denumire)}</a> (costul din rețetă ${money(x.cost)} față de ${money(x.pret)} ${esc(x.sursa || "preț")}, de ${Math.round(x.ori).toLocaleString("ro-RO")} ori; de făcut ${cant(x.deFacut, x.um)})`
+             `<a href="/productie/retete/${x.produs_id}">${esc(x.denumire)}</a> (costul din rețetă ${pretLei(x.cost)} față de ${pretLei(x.pret)} ${esc(x.sursa || "preț")}, de ${Math.round(x.ori).toLocaleString("ro-RO")} ori; de făcut ${cant(x.deFacut, x.um)})`
          )
          .join("; ")}${cate > 12 ? `; și încă ${cate - 12}` : ""}</span>.`
     );

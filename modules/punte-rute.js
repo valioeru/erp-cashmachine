@@ -52,7 +52,7 @@ async function seriaVazuta(db, tip) {
 module.exports = function registerRute(router, deps) {
   const { db, esc, layout, table, send, redirect, HANDLERE, acum, MAX_OCTETI, MAX_RANDURI, MAX_LOTURI_PASTRATE } = deps;
   // punte.js nu pasează money în deps, iar rapoartele de aici au nevoie de el
-  const { money } = require("../lib/render");
+  const { money, pretLei } = require("../lib/render");
   const cost = require("../lib/cost");
 
   const STARI_SYNC = {
@@ -517,7 +517,7 @@ module.exports = function registerRute(router, deps) {
                 esc(r.denumire),
                 Number(r.cantitate).toLocaleString("ro-RO"),
                 money(r.vanzari),
-                money(r.pret_vanzare),
+                pretLei(r.pret_vanzare),
                 `<a class="link-btn" href="/produse/${r.id}/editare">pune costul</a>`,
               ])
             )

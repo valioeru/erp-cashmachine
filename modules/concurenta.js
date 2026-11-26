@@ -19,7 +19,7 @@
 // Sunt trei rute fiindcă zonele de meniu sunt trei, dar raportul e unul
 // singur, construit într-un loc — altfel cele trei ar fi spus trei adevăruri.
 const db = require("../lib/db");
-const { esc, money, layout, table, dataRo, subnavCrm } = require("../lib/render");
+const { esc, money, pretLei, layout, table, dataRo, subnavCrm } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const CURS_IMPLICIT = 5.25;
@@ -247,7 +247,7 @@ async function blocBI(opts) {
         esc(r.denumire),
         `<strong>${esc(r.concurent)}</strong>`,
         `${Number(r.pret).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${esc(r.moneda)}`,
-        money(inLei(r.pret, r.moneda, c)),
+        pretLei(inLei(r.pret, r.moneda, c)),
         celulaDiferenta(r),
         `${esc(r.um || "")}${r.cantitate ? ` · ${Number(r.cantitate).toLocaleString("ro-RO")}` : ""}`,
         esc(String(r.data_ofertei || "")),
@@ -522,7 +522,7 @@ async function construiesteRaport(ctx, { directieFixa, titlu, subnav, activ }) {
         esc(r.denumire),
         `<strong>${esc(r.concurent)}</strong>`,
         `${Number(r.pret).toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${esc(r.moneda)}`,
-        money(inLei(r.pret, r.moneda, c)),
+        pretLei(inLei(r.pret, r.moneda, c)),
         `${esc(r.um || "")}${r.cantitate ? ` · ${Number(r.cantitate).toLocaleString("ro-RO")}` : ""}`,
         r.partener ? `<a href="/parteneri/${r.partener_id}">${esc(r.partener)}</a>` : "",
         esc(ETICHETA_SURSA[r.sursa] || r.sursa || ""),

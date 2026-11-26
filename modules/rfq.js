@@ -19,7 +19,7 @@
 // O coloană nouă adăugată peste un an e internă până cineva o trece anume pe
 // lista celor publice, nu invers.
 const db = require("../lib/db");
-const { esc, money, layout, table } = require("../lib/render");
+const { esc, money, layout, table, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 
 const ADAOS_IMPLICIT = 20;
@@ -199,21 +199,21 @@ function register(router) {
                       esc(r.agent_nume || "—"),
                       esc(r.client_nume || "—"),
                       `${nr(r.cantitate)} ${esc(r.um || "")}`,
-                      r.pret_tinta ? money(r.pret_tinta) : "—",
+                      r.pret_tinta ? pretLei(r.pret_tinta) : "—",
                       zi(r.termen_ofertare),
                       eticheta(r.status),
-                      r.pret_achizitie ? money(r.pret_achizitie) : "—",
-                      r.pret_ofertare ? money(r.pret_ofertare) : "—",
+                      r.pret_achizitie ? pretLei(r.pret_achizitie) : "—",
+                      r.pret_ofertare ? pretLei(r.pret_ofertare) : "—",
                       `<a class="btn small" href="/rfq/${r.id}">Deschide</a>`,
                     ]
                   : [
                       String(r.id),
                       esc(r.denumire),
                       `${nr(r.cantitate)} ${esc(r.um || "")}`,
-                      r.pret_tinta ? money(r.pret_tinta) : "—",
+                      r.pret_tinta ? pretLei(r.pret_tinta) : "—",
                       zi(r.termen_ofertare),
                       eticheta(r.status),
-                      r.pret_ofertare ? `<strong>${money(r.pret_ofertare)}</strong>` : "—",
+                      r.pret_ofertare ? `<strong>${pretLei(r.pret_ofertare)}</strong>` : "—",
                       `<a class="btn small" href="/rfq/${r.id}">Deschide</a>`,
                     ]
               )
@@ -268,8 +268,8 @@ function register(router) {
                       esc(r.categorie || "—"),
                       `${nr(r.cantitate)} ${esc(r.um || "")}`,
                       esc(r.furnizor_nume || r.furnizor_text || "—"),
-                      r.pret_achizitie ? money(r.pret_achizitie) : "—",
-                      r.pret_ofertare ? money(r.pret_ofertare) : "—",
+                      r.pret_achizitie ? pretLei(r.pret_achizitie) : "—",
+                      r.pret_ofertare ? pretLei(r.pret_ofertare) : "—",
                       zi(r.valabil_pana),
                       zi(r.raspuns_la),
                     ]
@@ -277,7 +277,7 @@ function register(router) {
                       `<a href="/rfq/${r.id}">${esc(r.denumire)}</a>`,
                       esc(r.categorie || "—"),
                       `${nr(r.cantitate)} ${esc(r.um || "")}`,
-                      r.pret_ofertare ? `<strong>${money(r.pret_ofertare)}</strong>` : "—",
+                      r.pret_ofertare ? `<strong>${pretLei(r.pret_ofertare)}</strong>` : "—",
                       esc(r.termen_livrare || "—"),
                       zi(r.valabil_pana),
                     ]
@@ -421,7 +421,7 @@ function register(router) {
           <div><div class="k">Categorie</div>${esc(r.categorie || "—")}</div>
           <div><div class="k">Cerută de</div>${esc(r.agent_nume || "—")}</div>
           <div><div class="k">Client</div>${esc(r.client_nume || "—")}</div>
-          <div><div class="k">Preț țintă</div>${r.pret_tinta ? money(r.pret_tinta) : "—"}</div>
+          <div><div class="k">Preț țintă</div>${r.pret_tinta ? pretLei(r.pret_tinta) : "—"}</div>
           <div><div class="k">Termen ofertă</div>${zi(r.termen_ofertare)}</div>
           <div><div class="k">Comandă estimată</div>${zi(r.termen_comanda)}</div>
         </div>
@@ -432,7 +432,7 @@ function register(router) {
         r.pret_ofertare
           ? `<div class="detail-box" style="margin-top:12px;border-left:4px solid var(--verde,#1a7f42)">
                <div class="k">Preț de ofertare</div>
-               <div style="font-size:22px;font-weight:600">${money(r.pret_ofertare)} / ${esc(r.um || "buc")}</div>
+               <div style="font-size:22px;font-weight:600">${pretLei(r.pret_ofertare)} / ${esc(r.um || "buc")}</div>
                <div class="mic" style="color:var(--text-muted)">adaos ${nr(r.adaos_folosit)}%${
                  r.valabil_pana ? ` · valabil până la ${zi(r.valabil_pana)}` : ""
                }${r.termen_livrare ? ` · livrare ${esc(r.termen_livrare)}` : ""}</div>
@@ -453,7 +453,7 @@ function register(router) {
              <div class="detail-box" style="border-left:4px solid var(--accent,#2f5d9c)">
                <div class="detail-grid">
                  <div><div class="k">Furnizor</div>${esc(r.furnizor_nume || r.furnizor_text || "—")}</div>
-                 <div><div class="k">Preț de achiziție</div>${r.pret_achizitie ? money(r.pret_achizitie) : "—"}</div>
+                 <div><div class="k">Preț de achiziție</div>${r.pret_achizitie ? pretLei(r.pret_achizitie) : "—"}</div>
                  <div><div class="k">Preluată de</div>${esc(r.preluat_nume || "—")}</div>
                  <div><div class="k">Valabil până</div>${zi(r.valabil_pana)}</div>
                </div>

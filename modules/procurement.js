@@ -19,7 +19,7 @@
 // nomenclatorul de produse rămâne opțională — marfa pe care n-ai cumpărat-o
 // încă nici nu are cum să fie în nomenclator.
 const db = require("../lib/db");
-const { esc, money, layout, table, actionLinks } = require("../lib/render");
+const { esc, money, layout, table, actionLinks, pretLei } = require("../lib/render");
 const { send, redirect } = require("../lib/router");
 const concurenta = require("./concurenta");
 
@@ -546,7 +546,7 @@ function register(router) {
         }
         ${
           a.pret_achizitie
-            ? `<div class="card"><div class="label">Preț de achiziție în nomenclator</div><div class="value">${money(a.pret_achizitie)}</div></div>`
+            ? `<div class="card"><div class="label">Preț de achiziție în nomenclator</div><div class="value">${pretLei(a.pret_achizitie)}</div></div>`
             : ""
         }
       </div>
