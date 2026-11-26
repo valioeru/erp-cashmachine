@@ -11,6 +11,7 @@ const XLS = require("../lib/export-xlsx");
 const ADR = require("../lib/adresa-client");
 const TP = require("../lib/termen-plata");
 const AL = require("../lib/adresa-livrare");
+const ADRL = require("../lib/adrese-livrare");
 
 const TIP_LABEL = { client: "Client", furnizor: "Furnizor", ambele: "Client & Furnizor" };
 const STARE_LABEL = {
@@ -560,6 +561,28 @@ function register(router) {
     redirect(ctx.res, `/parteneri/${id}?contacte=${r.adaugati}&completate=${r.completati}`);
   });
 
+  // Mai multe adrese de livrare pe același client (Vali, 26.11.2026;
+  // lib/adrese-livrare.js). Se adaugă și se scot de pe fișă; la comandă se
+  // alege una dintre ele.
+  router.post("/parteneri/:id/adrese-livrare", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    const p = await db.prepare("SELECT id, adresa, localitate, judet, adresa_livrare FROM parteneri WHERE id = ?").get(id);
+    if (!p) return redirect(ctx.res, "/parteneri");
+    const LLa = require("../lib/livrare-la");
+    const r = await ADRL.adauga({
+      partenerId: id,
+      corp: ctx.body,
+      existente: LLa.optiuni(p, []).adrese.map((a) => a.text),
+      userId: ctx.user ? ctx.user.id : null,
+    });
+    redirect(ctx.res, `/parteneri/${id}?${r.ok ? "adresa_livrare=adaugata" : "adresa_livrare_eroare=" + encodeURIComponent(r.eroare)}#adrese-livrare`);
+  });
+  router.post("/parteneri/:id/adrese-livrare/:adresa/scoate", async (ctx) => {
+    const id = parseInt(ctx.params.id, 10);
+    await ADRL.scoate({ partenerId: id, id: parseInt(ctx.params.adresa, 10) || 0 });
+    redirect(ctx.res, `/parteneri/${id}?adresa_livrare=scoasa#adrese-livrare`);
+  });
+
   // Pagină de detaliu — istoricul complet al unui partener: comenzi, facturi
   // (vânzare & achiziție), oportunități CRM și interacțiuni/follow-up-uri.
   // Înregistrată după registerCrud, ca să nu intre în conflict cu rutele
@@ -658,6 +681,39 @@ function register(router) {
       blocSemafor = "";
     }
 
+    // Adresele de livrare: cea de pe fișă și celelalte (lib/adrese-livrare.js).
+    const alteAdrese = await ADRL.alePartenerului(partener.id);
+    const mesajAdresa = ctx.query.adresa_livrare_eroare
+      ? `<div class="alert error" style="margin:6px 0">${esc(ctx.query.adresa_livrare_eroare)}</div>`
+      : ctx.query.adresa_livrare === "adaugata"
+        ? '<div class="alert success" style="margin:6px 0">Adresa de livrare e adăugată. O poți alege la comandă.</div>'
+        : ctx.query.adresa_livrare === "scoasa"
+          ? '<div class="alert success" style="margin:6px 0">Adresa de livrare e scoasă. Comenzile deja plasate rămân cu adresa lor.</div>'
+          : "";
+    const blocAdreseLivrare = `
+        <div id="adrese-livrare" data-adrese-livrare style="margin-top:12px;font-size:13px">
+          <div style="font-weight:600;margin-bottom:4px">Adrese de livrare (${1 + alteAdrese.length})</div>
+          ${mesajAdresa}
+          <table class="tabel-mic" style="width:100%;border-collapse:collapse">
+            <tr><td style="padding:3px 8px 3px 0;white-space:nowrap;color:var(--text-muted)">${AL.eIdentica(partener) ? "adresa firmei (și de livrare)" : "adresa de livrare"}</td>
+                <td style="padding:3px 8px">${esc(AL.efectiva(partener, require("../lib/livrare-la").adresaFirmei(partener))) || '<span style="color:var(--text-muted)">nescrisă</span>'}</td>
+                <td style="padding:3px 0;text-align:right"><a href="/parteneri/${partener.id}/editare">schimbă</a></td></tr>
+            ${alteAdrese
+              .map(
+                (a) => `<tr data-adresa-livrare-rand="${a.id}"><td style="padding:3px 8px 3px 0;white-space:nowrap;color:var(--text-muted)">${esc(ADRL.numeAfisat(a))}</td>
+                <td style="padding:3px 8px">${esc(a.adresa)}</td>
+                <td style="padding:3px 0;text-align:right"><form method="post" action="/parteneri/${partener.id}/adrese-livrare/${a.id}/scoate" style="display:inline" onsubmit="return confirm('Scoți adresa asta de livrare? Comenzile deja plasate rămân cu adresa lor.')"><button type="submit" class="btn secondary small">Scoate</button></form></td></tr>`
+              )
+              .join("")}
+          </table>
+          <form method="post" action="/parteneri/${partener.id}/adrese-livrare" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:6px">
+            <label style="font-weight:400">Nume scurt<br><input type="text" name="denumire" maxlength="${ADRL.MAX_DENUMIRE}" placeholder="ex. Depozit Cluj" style="width:170px"></label>
+            <label style="font-weight:400;flex:1;min-width:240px">Adresa<br><input type="text" name="adresa" maxlength="${ADRL.MAX_ADRESA}" required placeholder="strada, numărul, localitatea, județul" style="width:100%"></label>
+            <button type="submit" class="btn secondary small">+ Adaugă adresă de livrare</button>
+          </form>
+          <div style="color:var(--text-muted);font-size:12px;margin-top:4px">La comandă nouă alegi din lista asta adresa la care pleacă marfa.</div>
+        </div>`;
+
     const body = `
       <div class="detail-box">
         <div class="detail-grid">
@@ -680,7 +736,7 @@ function register(router) {
             AL.eIdentica(partener)
               ? `<span style="color:var(--text-muted)">${esc(AL.ETICHETA_BIFA)}</span>`
               : esc(AL.efectiva(partener))
-          }</div>
+          }${alteAdrese.length ? ` <a href="#adrese-livrare" style="font-size:12px">+ încă ${alteAdrese.length}</a>` : ""}</div>
           <div><div class="k">Localitate · județ · țară</div>${
             [partener.localitate, partener.judet, partener.tara].filter(Boolean).map((x) => esc(x)).join(" · ") ||
             '<span style="color:var(--text-muted)">se completează la prima factură trimisă în SmartBill</span>'
@@ -691,6 +747,7 @@ function register(router) {
           <a href="/crm/email/nou?partener_id=${partener.id}" class="btn secondary small">✉ Trimite email</a>
           <a href="/taskuri/nou?partener_id=${partener.id}" class="btn secondary small">+ Task</a>
         </div>
+        ${blocAdreseLivrare}
         ${blocSemafor}
         <div style="margin-top:12px;font-size:13px">
           <div style="margin-bottom:6px">Alocare pe agenți (din asta se calculează comisionul):

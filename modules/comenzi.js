@@ -1414,7 +1414,26 @@ async function livrareLaPartener(partenerId) {
     .prepare("SELECT nume, functie, telefon, email FROM mk_contacte WHERE partener_id = ? AND COALESCE(activ, 1) = 1 ORDER BY id")
     .all(partenerId)
     .catch(() => []);
-  return LL.optiuni(p, contacte);
+  const alteAdrese = await require("../lib/adrese-livrare").alePartenerului(partenerId);
+  return LL.optiuni(p, contacte, alteAdrese);
+}
+
+// Bifa „ține minte adresa asta la client" din „Livrare la": adresa scrisă pe
+// comandă intră printre adresele de livrare ale clientului, dacă nu e deja.
+// O greșeală aici nu oprește comanda.
+async function tineMinteAdresa(corp, partenerId, adresa, userId) {
+  if (String((corp && corp.livrare_tine_minte) || "") !== "1" || !(partenerId > 0) || !String(adresa || "").trim()) return;
+  try {
+    const o = await livrareLaPartener(partenerId);
+    await require("../lib/adrese-livrare").adauga({
+      partenerId,
+      corp: { adresa },
+      existente: o ? o.adrese.map((a) => a.text) : [],
+      userId,
+    });
+  } catch (e) {
+    console.error("[comenzi] adresa de livrare nu s-a putut ține minte:", e.message);
+  }
 }
 
 function register(router) {
@@ -1788,6 +1807,7 @@ function register(router) {
       livrare_mod: require("../lib/livrare-mod").valid(ctx.body.livrare_mod),
       // „Livrare la", cum a venit din formular: se întoarce cu omul la o eroare.
       livrare_adresa: ctx.body.livrare_adresa,
+      livrare_tine_minte: ctx.body.livrare_tine_minte,
       livrare_contact: ctx.body.livrare_contact,
       livrare_telefon: ctx.body.livrare_telefon,
       livrare_email: ctx.body.livrare_email,
@@ -1931,6 +1951,7 @@ function register(router) {
     await db
       .prepare("UPDATE comenzi SET livrare_adresa = ?, livrare_contact = ?, livrare_telefon = ?, livrare_email = ? WHERE id = ?")
       .run(livrareLa.valori.livrare_adresa || null, livrareLa.valori.livrare_contact || null, livrareLa.valori.livrare_telefon || null, livrareLa.valori.livrare_email || null, comandaId);
+    await tineMinteAdresa(ctx.body, idClient, livrareLa.valori.livrare_adresa, ctx.user && ctx.user.id);
 
     const insertLinie = db.prepare(
       `INSERT INTO comenzi_linii (comanda_id, produs_id, cantitate, pret_unitar, um, furnizor_id, furnizor_text, furnizor_sursa)
@@ -2989,6 +3010,7 @@ function register(router) {
     await db
       .prepare("UPDATE comenzi SET livrare_adresa = ?, livrare_contact = ?, livrare_telefon = ?, livrare_email = ? WHERE id = ?")
       .run(dupa.livrare_adresa || null, dupa.livrare_contact || null, dupa.livrare_telefon || null, dupa.livrare_email || null, comanda.id);
+    await tineMinteAdresa(b, Number(idClient), dupa.livrare_adresa, ctx.user && ctx.user.id);
     // Bifa de unitate protejată se poate schimba cât comanda se mai poate modifica.
     if ((Number(comanda.upa) === 1 ? 1 : 0) !== valori.upa) {
       await db.prepare("UPDATE comenzi SET upa = ? WHERE id = ?").run(valori.upa, comanda.id);
