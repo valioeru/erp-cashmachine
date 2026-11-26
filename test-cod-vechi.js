@@ -174,7 +174,12 @@ const curat = (h) => String(h).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").tri
   exec(`UPDATE produse SET nascut_la = '2026-12-20' WHERE id = ${F1}`); // de aici încolo zilele sunt cele din decembrie ale testului
   const lista = () => [A, B, C, D, E, F1, G].map((id) => ({ id, denumire: "x" + id }));
   let l = await CV.pentruAles(lista());
-  egal("eticheta o poartă doar codul vechi fără stoc — nu cel cu stoc, nu cel cu familie, nu cel trecut ca bun, nu cel proaspăt", l.map((p) => [p.id, Boolean(p.cod_vechi)]), [[A, true], [B, true], [C, false], [D, false], [E, false], [F1, false], [G, true]]);
+  egal("eticheta o poartă doar codul vechi fără stoc — nu cel cu stoc, nu cel cu familie, nu cel trecut ca bun, nu cel proaspăt", l.map((p) => [p.id, Boolean(p.cod_vechi)]).sort((x, y) => x[0] - y[0]), [[A, true], [B, true], [C, false], [D, false], [E, false], [F1, false], [G, true]]);
+  // 26.11.2026, Vali, cu poza listei de la comanda nouă deschisă pe „COD VECHI
+  // — nu selecta": „în lista asta să arate întâi codurile noi".
+  egal("la alegere: întâi codurile noi (cu familie, trecut ca bun), apoi cele care se aleg normal (cu stoc, proaspăt), la coadă cele marcate cod vechi", l.map((p) => p.id), [D, E, C, F1, A, B, G]);
+  egal("în fiecare grupă rămâne ordinea în care a venit lista", CV.inOrdine([{ id: 5, cod_vechi: true }, { id: 4 }, { id: 3 }, { id: 2, cod_vechi: true }, { id: 1 }], new Set([3, 1])).map((p) => p.id), [3, 1, 4, 5, 2]);
+  egal("listă goală sau fără stare: nu crapă", [CV.inOrdine(null, null), CV.inOrdine([{ id: 2 }, { id: 1 }], null).map((p) => p.id)], [[], [2, 1]]);
   egal("ultima folosire se citește din documente", [(await CV.folosite()).get(B), (await CV.folosite()).get(G), (await CV.folosite()).get(C), (await CV.folosite()).get(A)], ["2026-12-30", "2026-10-01", "2026-11-10", undefined]);
 
   console.log("\n── Parcarea de noapte ───────────────────────────────────────");
@@ -184,7 +189,7 @@ const curat = (h) => String(h).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").tri
   await CV.parcheaza("2026-12-31");
   egal("pe 31.12: se parchează cel nefolosit și cel folosit demult; nu cel folosit ieri, nu cel cu stoc, nu cele bune, nu cel proaspăt", parcate(), [[A, "2026-12-31", "auto"], [G, "2026-12-31", "auto"]]);
   l = await CV.pentruAles(lista());
-  egal("produsele parcate nu mai apar la alegere", l.map((p) => p.id), [B, C, D, E, F1]);
+  egal("produsele parcate nu mai apar la alegere", l.map((p) => p.id), [D, E, C, F1, B]);
   l = await CV.pentruAles(lista(), [String(G)]);
   egal("…în afară de cel deja pus pe documentul care se modifică, care rămâne, cu eticheta", l.filter((p) => [A, G].includes(p.id)).map((p) => [p.id, Boolean(p.cod_vechi)]), [[G, true]]);
   await CV.scoateDinParcare(G, "2026-12-31");
