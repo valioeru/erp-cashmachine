@@ -36,6 +36,7 @@ function subnav(activ) {
     ["/configurari/ignorati", "Parteneri ignorați"],
     ["/configurari/cod-produs", "Codul produsului"],
     ["/configurari/unificare-coduri", "Unificare coduri"],
+    ["/configurari/unificare-clienti", "Unificare clienți"],
   ];
   return `<div class="subnav">${linkuri
     .map(([h, t]) => `<a href="${h}" class="subnav-link${activ === h ? " activ" : ""}">${esc(t)}</a>`)

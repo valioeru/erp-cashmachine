@@ -25,6 +25,8 @@ const TABELE_CUNOSCUTE = [
   "costuri_personal", "plan_conturi", "inregistrari_contabile", "contabilitate_rulari",
   "agenda_externa", "stiri", "setari_app", "notificari_facturi", "emailuri",
   "rezervari_stoc", "aprovizionari", "cereri_materie_prima", "calculator_categorii",
+  // Adresele de livrare ale partenerilor și urma unificărilor de clienți (26.11.2026).
+  "parteneri_adrese_livrare", "parteneri_fuziuni", "parteneri_unificare_respinse",
 ];
 
 // Sesiunile și zona de tranzit a punții nu intră în backup: prima e efemeră,

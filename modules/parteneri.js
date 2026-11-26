@@ -591,7 +591,13 @@ function register(router) {
     const partener = await db
       .prepare("SELECT p.*, u.nume AS agent_nume FROM parteneri p LEFT JOIN utilizatori u ON u.id = p.agent_id WHERE p.id = ?")
       .get(ctx.params.id);
-    if (!partener) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/parteneri", body: "<p>Partener inexistent.</p>" }));
+    if (!partener) {
+      // Unificat în alt partener (Configurări → Unificare clienți): legătura
+      // veche duce la cel în care a intrat.
+      const ajuns = await require("../lib/parteneri-fuziune").undeAAjuns(ctx.params.id).catch(() => 0);
+      if (ajuns) return redirect(ctx.res, `/parteneri/${ajuns}`);
+      return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/parteneri", body: "<p>Partener inexistent.</p>" }));
+    }
 
     const comenzi = await db.prepare("SELECT id, numar, status, data FROM comenzi WHERE partener_id = ? ORDER BY id DESC").all(partener.id);
     // Scadența și restul de încasat intră în listă: fișa clientului e locul de
