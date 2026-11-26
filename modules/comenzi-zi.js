@@ -1694,12 +1694,19 @@ function scorPotrivire(cheieConsumabil, cheieNomenclator) {
 async function sugestiiLegare(consumabile) {
   const nomenclator = await db
     .prepare(
-      `SELECT id, cod, denumire, unitate_masura, pret_achizitie, cost_reteta, cost_rata
+      `SELECT id, COALESCE(NULLIF(TRIM(cod), ''), NULLIF(TRIM(cod_generat), '')) AS cod, denumire, unitate_masura, pret_achizitie, cost_reteta, cost_rata,
+              cod_familie_id, COALESCE(cod_vechi_exceptat, 0) AS cod_vechi_exceptat
          FROM produse WHERE COALESCE(activ, 1) = 1 AND fuzionat_in IS NULL ORDER BY denumire`
     )
     .all()
     .catch(() => []);
-  const pregatit = nomenclator.map((p) => ({ ...p, k: cheieText(p.denumire) }));
+  // Vali, 26.11.2026: „Când imporți comenzi Sameday corelează produsele din
+  // comandă doar cu produse cu coduri noi din ERP." Se propun și se pot alege
+  // doar produsele cu cod nou (din configurator sau trecute „E bun așa" —
+  // lib/cod-vechi.js). `nomenclator` rămâne întreg doar ca să putem spune pe
+  // nume produsul legat ACUM, când acela e unul cu cod vechi.
+  const noi = nomenclator.filter(eCodNou);
+  const pregatit = noi.map((p) => ({ ...p, k: cheieText(p.denumire) }));
   const sugestii = new Map();
   for (const c of consumabile) {
     const k = cheieText(c.denumire);
@@ -1712,8 +1719,12 @@ async function sugestiiLegare(consumabile) {
         .slice(0, 8)
     );
   }
-  return { nomenclator, sugestii };
+  return { nomenclator, noi, sugestii };
 }
+
+// Produs cu cod nou: făcut din configurator sau trecut de om ca „E bun așa".
+const eCodNou = (p) => require("../lib/cod-vechi").eBun(p);
+const ETICHETA_COD_VECHI = "COD VECHI — alege produsul cu cod nou";
 
 function formularLegare(consumabile, date) {
   const dupaId = new Map((date.nomenclator || []).map((p) => [Number(p.id), p]));
@@ -1726,9 +1737,15 @@ function formularLegare(consumabile, date) {
     const legatNesugerat =
       c.produs_id && !sug.some((x) => Number(x.p.id) === Number(c.produs_id))
         ? `<option value="${c.produs_id}" selected>${
-            legat ? numeProdus(legat) + " — legat acum" : `produsul #${Number(c.produs_id)}, legat acum — nu mai e activ în nomenclator`
+            legat ? numeProdus(legat) + " — legat acum" + (eCodNou(legat) ? "" : " · " + ETICHETA_COD_VECHI) : `produsul #${Number(c.produs_id)}, legat acum — nu mai e activ în nomenclator`
           }</option>`
         : "";
+    // Starea legăturii, la vedere: cod nou, cod vechi (de mutat) sau nelegat.
+    const stareCod = !c.produs_id
+      ? '<span class="badge" data-legatura="nelegat">nelegat</span>'
+      : legat && eCodNou(legat)
+        ? '<span class="badge verde" data-legatura="nou">cod nou</span>'
+        : '<span class="badge rosu" data-legatura="vechi">cod vechi — de mutat pe codul nou</span>';
     const opt = sug
       .map(
         (x) =>
@@ -1747,7 +1764,8 @@ function formularLegare(consumabile, date) {
       esc(c.denumire),
       pretLei(c.pret),
       `<select name="l_${c.id}" style="max-width:420px"><option value="">— nelegat —</option>${legatNesugerat}${opt}</select>
-       <input name="alt_${c.id}" list="lista-nomenclator" autocomplete="off" placeholder="alt produs: scrie numele sau codul și alege-l" style="display:block;width:100%;max-width:420px;margin-top:4px;font-size:12px">`,
+       <input name="alt_${c.id}" list="lista-nomenclator" autocomplete="off" placeholder="alt produs cu cod nou: scrie numele sau codul și alege-l" style="display:block;width:100%;max-width:420px;margin-top:4px;font-size:12px">
+       <div style="margin-top:4px">${stareCod}</div>`,
       // Un cost mai mare decât prețul de vânzare trece de plasa de 5× dar e
       // aproape sigur o legătură greșită: plicul AWB C5 se vinde la 9 bani, iar
       // un cost de 19 bani ar da marjă negativă fără să pară o eroare. Se vede.
@@ -1757,8 +1775,14 @@ function formularLegare(consumabile, date) {
       `<span style="font-size:12px;color:var(--text-muted)">${esc(c.cost_sursa || "")}</span>`,
     ];
   });
+  const peVechi = consumabile.filter((c) => c.produs_id && !(dupaId.get(Number(c.produs_id)) && eCodNou(dupaId.get(Number(c.produs_id))))).length;
   return `<form method="post" action="${CALE}/legare" class="form">
-    <datalist id="lista-nomenclator">${(date.nomenclator || []).map((p) => `<option value="#${Number(p.id)} · ${numeProdus(p)}">`).join("")}</datalist>
+    ${
+      peVechi
+        ? `<div class="flash flash-rosu" role="alert" data-legaturi-vechi>${peVechi === 1 ? "Un produs din comandă e legat" : peVechi + " produse din comandă sunt legate"} de un cod vechi din nomenclator. Comanda zilei se face în continuare cu el, dar mută legătura pe produsul cu cod nou: alege-l din listă și apasă „Leagă”.</div>`
+        : ""
+    }
+    <datalist id="lista-nomenclator">${(date.noi || date.nomenclator || []).map((p) => `<option value="#${Number(p.id)} · ${numeProdus(p)}">`).join("")}</datalist>
     ${table(["Produs din comandă", "Preț vânzare", "Produsul din nomenclator", "Cost rezultat", "Temei"], randuri)}
     <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
       <button class="btn" type="submit">Leagă și recalculează costurile</button>
@@ -1767,10 +1791,11 @@ function formularLegare(consumabile, date) {
       </label>
     </div>
     <p style="font-size:12px;color:var(--text-muted);margin-top:8px">
-      Lista arată întâi produsele care seamănă la nume. Dacă cel potrivit nu e între ele, scrie-i numele sau codul
-      în caseta de dedesubt și alege-l din lista care apare — caseta are întâietate față de listă. Același produs
-      există de multe ori sub două-trei coduri (vezi <a href="/produse/fuziune">nomenclatorul</a>): alege-l pe cel
-      pe care stă stocul, fiindcă el ajunge pe comanda zilei.
+      Se pot alege doar produse cu <strong>cod nou</strong> (făcute din configurator sau trecute „E bun așa” în
+      <a href="/configurari/unificare-coduri">Unificare coduri</a>). Lista arată întâi produsele care seamănă la nume.
+      Dacă cel potrivit nu e între ele, scrie-i numele sau codul în caseta de dedesubt și alege-l din lista care
+      apare — caseta are întâietate față de listă. Dacă produsul cu cod nou nu există încă, fă-l din Unificare coduri
+      („Fă codul nou…”); dacă marfa stă încă pe codul vechi, unifică-l acolo, ca stocul să treacă pe codul nou.
     </p>
   </form>`;
 }
@@ -2221,6 +2246,7 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
     const produse = await db.prepare("SELECT id, denumire, produs_id FROM consumabile_produse").all();
     const legaturi = [];
     const refuzate = [];
+    const coduriVechi = [];
     for (const p of produse) {
       // Doar ce a venit în formular. Produsele scoase din listă (activ = 0) nu
       // apar pe pagină, iar un câmp care lipsește nu înseamnă „dezleagă-l”:
@@ -2238,9 +2264,15 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       if (!alt && nou === vechi) continue;
       if (nou || alt) {
         // Produsul trebuie să existe; cel scris în casetă, să fie și activ.
-        const n = nou ? await db.prepare("SELECT id, COALESCE(activ, 1) AS activ, fuzionat_in FROM produse WHERE id = ?").get(nou).catch(() => null) : null;
+        const n = nou ? await db.prepare("SELECT id, denumire, COALESCE(activ, 1) AS activ, fuzionat_in, cod_familie_id, COALESCE(cod_vechi_exceptat, 0) AS cod_vechi_exceptat FROM produse WHERE id = ?").get(nou).catch(() => null) : null;
         if (!n || (alt && (!Number(n.activ) || n.fuzionat_in))) {
           refuzate.push(`${p.denumire} („${(alt || brut).slice(0, 60)}”)`);
+          continue;
+        }
+        // Doar produse cu cod nou (Vali, 26.11.2026). Legătura de dinainte,
+        // chiar spre un cod vechi, rămâne până e mutată de om.
+        if (nou !== vechi && !eCodNou(n)) {
+          coduriVechi.push(`${p.denumire} („${String(n.denumire || "").slice(0, 60)}”)`);
           continue;
         }
       }
@@ -2258,7 +2290,10 @@ ${filtruPerioada(per, luniSelect, { pastreaza: perC0 ? perC0.qs : "" })}
       `[comenzi-zi] costuri recalculate: ${r.cu_cost}/${r.produse} produse cu cost, ${r.fara_cost} fără; linii umplute: ${umplut.linii} + ${umplut.linii_awb} pe AWB`
     );
     const q = new URLSearchParams({ legare: "1", legare_ok: legaturi.length ? `Salvat: ${legaturi.join("; ")}.`.slice(0, 1500) : "Nicio legătură schimbată." });
-    if (refuzate.length) q.set("legare_eroare", `N-am găsit în nomenclator produsul ales la: ${refuzate.join(", ")}. Scrie numele sau codul și alege-l din lista care apare. A rămas legătura de dinainte.`.slice(0, 1500));
+    const erori = [];
+    if (refuzate.length) erori.push(`N-am găsit în nomenclator produsul ales la: ${refuzate.join(", ")}. Scrie numele sau codul și alege-l din lista care apare. A rămas legătura de dinainte.`);
+    if (coduriVechi.length) erori.push(`Produsul ales are cod vechi, deci nu l-am legat: ${coduriVechi.join(", ")}. Se pot lega doar produse cu cod nou; a rămas legătura de dinainte.`);
+    if (erori.length) q.set("legare_eroare", erori.join(" ").slice(0, 1500));
     return redirect(ctx.res, `${CALE}?${q.toString()}#legare`);
   });
 
