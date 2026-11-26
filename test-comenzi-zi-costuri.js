@@ -127,11 +127,12 @@ const ZI = "2031-02-10", ZI2 = "2031-02-11";
 const NOMENCLATOR = 98995;
 // Un produs care nu seamănă la nume cu nimic din raport: nu apare între sugestii.
 const ALTUL = 98996;
+const VECHI = 98997;
 function curata() {
   q(`DELETE FROM consumabile_linii WHERE zi_id IN (SELECT id FROM consumabile_zile WHERE data IN ('${ZI}', '${ZI2}'))`);
   q(`DELETE FROM consumabile_zile WHERE data IN ('${ZI}', '${ZI2}')`);
   q(`DELETE FROM consumabile_produse WHERE cod LIKE 'tst-cst-%'`);
-  q(`DELETE FROM produse WHERE id IN (${NOMENCLATOR}, ${ALTUL})`);
+  q(`DELETE FROM produse WHERE id IN (${NOMENCLATOR}, ${ALTUL}, ${VECHI})`);
 }
 const prod = (cod) => q(`SELECT pret, cost, nota_cost, cost_sursa, aliasuri FROM consumabile_produse WHERE cod = '${cod}'`)[0] || {};
 const num = (v) => (v == null ? null : Number(v));
@@ -141,7 +142,10 @@ const num = (v) => (v == null ? null : Number(v));
   // Ziua scrisă de mână ține minte cine a scris-o: oamenii testului trebuie să existe.
   const uid = Number(unul("SELECT id FROM utilizatori ORDER BY id LIMIT 1"));
   ADMIN.id = uid; GABI.id = uid; AGENT.id = uid;
-  q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${NOMENCLATOR}, 'TSTCST', 'TST Nomenclator cost', 'buc'), (${ALTUL}, 'ZZQX', 'ZZQ Xylofon albastru', 'buc')`);
+  // Cele două sunt produse cu COD NOU (trecute „E bun așa”): din 26.11.2026 doar ele se pot lega.
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura, cod_vechi_exceptat) VALUES (${NOMENCLATOR}, 'TSTCST', 'TST Nomenclator cost', 'buc', 1), (${ALTUL}, 'ZZQX', 'ZZQ Xylofon albastru', 'buc', 1)`);
+  // …iar acesta are cod vechi: seamănă la nume cu „TST Cutie B”, dar nu se propune și nu se poate lega.
+  q(`INSERT INTO produse (id, cod, denumire, unitate_masura) VALUES (${VECHI}, 'TSTVCH', 'TST Cutie B veche', 'buc')`);
   q(`INSERT INTO consumabile_produse (cod, denumire, pret, cost, nota_cost, aliasuri, ordine, activ, produs_id, cost_sursa) VALUES
        ('tst-cst-a', 'TST Cutie A', 1, NULL, NULL, NULL, 991, 1, NULL, NULL),
        ('tst-cst-b', 'TST Cutie B', 2, 1.5, 'oferta veche', NULL, 992, 1, NULL, 'scris de mână'),
@@ -328,6 +332,32 @@ const num = (v) => (v == null ? null : Number(v));
   egal("…și retrimisă neschimbată rămâne, fără eroare", [Number(x.b), x.d.eroare, x.d.ok], [ALTUL, null, "Nicio legătură schimbată."]);
   const pagMesaje = await cer("get", CALE, ADMIN, { query: { legare: "1", legare_ok: "Salvat: TST Cutie B: nelegat → #98996.", legare_eroare: "N-am găsit în nomenclator produsul ales la: TST Cutie B." } });
   bine("mesajele legării apar lângă formular", pagMesaje.corp.includes('<h2 id="legare">') && pagMesaje.corp.includes("Salvat: TST Cutie B: nelegat → #98996.") && pagMesaje.corp.includes('role="alert">N-am găsit în nomenclator produsul ales la: TST Cutie B.'));
+
+  // --- doar produse cu cod nou (Vali, 26.11.2026) ---
+  // „Când imporți comenzi Sameday corelează produsele din comandă doar cu
+  // produse cu coduri noi din ERP."
+  q(`UPDATE produse SET activ = 1 WHERE id = ${ALTUL}`);
+  q(`UPDATE consumabile_produse SET produs_id = ${NOMENCLATOR} WHERE cod = 'tst-cst-b'`);
+  fl = await legarePag();
+  const randB = (h) => (String(h).split(`name="l_${id.b}"`)[1] || "").split("</tr>")[0];
+  bine("produsul cu cod vechi nu e nici între sugestii, nici în lista din care se alege", !fl.includes(`value="${VECHI}"`) && !fl.includes(`#${VECHI} ·`) && fl.includes(`#${ALTUL} ·`), (fl.match(/[^<]{0,40}98997[^<]{0,40}/) || [""])[0]);
+  bine("legătura spre un cod nou e marcată „cod nou”, fără avertisment", randB(fl).includes('data-legatura="nou"') && !fl.includes("data-legaturi-vechi"));
+  x = await leagaB({ [`l_${id.b}`]: String(VECHI) });
+  egal("un produs cu cod vechi trimis din listă nu se leagă; rămâne legătura de dinainte și se spune de ce", [Number(x.b), /are cod vechi, deci nu l-am legat: TST Cutie B \(„TST Cutie B veche”\)/.test(x.d.eroare || ""), x.d.ok], [NOMENCLATOR, true, "Nicio legătură schimbată."]);
+  x = await leagaB({ [`alt_${id.b}`]: `#${VECHI} · TST Cutie B veche [TSTVCH]` });
+  egal("…nici scris în caseta „alt produs”", [Number(x.b), /are cod vechi/.test(x.d.eroare || "")], [NOMENCLATOR, true]);
+  q(`UPDATE consumabile_produse SET produs_id = ${VECHI} WHERE cod = 'tst-cst-b'`);
+  fl = await legarePag();
+  bine("o legătură de dinainte spre un cod vechi se vede: marcată pe rând, spusă pe nume și anunțată deasupra formularului", randB(fl).includes('data-legatura="vechi"') && fl.includes(`<option value="${VECHI}" selected>TST Cutie B veche [TSTVCH] — legat acum · COD VECHI — alege produsul cu cod nou</option>`) && /data-legaturi-vechi>Un produs din comandă e legat de un cod vechi/.test(fl), randB(fl).slice(0, 400));
+  x = await leagaB({ [`l_${id.b}`]: String(VECHI) });
+  egal("…retrimisă neschimbată rămâne (comanda zilei nu se rupe), fără eroare", [Number(x.b), x.d.eroare], [VECHI, null]);
+  x = await leagaB({ [`l_${id.b}`]: String(VECHI), [`alt_${id.b}`]: `#${ALTUL} · ZZQ Xylofon albastru [ZZQX]` });
+  egal("…și se mută pe codul nou ales de om", [Number(x.b), /TST Cutie B: #98997 → #98996/.test(x.d.ok || ""), x.d.eroare], [ALTUL, true, null]);
+  q(`UPDATE produse SET cod_familie_id = (SELECT id FROM cod_familii ORDER BY id LIMIT 1), cod_vechi_exceptat = 0 WHERE id = ${VECHI} AND EXISTS (SELECT 1 FROM cod_familii)`);
+  if (Number(unul(`SELECT COALESCE(cod_familie_id, 0) FROM produse WHERE id = ${VECHI}`)) > 0) {
+    fl = await legarePag();
+    bine("un produs făcut din configurator (are familie) e cod nou: apare în listă", fl.includes(`#${VECHI} ·`));
+  }
 
   rl = await cer("post", `${CALE}/legare`, GABI, { body: { [`l_${id.a}`]: "" } });
   egal("legăturile rămân ale administratorului", [rl.cod, Number(unul(`SELECT produs_id FROM consumabile_produse WHERE cod = 'tst-cst-a'`))], [302, NOMENCLATOR]);
