@@ -252,8 +252,10 @@ function curata() {
   await cer("/rfq/:id/adaos", { metoda: "post", user: ADMIN, params: { id: String(ID) }, body: { adaos: "35" } });
   egal("adminul pune adaos pe cerere", Number(din().adaos), 35);
   const cu35 = (await cer("/rfq/:id", { user: AGENT, params: { id: String(ID) } })).corp;
-  if (!cu35.includes("185,63")) rau("prețul nu s-a recalculat cu adaosul nou", "137,50 × 1,35 = 185,625");
-  else ok("prețul se recalculează singur: 185,63");
+  // Prețul ținut în bază e 185,625; se arată întreg, nu rotunjit la 185,63
+  // (26.11.2026: prețul pe unitate nu se mai taie la două zecimale).
+  if (!cu35.includes("185,6250")) rau("prețul nu s-a recalculat cu adaosul nou", "137,50 × 1,35 = 185,625");
+  else ok("prețul se recalculează singur: 185,6250");
 
   await cer("/rfq/:id/adaos", { metoda: "post", user: ACHIZITII, params: { id: String(ID) }, body: { adaos: "5" } });
   egal("achizițiile NU umblă la adaos", Number(din().adaos), 35);
