@@ -898,6 +898,20 @@ function register(router) {
       }
       throw e;
     }
+    // Rețeta aleasă la produsul nou (Vali, 27.11.2026; lib/retete.js): se
+    // copiază de la produsul ales. O greșeală aici nu pierde produsul făcut.
+    const reteta = String(b.reteta_de_la || "").trim();
+    if (reteta) {
+      try {
+        const din = Number((reteta.match(/^#\s*(\d+)\b/) || [])[1] || 0);
+        const rz = din ? await require("../lib/retete").copiaza({ dinId: din, inId: scris.id, inlocuieste: false, user: ctx.user }) : { ok: false, eroare: "produsul pentru rețetă n-a fost ales din listă" };
+        if (rz.ok) await require("../lib/cost").recalculeazaRetete().catch(() => null);
+        else console.error(`[cod-produs] produsul #${scris.id}: rețeta nu s-a copiat — ${rz.eroare}`);
+        if (!vechi) return redirect(ctx.res, rz.ok ? `/productie/retete/${scris.id}?ok=${encodeURIComponent(`Produsul e făcut, cu rețeta luată de la „${rz.dinNume}”. Schimbă ce diferă.`)}` : `/productie/retete/${scris.id}?eroare=${encodeURIComponent("Produsul e făcut, dar rețeta nu s-a copiat: " + rz.eroare)}`);
+      } catch (e) {
+        console.error(`[cod-produs] produsul #${scris.id}: rețeta nu s-a copiat —`, e.message);
+      }
+    }
     if (vechi) return redirect(ctx.res, await asociazaCuVechiul(vechi, scris.id, ctx.user));
     redirect(ctx.res, `/produse/${scris.id}`);
   });
@@ -1024,6 +1038,18 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto, vechi } = 
   const v = valori || {};
   const scris = (k) => (v[k] === undefined || v[k] === null ? "" : String(v[k]));
   const gri = (t) => ` <span style="color:var(--text-muted)">${t}</span>`;
+  // Produsele care au rețetă: din ele se poate lua rețeta produsului nou.
+  const reteteExistente = await db
+    .prepare(
+      `SELECT p.id, p.denumire, COALESCE(NULLIF(TRIM(p.cod), ''), p.cod_generat) AS cod,
+              (SELECT COUNT(*) FROM retete_componente rc WHERE rc.produs_id = p.id) AS componente
+         FROM produse p
+        WHERE COALESCE(p.activ, 1) = 1 AND p.fuzionat_in IS NULL
+          AND EXISTS (SELECT 1 FROM retete_componente rc WHERE rc.produs_id = p.id)
+        ORDER BY p.denumire LIMIT 3000`
+    )
+    .all()
+    .catch(() => []);
 
   const sugText = {};
   for (const c of car) if (c.fel === "text") sugText[c.id] = await sugestiiText(c);
@@ -1142,6 +1168,11 @@ async function formularProdusNou({ familieId, valori, mesaj, denAuto, vechi } = 
       ${rand(["pret_achizitie", "pret_productie", "adaos_lista"])}
       ${rand(["pret_minim", "pret_vanzare", "cota_tva", "stoc_minim"])}
       ${rand(["pret_nota"])}
+      <label class="field" data-reteta-la-produs-nou><span>Rețeta: ia-o de la produsul (opțional)</span>
+        <input name="reteta_de_la" list="pn-retete" autocomplete="off" value="${esc(scris("reteta_de_la"))}" placeholder="scrie numele sau codul unui produs care are rețetă și alege-l din listă">
+        <small style="display:block;color:var(--text-muted);font-size:12px;margin-top:3px">Pentru un produs care se fabrică la fel ca altul: i se copiază componentele, iar după salvare le schimbi pe cele care diferă, din Producție → Rețete. Lasă gol dacă n-are rețetă sau o scrii de la zero.</small>
+      </label>
+      <datalist id="pn-retete">${reteteExistente.map((x) => `<option value="#${Number(x.id)} · ${esc(x.denumire || "")}${x.cod ? " [" + esc(x.cod) + "]" : ""}" label="${Number(x.componente)} componente">`).join("")}</datalist>
       <div class="form-actions">
         <button class="btn" type="submit" id="btn-salveaza">Adaugă produsul</button>
         <a href="/produse" class="btn secondary">Renunță</a>

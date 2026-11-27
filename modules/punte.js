@@ -167,7 +167,7 @@ async function ingestStoc(randuri) {
 // produs finit, cât intră din fiecare componentă. O reconstruim ca medie pe
 // toate rapoartele în care apare produsul — mai stabilă decât un singur raport.
 async function ingestProductie(randuri) {
-  let documente = 0, liniiFinite = 0, liniiConsum = 0, retete = 0;
+  let documente = 0, liniiFinite = 0, liniiConsum = 0, retete = 0, reteteDeMana = 0;
   const produse = new Map();
   for (const p of await db.prepare("SELECT COALESCE(fuzionat_in, id) AS id, cod, denumire FROM produse").all()) {
     produse.set(String(p.denumire).trim().toLowerCase(), p.id);
@@ -240,12 +240,14 @@ async function ingestProductie(randuri) {
     // doar unde baza e mai mare ca 1, ca restul rețetelor să rămână cum erau.
     const prec = b > 1 ? 1e9 : 1e6;
     const cantitate = Math.round(perUnitate * prec) / prec;
-    const existent = await db.prepare("SELECT id FROM retete_componente WHERE produs_id = ? AND componenta_id = ?").get(g.finit, g.comp);
-    if (existent) await db.prepare("UPDATE retete_componente SET cantitate = ? WHERE id = ?").run(cantitate, existent.id);
-    else await db.prepare("INSERT INTO retete_componente (produs_id, componenta_id, cantitate) VALUES (?, ?, ?)").run(g.finit, g.comp, cantitate);
+    // Prin lib/retete.js (Vali, 27.11.2026): schimbarea rămâne în istoricul
+    // rețetei, iar o rețetă ținută de mână nu se mai rescrie de aici.
+    const rz = await require("../lib/retete").pune({ produsId: g.finit, componentaId: g.comp, cantitate, sursa: "smartbill" });
+    if (rz.sarit) reteteDeMana++;
     retete++;
   }
-  return { documente, liniiFinite, liniiConsum, retete };
+  if (reteteDeMana) console.log(`[punte] rețete: ${reteteDeMana} rânduri lăsate neatinse — rețeta lor e ținută de mână`);
+  return { documente, liniiFinite, liniiConsum, retete, reteteDeMana };
 }
 
 // --- bonuri de consum ------------------------------------------------------

@@ -1398,11 +1398,13 @@ function register(router) {
           continue;
         }
 
-        const existent = await db.prepare("SELECT id FROM retete_componente WHERE produs_id = ? AND componenta_id = ?").get(finitId, componentaId);
-        if (existent) {
-          await db.prepare("UPDATE retete_componente SET cantitate = ? WHERE id = ?").run(cantitate, existent.id);
-        } else {
-          await db.prepare("INSERT INTO retete_componente (produs_id, componenta_id, cantitate) VALUES (?, ?, ?)").run(finitId, componentaId, cantitate);
+        // Prin lib/retete.js: rămâne în istoricul rețetei; o rețetă ținută
+        // de mână nu se rescrie dintr-un fișier.
+        const rz = await require("../lib/retete").pune({ produsId: finitId, componentaId, cantitate, sursa: "import", user: ctx && ctx.user });
+        if (rz.sarit) {
+          err++;
+          erori.push(`Rând ${r + 1}: rețeta produsului „${numeFinit}” e ținută de mână în ERP și n-a fost schimbată.`);
+          continue;
         }
         create++;
       } catch (e) {

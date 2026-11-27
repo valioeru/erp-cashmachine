@@ -975,16 +975,23 @@ function register(router) {
 
   router.post("/produse/:id/reteta", async (ctx) => {
     const { componenta_id, cantitate } = ctx.body;
-    if (componenta_id && Number(cantitate) > 0) {
-      await db
-        .prepare("INSERT INTO retete_componente (produs_id, componenta_id, cantitate) VALUES (?, ?, ?)")
-        .run(ctx.params.id, componenta_id, Number(cantitate));
+    // Prin lib/retete.js (Vali, 27.11.2026): cu istoric, și fără a doua linie
+    // pentru aceeași componentă.
+    const RT = require("../lib/retete");
+    const q = RT.cantitateScrisa(cantitate);
+    if (componenta_id && q.ok) {
+      await RT.pune({ produsId: ctx.params.id, componentaId: componenta_id, cantitate: q.cantitate, sursa: "om", user: ctx.user });
+      await require("../lib/cost").recalculeazaRetete().catch(() => null);
     }
     redirect(ctx.res, `/produse/${ctx.params.id}`);
   });
 
   router.post("/produse/:id/reteta/:randId/sterge", async (ctx) => {
-    await db.prepare("DELETE FROM retete_componente WHERE id = ? AND produs_id = ?").run(ctx.params.randId, ctx.params.id);
+    const rand = await db.prepare("SELECT componenta_id FROM retete_componente WHERE id = ? AND produs_id = ?").get(ctx.params.randId, ctx.params.id);
+    if (rand) {
+      await require("../lib/retete").scoate({ produsId: ctx.params.id, componentaId: rand.componenta_id, sursa: "om", user: ctx.user });
+      await require("../lib/cost").recalculeazaRetete().catch(() => null);
+    }
     redirect(ctx.res, `/produse/${ctx.params.id}`);
   });
 }

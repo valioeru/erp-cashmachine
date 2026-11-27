@@ -22,6 +22,30 @@ const { send, redirect } = require("../lib/router");
 // Furnizorul materialului se alege aici, la alocarea materialului — aceeași
 // casetă ca pe pagina comenzii de producție (lib/furnizor-comanda.js).
 const FC = require("../lib/furnizor-comanda");
+// Scrierea rețetelor, cu istoric (Vali, 27.11.2026; lib/retete.js).
+const RT = require("../lib/retete");
+
+// „#123 · Denumire [COD]" din lista de ales → 123. Fără # nu se ia: un nume
+// care începe cu o cifră ar alege alt produs decât cel citit de om.
+const idDinAles = (v) => {
+  const m = String(v == null ? "" : v).trim().match(/^#\s*(\d+)\b/);
+  return m ? Number(m[1]) : 0;
+};
+const optiuneProdus = (p) => `#${Number(p.id)} · ${p.denumire || ""}${p.cod ? " [" + p.cod + "]" : ""}`;
+// Produsele care au deja rețetă: din ele se poate copia.
+async function produseCuReteta() {
+  return await db
+    .prepare(
+      `SELECT p.id, p.denumire, COALESCE(NULLIF(TRIM(p.cod), ''), p.cod_generat) AS cod,
+              (SELECT COUNT(*) FROM retete_componente rc WHERE rc.produs_id = p.id) AS componente
+         FROM produse p
+        WHERE COALESCE(p.activ, 1) = 1 AND p.fuzionat_in IS NULL
+          AND EXISTS (SELECT 1 FROM retete_componente rc WHERE rc.produs_id = p.id)
+        ORDER BY p.denumire LIMIT 3000`
+    )
+    .all()
+    .catch(() => []);
+}
 
 const nr = (v) => {
   const n = Number(String(v == null ? "" : v).replace(",", "."));
@@ -115,6 +139,7 @@ function register(router) {
 
     const body = `
       <div class="toolbar">
+        <a class="btn" href="/productie/retete/noua" data-reteta-noua>+ Rețetă nouă</a>
         <a class="btn secondary" href="/produse">Catalogul de produse</a>
         ${ctx.user.rol === "admin"
           ? `<form method="post" action="/productie/retete/recalculeaza" class="inline-form"><button class="btn secondary" type="submit">Recalculează costurile din rețete</button></form>`
@@ -210,11 +235,69 @@ function register(router) {
     );
   });
 
+  // ---- Rețetă nouă -------------------------------------------------------
+  // Vali, 27.11.2026: „să se poată adăuga rețetă nouă […] să se poată alege
+  // rețeta la produs nou". Alegi produsul și, dacă vrei, pornești de la rețeta
+  // altuia; apoi ajungi pe pagina rețetei, unde o completezi.
+  router.get("/productie/retete/noua", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const produse = await require("../lib/cod-vechi").pentruAles(
+      await db
+        .prepare(
+          `SELECT p.id, p.denumire, COALESCE(NULLIF(TRIM(p.cod), ''), p.cod_generat) AS cod,
+                  EXISTS (SELECT 1 FROM retete_componente rc WHERE rc.produs_id = p.id) AS are
+             FROM produse p WHERE COALESCE(p.activ, 1) = 1 AND p.fuzionat_in IS NULL ORDER BY p.denumire LIMIT 6000`
+        )
+        .all()
+    );
+    const cuReteta = await produseCuReteta();
+    const body = `
+      <div class="toolbar"><a class="btn secondary" href="/productie/retete">← Toate rețetele</a></div>
+      ${ctx.query.eroare ? `<div class="flash flash-rosu" role="alert">${esc(String(ctx.query.eroare))}</div>` : ""}
+      <p class="explic" style="max-width:720px">
+        Alege produsul pentru care scrii rețeta. Dacă seamănă cu unul care are deja rețetă, pornește de la a aceluia:
+        se copiază toate componentele, iar tu schimbi doar ce diferă. Dacă produsul nu există încă, fă-l întâi din
+        <a href="/produse/nou-cu-cod">Produs nou</a> — acolo poți alege rețeta direct.
+      </p>
+      <form class="form" method="post" action="/productie/retete/noua" style="max-width:720px" data-form-reteta-noua>
+        <label class="field"><span>Produsul (cel care se fabrică)</span>
+          <input name="produs" list="rn-produse" required autocomplete="off" value="${esc(String(ctx.query.produs || ""))}" placeholder="scrie numele sau codul și alege-l din listă">
+          <span class="ajutor">Produsele cu cod nou apar primele. Cele care au deja rețetă sunt marcate.</span>
+        </label>
+        <label class="field"><span>Pornește de la rețeta produsului (opțional)</span>
+          <input name="din" list="rn-retete" autocomplete="off" value="${esc(String(ctx.query.din || ""))}" placeholder="lasă gol ca să pornești de la zero">
+        </label>
+        <div class="form-actions"><button class="btn" type="submit">Deschide rețeta</button></div>
+      </form>
+      <datalist id="rn-produse">${produse.map((p) => `<option value="${esc(optiuneProdus(p))}"${p.are ? ' label="are deja rețetă"' : ""}>`).join("")}</datalist>
+      <datalist id="rn-retete">${cuReteta.map((p) => `<option value="${esc(optiuneProdus(p))}" label="${Number(p.componente)} componente">`).join("")}</datalist>
+    `;
+    send(ctx.res, 200, layout({ user: ctx.user, title: "Rețetă nouă", active: "/productie/retete", body }));
+  });
+
+  router.post("/productie/retete/noua", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const b = ctx.body || {};
+    const inapoi = (m) => redirect(ctx.res, "/productie/retete/noua?" + new URLSearchParams({ eroare: m, produs: String(b.produs || ""), din: String(b.din || "") }).toString());
+    const id = idDinAles(b.produs);
+    const p = id ? await db.prepare("SELECT id, denumire FROM produse WHERE id = ? AND COALESCE(activ, 1) = 1 AND fuzionat_in IS NULL").get(id) : null;
+    if (!p) return inapoi("Alege produsul din lista care apare când scrii — n-am găsit produsul scris.");
+    if (String(b.din || "").trim()) {
+      const din = idDinAles(b.din);
+      if (!din) return inapoi("Alege din listă produsul de la care se ia rețeta, sau lasă câmpul gol.");
+      const r = await RT.copiaza({ dinId: din, inId: p.id, inlocuieste: false, user: ctx.user });
+      if (!r.ok) return inapoi(r.eroare);
+      await cost.recalculeazaRetete();
+      return redirect(ctx.res, `/productie/retete/${p.id}?ok=${encodeURIComponent(`Rețeta a pornit de la „${r.dinNume}”: ${r.schimbari} ${r.schimbari === 1 ? "componentă copiată" : "componente copiate"}. Schimbă ce diferă.`)}`);
+    }
+    return redirect(ctx.res, `/productie/retete/${p.id}`);
+  });
+
   // ---- Rețeta unui produs ------------------------------------------------
   router.get("/productie/retete/:id", async (ctx) => {
     if (!ctx.user) return redirect(ctx.res, "/login");
     const p = await db
-      .prepare("SELECT id, cod, denumire, unitate_masura, pret_vanzare, pret_achizitie, cost_reteta, cost_reteta_lipsa, cost_rata, reteta_baza FROM produse WHERE id = ?")
+      .prepare("SELECT id, cod, denumire, unitate_masura, pret_vanzare, pret_achizitie, cost_reteta, cost_reteta_lipsa, cost_rata, reteta_baza, COALESCE(reteta_de_mana, 0) AS reteta_de_mana, reteta_de_mana_la, reteta_de_mana_de FROM produse WHERE id = ?")
       .get(ctx.params.id);
     if (!p) return send(ctx.res, 404, layout({ user: ctx.user, title: "Negăsit", active: "/productie/retete", body: "<p>Produsul nu există.</p>" }));
     const baza = Number(p.reteta_baza) > 1 ? Number(p.reteta_baza) : 1;
@@ -229,6 +312,27 @@ function register(router) {
     const candidati = await db
       .prepare("SELECT id, denumire, unitate_masura, pret_achizitie FROM produse WHERE id != ? ORDER BY denumire LIMIT 4000")
       .all(p.id);
+    // Cantitatea se schimbă pe loc (Vali, 27.11.2026): câmp + „Salvează" pe
+    // fiecare rând. Text, nu type=number: „0,85" trebuie primit și el.
+    const celulaCantitate = (l) =>
+      `<form method="post" action="/productie/retete/${p.id}/cantitate" class="inline-form" style="display:flex;gap:4px;align-items:center" data-cantitate-componenta="${l.componenta_id}">
+         <input type="hidden" name="componenta_id" value="${l.componenta_id}">
+         <input name="cantitate" inputmode="decimal" value="${esc(Number(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 9, useGrouping: false }))}" style="width:110px" aria-label="cantitate pe bucată">
+         <button class="btn small secondary" type="submit">Salvează</button>
+       </form>`;
+    const cuReteta = (await produseCuReteta()).filter((x) => Number(x.id) !== Number(p.id));
+    const istoric = await RT.istoric(p.id, 300);
+    const cumAVenit = (h) => RT.SURSE[h.sursa] || h.sursa || "";
+    const ceSaSchimbat = (h) =>
+      h.fel === "dezlegat"
+        ? esc(h.nota || "")
+        : `${esc(h.componenta_nume || "#" + h.componenta_id)}: ${
+            h.fel === "adaugat"
+              ? `adăugată, <strong>${esc(RT.scrisCantitate(h.cantitate_noua))}</strong>`
+              : h.fel === "scos"
+                ? `scoasă (era ${esc(RT.scrisCantitate(h.cantitate_veche))})`
+                : `${esc(RT.scrisCantitate(h.cantitate_veche))} → <strong>${esc(RT.scrisCantitate(h.cantitate_noua))}</strong>`
+          }${h.fel !== "dezlegat" && h.nota ? ` <span style="color:var(--text-muted);font-size:12px">(${esc(h.nota)})</span>` : ""}`;
 
     const body = `
       <div class="toolbar">
@@ -275,6 +379,18 @@ function register(router) {
           : ""
       }
 
+      ${
+        Number(p.reteta_de_mana) === 1
+          ? `<div class="detail-box" style="border-left:4px solid var(--accent,#2f5d9c)" data-reteta-de-mana>
+               <strong>Rețetă ținută de mână.</strong> A fost schimbată de ${esc(p.reteta_de_mana_de || "un om")}${p.reteta_de_mana_la ? " la " + esc(String(p.reteta_de_mana_la).slice(0, 16)) : ""},
+               deci importul din SmartBill n-o mai rescrie. Dacă vrei să o refacă din nou din bonurile de producție:
+               <form method="post" action="/productie/retete/${p.id}/dezleaga" class="inline-form" onsubmit="return confirm('Lași importul din SmartBill să rescrie rețeta? Cantitățile scrise de mână se pot schimba la următoarea sincronizare.')">
+                 <button class="link-btn" type="submit">lasă SmartBill s-o refacă</button>
+               </form>
+             </div>`
+          : ""
+      }
+
       <h2>Din ce e făcută o bucată de ${esc(p.denumire)}</h2>
       <p class="explic">
         Cantitățile sunt <strong>pe o singură bucată</strong> de produs finit. Costul fiecărei componente se ia din
@@ -290,7 +406,7 @@ function register(router) {
                 .sort((a, b) => b.cost - a.cost)
                 .map((l) => [
                   `<a href="/productie/retete/${l.componenta_id}">${esc(l.denumire)}</a>`,
-                  Number(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 6 }),
+                  celulaCantitate(l),
                   esc(um({ unitate_masura: l.um, denumire: l.denumire })),
                   l.cost_unitar > 0 ? bani4(l.cost_unitar) : `<span style="color:var(--danger)">fără cost</span>`,
                   `<span style="color:var(--text-muted);font-size:12px">${esc(l.temei)}</span>`,
@@ -323,7 +439,7 @@ function register(router) {
                  .sort((a, b) => b.cost - a.cost)
                  .map((l) => [
                    esc(l.denumire),
-                   Number(l.cantitate).toLocaleString("ro-RO", { maximumFractionDigits: 6 }),
+                   celulaCantitate(l),
                    esc(um({ unitate_masura: l.um, denumire: l.denumire })),
                    l.cost_unitar > 0 ? bani4(l.cost_unitar) : "—",
                    l.cost > 0 ? `<span style="color:var(--text-muted)">${bani4(l.cost)}</span>` : "—",
@@ -369,6 +485,33 @@ function register(router) {
         </label>
         <div class="form-actions"><button class="btn" type="submit">Adaugă în rețetă</button></div>
       </form>
+
+      <h2>Ia rețeta de la alt produs</h2>
+      <p class="explic">
+        Pentru un produs care seamănă cu unul deja scris: se copiază componentele și cantitățile, apoi schimbi ce diferă.
+        Rețeta celuilalt produs rămâne neatinsă.
+      </p>
+      <form class="form" method="post" action="/productie/retete/${p.id}/copiaza" style="max-width:640px" data-copiaza-reteta>
+        <label class="field"><span>Produsul de la care se ia rețeta</span>
+          <input name="din" list="rt-retete" required autocomplete="off" placeholder="scrie numele sau codul și alege-l din listă">
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" name="inlocuieste" value="1" style="width:auto;min-height:0">
+          <span>Înlocuiește rețeta de acum (scoate componentele pe care celălalt produs nu le are). Nebifat: doar adaugă și potrivește cantitățile.</span>
+        </label>
+        <div class="form-actions"><button class="btn secondary" type="submit">Copiază rețeta</button></div>
+      </form>
+      <datalist id="rt-retete">${cuReteta.map((x) => `<option value="${esc(optiuneProdus(x))}" label="${Number(x.componente)} componente">`).join("")}</datalist>
+
+      <h2 id="istoric">Istoricul rețetei</h2>
+      ${
+        istoric.length
+          ? `<div data-istoric-reteta>${table(
+              ["Când", "Cine", "Ce s-a schimbat", "De unde"],
+              istoric.map((h) => [esc(String(h.la || "").slice(0, 16)), esc(h.utilizator_nume || (h.sursa === "smartbill" ? "sincronizarea" : "—")), ceSaSchimbat(h), esc(cumAVenit(h))])
+            )}</div>`
+          : `<p style="color:var(--text-muted)" data-istoric-reteta>Nicio schimbare ținută minte încă. Istoricul se scrie de la 27.11.2026: orice componentă adăugată, modificată sau scoasă apare aici, cu cine și când.</p>`
+      }
     `;
     send(ctx.res, 200, layout({ user: ctx.user, title: `Rețeta: ${p.denumire}`, active: "/productie/retete", body }));
   });
@@ -409,9 +552,8 @@ function register(router) {
     if (!compId || !(cant > 0)) return inapoi("Alege componenta și scrie o cantitate mai mare ca zero.");
     if (compId === produsId) return inapoi("Un produs nu poate intra în propria rețetă.");
 
-    const existent = await db.prepare("SELECT id FROM retete_componente WHERE produs_id = ? AND componenta_id = ?").get(produsId, compId);
-    if (existent) await db.prepare("UPDATE retete_componente SET cantitate = ? WHERE id = ?").run(cant, existent.id);
-    else await db.prepare("INSERT INTO retete_componente (produs_id, componenta_id, cantitate) VALUES (?, ?, ?)").run(produsId, compId, cant);
+    // Prin lib/retete.js: cu istoric, iar rețeta devine „ținută de mână".
+    await RT.pune({ produsId, componentaId: compId, cantitate: cant, sursa: "om", user: ctx.user });
 
     // Costul se recalculează imediat: rețeta abia schimbată trebuie să se vadă
     // în marjă de la următoarea pagină, nu de la următorul import.
@@ -593,9 +735,46 @@ function register(router) {
   router.post("/productie/retete/:id/sterge", async (ctx) => {
     const produsId = Number(ctx.params.id);
     const compId = Number(ctx.body.componenta_id);
-    if (compId) await db.prepare("DELETE FROM retete_componente WHERE produs_id = ? AND componenta_id = ?").run(produsId, compId);
+    if (compId) await RT.scoate({ produsId, componentaId: compId, sursa: "om", user: ctx.user });
     await cost.recalculeazaRetete();
     return redirect(ctx.res, `/productie/retete/${produsId}`);
+  });
+
+  // Cantitatea unei componente, schimbată pe loc.
+  router.post("/productie/retete/:id/cantitate", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const produsId = Number(ctx.params.id);
+    const compId = Number((ctx.body || {}).componenta_id);
+    const inapoi = (camp, m) => redirect(ctx.res, `/productie/retete/${produsId}?${camp}=${encodeURIComponent(m)}`);
+    const q = RT.cantitateScrisa((ctx.body || {}).cantitate);
+    if (!q.ok) return inapoi("eroare", q.eroare + " Ca să scoți componenta de tot, apasă „Scoate”.");
+    const are = compId ? await db.prepare("SELECT id FROM retete_componente WHERE produs_id = ? AND componenta_id = ?").get(produsId, compId) : null;
+    if (!are) return inapoi("eroare", "Componenta nu mai e în rețetă.");
+    const r = await RT.pune({ produsId, componentaId: compId, cantitate: q.cantitate, sursa: "om", user: ctx.user });
+    if (!r.schimbat) return inapoi("ok", "Cantitatea era deja aceasta; nu s-a schimbat nimic.");
+    await cost.recalculeazaRetete();
+    return inapoi("ok", "Cantitatea e schimbată și costul recalculat. Vechea valoare e în istoricul rețetei, mai jos.");
+  });
+
+  // Rețeta altui produs, copiată aici.
+  router.post("/productie/retete/:id/copiaza", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const produsId = Number(ctx.params.id);
+    const inapoi = (camp, m) => redirect(ctx.res, `/productie/retete/${produsId}?${camp}=${encodeURIComponent(m)}`);
+    const din = idDinAles((ctx.body || {}).din);
+    if (!din) return inapoi("eroare", "Alege din listă produsul de la care se ia rețeta.");
+    const r = await RT.copiaza({ dinId: din, inId: produsId, inlocuieste: String((ctx.body || {}).inlocuieste || "") === "1", user: ctx.user });
+    if (!r.ok) return inapoi("eroare", r.eroare);
+    await cost.recalculeazaRetete();
+    return inapoi("ok", r.schimbari ? `Rețeta lui „${r.dinNume}” a fost copiată: ${r.schimbari} ${r.schimbari === 1 ? "schimbare" : "schimbări"}, toate în istoric.` : `Rețeta era deja la fel cu a lui „${r.dinNume}”.`);
+  });
+
+  // Omul lasă din nou importul din SmartBill să refacă rețeta.
+  router.post("/productie/retete/:id/dezleaga", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const produsId = Number(ctx.params.id);
+    await RT.dezleaga({ produsId, user: ctx.user });
+    return redirect(ctx.res, `/productie/retete/${produsId}?ok=${encodeURIComponent("De acum importul din SmartBill poate rescrie din nou rețeta asta.")}`);
   });
 }
 
