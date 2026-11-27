@@ -393,9 +393,6 @@ function register(router) {
       { name: "sursa", label: "Sursă (de unde a venit)" },
       { name: "data_nastere", label: "Zi de naștere persoană de contact (pentru urări)", type: "date" },
       { name: "adresa", label: "Adresă", type: "textarea" },
-      // Adresa de livrare, cu bifa „aceeași cu adresa partenerului"
-      // (Vali, 23.11.2026; lib/adresa-livrare.js). Goală în bază = aceeași.
-      { name: "adresa_livrare", label: "Adresa de livrare", html: (v) => AL.campFormular(v) },
       // Cerute de SmartBill pe factură (vezi lib/adresa-client.js). La
       // clienții importați din SmartBill se completează singure la prima
       // factură trimisă, din adresă; aici se pot corecta.
@@ -407,6 +404,12 @@ function register(router) {
         options: [{ value: "", label: "— (client din afara României)" }].concat(ADR.JUDETE.map((j) => ({ value: j, label: j }))),
       },
       { name: "tara", label: "Țară", ajutor: "Romania pentru firmele din România; altfel țara, de ex. Grecia." },
+      // Adresa de livrare, cu bifa „aceeași cu adresa partenerului"
+      // (Vali, 23.11.2026; lib/adresa-livrare.js). Goală în bază = aceeași.
+      // Stă DUPĂ adresa completă — adresă, localitate, județ, țară (Vali,
+      // 27.11.2026): bifa spune „aceeași cu adresa de mai sus", deci întâi
+      // se vede toată adresa, apoi bifa.
+      { name: "adresa_livrare", label: "Adresa de livrare", html: (v) => AL.campFormular(v) },
       // Termenul de plată (Vali, 17.11.2026) — vezi lib/termen-plata.js.
       {
         name: "termen_plata_zile",
