@@ -3021,17 +3021,19 @@ function register(router) {
     // scris acolo ce-a ieșit pe ușă, iar o corectură de preț n-are voie să
     // șteargă asta. De-aia se actualizează rândul existent în loc să se
     // șteargă tot și să se scrie din nou.
-    const vechiPeProdus = new Map(
-      (await db.prepare("SELECT id, produs_id FROM comenzi_linii WHERE comanda_id = ?").all(comanda.id)).map((l) => [
-        Number(l.produs_id),
-        Number(l.id),
-      ])
-    );
+    const liniiDinainte = await db.prepare("SELECT id, produs_id, cantitate, um FROM comenzi_linii WHERE comanda_id = ?").all(comanda.id);
+    const vechiPeProdus = new Map(liniiDinainte.map((l) => [Number(l.produs_id), Number(l.id)]));
+    const cantitateDinainte = new Map(liniiDinainte.map((l) => [Number(l.id), Number(l.cantitate)]));
+    // Liniile a căror cantitate se schimbă: producția le urmează, mai jos.
+    const cantitatiSchimbate = [];
     const pastrate = new Set();
     for (const l of noi) {
       const idVechi = vechiPeProdus.get(l.produs_id);
       if (idVechi) {
         pastrate.add(idVechi);
+        if (Math.abs(Number(cantitateDinainte.get(idVechi)) - Number(l.cantitate)) > 0.0005) {
+          cantitatiSchimbate.push({ linieId: idVechi, produsId: l.produs_id, denumire: numeProduselor.get(l.produs_id), um: l.um, veche: cantitateDinainte.get(idVechi), noua: l.cantitate });
+        }
         await db
           .prepare("UPDATE comenzi_linii SET cantitate = ?, pret_unitar = ?, um = ? WHERE id = ?")
           .run(l.cantitate, l.pret_unitar, l.um, idVechi);
@@ -3065,6 +3067,21 @@ function register(router) {
     }
 
     if (peLiniiMonede) await scrieMonedeLinii(comanda.id, produsIds, cantitati, conversie.extra);
+
+    // Cantitatea din producție urmează cantitatea de pe comandă (Vali,
+    // 27.11.2026; lib/productie-dupa-modificare.js): cererea către producție
+    // și comanda de producție făcută din ea își schimbă cifra cu aceeași
+    // diferență. O greșeală aici nu oprește modificarea; se scrie în jurnal.
+    if (cantitatiSchimbate.length) {
+      try {
+        const dinProductie = await require("../lib/productie-dupa-modificare").aplica({ comandaId: comanda.id, linii: cantitatiSchimbate });
+        for (const x of dinProductie) schimbari.push(x);
+        if (dinProductie.length) console.log(`[comenzi] ${comanda.numar || "#" + comanda.id}: producția după modificare — ${dinProductie.map((x) => `${x.ce}: ${x.vechi} → ${x.nou}`).join("; ").slice(0, 600)}`);
+      } catch (e) {
+        console.error(`[comenzi] ${comanda.numar || "#" + comanda.id}: cantitatea din producție nu s-a putut actualiza:`, e.message);
+        schimbari.push({ ce: "Producție", vechi: "", nou: "cantitatea din producție NU s-a putut actualiza singură — schimb-o de mână pe comanda de producție" });
+      }
+    }
 
     const motiv = String(b.motiv || "").slice(0, 200).trim();
     if (motiv) schimbari.push({ ce: "Motivul modificării", vechi: "", nou: motiv });
