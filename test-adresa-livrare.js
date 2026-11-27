@@ -141,6 +141,12 @@ const text = (h) => String(h).replace(/<script[\s\S]*?<\/script>/g, " ").replace
   console.log("\n── Formularul de partener ───────────────────────────────────");
   let r = await cer("/parteneri/nou");
   bine("formularul de partener nou are „Adresa de livrare” cu bifa pusă", r.cod === 200 && r.corp.includes("Adresa de livrare") && /name="livrare_identica" value="1" checked/.test(r.corp) && /<textarea name="adresa_livrare"/.test(r.corp), r.cod);
+  // 27.11.2026, Vali: „Bifa cu adresa de livrare să fie la final, după adresa completă."
+  {
+    const unde = (ce) => r.corp.indexOf(ce);
+    const ordine = ['name="adresa"', 'name="localitate"', 'name="judet"', 'name="tara"', 'name="livrare_identica"', 'name="adresa_livrare"', 'name="termen_plata_zile"'].map(unde);
+    bine("bifa și adresa de livrare stau după adresa completă: adresă, localitate, județ, țară — apoi livrarea", ordine.every((x) => x > 0) && ordine.every((x, i) => i === 0 || x > ordine[i - 1]), JSON.stringify(ordine));
+  }
   r = await cer("/parteneri", { metoda: "post", body: corp(NUME + " Unu SRL", { livrare_identica: "1", adresa_livrare: "" }) });
   egal("bifat „aceeași”: partenerul se salvează, fără adresă de livrare scrisă", [r.cod, part(NUME + " Unu SRL") && part(NUME + " Unu SRL").adresa_livrare], [302, null]);
   r = await cer("/parteneri", { metoda: "post", body: corp(NUME + " Doi SRL", { adresa_livrare: "Depozit Nord, Hala 3, Pitești" }) });
