@@ -1476,6 +1476,24 @@ function register(router) {
          ORDER BY ${require("../lib/comenzi-ordine").sqlRang("c.status")}, c.id DESC`
       )
       .all(per.de, per.la + " 23:59:59");
+    // Statusul pe produs (Vali, 27.11.2026; lib/status-linii.js): sub statusul
+    // comenzii se spune câte produse au altă stare — „1 din 3 produse: livrată".
+    const SL = require("../lib/status-linii");
+    const liniiPeComanda = new Map();
+    for (const l of await db
+      .prepare(
+        `SELECT cl.comanda_id, cl.id, cl.status_linie, cl.status_linie_comanda FROM comenzi_linii cl
+          WHERE cl.comanda_id IN (SELECT comanda_id FROM comenzi_linii WHERE status_linie IS NOT NULL)`
+      )
+      .all()
+      .catch(() => [])) {
+      const k = Number(l.comanda_id);
+      (liniiPeComanda.get(k) || liniiPeComanda.set(k, []).get(k)).push(l);
+    }
+    const celulaStatus = (c) => {
+      const r = liniiPeComanda.has(Number(c.id)) ? SL.rezumat(liniiPeComanda.get(Number(c.id)), c) : "";
+      return stari.eticheta(c.status) + (r ? `<div class="mic" data-status-produse style="color:var(--text-muted);font-size:12px;margin-top:2px">${esc(r)}</div>` : "");
+    };
     // Marja fiecărei comenzi, cu vorba ei (Vali, 18.11.2026; lib/marja-comanda.js).
     // Dacă liniile nu se pot citi, lista merge mai departe fără coloana asta.
     const MJ = require("../lib/marja-comanda");
@@ -1529,7 +1547,7 @@ function register(router) {
           esc(c.data),
           celulaDataCeruta(c),
           celulaDataConfirmata(c),
-          stari.eticheta(c.status),
+          celulaStatus(c),
           celulaTotal(c),
           celulaMarja(c),
           actionLinks([{ href: `/comenzi/${c.id}`, label: "Deschide" }]),
@@ -2072,6 +2090,16 @@ function register(router) {
     // marfa din depozit, deci n-are de unde să știe; își poate anula doar
     // comanda lui. Lista e în lib/comenzi-stari.js.
     const stariDePus = stari.stariPermise(ctx.user, comanda);
+    // Statusul pe produs (lib/status-linii.js): coloana apare la comenzile cu
+    // mai multe produse; bifele și formularul, doar cui poate muta comanda.
+    const SL = require("../lib/status-linii");
+    const peProduse = linii.length > 1 && !["ciorna", "anulata"].includes(String(comanda.status));
+    const poateStatusLinii = peProduse && stariDePus.length > 0;
+    const mesajStatusLinii = ctx.query.status_linii_eroare
+      ? `<div class="flash flash-rosu" role="alert" style="background:#f8e5e3;border-color:#efc9c4;color:var(--danger)">${esc(String(ctx.query.status_linii_eroare))}</div>`
+      : ctx.query.status_linii_ok
+        ? `<div class="flash" role="status">${esc(String(ctx.query.status_linii_ok))}</div>`
+        : "";
     // Ștergerea e doar a adminului. Nu e un pas din flux — e ștergere
     // definitivă din bază, cu linii cu tot. Pentru „comanda nu se mai face”
     // există „anulată”, care lasă urma pe client și motivul scris.
@@ -2178,8 +2206,9 @@ function register(router) {
           : ""
       }
 
+      ${mesajStatusLinii}
       ${table(
-        ["Produs", "Cantitate", "UM", "Preț unitar", "Subtotal", "În stoc acum"],
+        ["Produs", "Cantitate", "UM", "Preț unitar", "Subtotal", "În stoc acum"].concat(peProduse ? ["Status"] : []),
         linii.map((l) => {
           const st = stocPeLinie.get(Number(l.id));
           const stocTxt = !st
@@ -2206,9 +2235,32 @@ function register(router) {
               (String(comanda.moneda || "RON") === "RON" && ML.nota(l) ? `<br><span class="mic" style="color:var(--text-muted)" data-pret-valuta>${esc(ML.nota(l))}</span>` : ""),
             sumaIn(l.cantitate * l.pret_unitar, comanda.moneda),
             stocTxt,
-          ];
+          ].concat(
+            peProduse
+              ? [
+                  `<span data-status-linie="${l.id}">${poateStatusLinii ? `<label style="display:flex;align-items:center;gap:6px;font-weight:400;margin:0"><input type="checkbox" name="linie" value="${l.id}" form="status-linii" style="width:auto" aria-label="alege produsul"> ` : ""}${stari.eticheta(SL.efectiv(l, comanda))}${poateStatusLinii ? "</label>" : ""}${
+                    SL.areStatusPropriu(l, comanda) && l.status_linie_de
+                      ? `<div class="mic" style="color:var(--text-muted);font-size:11px">pus de ${esc(l.status_linie_de)}${l.status_linie_la ? ", " + esc(String(l.status_linie_la).slice(0, 16)) : ""}</div>`
+                      : ""
+                  }</span>`,
+                ]
+              : []
+          );
         })
       )}
+      ${
+        poateStatusLinii
+          ? `<form id="status-linii" method="post" action="/comenzi/${comanda.id}/status-linii" data-status-linii style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0 10px;font-size:13px">
+              <span>Produsele bifate:</span>
+              <select name="status" style="width:auto">
+                ${stariDePus.map((s) => `<option value="${s}">${esc(stari.PASI_ETICHETE[s] || s.replace(/_/g, " "))}</option>`).join("")}
+                <option value="${SL.RESET}">— la fel ca toată comanda —</option>
+              </select>
+              <button type="submit" class="btn small">Schimbă statusul la produsele bifate</button>
+              <span class="mic" style="color:var(--text-muted)">Doar marcaj: nu mișcă stoc și nu emite factură. Când toate produsele au aceeași stare, trece și comanda pe ea.</span>
+            </form>`
+          : ""
+      }
       <div class="totals"><span class="grand">Total: ${esc(sumaIn(total, comanda.moneda))}</span></div>
       ${
         String(comanda.moneda || "RON") !== "RON"
@@ -3181,6 +3233,50 @@ function register(router) {
       .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
       .run(c.partener_id, `Comanda ${c.numar || "#" + c.id}: ${nou.replace(/_/g, " ")}`, null, ctx.user.id);
     redirect(ctx.res, `/comenzi/${ctx.params.id}`);
+  });
+
+  // Statusul pe produs (Vali, 27.11.2026; lib/status-linii.js): produsele
+  // bifate primesc starea aleasă; comanda rămâne pe a ei până când toate
+  // produsele ajung la aceeași stare.
+  router.post("/comenzi/:id/status-linii", async (ctx) => {
+    if (!ctx.user) return redirect(ctx.res, "/login");
+    const SL = require("../lib/status-linii");
+    const c = await db.prepare("SELECT * FROM comenzi WHERE id = ?").get(ctx.params.id);
+    if (!c) return redirect(ctx.res, "/comenzi");
+    const inapoi = (cheie, mesaj) => redirect(ctx.res, `/comenzi/${c.id}?${cheie}=${encodeURIComponent(mesaj)}`);
+    const linii = await db
+      .prepare("SELECT cl.id, cl.status_linie, cl.status_linie_comanda, p.denumire FROM comenzi_linii cl JOIN produse p ON p.id = cl.produs_id WHERE cl.comanda_id = ? ORDER BY cl.id")
+      .all(c.id);
+    const b = ctx.body || {};
+    const brut = b.linie !== undefined ? b.linie : b["linie[]"];
+    const ids = (Array.isArray(brut) ? brut : brut === undefined ? [] : [brut]).map((x) => parseInt(x, 10)).filter((x) => x > 0);
+    // Drepturile sunt cele de la statusul comenzii, verificate aici, nu doar în pagină.
+    const h = SL.hotaraste({ comanda: c, linii, ids, status: b.status, permise: stari.stariPermise(ctx.user, c) });
+    if (!h.ok) return inapoi("status_linii_eroare", h.eroare);
+    if (!h.schimbari.length && !h.deScris.length) return inapoi("status_linii_ok", "Produsele bifate aveau deja starea asta.");
+    const cine = ctx.user.nume || ctx.user.email || "";
+    const cand = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Bucharest" }).slice(0, 19);
+    for (const x of h.deScris) {
+      await db
+        .prepare("UPDATE comenzi_linii SET status_linie = ?, status_linie_comanda = ?, status_linie_la = ?, status_linie_de = ? WHERE id = ? AND comanda_id = ?")
+        .run(x.status_linie, x.status_linie_comanda, x.status_linie ? cand : null, x.status_linie ? cine : null, x.id, c.id);
+    }
+    const istoric = h.schimbari.map((s) => ({ ce: "Status · " + (s.linie.denumire || "produs"), vechi: SL.text(s.vechi), nou: SL.text(s.nou) }));
+    let mesaj = `${h.schimbari.length} ${h.schimbari.length === 1 ? "produs trecut" : "produse trecute"} pe „${SL.text(h.schimbari[0] ? h.schimbari[0].nou : c.status)}”.`;
+    if (h.comandaPe) {
+      // Toate produsele au ajuns la aceeași stare: trece și comanda, iar
+      // liniile rămân fără stare proprie.
+      await db.prepare("UPDATE comenzi SET status = ? WHERE id = ?").run(h.comandaPe, c.id);
+      await db.prepare("UPDATE comenzi_linii SET status_linie = NULL, status_linie_comanda = NULL, status_linie_la = NULL, status_linie_de = NULL WHERE comanda_id = ?").run(c.id);
+      istoric.push({ ce: "Status", vechi: SL.text(c.status), nou: SL.text(h.comandaPe) + " — toate produsele au ajuns aici" });
+      await db
+        .prepare("INSERT INTO interactiuni (partener_id, tip, subiect, descriere, utilizator_id) VALUES (?, 'comanda', ?, ?, ?)")
+        .run(c.partener_id, `Comanda ${c.numar || "#" + c.id}: ${h.comandaPe.replace(/_/g, " ")}`, "Toate produsele au ajuns la starea asta.", ctx.user.id);
+      mesaj += ` Toate produsele sunt acum „${SL.text(h.comandaPe)}”, deci a trecut și comanda.`;
+    }
+    await scrieIstoric(c.id, ctx.user, istoric);
+    console.log(`[comenzi] ${c.numar || "#" + c.id}: status pe produse de ${cine} — ${istoric.map((x) => `${x.ce}: ${x.vechi} → ${x.nou}`).join("; ").slice(0, 500)}`);
+    return inapoi("status_linii_ok", mesaj);
   });
 
   // „Facturează” — agentul poate apăsa DOAR după ce marfa e în stoc la
